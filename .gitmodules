@@ -1,0 +1,6 @@
+[submodule "native/third_party/moonlight-common-c"]
+	path = native/third_party/moonlight-common-c
+	url = https://github.com/moonlight-stream/moonlight-common-c.git
+[submodule "native/third_party/pybind11"]
+	path = native/third_party/pybind11
+	url = https://github.com/pybind/pybind11.git
