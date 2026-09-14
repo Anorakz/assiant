@@ -67,3 +67,31 @@ Desktop.ini
 *.swp
 *.swo
 *~
+
+# 构建产物
+build/
+build-rk3568/
+dist/
+*.so
+*.pyd
+*.o
+*.a
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# 板端本地状态（如果误建）
+logs/
+data/
+models/*.rknn
+
+# 密钥
+config/secrets.yaml
