@@ -1,0 +1,69 @@
+# ================= Conda / Python虚拟环境 =================
+conda/
+conda_env/
+venv/
+.venv/
+env/
+
+# Python缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+logs/
+.env
+.env.*
+
+# ================= C/C++ / CMake 编译产物（RK3568重点） =================
+# 编译输出目录
+build/
+cmake-build-*/
+out/
+output/
+install/
+
+# 目标文件、中间产物
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.exe
+*.elf
+*.bin
+*.img
+*.hex
+*.map
+*.sym
+*.lst
+
+# CMake缓存
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+
+# ================= VSCode 编辑器配置（保留工程配置，忽略个人缓存） =================
+.vscode/*
+
+# ================= 系统垃圾文件 =================
+# Windows
+Thumbs.db
+Desktop.ini
+# Mac
+.DS_Store
+
+# ================= 其他临时文件 =================
+*.swp
+*.swo
+*~
