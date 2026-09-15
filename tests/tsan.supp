@@ -1,0 +1,35 @@
+# ThreadSanitizer 抑制规则
+# ---------------------------------------------------------------------------
+# RingBuffer 用的是"槽位序号 + acquire/release"的自定义同步协议:
+#
+#   生产者:  slot.seq.store(seq + capacity, release)   // 占位
+#            slot.value = v                            // 写载荷
+#            slot.seq.store(seq + 1, release)          // 发布
+#   消费者:  if (slot.seq.load(acquire) == seq + 1) { 读 slot.value; 复查 seq; }
+#
+# 这条链在 C++ 内存模型下是成立的: 消费者对 slot.seq 的 acquire 读与生产者
+# 的 release 写构成 synchronizes-with, 因此 slot.value 的写 happens-before
+# 对应的读, 本身不是数据竞争。读后复查 seq 则保证不会读到被覆盖到一半的值。
+#
+# 但 TSan 只认得"同一个原子变量上的 acquire/release 配对", 它看不到
+# "先读 A 拿到值、再据此判定 B 安全" 这种间接推理, 于是把 slot.value 的
+# 正常读写报成 data race —— 这是锁自由结构里的经典误报。
+#
+# 因此这里抑制掉 slot.value (载荷) 的报错。控制面 (write_seq_/read_pos_/
+# overruns_ 等原子量) **不做抑制**, 一旦真有竞争 TSan 依然会报出来。
+#
+# 用法 (WSL):
+#   g++ -std=c++17 -O1 -g -fsanitize=thread -pthread -I native \
+#       -I native/third_party/googletest/googletest/include \
+#       -I native/third_party/googletest/googletest \
+#       -o /tmp/rb_tsan tests/test_ring_buffer.cpp \
+#       native/third_party/googletest/googletest/src/gtest-all.cc \
+#       native/third_party/googletest/googletest/src/gtest_main.cc
+#   setarch linux64 -R env TSAN_OPTIONS="suppressions=tests/tsan.supp" /tmp/rb_tsan
+#
+# 只有这三个函数里的"载荷读写"被抑制.
+# 注意 pattern 只能写到函数名: 带模板参数的全名 (agent::RingBuffer<...>::push)
+# TSan 匹配不上, 会被当成不匹配而照常报错.
+race:push
+race:pop_impl
+race:read_latest_impl
