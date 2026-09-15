@@ -165,6 +165,32 @@ test_image_rb/fast:
 .PHONY : test_image_rb/fast
 
 #=============================================================================
+# Target rules for targets named test_host_input_rb
+
+# Build rule for target.
+test_host_input_rb: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 test_host_input_rb
+.PHONY : test_host_input_rb
+
+# fast build rule for target.
+test_host_input_rb/fast:
+	$(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_host_input_rb.dir\build.make tests/CMakeFiles/test_host_input_rb.dir/build
+.PHONY : test_host_input_rb/fast
+
+#=============================================================================
+# Target rules for targets named test_preprocess
+
+# Build rule for target.
+test_preprocess: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 test_preprocess
+.PHONY : test_preprocess
+
+# fast build rule for target.
+test_preprocess/fast:
+	$(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_preprocess.dir\build.make tests/CMakeFiles/test_preprocess.dir/build
+.PHONY : test_preprocess/fast
+
+#=============================================================================
 # Target rules for targets named gtest
 
 # Build rule for target.
@@ -202,7 +228,9 @@ help:
 	@echo ... agent_native
 	@echo ... gtest
 	@echo ... gtest_main
+	@echo ... test_host_input_rb
 	@echo ... test_image_rb
+	@echo ... test_preprocess
 	@echo ... test_ring_buffer
 .PHONY : help
 

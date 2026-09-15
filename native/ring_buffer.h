@@ -131,6 +131,16 @@ public:
     ///   · 诊断: 查看消费者当前进度
     std::size_t consumed(bool publish = true) noexcept;
 
+    /// 告诉生产者"绝对序号 < seq 的条目我都已经处理掉了" (单调, 传小值不会倒退)
+    ///
+    /// 给 **自带游标** 的封装层用: 例如 HostInputRingBuffer::read_all() 走
+    /// peek() 取数据, 完全不碰 RingBuffer 的 pop/read 游标, 于是生产者看不到
+    /// 消费进度, 会把已经读走的事件继续算成 overrun。那一批取完之后调一次
+    /// 这个函数, 丢事件统计才是准的。
+    ///
+    /// @note 只应由消费者线程调用
+    void consumed_up_to(std::size_t seq) noexcept;
+
     // ------------------------------------------------------------ 生产者侧 ---
     /// 写入一条数据. 永不阻塞、永不失败; 满时覆盖最老的未读数据.
     PushResult push(const T& value);
@@ -163,8 +173,15 @@ public:
     //  (例如 ImageRingBuffer::read_by_timestamp)。
 
     /// 可访问范围: 绝对序号区间 [oldest_seq(), newest_seq() + 1)
+    ///
+    /// @note 缓冲区为空时 newest_seq() == 0 且 oldest_seq() == 0, 这个区间
+    ///       [0, 1) 是**假的** —— 序号 0 还没有被写过。用之前先用 empty()
+    ///       或 wrote_anything() 判断。
     std::size_t oldest_seq() const noexcept;
     std::size_t newest_seq() const noexcept;
+
+    /// 生产者是否写过至少一条 (empty() 的等价判断, 语义更直白)
+    bool wrote_anything() const noexcept;
 
     /// 把绝对序号 seq 的数据拷进 out (语义等价于 pop 后回退游标)
     /// @return false 表示该序号已经不在缓冲区里 (太旧或还没写)
@@ -507,6 +524,16 @@ std::optional<T> RingBuffer<T, Capacity, TimestampMember>::read_latest(std::chro
         }
         std::this_thread::sleep_for(std::chrono::microseconds(200));
     }
+}
+
+template <typename T, std::size_t Capacity, auto TimestampMember>
+void RingBuffer<T, Capacity, TimestampMember>::consumed_up_to(std::size_t seq) noexcept {
+    publish_read_pos(seq);
+}
+
+template <typename T, std::size_t Capacity, auto TimestampMember>
+bool RingBuffer<T, Capacity, TimestampMember>::wrote_anything() const noexcept {
+    return write_seq_.load(std::memory_order_acquire) != 0;
 }
 
 template <typename T, std::size_t Capacity, auto TimestampMember>

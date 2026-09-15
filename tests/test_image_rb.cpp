@@ -36,7 +36,7 @@ Frame make_frame(std::uint8_t pattern, std::int64_t ts) {
     return f;
 }
 
-/// 校验 out 的像素是否全为 pattern
+/// 全量校验: out 的像素是否全为 pattern (196KB, 只在需要时用)
 bool pixels_are(const Frame& out, std::uint8_t pattern) {
     for (std::size_t i = 0; i < kFrameBytes; ++i) {
         if (out.data[i] != pattern) {
@@ -45,9 +45,6 @@ bool pixels_are(const Frame& out, std::uint8_t pattern) {
     }
     return true;
 }
-
-/// 第 i 个字节的采样值, 用来快速区分不同帧 (全量扫描 196KB 太慢)
-std::uint8_t probe(const Frame& f, std::size_t i = 0) { return f.data[i]; }
 
 }  // namespace
 
@@ -94,7 +91,7 @@ TEST(ImageRingBuffer, SingleFrameReadLatest) {
     Frame out = make_frame(0x00, 0);
     ASSERT_TRUE(rb.read_latest(out));
     EXPECT_EQ(out.timestamp_ns, 1000);
-    EXPECT_EQ(probe(out), 0x11);
+    EXPECT_TRUE(pixels_are(out, 0x11));
 }
 
 TEST(ImageRingBuffer, SingleFrameReadByTimestampCoversBothSides) {
@@ -106,7 +103,7 @@ TEST(ImageRingBuffer, SingleFrameReadByTimestampCoversBothSides) {
     // ts 正好等于该帧
     ASSERT_TRUE(rb.read_by_timestamp(5000, out));
     EXPECT_EQ(out.timestamp_ns, 5000);
-    EXPECT_EQ(probe(out), 0x22);
+    EXPECT_TRUE(pixels_are(out, 0x22));
 
     // ts 比该帧晚 -> 仍是这一帧
     ASSERT_TRUE(rb.read_by_timestamp(9999, out));
@@ -130,7 +127,7 @@ TEST(ImageRingBuffer, SingleFrameReadLatestIsNotRepeated) {
     rb.push(make_frame(0x44, 200));
     ASSERT_TRUE(rb.read_latest(out));
     EXPECT_EQ(out.timestamp_ns, 200);
-    EXPECT_EQ(probe(out), 0x44);
+    EXPECT_TRUE(pixels_are(out, 0x44));
 }
 
 // ===========================================================================
@@ -197,7 +194,7 @@ TEST(ImageRingBuffer, ReadLatestSeesNewestAfterOverwrite) {
     Frame out = make_frame(0x00, 0);
     ASSERT_TRUE(rb.read_latest(out));
     EXPECT_EQ(out.timestamp_ns, static_cast<std::int64_t>(cap + 9) * 1000);
-    EXPECT_EQ(probe(out), static_cast<std::uint8_t>(cap + 9));
+    EXPECT_TRUE(pixels_are(out, static_cast<std::uint8_t>(cap + 9)));
 
     EXPECT_EQ(rb.overruns(), 10u);
 }
@@ -231,7 +228,7 @@ TEST(ImageRingBuffer, ReadByTimestampPicksClosestNotExceeding) {
     // 正好命中
     ASSERT_TRUE(rb.read_by_timestamp(3000, out));
     EXPECT_EQ(out.timestamp_ns, 3000);
-    EXPECT_EQ(probe(out), 3);
+    EXPECT_TRUE(pixels_are(out, 3));
 
     // 落在两帧之间 -> 取不晚于 ts 的那帧 (3500 -> 3000)
     ASSERT_TRUE(rb.read_by_timestamp(3500, out));
@@ -261,7 +258,7 @@ TEST(ImageRingBuffer, ReadByTimestampIsNonDestructiveAndRepeatable) {
     // 同样的查询再来一次, 结果必须一致
     ASSERT_TRUE(rb.read_by_timestamp(2500, b));
     EXPECT_EQ(b.timestamp_ns, 2000);
-    EXPECT_EQ(probe(b), 2);
+    EXPECT_TRUE(pixels_are(b, 2));
 
     // 也别影响 read_latest
     Frame latest = make_frame(0x00, 0);
@@ -319,7 +316,7 @@ TEST(ImageRingBuffer, ReadByTimestampAfterWrapStillFindsOldestSurvivor) {
     // 最旧的存活帧是 i=50 (ts=50000)
     ASSERT_TRUE(rb.read_by_timestamp(50000, out));
     EXPECT_EQ(out.timestamp_ns, 50000);
-    EXPECT_EQ(probe(out), static_cast<std::uint8_t>(50));
+    EXPECT_TRUE(pixels_are(out, static_cast<std::uint8_t>(50)));
 
     // 再早一点就没了
     EXPECT_FALSE(rb.read_by_timestamp(49999, out));
@@ -341,7 +338,7 @@ TEST(ImageRingBuffer, ReadByTimestampBetweenWrappedFrames) {
     // ts=2650, 落在 i=26 (2600) 和 i=27 (2700) 之间 -> 应取 i=26
     ASSERT_TRUE(rb.read_by_timestamp(2650, out));
     EXPECT_EQ(out.timestamp_ns, 2600);
-    EXPECT_EQ(probe(out), static_cast<std::uint8_t>(26));
+    EXPECT_TRUE(pixels_are(out, static_cast<std::uint8_t>(26)));
 }
 
 // ===========================================================================

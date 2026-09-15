@@ -153,6 +153,58 @@ test_image_rb/fast:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_image_rb.dir\build.make tests/CMakeFiles/test_image_rb.dir/build
 .PHONY : test_image_rb/fast
 
+# Convenience name for target.
+tests/CMakeFiles/test_host_input_rb.dir/rule:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 tests/CMakeFiles/test_host_input_rb.dir/rule
+.PHONY : tests/CMakeFiles/test_host_input_rb.dir/rule
+
+# Convenience name for target.
+test_host_input_rb: tests/CMakeFiles/test_host_input_rb.dir/rule
+.PHONY : test_host_input_rb
+
+# fast build rule for target.
+test_host_input_rb/fast:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_host_input_rb.dir\build.make tests/CMakeFiles/test_host_input_rb.dir/build
+.PHONY : test_host_input_rb/fast
+
+# Convenience name for target.
+tests/CMakeFiles/test_preprocess.dir/rule:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 tests/CMakeFiles/test_preprocess.dir/rule
+.PHONY : tests/CMakeFiles/test_preprocess.dir/rule
+
+# Convenience name for target.
+test_preprocess: tests/CMakeFiles/test_preprocess.dir/rule
+.PHONY : test_preprocess
+
+# fast build rule for target.
+test_preprocess/fast:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_preprocess.dir\build.make tests/CMakeFiles/test_preprocess.dir/build
+.PHONY : test_preprocess/fast
+
+__/native/host_input_rb.obj: __/native/host_input_rb.cpp.obj
+.PHONY : __/native/host_input_rb.obj
+
+# target to build an object file
+__/native/host_input_rb.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_host_input_rb.dir\build.make tests/CMakeFiles/test_host_input_rb.dir/__/native/host_input_rb.cpp.obj
+.PHONY : __/native/host_input_rb.cpp.obj
+
+__/native/host_input_rb.i: __/native/host_input_rb.cpp.i
+.PHONY : __/native/host_input_rb.i
+
+# target to preprocess a source file
+__/native/host_input_rb.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_host_input_rb.dir\build.make tests/CMakeFiles/test_host_input_rb.dir/__/native/host_input_rb.cpp.i
+.PHONY : __/native/host_input_rb.cpp.i
+
+__/native/host_input_rb.s: __/native/host_input_rb.cpp.s
+.PHONY : __/native/host_input_rb.s
+
+# target to generate assembly for a file
+__/native/host_input_rb.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_host_input_rb.dir\build.make tests/CMakeFiles/test_host_input_rb.dir/__/native/host_input_rb.cpp.s
+.PHONY : __/native/host_input_rb.cpp.s
+
 __/native/image_rb.obj: __/native/image_rb.cpp.obj
 .PHONY : __/native/image_rb.obj
 
@@ -177,6 +229,54 @@ __/native/image_rb.cpp.s:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_image_rb.dir\build.make tests/CMakeFiles/test_image_rb.dir/__/native/image_rb.cpp.s
 .PHONY : __/native/image_rb.cpp.s
 
+__/native/preprocess.obj: __/native/preprocess.cpp.obj
+.PHONY : __/native/preprocess.obj
+
+# target to build an object file
+__/native/preprocess.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_preprocess.dir\build.make tests/CMakeFiles/test_preprocess.dir/__/native/preprocess.cpp.obj
+.PHONY : __/native/preprocess.cpp.obj
+
+__/native/preprocess.i: __/native/preprocess.cpp.i
+.PHONY : __/native/preprocess.i
+
+# target to preprocess a source file
+__/native/preprocess.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_preprocess.dir\build.make tests/CMakeFiles/test_preprocess.dir/__/native/preprocess.cpp.i
+.PHONY : __/native/preprocess.cpp.i
+
+__/native/preprocess.s: __/native/preprocess.cpp.s
+.PHONY : __/native/preprocess.s
+
+# target to generate assembly for a file
+__/native/preprocess.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_preprocess.dir\build.make tests/CMakeFiles/test_preprocess.dir/__/native/preprocess.cpp.s
+.PHONY : __/native/preprocess.cpp.s
+
+test_host_input_rb.obj: test_host_input_rb.cpp.obj
+.PHONY : test_host_input_rb.obj
+
+# target to build an object file
+test_host_input_rb.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_host_input_rb.dir\build.make tests/CMakeFiles/test_host_input_rb.dir/test_host_input_rb.cpp.obj
+.PHONY : test_host_input_rb.cpp.obj
+
+test_host_input_rb.i: test_host_input_rb.cpp.i
+.PHONY : test_host_input_rb.i
+
+# target to preprocess a source file
+test_host_input_rb.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_host_input_rb.dir\build.make tests/CMakeFiles/test_host_input_rb.dir/test_host_input_rb.cpp.i
+.PHONY : test_host_input_rb.cpp.i
+
+test_host_input_rb.s: test_host_input_rb.cpp.s
+.PHONY : test_host_input_rb.s
+
+# target to generate assembly for a file
+test_host_input_rb.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_host_input_rb.dir\build.make tests/CMakeFiles/test_host_input_rb.dir/test_host_input_rb.cpp.s
+.PHONY : test_host_input_rb.cpp.s
+
 test_image_rb.obj: test_image_rb.cpp.obj
 .PHONY : test_image_rb.obj
 
@@ -200,6 +300,30 @@ test_image_rb.s: test_image_rb.cpp.s
 test_image_rb.cpp.s:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_image_rb.dir\build.make tests/CMakeFiles/test_image_rb.dir/test_image_rb.cpp.s
 .PHONY : test_image_rb.cpp.s
+
+test_preprocess.obj: test_preprocess.cpp.obj
+.PHONY : test_preprocess.obj
+
+# target to build an object file
+test_preprocess.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_preprocess.dir\build.make tests/CMakeFiles/test_preprocess.dir/test_preprocess.cpp.obj
+.PHONY : test_preprocess.cpp.obj
+
+test_preprocess.i: test_preprocess.cpp.i
+.PHONY : test_preprocess.i
+
+# target to preprocess a source file
+test_preprocess.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_preprocess.dir\build.make tests/CMakeFiles/test_preprocess.dir/test_preprocess.cpp.i
+.PHONY : test_preprocess.cpp.i
+
+test_preprocess.s: test_preprocess.cpp.s
+.PHONY : test_preprocess.s
+
+# target to generate assembly for a file
+test_preprocess.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_preprocess.dir\build.make tests/CMakeFiles/test_preprocess.dir/test_preprocess.cpp.s
+.PHONY : test_preprocess.cpp.s
 
 test_ring_buffer.obj: test_ring_buffer.cpp.obj
 .PHONY : test_ring_buffer.obj
@@ -234,14 +358,28 @@ help:
 	@echo ... edit_cache
 	@echo ... rebuild_cache
 	@echo ... test
+	@echo ... test_host_input_rb
 	@echo ... test_image_rb
+	@echo ... test_preprocess
 	@echo ... test_ring_buffer
+	@echo ... __/native/host_input_rb.obj
+	@echo ... __/native/host_input_rb.i
+	@echo ... __/native/host_input_rb.s
 	@echo ... __/native/image_rb.obj
 	@echo ... __/native/image_rb.i
 	@echo ... __/native/image_rb.s
+	@echo ... __/native/preprocess.obj
+	@echo ... __/native/preprocess.i
+	@echo ... __/native/preprocess.s
+	@echo ... test_host_input_rb.obj
+	@echo ... test_host_input_rb.i
+	@echo ... test_host_input_rb.s
 	@echo ... test_image_rb.obj
 	@echo ... test_image_rb.i
 	@echo ... test_image_rb.s
+	@echo ... test_preprocess.obj
+	@echo ... test_preprocess.i
+	@echo ... test_preprocess.s
 	@echo ... test_ring_buffer.obj
 	@echo ... test_ring_buffer.i
 	@echo ... test_ring_buffer.s

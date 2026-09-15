@@ -9,102 +9,102 @@
         {
           "name": "FreshBufferIsEmpty",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 58
+          "line": 55
         },
         {
           "name": "ReadLatestOnEmptyFails",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 66
+          "line": 63
         },
         {
           "name": "ReadByTimestampOnEmptyFails",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 76
+          "line": 73
         },
         {
           "name": "SingleFrameReadLatest",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 88
+          "line": 85
         },
         {
           "name": "SingleFrameReadByTimestampCoversBothSides",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 100
+          "line": 97
         },
         {
           "name": "SingleFrameReadLatestIsNotRepeated",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 119
+          "line": 116
         },
         {
           "name": "FillsToCapacityWithoutOverrun",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 140
+          "line": 137
         },
         {
           "name": "SizeIsClampedAtCapacityWhenOverwritten",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 151
+          "line": 148
         },
         {
           "name": "OverwriteDropsOldestAndCountsIt",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 167
+          "line": 164
         },
         {
           "name": "ReadLatestSeesNewestAfterOverwrite",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 189
+          "line": 186
         },
         {
           "name": "PushNeverBlocksWhenFull",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 205
+          "line": 202
         },
         {
           "name": "ReadByTimestampPicksClosestNotExceeding",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 222
+          "line": 219
         },
         {
           "name": "ReadByTimestampIsNonDestructiveAndRepeatable",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 248
+          "line": 245
         },
         {
           "name": "ReadByTimestampDoesNotAffectLatestWatermark",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 272
+          "line": 269
         },
         {
           "name": "ReadByTimestampExactBoundaries",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 288
+          "line": 285
         },
         {
           "name": "ReadByTimestampAfterWrapStillFindsOldestSurvivor",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 308
+          "line": 305
         },
         {
           "name": "ReadByTimestampBetweenWrappedFrames",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 332
+          "line": 329
         },
         {
           "name": "CapacityIsThreeHundred",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 351
+          "line": 348
         },
         {
           "name": "FrameLayoutIsPackedAsExpected",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 357
+          "line": 354
         },
         {
           "name": "LargeStorageLivesOnHeapNotStack",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
-          "line": 363
+          "line": 360
         }
       ]
     }
