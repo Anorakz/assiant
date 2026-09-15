@@ -63,3 +63,9 @@ send_key / send_mouse 必须释放 GIL，不阻塞 asyncio。
 ZeroMQ PUB 绑定 0.0.0.0:5555，SUB 连板端 :5556。
 
 固件升级后重拉 sysroot 并重新交叉编译，否则 glibc 不匹配。
+
+工具链：GCC 9.2-2019.12，路径 E:/rk3568/arm/
+sysroot：E:/rk3568/sysroot（从板端 tar 同步，rsync 展开）
+板端：root@192.168.137.30，目录 /home/kickpi/myproject/assitant/agent
+Python：板端 3.8
+GLIBC：板端 2.31，编译产物最高要求 2.17
