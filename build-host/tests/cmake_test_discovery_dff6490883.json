@@ -1,5 +1,5 @@
 {
-  "tests": 33,
+  "tests": 35,
   "name": "AllTests",
   "testsuites": [
     {
@@ -55,7 +55,7 @@
     },
     {
       "name": "RingBufferBoundary",
-      "tests": 18,
+      "tests": 20,
       "testsuite": [
         {
           "name": "EmptyThenFullThenEmptyAgain",
@@ -123,29 +123,39 @@
           "line": 358
         },
         {
-          "name": "ReadLatestAfterSkipsOldFrames",
+          "name": "ReadLatestIntoRefMatchesOptionalVersion",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_ring_buffer.cpp",
           "line": 377
         },
         {
-          "name": "ReadLatestAfterDropsStaleFrames",
+          "name": "PeekReadsBySequenceWithoutMovingCursors",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_ring_buffer.cpp",
-          "line": 414
+          "line": 399
+        },
+        {
+          "name": "PeekRejectsOverwrittenSequence",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_ring_buffer.cpp",
+          "line": 423
+        },
+        {
+          "name": "PeekWorksAfterWrapAround",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_ring_buffer.cpp",
+          "line": 443
         },
         {
           "name": "ReadLatestWithTimeoutReturnsImmediatelyWhenDataReady",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_ring_buffer.cpp",
-          "line": 437
+          "line": 462
         },
         {
           "name": "ReadLatestWithTimeoutGivesUpWhenNoData",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_ring_buffer.cpp",
-          "line": 450
+          "line": 475
         },
         {
           "name": "ReadLatestWithTimeoutWakesUpOnLateData",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_ring_buffer.cpp",
-          "line": 461
+          "line": 486
         }
       ]
     },
@@ -156,32 +166,32 @@
         {
           "name": "SingleProducerSingleConsumerKeepsEveryItem",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_ring_buffer.cpp",
-          "line": 522
+          "line": 547
         },
         {
           "name": "OverwritingProducerNeverExposesTornValues",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_ring_buffer.cpp",
-          "line": 579
+          "line": 604
         },
         {
           "name": "PopUnderOverwriteStaysConsistentAndAdvances",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_ring_buffer.cpp",
-          "line": 632
+          "line": 657
         },
         {
           "name": "ReadLatestNeverGoesBackwardsUnderLoad",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_ring_buffer.cpp",
-          "line": 686
+          "line": 711
         },
         {
           "name": "ConcurrentReadLatestWithTimeoutIsSafe",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_ring_buffer.cpp",
-          "line": 731
+          "line": 756
         },
         {
           "name": "CapacityOneStressDoesNotInvokeUb",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_ring_buffer.cpp",
-          "line": 772
+          "line": 797
         }
       ]
     }

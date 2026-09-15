@@ -1,0 +1,112 @@
+{
+  "tests": 20,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "ImageRingBuffer",
+      "tests": 20,
+      "testsuite": [
+        {
+          "name": "FreshBufferIsEmpty",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 58
+        },
+        {
+          "name": "ReadLatestOnEmptyFails",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 66
+        },
+        {
+          "name": "ReadByTimestampOnEmptyFails",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 76
+        },
+        {
+          "name": "SingleFrameReadLatest",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 88
+        },
+        {
+          "name": "SingleFrameReadByTimestampCoversBothSides",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 100
+        },
+        {
+          "name": "SingleFrameReadLatestIsNotRepeated",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 119
+        },
+        {
+          "name": "FillsToCapacityWithoutOverrun",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 140
+        },
+        {
+          "name": "SizeIsClampedAtCapacityWhenOverwritten",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 151
+        },
+        {
+          "name": "OverwriteDropsOldestAndCountsIt",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 167
+        },
+        {
+          "name": "ReadLatestSeesNewestAfterOverwrite",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 189
+        },
+        {
+          "name": "PushNeverBlocksWhenFull",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 205
+        },
+        {
+          "name": "ReadByTimestampPicksClosestNotExceeding",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 222
+        },
+        {
+          "name": "ReadByTimestampIsNonDestructiveAndRepeatable",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 248
+        },
+        {
+          "name": "ReadByTimestampDoesNotAffectLatestWatermark",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 272
+        },
+        {
+          "name": "ReadByTimestampExactBoundaries",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 288
+        },
+        {
+          "name": "ReadByTimestampAfterWrapStillFindsOldestSurvivor",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 308
+        },
+        {
+          "name": "ReadByTimestampBetweenWrappedFrames",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 332
+        },
+        {
+          "name": "CapacityIsThreeHundred",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 351
+        },
+        {
+          "name": "FrameLayoutIsPackedAsExpected",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 357
+        },
+        {
+          "name": "LargeStorageLivesOnHeapNotStack",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_image_rb.cpp",
+          "line": 363
+        }
+      ]
+    }
+  ]
+}

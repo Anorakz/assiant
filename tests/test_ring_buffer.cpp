@@ -374,64 +374,89 @@ TEST(RingBufferBoundary, DropResetsBothReadPositions) {
     EXPECT_EQ(rb.pop(), 99u);
 }
 
-TEST(RingBufferBoundary, ReadLatestAfterSkipsOldFrames) {
-    // ImageFrame 那种带 timestamp_us 的载荷
-    struct Frame {
-        std::uint64_t timestamp_us = 0;
-    };
-    RingBuffer<Frame> rb(8);
+TEST(RingBufferBoundary, ReadLatestIntoRefMatchesOptionalVersion) {
+    // 引用版是给大载荷准备的 (省掉 optional 那次额外拷贝), 行为必须一致
+    RingBuffer<std::uint64_t> rb(8);
+    rb.push(11);
+    rb.push(22);
 
-    for (std::uint64_t t = 100; t <= 500; t += 100) {
-        rb.push(Frame{t});
-    }
+    std::uint64_t out = 0;
+    ASSERT_TRUE(rb.read_latest(out));
+    EXPECT_EQ(out, 22u);
 
-    auto f = rb.read_latest_after(350);
-    ASSERT_TRUE(f.has_value());
-    EXPECT_EQ(f->timestamp_us, 500u) << "应当返回最新的、且不早于 350 的那条";
+    // 已经是同一帧了, 再读应当失败
+    EXPECT_FALSE(rb.read_latest(out));
 
-    // 450 的写入顺序比 500 新, 时间戳也满足 >= 350, 所以它是"新到的合格帧"
-    rb.push(Frame{450});
-    auto g = rb.read_latest_after(350);
-    ASSERT_TRUE(g.has_value());
-    EXPECT_EQ(g->timestamp_us, 450u) << "新写入的合格帧应当能被取到";
+    rb.push(33);
+    ASSERT_TRUE(rb.read_latest(out));
+    EXPECT_EQ(out, 33u);
 
-    // 更晚写入的 600 也能正常取到
-    rb.push(Frame{600});
-    auto h = rb.read_latest_after(350);
-    ASSERT_TRUE(h.has_value());
-    EXPECT_EQ(h->timestamp_us, 600u);
-
-    // 阈值高于任何现存帧 -> 空
-    EXPECT_EQ(rb.read_latest_after(9999), std::nullopt);
-
-    // 阈值很低 -> 直接拿最新那条
-    rb.push(Frame{800});
-    auto k = rb.read_latest_after(0);
-    ASSERT_TRUE(k.has_value());
-    EXPECT_EQ(k->timestamp_us, 800u);
+    // 空缓冲
+    RingBuffer<std::uint64_t> empty(4);
+    EXPECT_FALSE(empty.read_latest(out));
 }
 
-TEST(RingBufferBoundary, ReadLatestAfterDropsStaleFrames) {
-    // 时间戳太旧的积压帧应当被丢弃, 而不是把后续帧一起挡死
-    struct Frame {
-        std::uint64_t timestamp_us = 0;
-    };
-    RingBuffer<Frame> rb(8);
-    rb.push(Frame{100});
-    rb.push(Frame{200});
+TEST(RingBufferBoundary, PeekReadsBySequenceWithoutMovingCursors) {
+    RingBuffer<std::uint64_t> rb(8);
+    for (std::uint64_t i = 1; i <= 3; ++i) {
+        rb.push(i * 100);
+    }
 
-    // 阈值 500: 两条都太旧, 应当空
-    EXPECT_EQ(rb.read_latest_after(500), std::nullopt);
-    EXPECT_EQ(rb.read_latest_after(500), std::nullopt);
+    EXPECT_EQ(rb.oldest_seq(), 0u);
+    EXPECT_EQ(rb.newest_seq(), 2u);
 
-    // 之后来一条合格帧, 能正常取到 (说明没有被旧帧挡死)
-    rb.push(Frame{700});
-    auto f = rb.read_latest_after(500);
-    ASSERT_TRUE(f.has_value());
-    EXPECT_EQ(f->timestamp_us, 700u);
+    std::uint64_t out = 0;
+    ASSERT_TRUE(rb.peek(0, out));
+    EXPECT_EQ(out, 100u);
+    ASSERT_TRUE(rb.peek(2, out));
+    EXPECT_EQ(out, 300u);
 
-    // 已取过 700, 没有新数据
-    EXPECT_EQ(rb.read_latest_after(500), std::nullopt);
+    // 越界
+    EXPECT_FALSE(rb.peek(3, out)) << "还没写的序号";
+    EXPECT_FALSE(rb.peek(99, out));
+
+    // peek 不该影响 read_latest / pop
+    EXPECT_FALSE(rb.empty());
+    EXPECT_EQ(rb.pop(), 100u);
+}
+
+TEST(RingBufferBoundary, PeekRejectsOverwrittenSequence) {
+    RingBuffer<std::uint64_t> rb(4);
+    for (std::uint64_t i = 1; i <= 4; ++i) {
+        rb.push(i);
+    }
+    rb.push(5);  // 覆盖掉 i=1 (seq 0)
+    rb.push(6);  // 覆盖掉 i=2 (seq 1)
+
+    EXPECT_EQ(rb.oldest_seq(), 2u);
+    EXPECT_EQ(rb.newest_seq(), 5u);
+
+    std::uint64_t out = 0;
+    EXPECT_FALSE(rb.peek(0, out)) << "seq 0 已被覆盖";
+    EXPECT_FALSE(rb.peek(1, out)) << "seq 1 已被覆盖";
+    ASSERT_TRUE(rb.peek(2, out));
+    EXPECT_EQ(out, 3u);
+    ASSERT_TRUE(rb.peek(5, out));
+    EXPECT_EQ(out, 6u);
+}
+
+TEST(RingBufferBoundary, PeekWorksAfterWrapAround) {
+    RingBuffer<std::uint64_t> rb(4);
+    for (std::uint64_t i = 1; i <= 20; ++i) {
+        rb.push(i);
+    }
+
+    // 只该剩最后 4 条: 17,18,19,20
+    EXPECT_EQ(rb.size(), 4u);
+    EXPECT_EQ(rb.oldest_seq(), 16u);
+    EXPECT_EQ(rb.newest_seq(), 19u);
+
+    std::uint64_t out = 0;
+    for (std::uint64_t k = 0; k < 4; ++k) {
+        ASSERT_TRUE(rb.peek(16 + k, out)) << "k=" << k;
+        EXPECT_EQ(out, 17 + k);
+    }
+    EXPECT_FALSE(rb.peek(15, out));
 }
 
 TEST(RingBufferBoundary, ReadLatestWithTimeoutReturnsImmediatelyWhenDataReady) {

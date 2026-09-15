@@ -152,6 +152,19 @@ test_ring_buffer/fast:
 .PHONY : test_ring_buffer/fast
 
 #=============================================================================
+# Target rules for targets named test_image_rb
+
+# Build rule for target.
+test_image_rb: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 test_image_rb
+.PHONY : test_image_rb
+
+# fast build rule for target.
+test_image_rb/fast:
+	$(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_image_rb.dir\build.make tests/CMakeFiles/test_image_rb.dir/build
+.PHONY : test_image_rb/fast
+
+#=============================================================================
 # Target rules for targets named gtest
 
 # Build rule for target.
@@ -189,6 +202,7 @@ help:
 	@echo ... agent_native
 	@echo ... gtest
 	@echo ... gtest_main
+	@echo ... test_image_rb
 	@echo ... test_ring_buffer
 .PHONY : help
 

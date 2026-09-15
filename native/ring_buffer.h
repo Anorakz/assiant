@@ -62,6 +62,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <memory>
 #include <optional>
 #include <thread>
 #include <utility>
@@ -75,11 +77,18 @@ struct PushResult {
     bool ok = true;                 ///< 写入是否成功 (当前实现恒为 true)
 };
 
-template <typename T>
+/// @tparam T        载荷类型
+/// @tparam Capacity 编译期容量:
+///                     Capacity > 0  → 定长, 容量就是 Capacity, 构造参数被忽略
+///                     Capacity == 0 → 运行时容量, 由构造函数参数决定
+///
+/// 定长支路用堆分配 (不是 std::array 成员): 300 帧 256×256×3 接近 56MB,
+/// 放成员里会把栈撑爆, 而且会让 RingBuffer 变得不可移动。
+template <typename T, std::size_t Capacity = 0, auto TimestampMember = nullptr>
 class RingBuffer {
 public:
-    /// @param capacity 槽位数, 必须 >= 1
-    explicit RingBuffer(std::size_t capacity);
+    /// @param dynamic_capacity 运行时容量, 必须 >= 1 (仅 Capacity == 0 时生效)
+    explicit RingBuffer(std::size_t dynamic_capacity = 1);
 
     RingBuffer(const RingBuffer&) = delete;
     RingBuffer& operator=(const RingBuffer&) = delete;
@@ -136,20 +145,38 @@ public:
     /// 丢弃过期数据, 返回最新一条 (非阻塞); 无数据则 nullopt
     std::optional<T> read_latest();
 
+    /// 同上, 但写进调用方提供的对象并返回是否成功 —— 大载荷 (如 196KB 的帧)
+    /// 用这个可以避免"先拷进 optional 再拷出来"的额外一次拷贝.
+    bool read_latest(T& out);
+
     /// 取最新一条, 若无数据则最多等待 timeout (轮询实现, 非条件变量)
     /// @param timeout 为 0 时等价于 read_latest()
     std::optional<T> read_latest(std::chrono::milliseconds timeout);
 
-    /// 取"最新的、且时间戳 >= min_timestamp_us"的一条; 没有则 nullopt
-    ///
-    /// 语义是 **带过滤的 read_latest**, 不是"按时间戳随机访问":
-    ///   · 与 read_latest() 共享同一个单调前进的水位 latest_seq_
-    ///   · 只会返回比上次已取到的更新的帧, 不会回头捞旧帧
-    ///   · 时间戳太旧的帧会被丢弃并推进水位 (等价于丢帧)
-    /// 这样多帧积压时总能源源不断拿到新鲜帧, 而不会反复返回同一条旧帧.
-    ///
-    /// @note 要求 T 具备 public 成员 timestamp_us (微秒)
-    std::optional<T> read_latest_after(std::uint64_t min_timestamp_us);
+    // -------------------------------------------------- 按时间戳随机访问 ---
+    //  给"按时间戳找帧"这类查询用的 **非破坏性** 接口。
+    //  它们不动 tail_ / latest_seq_ / read_pos_ 任何游标, 所以同一个查询
+    //  可以重复调用并得到一致结果。
+    //
+    //  注意: 时间戳过滤本身不在这里做。RingBuffer 是泛型的, 不该假设 T 有
+    //  什么时间字段; "最接近且不超过某时间戳" 这类语义放在具体封装里
+    //  (例如 ImageRingBuffer::read_by_timestamp)。
+
+    /// 可访问范围: 绝对序号区间 [oldest_seq(), newest_seq() + 1)
+    std::size_t oldest_seq() const noexcept;
+    std::size_t newest_seq() const noexcept;
+
+    /// 把绝对序号 seq 的数据拷进 out (语义等价于 pop 后回退游标)
+    /// @return false 表示该序号已经不在缓冲区里 (太旧或还没写)
+    bool peek(std::size_t seq, T& out) const;
+
+    /// 只取绝对序号 seq 的时间戳字段, 不拷贝整条数据
+    /// @param ts [out] 时间戳
+    /// @return false 表示该序号已经不在缓冲区里
+    /// @note 字段用模板参数给出 (如 &Frame::timestamp_ns), 所以 RingBuffer
+    ///       不需要知道 T 里叫什么名字; 只有调用这个函数时才要求该字段存在。
+    /// @note 为减少拷贝, 建议把时间戳放在 T 的 **最后一个** 字段。
+    bool timestamp_of(std::size_t seq, std::int64_t& ts) const;
 
     /// 丢弃所有未读数据 (消费者侧调用), 之后 size() == 0
     void drop() noexcept;
@@ -181,10 +208,11 @@ private:
     /// @param min_seq 只接受绝对序号 >= min_seq 的数据
     bool read_latest_impl(T& out, std::size_t min_seq);
 
+    // Slot 含 std::atomic, 既不可拷贝也不可移动, 所以槽位数组一旦建好就不能
+    // 再增长/重分配 —— 这也是不用 std::vector 做定长支路的原因之一。
+    // 定长支路 (Capacity > 0) 的容量在编译期就定了, capacity_ 只是个常量镜像。
     std::size_t capacity_;
-    // 注意: Slot 含 std::atomic, 既不可拷贝也不可移动, 所以必须在构造时定长,
-    // 之后不能再 resize (否则 vector 增长时无法搬移元素)。
-    std::vector<Slot> slots_;
+    std::unique_ptr<Slot[]> slots_;
 
     /// 生产者: 已写入的总条数. 严格单调, 写入完成后以 release 发布
     std::atomic<std::size_t> write_seq_{0};
@@ -210,36 +238,37 @@ private:
 //  实现
 // ============================================================================
 
-template <typename T>
-RingBuffer<T>::RingBuffer(std::size_t capacity)
-    : capacity_(capacity == 0 ? 1 : capacity),  // 至少一个槽位, 避免取模除零
-      slots_(capacity == 0 ? 1 : capacity) {    // 定长构造, 不做后续 resize
+template <typename T, std::size_t Capacity, auto TimestampMember>
+RingBuffer<T, Capacity, TimestampMember>::RingBuffer(std::size_t dynamic_capacity)
+    : capacity_(Capacity == 0 ? (dynamic_capacity == 0 ? 1 : dynamic_capacity)
+                              : Capacity),
+      slots_(new Slot[capacity_]) {
     // 初始 seq 必须是自己的下标 —— 后面所有满/空判定都建立在这个基准上
     for (std::size_t i = 0; i < capacity_; ++i) {
         slots_[i].seq.store(i, std::memory_order_relaxed);
     }
 }
 
-template <typename T>
-std::size_t RingBuffer<T>::capacity() const noexcept {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+std::size_t RingBuffer<T, Capacity, TimestampMember>::capacity() const noexcept {
     return capacity_;
 }
 
-template <typename T>
-typename RingBuffer<T>::Slot& RingBuffer<T>::slot_of(std::size_t pos) noexcept {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+typename RingBuffer<T, Capacity, TimestampMember>::Slot& RingBuffer<T, Capacity, TimestampMember>::slot_of(std::size_t pos) noexcept {
     return slots_[pos % capacity_];
 }
 
-template <typename T>
-void RingBuffer<T>::publish_read_pos(std::size_t pos) noexcept {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+void RingBuffer<T, Capacity, TimestampMember>::publish_read_pos(std::size_t pos) noexcept {
     std::size_t pub = read_pos_.load(std::memory_order_relaxed);
     if (pub < pos) {
         read_pos_.store(pos, std::memory_order_relaxed);
     }
 }
 
-template <typename T>
-std::size_t RingBuffer<T>::note_write_slot(std::size_t seq, Slot& slot) noexcept {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+std::size_t RingBuffer<T, Capacity, TimestampMember>::note_write_slot(std::size_t seq, Slot& slot) noexcept {
     (void)slot;
     // 写 seq 之前, 缓冲区里最早还活着的条目是 seq - capacity_ + 1.
     // 也就是说: 写完之后, tail 一定被顶到 clamped_tail.
@@ -268,8 +297,8 @@ std::size_t RingBuffer<T>::note_write_slot(std::size_t seq, Slot& slot) noexcept
     return delta;
 }
 
-template <typename T>
-std::size_t RingBuffer<T>::size() const noexcept {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+std::size_t RingBuffer<T, Capacity, TimestampMember>::size() const noexcept {
     const std::size_t written = write_seq_.load(std::memory_order_acquire);
     if (written <= tail_) {
         return 0;  // 还没写, 或者读端已经追平
@@ -279,23 +308,23 @@ std::size_t RingBuffer<T>::size() const noexcept {
     return unread > capacity_ ? capacity_ : unread;
 }
 
-template <typename T>
-bool RingBuffer<T>::empty() const noexcept {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+bool RingBuffer<T, Capacity, TimestampMember>::empty() const noexcept {
     return size() == 0;
 }
 
-template <typename T>
-bool RingBuffer<T>::full() const noexcept {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+bool RingBuffer<T, Capacity, TimestampMember>::full() const noexcept {
     return size() == capacity_;
 }
 
-template <typename T>
-std::size_t RingBuffer<T>::overruns() const noexcept {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+std::size_t RingBuffer<T, Capacity, TimestampMember>::overruns() const noexcept {
     return overruns_.load(std::memory_order_relaxed);
 }
 
-template <typename T>
-std::size_t RingBuffer<T>::consumed(bool publish) noexcept {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+std::size_t RingBuffer<T, Capacity, TimestampMember>::consumed(bool publish) noexcept {
     const std::size_t fence = tail_ > latest_seq_ ? tail_ : latest_seq_;
     if (publish) {
         // 只写这个原子量; 生产者的私有水位由它自己维护.
@@ -304,8 +333,8 @@ std::size_t RingBuffer<T>::consumed(bool publish) noexcept {
     return fence;
 }
 
-template <typename T>
-PushResult RingBuffer<T>::push(const T& value) {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+PushResult RingBuffer<T, Capacity, TimestampMember>::push(const T& value) {
     const std::size_t seq = write_seq_.load(std::memory_order_relaxed);
     Slot& slot = slot_of(seq);
     const std::size_t overwritten = note_write_slot(seq, slot);
@@ -323,8 +352,8 @@ PushResult RingBuffer<T>::push(const T& value) {
     return PushResult{overwritten > 0, true};
 }
 
-template <typename T>
-PushResult RingBuffer<T>::push(T&& value) {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+PushResult RingBuffer<T, Capacity, TimestampMember>::push(T&& value) {
     const std::size_t seq = write_seq_.load(std::memory_order_relaxed);
     Slot& slot = slot_of(seq);
     const std::size_t overwritten = note_write_slot(seq, slot);
@@ -338,8 +367,8 @@ PushResult RingBuffer<T>::push(T&& value) {
     return PushResult{overwritten > 0, true};
 }
 
-template <typename T>
-std::optional<T> RingBuffer<T>::pop() {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+std::optional<T> RingBuffer<T, Capacity, TimestampMember>::pop() {
     T out{};
     if (!pop_impl(out, /*allow_skip=*/true)) {
         return std::nullopt;
@@ -347,8 +376,8 @@ std::optional<T> RingBuffer<T>::pop() {
     return std::optional<T>(std::move(out));
 }
 
-template <typename T>
-bool RingBuffer<T>::pop_impl(T& out, bool allow_skip) {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+bool RingBuffer<T, Capacity, TimestampMember>::pop_impl(T& out, bool allow_skip) {
     // 生产者可能连续抢写同一个槽位 (容量 1 时必然如此), 所以自旋必须有上界,
     // 否则消费者会被活活饿死在这里.
     constexpr int kMaxSpins = 64;
@@ -406,8 +435,8 @@ bool RingBuffer<T>::pop_impl(T& out, bool allow_skip) {
     }
 }
 
-template <typename T>
-bool RingBuffer<T>::read_latest_impl(T& out, std::size_t min_seq) {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+bool RingBuffer<T, Capacity, TimestampMember>::read_latest_impl(T& out, std::size_t min_seq) {
     // 生产者可能一直在抢写最新那格, 自旋必须有上界, 否则会活锁.
     constexpr int kMaxSpins = 64;
 
@@ -447,8 +476,8 @@ bool RingBuffer<T>::read_latest_impl(T& out, std::size_t min_seq) {
     return false;
 }
 
-template <typename T>
-std::optional<T> RingBuffer<T>::read_latest() {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+std::optional<T> RingBuffer<T, Capacity, TimestampMember>::read_latest() {
     T out{};
     if (!read_latest_impl(out, latest_seq_)) {
         return std::nullopt;
@@ -456,8 +485,13 @@ std::optional<T> RingBuffer<T>::read_latest() {
     return std::optional<T>(std::move(out));
 }
 
-template <typename T>
-std::optional<T> RingBuffer<T>::read_latest(std::chrono::milliseconds timeout) {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+bool RingBuffer<T, Capacity, TimestampMember>::read_latest(T& out) {
+    return read_latest_impl(out, latest_seq_);
+}
+
+template <typename T, std::size_t Capacity, auto TimestampMember>
+std::optional<T> RingBuffer<T, Capacity, TimestampMember>::read_latest(std::chrono::milliseconds timeout) {
     if (timeout.count() <= 0) {
         return read_latest();
     }
@@ -475,25 +509,76 @@ std::optional<T> RingBuffer<T>::read_latest(std::chrono::milliseconds timeout) {
     }
 }
 
-template <typename T>
-std::optional<T> RingBuffer<T>::read_latest_after(std::uint64_t min_timestamp_us) {
-    T out{};
-    if (!read_latest_impl(out, latest_seq_)) {
-        return std::nullopt;
-    }
-    if (out.timestamp_us >= min_timestamp_us) {
-        // 命中; 水位已由 read_latest_impl 停在这一条上
-        return std::optional<T>(std::move(out));
-    }
-    // 这条太旧 -> 丢弃它.
-    // 注意这里 **不能** 推进 latest_seq_: 推进会让下次读取直接跳过之后才
-    // 写入的帧 (写入序号在涨, 读位置得跟上已写入的量). 让 latest_seq_ 停在
-    // 原地, 下次读的仍是"当前最新那条", 生产者一写新帧就能立刻拿到.
-    return std::nullopt;
+template <typename T, std::size_t Capacity, auto TimestampMember>
+std::size_t RingBuffer<T, Capacity, TimestampMember>::oldest_seq() const noexcept {
+    // 写满之后最老的存活条目就被顶到 write_seq_ - capacity_
+    const std::size_t written = write_seq_.load(std::memory_order_acquire);
+    return written <= capacity_ ? 0 : written - capacity_;
 }
 
-template <typename T>
-void RingBuffer<T>::drop() noexcept {
+template <typename T, std::size_t Capacity, auto TimestampMember>
+std::size_t RingBuffer<T, Capacity, TimestampMember>::newest_seq() const noexcept {
+    const std::size_t written = write_seq_.load(std::memory_order_acquire);
+    return written == 0 ? 0 : written - 1;
+}
+
+template <typename T, std::size_t Capacity, auto TimestampMember>
+bool RingBuffer<T, Capacity, TimestampMember>::peek(std::size_t seq, T& out) const {
+    const std::size_t written = write_seq_.load(std::memory_order_acquire);
+
+    // 越界: 还没写 (seq >= written), 或太旧已被覆盖
+    if (seq >= written) {
+        return false;
+    }
+    if (written > capacity_ && seq < written - capacity_) {
+        return false;
+    }
+
+    const Slot& slot = slots_[seq % capacity_];
+    const std::size_t s = slot.seq.load(std::memory_order_acquire);
+    if (s != seq + 1) {
+        return false;  // 正被生产者改写, 或已被更晚的写入取代
+    }
+
+    out = slot.value;
+    // 复查: 拷贝期间被覆盖就放弃这次查询
+    return slot.seq.load(std::memory_order_acquire) == s;
+}
+
+template <typename T, std::size_t Capacity, auto TimestampMember>
+bool RingBuffer<T, Capacity, TimestampMember>::timestamp_of(std::size_t seq, std::int64_t& ts) const {
+    const std::size_t written = write_seq_.load(std::memory_order_acquire);
+
+    if (seq >= written) {
+        return false;
+    }
+    if (written > capacity_ && seq < written - capacity_) {
+        return false;
+    }
+
+    const Slot& slot = slots_[seq % capacity_];
+    const std::size_t s = slot.seq.load(std::memory_order_acquire);
+    if (s != seq + 1) {
+        return false;
+    }
+
+    // 只搬时间戳一个字段 (不拷整条数据), 所以强烈建议把它放在 T 的最后一个
+    // 字段 —— memcpy 的跨度是 offsetof(T, ts) + sizeof(ts), 越靠前搬得越少。
+    static_assert(TimestampMember != nullptr,
+                  "timestamp_of() 需要指定时间戳成员, 例如 "
+                  "RingBuffer<Frame, 300, &Frame::timestamp_ns>");
+    std::int64_t value = 0;
+    std::memcpy(&value, &(slot.value.*TimestampMember), sizeof(value));
+
+    if (slot.seq.load(std::memory_order_acquire) != s) {
+        return false;  // 复查: 读的过程中被覆盖了
+    }
+    ts = value;
+    return true;
+}
+
+template <typename T, std::size_t Capacity, auto TimestampMember>
+void RingBuffer<T, Capacity, TimestampMember>::drop() noexcept {
     // 消费端独占 tail_/latest_seq_, 直接追平写端即可
     const std::size_t written = write_seq_.load(std::memory_order_acquire);
     tail_ = written;

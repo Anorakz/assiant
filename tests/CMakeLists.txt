@@ -13,17 +13,28 @@ set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 add_subdirectory(../native/third_party/googletest
                  "${CMAKE_BINARY_DIR}/googletest-build" EXCLUDE_FROM_ALL)
 
-add_executable(test_ring_buffer
+include(GoogleTest)
+
+# 每个单测一个可执行文件; 公共设置走这个 helper, 避免每加一个测试就抄一遍
+function(agent_add_host_test name)
+    add_executable(${name} ${ARGN})
+    target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/native)
+    target_link_libraries(${name} PRIVATE GTest::gtest_main Threads::Threads)
+    if(MSVC)
+        target_compile_options(${name} PRIVATE /W4)
+    else()
+        target_compile_options(${name} PRIVATE -Wall -Wextra)
+    endif()
+    gtest_discover_tests(${name})
+endfunction()
+
+# ring_buffer: 纯模板, 头文件即可
+agent_add_host_test(test_ring_buffer
     test_ring_buffer.cpp
 )
-target_include_directories(test_ring_buffer PRIVATE ${CMAKE_SOURCE_DIR}/native)
-target_link_libraries(test_ring_buffer PRIVATE GTest::gtest_main Threads::Threads)
 
-if(MSVC)
-    target_compile_options(test_ring_buffer PRIVATE /W4)
-else()
-    target_compile_options(test_ring_buffer PRIVATE -Wall -Wextra)
-endif()
-
-include(GoogleTest)
-gtest_discover_tests(test_ring_buffer)
+# image_rb: 有 .cpp, 一并编进来
+agent_add_host_test(test_image_rb
+    test_image_rb.cpp
+    ../native/image_rb.cpp
+)

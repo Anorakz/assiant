@@ -139,6 +139,68 @@ test_ring_buffer/fast:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_ring_buffer.dir\build.make tests/CMakeFiles/test_ring_buffer.dir/build
 .PHONY : test_ring_buffer/fast
 
+# Convenience name for target.
+tests/CMakeFiles/test_image_rb.dir/rule:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 tests/CMakeFiles/test_image_rb.dir/rule
+.PHONY : tests/CMakeFiles/test_image_rb.dir/rule
+
+# Convenience name for target.
+test_image_rb: tests/CMakeFiles/test_image_rb.dir/rule
+.PHONY : test_image_rb
+
+# fast build rule for target.
+test_image_rb/fast:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_image_rb.dir\build.make tests/CMakeFiles/test_image_rb.dir/build
+.PHONY : test_image_rb/fast
+
+__/native/image_rb.obj: __/native/image_rb.cpp.obj
+.PHONY : __/native/image_rb.obj
+
+# target to build an object file
+__/native/image_rb.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_image_rb.dir\build.make tests/CMakeFiles/test_image_rb.dir/__/native/image_rb.cpp.obj
+.PHONY : __/native/image_rb.cpp.obj
+
+__/native/image_rb.i: __/native/image_rb.cpp.i
+.PHONY : __/native/image_rb.i
+
+# target to preprocess a source file
+__/native/image_rb.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_image_rb.dir\build.make tests/CMakeFiles/test_image_rb.dir/__/native/image_rb.cpp.i
+.PHONY : __/native/image_rb.cpp.i
+
+__/native/image_rb.s: __/native/image_rb.cpp.s
+.PHONY : __/native/image_rb.s
+
+# target to generate assembly for a file
+__/native/image_rb.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_image_rb.dir\build.make tests/CMakeFiles/test_image_rb.dir/__/native/image_rb.cpp.s
+.PHONY : __/native/image_rb.cpp.s
+
+test_image_rb.obj: test_image_rb.cpp.obj
+.PHONY : test_image_rb.obj
+
+# target to build an object file
+test_image_rb.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_image_rb.dir\build.make tests/CMakeFiles/test_image_rb.dir/test_image_rb.cpp.obj
+.PHONY : test_image_rb.cpp.obj
+
+test_image_rb.i: test_image_rb.cpp.i
+.PHONY : test_image_rb.i
+
+# target to preprocess a source file
+test_image_rb.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_image_rb.dir\build.make tests/CMakeFiles/test_image_rb.dir/test_image_rb.cpp.i
+.PHONY : test_image_rb.cpp.i
+
+test_image_rb.s: test_image_rb.cpp.s
+.PHONY : test_image_rb.s
+
+# target to generate assembly for a file
+test_image_rb.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_image_rb.dir\build.make tests/CMakeFiles/test_image_rb.dir/test_image_rb.cpp.s
+.PHONY : test_image_rb.cpp.s
+
 test_ring_buffer.obj: test_ring_buffer.cpp.obj
 .PHONY : test_ring_buffer.obj
 
@@ -172,7 +234,14 @@ help:
 	@echo ... edit_cache
 	@echo ... rebuild_cache
 	@echo ... test
+	@echo ... test_image_rb
 	@echo ... test_ring_buffer
+	@echo ... __/native/image_rb.obj
+	@echo ... __/native/image_rb.i
+	@echo ... __/native/image_rb.s
+	@echo ... test_image_rb.obj
+	@echo ... test_image_rb.i
+	@echo ... test_image_rb.s
 	@echo ... test_ring_buffer.obj
 	@echo ... test_ring_buffer.i
 	@echo ... test_ring_buffer.s

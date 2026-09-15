@@ -1,14 +1,4 @@
-Phase 0 — 仓库骨架与工具链
-□ git init，配置 .gitignore（build/、dist/、pycache/、*.so、.venv/）
-□ 添加 submodule：moonlight-common-c、pybind11、googletest
-□ 写 .editorconfig（C++ 4 空格、Python 4 空格、行尾 LF）
-□ 写 CONTRIBUTING.md：提交规范、分支模型、PR 要求
-□ 写 cmake/toolchain-aarch64-rk3568.cmake
-□ scripts/bootstrap.ps1 可一键拉 submodule + 建 venv
-□ scripts/sync-sysroot.ps1 可从板端拉 /lib、/usr/lib、/usr/include
-□ 验证：aarch64-none-linux-gnu-gcc -v 可用，sysroot 目录存在 libc.so.6
 Phase 1 — native 层（C++ 核心）
-□ ring_buffer.h：lock-free SPSC 环形缓冲模板
 □ image_rb.h/.cpp：固定容量 300 帧，支持 read_latest、read_by_timestamp
 □ host_input_rb.h/.cpp：固定容量 128 事件，read_latest、read_all
 □ moonlight_adapter.h/.cpp：LiStartConnection、视频接收线程、主机输入接收线程
