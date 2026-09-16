@@ -50,3 +50,38 @@ agent_add_host_test(test_preprocess
     test_preprocess.cpp
     ../native/preprocess.cpp
 )
+
+# decoder: 骨架阶段只测 stub 契约 (不链接 FFmpeg)
+agent_add_host_test(test_decoder
+    test_decoder.cpp
+    ../native/decoder.cpp
+)
+
+# input_sender: stub 模式, 不链接 moonlight-common-c
+agent_add_host_test(test_input_sender
+    test_input_sender.cpp
+    ../native/input_sender.cpp
+)
+
+# moonlight_connection: HTTP + XML 握手层 (纯 host, 不依赖 moonlight 库)
+agent_add_host_test(test_moonlight_connection
+    test_moonlight_connection.cpp
+    ../native/moonlight_connection.cpp
+)
+if(WIN32)
+    target_link_libraries(test_moonlight_connection PRIVATE ws2_32)
+endif()
+
+# moonlight_adapter: 状态机 + 参数校验 (host 不链接 moonlight)
+agent_add_host_test(test_moonlight_adapter
+    test_moonlight_adapter.cpp
+    ../native/moonlight_adapter.cpp
+    ../native/moonlight_connection.cpp
+    ../native/decoder.cpp
+    ../native/image_rb.cpp
+    ../native/host_input_rb.cpp
+    ../native/preprocess.cpp
+)
+if(WIN32)
+    target_link_libraries(test_moonlight_adapter PRIVATE ws2_32)
+endif()

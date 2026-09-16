@@ -1,0 +1,5 @@
+if(EXISTS "E:/rk3568/project/myproject/assitant/build-host/tests/test_moonlight_connection[1]_tests.cmake")
+  include("E:/rk3568/project/myproject/assitant/build-host/tests/test_moonlight_connection[1]_tests.cmake")
+else()
+  add_test(test_moonlight_connection_NOT_BUILT test_moonlight_connection_NOT_BUILT)
+endif()

@@ -1,0 +1,97 @@
+{
+  "tests": 17,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "MoonlightAdapterTest",
+      "tests": 17,
+      "testsuite": [
+        {
+          "name": "StartsIdleAndDisconnected",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 41
+        },
+        {
+          "name": "RingBuffersAreAccessibleBeforeStart",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 51
+        },
+        {
+          "name": "RingBufferReferencesAreStable",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 62
+        },
+        {
+          "name": "RejectsEmptyHost",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 75
+        },
+        {
+          "name": "RejectsEmptyApp",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 82
+        },
+        {
+          "name": "RejectsInvalidDimensions",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 89
+        },
+        {
+          "name": "StartFailsWhenServerUnreachable",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 102
+        },
+        {
+          "name": "LastErrorIsClearedOnNextAttempt",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 114
+        },
+        {
+          "name": "StopIsIdempotentWhenIdle",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 130
+        },
+        {
+          "name": "StopAfterFailedStartIsSafe",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 141
+        },
+        {
+          "name": "CanRetryAfterStop",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 151
+        },
+        {
+          "name": "SecondStartWhileIdleIsAllowed",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 162
+        },
+        {
+          "name": "VideoFrameIgnoredWhenNotStreaming",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 175
+        },
+        {
+          "name": "VideoFrameRejectsNullAndEmpty",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 187
+        },
+        {
+          "name": "ConnectionStartedSetsStreaming",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 198
+        },
+        {
+          "name": "AbnormalTerminationRecordsError",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 210
+        },
+        {
+          "name": "DestructorStopsCleanly",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_moonlight_adapter.cpp",
+          "line": 221
+        }
+      ]
+    }
+  ]
+}

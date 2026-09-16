@@ -1,0 +1,118 @@
+{
+  "tests": 20,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "Nv12ToI420",
+      "tests": 7,
+      "testsuite": [
+        {
+          "name": "ProducesCorrectPlaneLayout",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 93
+        },
+        {
+          "name": "SplitsInterleavedUvCorrectly",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 111
+        },
+        {
+          "name": "CollapsesYStride",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 137
+        },
+        {
+          "name": "CollapsesUvStride",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 155
+        },
+        {
+          "name": "FullFrameRoundTrip",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 172
+        },
+        {
+          "name": "OutputSizeMatchesI420Formula",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 213
+        },
+        {
+          "name": "NullAndInvalidArgsAreSafe",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 229
+        }
+      ]
+    },
+    {
+      "name": "DecoderStub",
+      "tests": 13,
+      "testsuite": [
+        {
+          "name": "ConstructsAndDestructsSafely",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 246
+        },
+        {
+          "name": "FreshDecoderIsNotInitialized",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 255
+        },
+        {
+          "name": "DecodeBeforeInitReturnsFalseAndClearsOutParams",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 265
+        },
+        {
+          "name": "DecodeIsSafeWithNullOutParams",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 282
+        },
+        {
+          "name": "InitRejectsNonPositiveDimensions",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 293
+        },
+        {
+          "name": "DecodeRejectsNullDataOrZeroSize",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 307
+        },
+        {
+          "name": "FlushBeforeInitFailsCleanly",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 319
+        },
+        {
+          "name": "InitReturnsFalseWithoutFFmpeg",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 329
+        },
+        {
+          "name": "InitIsSafeForBothCodecs",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 339
+        },
+        {
+          "name": "InitIsIdempotentAndReleasesPreviousState",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 347
+        },
+        {
+          "name": "ReleaseIsIdempotent",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 362
+        },
+        {
+          "name": "ReleaseAfterFailedInitLeavesCleanState",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 374
+        },
+        {
+          "name": "CanInitAgainAfterRelease",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 386
+        }
+      ]
+    }
+  ]
+}

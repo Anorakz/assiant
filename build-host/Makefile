@@ -191,6 +191,58 @@ test_preprocess/fast:
 .PHONY : test_preprocess/fast
 
 #=============================================================================
+# Target rules for targets named test_decoder
+
+# Build rule for target.
+test_decoder: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 test_decoder
+.PHONY : test_decoder
+
+# fast build rule for target.
+test_decoder/fast:
+	$(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_decoder.dir\build.make tests/CMakeFiles/test_decoder.dir/build
+.PHONY : test_decoder/fast
+
+#=============================================================================
+# Target rules for targets named test_input_sender
+
+# Build rule for target.
+test_input_sender: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 test_input_sender
+.PHONY : test_input_sender
+
+# fast build rule for target.
+test_input_sender/fast:
+	$(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_input_sender.dir\build.make tests/CMakeFiles/test_input_sender.dir/build
+.PHONY : test_input_sender/fast
+
+#=============================================================================
+# Target rules for targets named test_moonlight_connection
+
+# Build rule for target.
+test_moonlight_connection: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 test_moonlight_connection
+.PHONY : test_moonlight_connection
+
+# fast build rule for target.
+test_moonlight_connection/fast:
+	$(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_connection.dir\build.make tests/CMakeFiles/test_moonlight_connection.dir/build
+.PHONY : test_moonlight_connection/fast
+
+#=============================================================================
+# Target rules for targets named test_moonlight_adapter
+
+# Build rule for target.
+test_moonlight_adapter: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 test_moonlight_adapter
+.PHONY : test_moonlight_adapter
+
+# fast build rule for target.
+test_moonlight_adapter/fast:
+	$(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/build
+.PHONY : test_moonlight_adapter/fast
+
+#=============================================================================
 # Target rules for targets named gtest
 
 # Build rule for target.
@@ -228,8 +280,12 @@ help:
 	@echo ... agent_native
 	@echo ... gtest
 	@echo ... gtest_main
+	@echo ... test_decoder
 	@echo ... test_host_input_rb
 	@echo ... test_image_rb
+	@echo ... test_input_sender
+	@echo ... test_moonlight_adapter
+	@echo ... test_moonlight_connection
 	@echo ... test_preprocess
 	@echo ... test_ring_buffer
 .PHONY : help

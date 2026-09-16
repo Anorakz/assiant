@@ -58,32 +58,68 @@ E:\rk3568\arm\
 
 ## 3. sysroot 补 Python 3.8 开发文件
 
-板端 sysroot 是从运行中的板子同步的，**不带 `python3.8-dev`**，缺 `Python.h`，
-而 pybind11 必须有它。板端 Python 是 **3.8.10 / Ubuntu focal**，所以取 focal 的
-`libpython3.8-dev` arm64 包：
+## 3. sysroot 补开发包 (头文件 + 链接名)
+
+从板子同步下来的 rootfs **只有运行库**, 缺头文件和 `.so` 链接名, 交叉编译会失败。
+两类包必须补:
+
+| 缺什么 | 症状 | 包 |
+|---|---|---|
+| `Python.h` | pybind11 编不过 | `libpython3.8-dev` |
+| `libavcodec/avcodec.h` 等 | decoder 编不过 | `libavcodec-dev` 等 5 个 |
+| `lib*.so` 链接名 | 链接期 `cannot find -lavcodec` | 同上（dev 包里带） |
+
+**一条命令搞定**（幂等，可重复执行；板端固件升级后重跑）：
+
+```powershell
+scripts/setup-sysroot-deps.ps1
+```
+
+### 3.1 Python 3.8 开发文件
+
+板端 Python 是 **3.8.10 / Ubuntu focal**，所以取 focal 的 `libpython3.8-dev`：
 
 ```
 http://ports.ubuntu.com/ubuntu-ports/pool/main/p/python3.8/
     libpython3.8-dev_3.8.10-0ubuntu1~20.04.18_arm64.deb
 ```
 
-解包（`.deb` 就是 ar 归档，`tar` 可以直接解开），把里面这些内容合进
-`E:\rk3568\sysroot`：
+头文件落在 `usr/include/python3.8/`（**不是** 多架构目录）。
 
-| 包内路径 | 放到 sysroot |
-|---|---|
-| `usr/include/python3.8/*` | `usr/include/python3.8/` |
-| `usr/include/aarch64-linux-gnu/python3.8/pyconfig.h` | `usr/include/aarch64-linux-gnu/python3.8/` |
-| `usr/lib/python3.8/config-3.8-aarch64-linux-gnu/*` | 同路径 |
+### 3.2 FFmpeg 开发文件
 
-Windows 上 `tar` 解不出 `.deb` 里的**符号链接**，需要手工补一个链接脚本
-`usr/lib/aarch64-linux-gnu/libpython3.8.so`：
+板端 FFmpeg 是 **4.2.7-0ubuntu0.1**，所以取 focal-updates 的 4.2.7，
+**不是** focal 初始的 4.2.2 —— 版本必须与板端运行库一致：
 
 ```
-INPUT ( /usr/lib/aarch64-linux-gnu/libpython3.8.so.1 )
+http://ports.ubuntu.com/ubuntu-ports/pool/universe/f/ffmpeg/
+    libavcodec-dev_4.2.7-0ubuntu0.1_arm64.deb
+    libavutil-dev_4.2.7-0ubuntu0.1_arm64.deb
+    libswscale-dev_4.2.7-0ubuntu0.1_arm64.deb
+    libswresample-dev_4.2.7-0ubuntu0.1_arm64.deb
+    libavformat-dev_4.2.7-0ubuntu0.1_arm64.deb
 ```
 
-### 目标端的扩展名后缀
+头文件装在**多架构目录** `usr/include/aarch64-linux-gnu/libavcodec/` 下 ——
+和 `cmake/toolchain.cmake` 里的 `-isystem .../usr/include/aarch64-linux-gnu` 正好对上，
+所以源码里直接 `#include <libavcodec/avcodec.h>` 即可。
+
+> **这个 FFmpeg 没有 rkmpp 支持。** 在 `libavcodec.so.58.54.100` 里搜不到任何
+> rkmpp 符号（`rkmpp` / `h264_rkmpp` / `drm_prime` 全是 0 次）。
+> 它带的是 **V4L2 M2M** 硬解：`h264_v4l2m2m` / `hevc_v4l2m2m`。
+> 在 RK3568 上这条路径走内核 `rkvdec` / `VEPU`，**就是硬件解码**，
+> 所以 `decoder.cpp` 封的是它，而不是 rkmpp。
+
+### 3.3 Windows 上的两个坑
+
+1. **tar 建不出 .deb 里的符号链接** → 缺 `libX.so` 时脚本补一个链接器脚本
+   （一行 `INPUT ( /usr/lib/aarch64-linux-gnu/libX.so.N)`），用法等价。
+2. **Windows PowerShell 5.1 按 ANSI 解码无 BOM 的 .ps1** → 脚本里写中文会
+   乱码甚至解析失败。`scripts/` 下的 .ps1 **一律保持纯 ASCII**。
+   另外 `param()` 必须是脚本第一条**语句**，`$ErrorActionPreference` 得放在它后面，
+   否则 PowerShell 会把 `param` 当命令名去找。
+
+### 3.4 目标端的扩展名后缀
 
 从板端 `/usr/lib/python3.8/config-3.8-aarch64-linux-gnu/Makefile` 读到：
 

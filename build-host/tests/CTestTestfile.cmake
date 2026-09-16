@@ -8,4 +8,8 @@ include("E:/rk3568/project/myproject/assitant/build-host/tests/test_ring_buffer[
 include("E:/rk3568/project/myproject/assitant/build-host/tests/test_image_rb[1]_include.cmake")
 include("E:/rk3568/project/myproject/assitant/build-host/tests/test_host_input_rb[1]_include.cmake")
 include("E:/rk3568/project/myproject/assitant/build-host/tests/test_preprocess[1]_include.cmake")
+include("E:/rk3568/project/myproject/assitant/build-host/tests/test_decoder[1]_include.cmake")
+include("E:/rk3568/project/myproject/assitant/build-host/tests/test_input_sender[1]_include.cmake")
+include("E:/rk3568/project/myproject/assitant/build-host/tests/test_moonlight_connection[1]_include.cmake")
+include("E:/rk3568/project/myproject/assitant/build-host/tests/test_moonlight_adapter[1]_include.cmake")
 subdirs("../googletest-build")

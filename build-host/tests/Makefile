@@ -181,12 +181,96 @@ test_preprocess/fast:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_preprocess.dir\build.make tests/CMakeFiles/test_preprocess.dir/build
 .PHONY : test_preprocess/fast
 
+# Convenience name for target.
+tests/CMakeFiles/test_decoder.dir/rule:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 tests/CMakeFiles/test_decoder.dir/rule
+.PHONY : tests/CMakeFiles/test_decoder.dir/rule
+
+# Convenience name for target.
+test_decoder: tests/CMakeFiles/test_decoder.dir/rule
+.PHONY : test_decoder
+
+# fast build rule for target.
+test_decoder/fast:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_decoder.dir\build.make tests/CMakeFiles/test_decoder.dir/build
+.PHONY : test_decoder/fast
+
+# Convenience name for target.
+tests/CMakeFiles/test_input_sender.dir/rule:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 tests/CMakeFiles/test_input_sender.dir/rule
+.PHONY : tests/CMakeFiles/test_input_sender.dir/rule
+
+# Convenience name for target.
+test_input_sender: tests/CMakeFiles/test_input_sender.dir/rule
+.PHONY : test_input_sender
+
+# fast build rule for target.
+test_input_sender/fast:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_input_sender.dir\build.make tests/CMakeFiles/test_input_sender.dir/build
+.PHONY : test_input_sender/fast
+
+# Convenience name for target.
+tests/CMakeFiles/test_moonlight_connection.dir/rule:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 tests/CMakeFiles/test_moonlight_connection.dir/rule
+.PHONY : tests/CMakeFiles/test_moonlight_connection.dir/rule
+
+# Convenience name for target.
+test_moonlight_connection: tests/CMakeFiles/test_moonlight_connection.dir/rule
+.PHONY : test_moonlight_connection
+
+# fast build rule for target.
+test_moonlight_connection/fast:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_connection.dir\build.make tests/CMakeFiles/test_moonlight_connection.dir/build
+.PHONY : test_moonlight_connection/fast
+
+# Convenience name for target.
+tests/CMakeFiles/test_moonlight_adapter.dir/rule:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 tests/CMakeFiles/test_moonlight_adapter.dir/rule
+.PHONY : tests/CMakeFiles/test_moonlight_adapter.dir/rule
+
+# Convenience name for target.
+test_moonlight_adapter: tests/CMakeFiles/test_moonlight_adapter.dir/rule
+.PHONY : test_moonlight_adapter
+
+# fast build rule for target.
+test_moonlight_adapter/fast:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/build
+.PHONY : test_moonlight_adapter/fast
+
+__/native/decoder.obj: __/native/decoder.cpp.obj
+.PHONY : __/native/decoder.obj
+
+# target to build an object file
+__/native/decoder.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_decoder.dir\build.make tests/CMakeFiles/test_decoder.dir/__/native/decoder.cpp.obj
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/decoder.cpp.obj
+.PHONY : __/native/decoder.cpp.obj
+
+__/native/decoder.i: __/native/decoder.cpp.i
+.PHONY : __/native/decoder.i
+
+# target to preprocess a source file
+__/native/decoder.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_decoder.dir\build.make tests/CMakeFiles/test_decoder.dir/__/native/decoder.cpp.i
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/decoder.cpp.i
+.PHONY : __/native/decoder.cpp.i
+
+__/native/decoder.s: __/native/decoder.cpp.s
+.PHONY : __/native/decoder.s
+
+# target to generate assembly for a file
+__/native/decoder.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_decoder.dir\build.make tests/CMakeFiles/test_decoder.dir/__/native/decoder.cpp.s
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/decoder.cpp.s
+.PHONY : __/native/decoder.cpp.s
+
 __/native/host_input_rb.obj: __/native/host_input_rb.cpp.obj
 .PHONY : __/native/host_input_rb.obj
 
 # target to build an object file
 __/native/host_input_rb.cpp.obj:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_host_input_rb.dir\build.make tests/CMakeFiles/test_host_input_rb.dir/__/native/host_input_rb.cpp.obj
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/host_input_rb.cpp.obj
 .PHONY : __/native/host_input_rb.cpp.obj
 
 __/native/host_input_rb.i: __/native/host_input_rb.cpp.i
@@ -195,6 +279,7 @@ __/native/host_input_rb.i: __/native/host_input_rb.cpp.i
 # target to preprocess a source file
 __/native/host_input_rb.cpp.i:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_host_input_rb.dir\build.make tests/CMakeFiles/test_host_input_rb.dir/__/native/host_input_rb.cpp.i
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/host_input_rb.cpp.i
 .PHONY : __/native/host_input_rb.cpp.i
 
 __/native/host_input_rb.s: __/native/host_input_rb.cpp.s
@@ -203,6 +288,7 @@ __/native/host_input_rb.s: __/native/host_input_rb.cpp.s
 # target to generate assembly for a file
 __/native/host_input_rb.cpp.s:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_host_input_rb.dir\build.make tests/CMakeFiles/test_host_input_rb.dir/__/native/host_input_rb.cpp.s
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/host_input_rb.cpp.s
 .PHONY : __/native/host_input_rb.cpp.s
 
 __/native/image_rb.obj: __/native/image_rb.cpp.obj
@@ -211,6 +297,7 @@ __/native/image_rb.obj: __/native/image_rb.cpp.obj
 # target to build an object file
 __/native/image_rb.cpp.obj:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_image_rb.dir\build.make tests/CMakeFiles/test_image_rb.dir/__/native/image_rb.cpp.obj
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/image_rb.cpp.obj
 .PHONY : __/native/image_rb.cpp.obj
 
 __/native/image_rb.i: __/native/image_rb.cpp.i
@@ -219,6 +306,7 @@ __/native/image_rb.i: __/native/image_rb.cpp.i
 # target to preprocess a source file
 __/native/image_rb.cpp.i:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_image_rb.dir\build.make tests/CMakeFiles/test_image_rb.dir/__/native/image_rb.cpp.i
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/image_rb.cpp.i
 .PHONY : __/native/image_rb.cpp.i
 
 __/native/image_rb.s: __/native/image_rb.cpp.s
@@ -227,7 +315,83 @@ __/native/image_rb.s: __/native/image_rb.cpp.s
 # target to generate assembly for a file
 __/native/image_rb.cpp.s:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_image_rb.dir\build.make tests/CMakeFiles/test_image_rb.dir/__/native/image_rb.cpp.s
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/image_rb.cpp.s
 .PHONY : __/native/image_rb.cpp.s
+
+__/native/input_sender.obj: __/native/input_sender.cpp.obj
+.PHONY : __/native/input_sender.obj
+
+# target to build an object file
+__/native/input_sender.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_input_sender.dir\build.make tests/CMakeFiles/test_input_sender.dir/__/native/input_sender.cpp.obj
+.PHONY : __/native/input_sender.cpp.obj
+
+__/native/input_sender.i: __/native/input_sender.cpp.i
+.PHONY : __/native/input_sender.i
+
+# target to preprocess a source file
+__/native/input_sender.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_input_sender.dir\build.make tests/CMakeFiles/test_input_sender.dir/__/native/input_sender.cpp.i
+.PHONY : __/native/input_sender.cpp.i
+
+__/native/input_sender.s: __/native/input_sender.cpp.s
+.PHONY : __/native/input_sender.s
+
+# target to generate assembly for a file
+__/native/input_sender.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_input_sender.dir\build.make tests/CMakeFiles/test_input_sender.dir/__/native/input_sender.cpp.s
+.PHONY : __/native/input_sender.cpp.s
+
+__/native/moonlight_adapter.obj: __/native/moonlight_adapter.cpp.obj
+.PHONY : __/native/moonlight_adapter.obj
+
+# target to build an object file
+__/native/moonlight_adapter.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/moonlight_adapter.cpp.obj
+.PHONY : __/native/moonlight_adapter.cpp.obj
+
+__/native/moonlight_adapter.i: __/native/moonlight_adapter.cpp.i
+.PHONY : __/native/moonlight_adapter.i
+
+# target to preprocess a source file
+__/native/moonlight_adapter.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/moonlight_adapter.cpp.i
+.PHONY : __/native/moonlight_adapter.cpp.i
+
+__/native/moonlight_adapter.s: __/native/moonlight_adapter.cpp.s
+.PHONY : __/native/moonlight_adapter.s
+
+# target to generate assembly for a file
+__/native/moonlight_adapter.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/moonlight_adapter.cpp.s
+.PHONY : __/native/moonlight_adapter.cpp.s
+
+__/native/moonlight_connection.obj: __/native/moonlight_connection.cpp.obj
+.PHONY : __/native/moonlight_connection.obj
+
+# target to build an object file
+__/native/moonlight_connection.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_connection.dir\build.make tests/CMakeFiles/test_moonlight_connection.dir/__/native/moonlight_connection.cpp.obj
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/moonlight_connection.cpp.obj
+.PHONY : __/native/moonlight_connection.cpp.obj
+
+__/native/moonlight_connection.i: __/native/moonlight_connection.cpp.i
+.PHONY : __/native/moonlight_connection.i
+
+# target to preprocess a source file
+__/native/moonlight_connection.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_connection.dir\build.make tests/CMakeFiles/test_moonlight_connection.dir/__/native/moonlight_connection.cpp.i
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/moonlight_connection.cpp.i
+.PHONY : __/native/moonlight_connection.cpp.i
+
+__/native/moonlight_connection.s: __/native/moonlight_connection.cpp.s
+.PHONY : __/native/moonlight_connection.s
+
+# target to generate assembly for a file
+__/native/moonlight_connection.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_connection.dir\build.make tests/CMakeFiles/test_moonlight_connection.dir/__/native/moonlight_connection.cpp.s
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/moonlight_connection.cpp.s
+.PHONY : __/native/moonlight_connection.cpp.s
 
 __/native/preprocess.obj: __/native/preprocess.cpp.obj
 .PHONY : __/native/preprocess.obj
@@ -235,6 +399,7 @@ __/native/preprocess.obj: __/native/preprocess.cpp.obj
 # target to build an object file
 __/native/preprocess.cpp.obj:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_preprocess.dir\build.make tests/CMakeFiles/test_preprocess.dir/__/native/preprocess.cpp.obj
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/preprocess.cpp.obj
 .PHONY : __/native/preprocess.cpp.obj
 
 __/native/preprocess.i: __/native/preprocess.cpp.i
@@ -243,6 +408,7 @@ __/native/preprocess.i: __/native/preprocess.cpp.i
 # target to preprocess a source file
 __/native/preprocess.cpp.i:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_preprocess.dir\build.make tests/CMakeFiles/test_preprocess.dir/__/native/preprocess.cpp.i
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/preprocess.cpp.i
 .PHONY : __/native/preprocess.cpp.i
 
 __/native/preprocess.s: __/native/preprocess.cpp.s
@@ -251,7 +417,32 @@ __/native/preprocess.s: __/native/preprocess.cpp.s
 # target to generate assembly for a file
 __/native/preprocess.cpp.s:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_preprocess.dir\build.make tests/CMakeFiles/test_preprocess.dir/__/native/preprocess.cpp.s
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/preprocess.cpp.s
 .PHONY : __/native/preprocess.cpp.s
+
+test_decoder.obj: test_decoder.cpp.obj
+.PHONY : test_decoder.obj
+
+# target to build an object file
+test_decoder.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_decoder.dir\build.make tests/CMakeFiles/test_decoder.dir/test_decoder.cpp.obj
+.PHONY : test_decoder.cpp.obj
+
+test_decoder.i: test_decoder.cpp.i
+.PHONY : test_decoder.i
+
+# target to preprocess a source file
+test_decoder.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_decoder.dir\build.make tests/CMakeFiles/test_decoder.dir/test_decoder.cpp.i
+.PHONY : test_decoder.cpp.i
+
+test_decoder.s: test_decoder.cpp.s
+.PHONY : test_decoder.s
+
+# target to generate assembly for a file
+test_decoder.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_decoder.dir\build.make tests/CMakeFiles/test_decoder.dir/test_decoder.cpp.s
+.PHONY : test_decoder.cpp.s
 
 test_host_input_rb.obj: test_host_input_rb.cpp.obj
 .PHONY : test_host_input_rb.obj
@@ -300,6 +491,78 @@ test_image_rb.s: test_image_rb.cpp.s
 test_image_rb.cpp.s:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_image_rb.dir\build.make tests/CMakeFiles/test_image_rb.dir/test_image_rb.cpp.s
 .PHONY : test_image_rb.cpp.s
+
+test_input_sender.obj: test_input_sender.cpp.obj
+.PHONY : test_input_sender.obj
+
+# target to build an object file
+test_input_sender.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_input_sender.dir\build.make tests/CMakeFiles/test_input_sender.dir/test_input_sender.cpp.obj
+.PHONY : test_input_sender.cpp.obj
+
+test_input_sender.i: test_input_sender.cpp.i
+.PHONY : test_input_sender.i
+
+# target to preprocess a source file
+test_input_sender.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_input_sender.dir\build.make tests/CMakeFiles/test_input_sender.dir/test_input_sender.cpp.i
+.PHONY : test_input_sender.cpp.i
+
+test_input_sender.s: test_input_sender.cpp.s
+.PHONY : test_input_sender.s
+
+# target to generate assembly for a file
+test_input_sender.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_input_sender.dir\build.make tests/CMakeFiles/test_input_sender.dir/test_input_sender.cpp.s
+.PHONY : test_input_sender.cpp.s
+
+test_moonlight_adapter.obj: test_moonlight_adapter.cpp.obj
+.PHONY : test_moonlight_adapter.obj
+
+# target to build an object file
+test_moonlight_adapter.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/test_moonlight_adapter.cpp.obj
+.PHONY : test_moonlight_adapter.cpp.obj
+
+test_moonlight_adapter.i: test_moonlight_adapter.cpp.i
+.PHONY : test_moonlight_adapter.i
+
+# target to preprocess a source file
+test_moonlight_adapter.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/test_moonlight_adapter.cpp.i
+.PHONY : test_moonlight_adapter.cpp.i
+
+test_moonlight_adapter.s: test_moonlight_adapter.cpp.s
+.PHONY : test_moonlight_adapter.s
+
+# target to generate assembly for a file
+test_moonlight_adapter.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/test_moonlight_adapter.cpp.s
+.PHONY : test_moonlight_adapter.cpp.s
+
+test_moonlight_connection.obj: test_moonlight_connection.cpp.obj
+.PHONY : test_moonlight_connection.obj
+
+# target to build an object file
+test_moonlight_connection.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_connection.dir\build.make tests/CMakeFiles/test_moonlight_connection.dir/test_moonlight_connection.cpp.obj
+.PHONY : test_moonlight_connection.cpp.obj
+
+test_moonlight_connection.i: test_moonlight_connection.cpp.i
+.PHONY : test_moonlight_connection.i
+
+# target to preprocess a source file
+test_moonlight_connection.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_connection.dir\build.make tests/CMakeFiles/test_moonlight_connection.dir/test_moonlight_connection.cpp.i
+.PHONY : test_moonlight_connection.cpp.i
+
+test_moonlight_connection.s: test_moonlight_connection.cpp.s
+.PHONY : test_moonlight_connection.s
+
+# target to generate assembly for a file
+test_moonlight_connection.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_connection.dir\build.make tests/CMakeFiles/test_moonlight_connection.dir/test_moonlight_connection.cpp.s
+.PHONY : test_moonlight_connection.cpp.s
 
 test_preprocess.obj: test_preprocess.cpp.obj
 .PHONY : test_preprocess.obj
@@ -358,25 +621,53 @@ help:
 	@echo ... edit_cache
 	@echo ... rebuild_cache
 	@echo ... test
+	@echo ... test_decoder
 	@echo ... test_host_input_rb
 	@echo ... test_image_rb
+	@echo ... test_input_sender
+	@echo ... test_moonlight_adapter
+	@echo ... test_moonlight_connection
 	@echo ... test_preprocess
 	@echo ... test_ring_buffer
+	@echo ... __/native/decoder.obj
+	@echo ... __/native/decoder.i
+	@echo ... __/native/decoder.s
 	@echo ... __/native/host_input_rb.obj
 	@echo ... __/native/host_input_rb.i
 	@echo ... __/native/host_input_rb.s
 	@echo ... __/native/image_rb.obj
 	@echo ... __/native/image_rb.i
 	@echo ... __/native/image_rb.s
+	@echo ... __/native/input_sender.obj
+	@echo ... __/native/input_sender.i
+	@echo ... __/native/input_sender.s
+	@echo ... __/native/moonlight_adapter.obj
+	@echo ... __/native/moonlight_adapter.i
+	@echo ... __/native/moonlight_adapter.s
+	@echo ... __/native/moonlight_connection.obj
+	@echo ... __/native/moonlight_connection.i
+	@echo ... __/native/moonlight_connection.s
 	@echo ... __/native/preprocess.obj
 	@echo ... __/native/preprocess.i
 	@echo ... __/native/preprocess.s
+	@echo ... test_decoder.obj
+	@echo ... test_decoder.i
+	@echo ... test_decoder.s
 	@echo ... test_host_input_rb.obj
 	@echo ... test_host_input_rb.i
 	@echo ... test_host_input_rb.s
 	@echo ... test_image_rb.obj
 	@echo ... test_image_rb.i
 	@echo ... test_image_rb.s
+	@echo ... test_input_sender.obj
+	@echo ... test_input_sender.i
+	@echo ... test_input_sender.s
+	@echo ... test_moonlight_adapter.obj
+	@echo ... test_moonlight_adapter.i
+	@echo ... test_moonlight_adapter.s
+	@echo ... test_moonlight_connection.obj
+	@echo ... test_moonlight_connection.i
+	@echo ... test_moonlight_connection.s
 	@echo ... test_preprocess.obj
 	@echo ... test_preprocess.i
 	@echo ... test_preprocess.s

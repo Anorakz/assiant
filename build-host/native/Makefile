@@ -163,6 +163,174 @@ binding.cpp.s:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/binding.cpp.s
 .PHONY : binding.cpp.s
 
+decoder.obj: decoder.cpp.obj
+.PHONY : decoder.obj
+
+# target to build an object file
+decoder.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/decoder.cpp.obj
+.PHONY : decoder.cpp.obj
+
+decoder.i: decoder.cpp.i
+.PHONY : decoder.i
+
+# target to preprocess a source file
+decoder.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/decoder.cpp.i
+.PHONY : decoder.cpp.i
+
+decoder.s: decoder.cpp.s
+.PHONY : decoder.s
+
+# target to generate assembly for a file
+decoder.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/decoder.cpp.s
+.PHONY : decoder.cpp.s
+
+host_input_rb.obj: host_input_rb.cpp.obj
+.PHONY : host_input_rb.obj
+
+# target to build an object file
+host_input_rb.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/host_input_rb.cpp.obj
+.PHONY : host_input_rb.cpp.obj
+
+host_input_rb.i: host_input_rb.cpp.i
+.PHONY : host_input_rb.i
+
+# target to preprocess a source file
+host_input_rb.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/host_input_rb.cpp.i
+.PHONY : host_input_rb.cpp.i
+
+host_input_rb.s: host_input_rb.cpp.s
+.PHONY : host_input_rb.s
+
+# target to generate assembly for a file
+host_input_rb.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/host_input_rb.cpp.s
+.PHONY : host_input_rb.cpp.s
+
+image_rb.obj: image_rb.cpp.obj
+.PHONY : image_rb.obj
+
+# target to build an object file
+image_rb.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/image_rb.cpp.obj
+.PHONY : image_rb.cpp.obj
+
+image_rb.i: image_rb.cpp.i
+.PHONY : image_rb.i
+
+# target to preprocess a source file
+image_rb.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/image_rb.cpp.i
+.PHONY : image_rb.cpp.i
+
+image_rb.s: image_rb.cpp.s
+.PHONY : image_rb.s
+
+# target to generate assembly for a file
+image_rb.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/image_rb.cpp.s
+.PHONY : image_rb.cpp.s
+
+input_sender.obj: input_sender.cpp.obj
+.PHONY : input_sender.obj
+
+# target to build an object file
+input_sender.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/input_sender.cpp.obj
+.PHONY : input_sender.cpp.obj
+
+input_sender.i: input_sender.cpp.i
+.PHONY : input_sender.i
+
+# target to preprocess a source file
+input_sender.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/input_sender.cpp.i
+.PHONY : input_sender.cpp.i
+
+input_sender.s: input_sender.cpp.s
+.PHONY : input_sender.s
+
+# target to generate assembly for a file
+input_sender.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/input_sender.cpp.s
+.PHONY : input_sender.cpp.s
+
+moonlight_adapter.obj: moonlight_adapter.cpp.obj
+.PHONY : moonlight_adapter.obj
+
+# target to build an object file
+moonlight_adapter.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/moonlight_adapter.cpp.obj
+.PHONY : moonlight_adapter.cpp.obj
+
+moonlight_adapter.i: moonlight_adapter.cpp.i
+.PHONY : moonlight_adapter.i
+
+# target to preprocess a source file
+moonlight_adapter.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/moonlight_adapter.cpp.i
+.PHONY : moonlight_adapter.cpp.i
+
+moonlight_adapter.s: moonlight_adapter.cpp.s
+.PHONY : moonlight_adapter.s
+
+# target to generate assembly for a file
+moonlight_adapter.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/moonlight_adapter.cpp.s
+.PHONY : moonlight_adapter.cpp.s
+
+moonlight_connection.obj: moonlight_connection.cpp.obj
+.PHONY : moonlight_connection.obj
+
+# target to build an object file
+moonlight_connection.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/moonlight_connection.cpp.obj
+.PHONY : moonlight_connection.cpp.obj
+
+moonlight_connection.i: moonlight_connection.cpp.i
+.PHONY : moonlight_connection.i
+
+# target to preprocess a source file
+moonlight_connection.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/moonlight_connection.cpp.i
+.PHONY : moonlight_connection.cpp.i
+
+moonlight_connection.s: moonlight_connection.cpp.s
+.PHONY : moonlight_connection.s
+
+# target to generate assembly for a file
+moonlight_connection.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/moonlight_connection.cpp.s
+.PHONY : moonlight_connection.cpp.s
+
+preprocess.obj: preprocess.cpp.obj
+.PHONY : preprocess.obj
+
+# target to build an object file
+preprocess.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/preprocess.cpp.obj
+.PHONY : preprocess.cpp.obj
+
+preprocess.i: preprocess.cpp.i
+.PHONY : preprocess.i
+
+# target to preprocess a source file
+preprocess.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/preprocess.cpp.i
+.PHONY : preprocess.cpp.i
+
+preprocess.s: preprocess.cpp.s
+.PHONY : preprocess.s
+
+# target to generate assembly for a file
+preprocess.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/preprocess.cpp.s
+.PHONY : preprocess.cpp.s
+
 # Help Target
 help:
 	@echo The following are some of the valid targets for this Makefile:
@@ -176,6 +344,27 @@ help:
 	@echo ... binding.obj
 	@echo ... binding.i
 	@echo ... binding.s
+	@echo ... decoder.obj
+	@echo ... decoder.i
+	@echo ... decoder.s
+	@echo ... host_input_rb.obj
+	@echo ... host_input_rb.i
+	@echo ... host_input_rb.s
+	@echo ... image_rb.obj
+	@echo ... image_rb.i
+	@echo ... image_rb.s
+	@echo ... input_sender.obj
+	@echo ... input_sender.i
+	@echo ... input_sender.s
+	@echo ... moonlight_adapter.obj
+	@echo ... moonlight_adapter.i
+	@echo ... moonlight_adapter.s
+	@echo ... moonlight_connection.obj
+	@echo ... moonlight_connection.i
+	@echo ... moonlight_connection.s
+	@echo ... preprocess.obj
+	@echo ... preprocess.i
+	@echo ... preprocess.s
 .PHONY : help
 
 
