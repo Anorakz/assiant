@@ -29,7 +29,8 @@ agent/
 │   ├── config.py                # YAML 配置加载/保存/点号路径读取
 │   ├── core/                    # 状态层、工具路由、调度层
 │   │   ├── state_machine.py     # SLEEP ⇄ IDLE ⇄ STUDY/GAME 状态机
-│   │   └── tool_router.py       # 工具注册 / 权限控制 / 执行调度
+│   │   ├── tool_router.py       # 工具注册 / 权限控制 / 执行调度
+│   │   └── scheduler.py         # 日程检查 + 定时触发 + 快捷键监听
 │   ├── llm/                     # LLM 三模式 + 规则兜底
 │   │   ├── provider.py          # edge / cloud / disabled 分发
 │   │   └── rule_engine.py       # 无 LLM 时的正则规则兜底
@@ -64,6 +65,7 @@ agent/
 │   ├── test_tool_router.py      # 工具注册/权限/参数校验/超时/异常单测
 │   ├── test_llm.py              # LLM 三模式切换 / cloud mock / 规则匹配
 │   ├── test_vision.py           # ROI 解析 / SigLIP mock (有无 numpy 两条路径)
+│   ├── test_scheduler.py        # 日程触发 / 去重 / 快捷键识别
 │   ├── test_chat_bus.py         # ChatInputBus 单测
 │   ├── test_io.py               # image_reader / host_input_reader / input_sender
 │   ├── mocks/                   # mock_agent_native: native 替身
@@ -178,6 +180,53 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
 - 参数校验用的是**自己实现的 JSON Schema 子集**（`SUPPORTED_KEYWORDS`）——实测宿主/WSL/板端
   都没有 `jsonschema`，不为一个字段校验往板端塞依赖。子集外的关键字默认静默忽略，
   用 `ToolRouter(permissive_schema=False)` 可以把"写了但没生效"变成报错。
+
+---
+
+## 调度器
+
+日程检查 + 定时触发 + 快捷键监听。触发动作只有两种：**状态转换** 和 **发消息给 Agent**
+（`bus.push("scheduler", ...)`，和终端/GUI 同一个入口）。触发时两者可同时做。
+
+```python
+from agent.core import Scheduler
+
+scheduler = Scheduler(state=sm, bus=bus, config=cfg)
+await scheduler.start()          # 起日程循环 + 快捷键订阅
+await scheduler.stop()
+
+await scheduler.check_schedule() # 也可手动跑一轮，返回本次真正触发的事件
+```
+
+配置（`interval_min` / `window_min` / `late_grace_min` / `hotkeys` 在 `scheduler` 段，
+`recurring` / `oneoff` 两处都认，方便直接喂 `schedule.yaml`）：
+
+```yaml
+scheduler:
+  interval_min: 1          # 每 1 分钟检查一次
+  window_min: 1            # 触发窗口宽度
+  late_grace_min: 5        # 迟到的容忍度(休眠/重启后晚几分钟仍认)
+  hotkeys:
+    - keys: ["ctrl", "alt", "s"]
+      action: {state: study, prompt: "开始学习"}
+recurring:
+  - {title: 站会, days: [mon, tue, wed, thu, fri], start: "09:30", remind_before_min: 5}
+oneoff:
+  - {title: 评审, date: "2026-09-20", start: "14:00", action: {state: study}}
+```
+
+约定：
+
+- **去重**：`check_schedule()` 每 `interval_min` 跑一次，但同一时间窗内只触发一次
+  （key 是「哪一天 + 事件 + 触发分钟」）。重启后同一窗口内会再触发一次——不做持久化。
+- **提前量可以跨天**：`00:05` 提前 10 分钟 → 前一天 `23:55` 触发，所以查找时同时看
+  「今天」和「明天」两个事件日。
+- **快捷键是订阅式的**：`bus.subscribe()` 只看不取。**不能**用 `get()` 读——那会把
+  终端/GUI 的用户消息一起吃进调度器，下游再也看不到。只认 `source == "host_keyboard"`。
+- **按住不放不会重复触发**（主机端按键重复会连发 press），抬起后可再次触发。
+- **`sync_time()` 不修改系统时间**，只校验时钟是否明显不对（板端无 NTP 服务/客户端库；
+  真要联网校时应配 systemd-timesyncd 或 chrony）。
+- **不做** cron 表达式解析、**不做**日程持久化。
 
 ---
 

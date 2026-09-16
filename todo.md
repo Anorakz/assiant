@@ -28,12 +28,10 @@ Phase 3 — Python Agent Core
 □ llm/rule_engine.py：disabled 时的兜底规则
 □ vision/siglip_encoder.py：RKNN-Toolkit-Lite2 推理封装（先 mock）
 □ vision/roi.py：ROI 配置解析
-□ ipc/zmq_pub.py：绑定 0.0.0.0:5555
-□ ipc/zmq_sub.py：连接 PC 192.168.1.100:5556
 □ config/loader.py + config/schema.py：YAML 加载 + 校验
 □ main.py：装配所有组件，启动 asyncio 事件循环
 □ 单元测试：state_machine、chat_bus、tool_router、config_loader 全绿
-Phase 4 — GUI（PC 侧）
+Phase 4 — GUI（板端）
 □ gui/app/main.py：PySide6 主窗口
 □ widgets/wallpaper_panel.py：壁纸展示 + 手动换一张
 □ widgets/chat_panel.py：LLM 输出 + 对话输入框 + 键盘捕获

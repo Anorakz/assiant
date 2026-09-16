@@ -20,6 +20,20 @@
 #    和用户看到的日志时间对齐, monotonic 没有可比性
 #  · get() 会一直等到有事件为止, 不返回 None; 想非阻塞就用 get_nowait()
 #
+#  订阅 (subscribe): 只看不取
+#  ---------------------------------------------------------------------------
+#  bus 是**单一消费者**的队列: 一条事件被 get() 取走就没了。但除了"主力消费者"
+#  (agent core), 还有只想**旁观**的角色 —— 典型是 scheduler 要从主机键盘事件里
+#  识别快捷键。如果让它 get() 来读, 它会:
+#      · 把终端/GUI 的用户消息一并吃掉, 下游再也看不到
+#      · 吃掉自己 push 出去的触发消息
+#  所以这里提供 subscribe(): 注册的回调在 push 时被通知, 事件**仍然留在队列里**
+#  等下游取。订阅者只观察, 不消费。
+#
+#  ⚠ 订阅回调绝不能阻塞: 它是在 push() 的调用栈上被调用的, 而 push() 又可能
+#    被 host_input_reader 的轮询协程调用。所以回调里有 await 的部分不会在这里
+#    等待, 而是挂一个后台任务 (见 _notify_subscribers)。
+#
 #  事件循环
 #  ---------------------------------------------------------------------------
 #  asyncio.Queue 必须绑定到一个事件循环, 而"绑定"发生在第一次使用它的时候。
@@ -32,8 +46,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 __all__ = ["ChatInputBus", "EVENT_FIELDS"]
 
@@ -60,6 +75,7 @@ class ChatInputBus:
         self._maxsize = maxsize
         self._queue: Optional[asyncio.Queue] = None
         self._loop = None
+        self._subscribers: List[Callable[[Dict[str, Any]], Any]] = []
 
     # ------------------------------------------------------------ 内部 ---
     def _ensure_queue(self) -> asyncio.Queue:
@@ -85,14 +101,70 @@ class ChatInputBus:
         @param source 来源标记, 约定用 "terminal" / "gui" / "host_keyboard"
         @param text   事件内容原样存放, bus 不做解析
         @return 实际入队的事件 dict (便于调用方拿 timestamp)
+
+        @note 订阅者 (subscribe) 在**入队之前**被通知, 但它们不消费事件 ——
+              事件仍然留在队列里等 get()/get_nowait()。
         """
         event = {
             "source": source,
             "text": text,
             "timestamp": time.time(),
         }
+        self._notify_subscribers(event)
         await self._ensure_queue().put(event)
         return event
+
+    # ------------------------------------------------------------ 订阅 ---
+    def subscribe(self, callback: Callable[[Dict[str, Any]], Any]) -> Callable[[], bool]:
+        """注册一个"只看不取"的观察者。
+
+        @param callback 收到 event dict 的可调用对象; 可以是普通函数, 也可以是
+                        协程函数 (协程会被挂成后台任务, 不阻塞 push)
+        @return 一个取消订阅的可调用对象 (调用它即注销)
+        @note 回调抛出的异常会被吞掉并打印 —— 一个旁观者出错不该影响 push 的
+              调用方, 更不该影响队列里的事件。
+        """
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        self._subscribers.append(callback)
+
+        def unsubscribe() -> bool:
+            try:
+                self._subscribers.remove(callback)
+                return True
+            except ValueError:
+                return False
+
+        return unsubscribe
+
+    @property
+    def subscriber_count(self) -> int:
+        return len(self._subscribers)
+
+    def _notify_subscribers(self, event: Dict[str, Any]) -> None:
+        if not self._subscribers:
+            return
+        for callback in list(self._subscribers):
+            try:
+                result = callback(event)
+            except Exception as exc:  # noqa: BLE001
+                print("ChatInputBus: subscriber %r raised: %r" % (callback, exc))
+                continue
+
+            if inspect.isawaitable(result):
+                # 不能 await (我们是在 push 的调用栈上), 挂后台任务。
+                # 回调内部的异常交给任务自己的 done 回调处理。
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    # 没有事件循环: 无法调度, 明确说明而不是静默丢弃
+                    print(
+                        "ChatInputBus: subscriber %r returned an awaitable but there is "
+                        "no running event loop; the subscription was skipped" % (callback,)
+                    )
+                    continue
+                task = loop.create_task(result)
+                task.add_done_callback(_log_task_exception)
 
     # ------------------------------------------------------------ 读取 ---
     async def get(self) -> Dict[str, Any]:
@@ -120,4 +192,15 @@ class ChatInputBus:
 
     def __repr__(self) -> str:
         size = self._queue.qsize() if self._queue is not None else 0
-        return "<ChatInputBus size=%d maxsize=%d>" % (size, self._maxsize)
+        return "<ChatInputBus size=%d maxsize=%d subscribers=%d>" % (
+            size, self._maxsize, len(self._subscribers)
+        )
+
+
+def _log_task_exception(task: "asyncio.Task") -> None:
+    """吃掉订阅者协程的异常并打印 (没有它会有 "Task exception was never retrieved")。"""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        print("ChatInputBus: subscriber task raised: %r" % (exc,))

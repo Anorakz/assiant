@@ -9,6 +9,17 @@
 # ============================================================================
 
 from .state_machine import INITIAL_STATE, LEGAL_TRANSITIONS, State, StateMachine
+from .scheduler import (
+    DEFAULT_INTERVAL_MIN,
+    DEFAULT_WINDOW_MIN,
+    HotkeyBinding,
+    ScheduleEvent,
+    Scheduler,
+    SchedulerError,
+    parse_clock,
+    parse_hotkey_config,
+    parse_hotkey_text,
+)
 from .tool_router import (
     DEFAULT_TIMEOUT_S,
     SUPPORTED_KEYWORDS,
@@ -25,6 +36,16 @@ __all__ = [
     "StateMachine",
     "LEGAL_TRANSITIONS",
     "INITIAL_STATE",
+    # 调度层
+    "Scheduler",
+    "ScheduleEvent",
+    "HotkeyBinding",
+    "SchedulerError",
+    "parse_clock",
+    "parse_hotkey_text",
+    "parse_hotkey_config",
+    "DEFAULT_INTERVAL_MIN",
+    "DEFAULT_WINDOW_MIN",
     # 工具路由
     "Tool",
     "ToolRouter",
