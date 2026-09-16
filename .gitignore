@@ -95,3 +95,13 @@ models/*.rknn
 
 # 密钥
 config/secrets.yaml
+
+# ================= agent 配置（真实配置不入库，只留模板） =================
+# config/ 下真实的 *.yaml 含主机地址、证书路径、个人画像、日程，不该进版本库。
+# 仓库里只提交 *.example.yaml 模板；新环境用 cp xxx.example.yaml xxx.yaml 起步。
+# 注意: ! 取反必须排在忽略规则之后，git 才会重新纳入模板文件。
+config/*.yaml
+!config/*.example.yaml
+config/creds/
+*.pem
+*.key

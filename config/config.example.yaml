@@ -1,0 +1,58 @@
+# ============================================================================
+#  config/config.example.yaml — 全局配置模板
+#
+#  用法:
+#      cp config/config.example.yaml config/config.yaml
+#      然后按需修改 config/config.yaml
+#
+#  ⚠ config/config.yaml 不进 git (见 .gitignore); 本模板文件才进 git。
+#  ⚠ agent/config.py 不做 schema 校验, 字段的合法性由各模块自己检查;
+#     本文件里的注释就是各字段的事实约定来源。
+# ============================================================================
+
+llm:
+  # 推理位置。board = 板端本地模型(RKNN), remote = 调远端 API
+  mode: board
+
+  # ---- mode=board 时使用 ----
+  model_path: /home/kickpi/myproject/assitant/models/llm.rknn
+  # 上下文长度上限, 超过要截断
+  max_tokens: 512
+  # 采样温度
+  temperature: 0.7
+
+  # ---- mode=remote 时使用 ----
+  api_base: https://api.example.com/v1
+  api_key: ""
+  model: gpt-4o-mini
+  # 单次请求超时(秒)
+  timeout_s: 30
+
+# ---------------------------------------------------------------------------
+# Sunshine 串流主机
+# ---------------------------------------------------------------------------
+sunshine:
+  # 主机地址; 从板端访问宿主机时填宿主在局域网里的地址
+  host: 192.168.137.1
+  # GameStream HTTP 端口 (握手 / serverinfo / pair)
+  port: 47989
+  # 应用名或 appid (Sunshine 的 /applist 里能看到)
+  app: Desktop
+  # 期望的流参数
+  width: 1280
+  height: 720
+  fps: 60
+
+  # 客户端证书 (配对时生成, 必须两个文件都在)
+  cert: /home/kickpi/myproject/assitant/creds/client.pem
+  key: /home/kickpi/myproject/assitant/creds/client.key
+
+# ---------------------------------------------------------------------------
+# 进程间通信
+# ---------------------------------------------------------------------------
+ipc:
+  # GUI/Agent 之间: PUB 绑在所有网卡上, SUB 连板端
+  pub_bind: tcp://0.0.0.0:5555
+  sub_connect: tcp://127.0.0.1:5556
+  # 收不到消息时的等待上限(毫秒)
+  recv_timeout_ms: 1000

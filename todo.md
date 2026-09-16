@@ -1,4 +1,4 @@
-Phase 1 — native 层（C++ 核心）
+<!-- Phase 1 — native 层（C++ 核心）
 □ image_rb.h/.cpp：固定容量 300 帧，支持 read_latest、read_by_timestamp
 □ host_input_rb.h/.cpp：固定容量 128 事件，read_latest、read_all
 □ moonlight_adapter.h/.cpp：LiStartConnection、视频接收线程、主机输入接收线程
@@ -6,8 +6,8 @@ Phase 1 — native 层（C++ 核心）
 □ preprocess.cpp：ROI 裁剪 + 缩放 256×256 + RGB888
 □ input_sender.h/.cpp：封装 LiSendKeyboardEvent、LiSendMouseEvent
 □ host 单测：test_ring_buffer、test_image_rb、test_host_input_rb 全绿
-□ 交叉编译通过：scripts/build-native.ps1 产出 libagent_native.a
-Phase 2 — pybind11 绑定
+□ 交叉编译通过：scripts/build-native.ps1 产出 libagent_native.a -->
+<!-- Phase 2 — pybind11 绑定
 □ binding/module.cpp：定义 agent_native 模块
 □ bind_moonlight.cpp：moonlight.start/stop/status
 □ bind_image_rb.cpp：image_rb.read_latest/read_by_timestamp/size/capacity，返回 numpy
@@ -15,7 +15,7 @@ Phase 2 — pybind11 绑定
 □ bind_input_sender.cpp：send_key/send_mouse/send_hotkey，全部加 py::call_guard<py::gil_scoped_release>
 □ 交叉编译通过，产出 agent_native.cpython-38-aarch64-linux-gnu.so
 □ file 命令确认 ELF aarch64
-□ host 编译一份 .pyd/.so 用于 Python 单测（mock 掉 moonlight 连接）
+□ host 编译一份 .pyd/.so 用于 Python 单测（mock 掉 moonlight 连接） -->
 Phase 3 — Python Agent Core
 □ io/image_reader.py：包装 image_rb，asyncio 友好（run_in_executor）
 □ io/host_input_reader.py：轮询 host_input_rb，投递到 Chat Input Bus
