@@ -27,14 +27,16 @@ agent/
 ├── agent/                       # Python Agent Core
 │   ├── __init__.py
 │   ├── config.py                # YAML 配置加载/保存/点号路径读取
+│   ├── core/                    # 状态层与调度层
+│   │   └── state_machine.py     # SLEEP ⇄ IDLE ⇄ STUDY/GAME 状态机
 │   └── io/                      # native 的 asyncio 包装 + 输入汇聚
 │       ├── chat_bus.py          # ChatInputBus: 终端/GUI/主机键盘 三源统一事件流
 │       ├── image_reader.py      # ImageReader: image_rb → numpy 帧
 │       ├── host_input_reader.py # HostInputReader: 轮询 host_input_rb → bus
 │       ├── input_sender.py      # InputSender: send_key / send_hotkey / send_mouse
 │       └── _native.py           # native 解析 + 专属单线程执行器 (SPSC)
-│   (main.py / state.py / scheduler.py / router.py / llm.py / vision.py /
-│    ipc.py / tools/ —— 待实现)
+│   (main.py / scheduler.py / router.py / llm.py / vision.py / ipc.py /
+│    tools/ —— 待实现)
 ├── gui/                         # PySide6 GUI (待实现: main.py / panels.py / zmq_client.py)
 ├── config/                      # 配置模板 (真实配置不入 git)
 │   ├── config.example.yaml      # 全局: llm.mode, sunshine.*, ipc.*
@@ -51,6 +53,7 @@ agent/
 │   ├── CMakeLists.txt
 │   ├── test_*.cpp               # C++ 单测 (gtest, 由 ctest 驱动)
 │   ├── test_config.py           # 配置模块单测 (unittest)
+│   ├── test_state_machine.py    # 状态机单测
 │   ├── test_chat_bus.py         # ChatInputBus 单测
 │   ├── test_io.py               # image_reader / host_input_reader / input_sender
 │   ├── mocks/                   # mock_agent_native: native 替身
@@ -127,6 +130,37 @@ await sender.send_hotkey(["ctrl", "alt", "S"])
   调用时报错；测试用 `agent.io.set_native(mock)` 注入替身。
 - `HostInputReader` 是轮询模式（默认 50ms），读到事件后渲染成文本投递到 bus。
   它**不做**键盘事件解析、不做快捷键识别，也不做输入合法性校验。
+
+---
+
+## 状态机
+
+四个运行状态，**任何切换都必须经过 IDLE**（IDLE 是唯一的公共锚点）：
+
+```
+SLEEP ⇄ IDLE ⇄ STUDY
+         ↕
+        GAME
+```
+
+```python
+from agent.core import State, StateMachine
+
+sm = StateMachine()
+sm.on_change(lambda old, new: ...)        # 通知 GUI
+
+sm.transition(State.STUDY, "用户说开始学习")   # True
+sm.transition(State.GAME, "顺便打会儿游戏")    # False: STUDY 不能直接进 GAME
+sm.current()                              # State.STUDY
+sm.is_connected()                         # moonlight 连接状态 (与状态无关)
+```
+
+约定：
+
+- 非法转换**返回 False**，不抛异常（触发源可能是 IPC 消息或 LLM 输出）。
+- 目标状态也接受字符串（`"study"`），方便直接接 IPC 传来的值。
+- `is_connected()` 与当前状态**无关**，直接问 native；缺 `.so` 时返回 False。
+- 只做"记状态 + 判合法性 + 通知"，**不做**持久化、超时自动转换、变更日志。
 
 ---
 
