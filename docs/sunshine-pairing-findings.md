@@ -1,163 +1,173 @@
-# Sunshine SRSAES 配对：定位与结论
+# Sunshine SRSAES 配对：定位与结论（已修正）
 
 日期：2026-09-16
-服务端：Sunshine `2025.924.154138`（`D:\tool\sunshine`，Windows 服务 `SunshineService`）
-客户端：本仓库 `scripts/pair_sunshine.py` / `scripts/pair_sunshine.cpp`
-目标主机：`Anorak_Host`，从 WSL 经网关 `172.25.32.1` 访问（WSL 到 Windows 宿主）
+服务端：Sunshine **`2026.914.233613`**（升级前 `2025.924.154138`）
+客户端：本仓库 `scripts/pair_sunshine.py` / `pair_sunshine.cpp`（已修正）
+参考实现：`temp/pairing.c`（Moonlight Embedded，Iwan Timmer）
+目标主机：`Anorak_Host`，从 WSL 经网关 `172.25.32.1` 访问
+
+---
+
+## 0. 最终验证（正规配对，无任何绕过）
+
+```
+1) /serverinfo   HTTP 200
+2) /applist      HTTP 200   <App>Desktop(881448767)</App><App>Steam Big Picture(1093255277)</App>
+3) /launch       HTTP 200   <sessionUrl0>rtsp://172.25.32.1:48010</sessionUrl0>
+                            <gamesession>1</gamesession>
+```
+
+`scripts/pair_sunshine.py` 与 `scripts/pair_ref.py` 两个独立实现均返回 `paired=1`。
 
 ---
 
 ## 1. 结论（TL;DR）
 
-**问题不在我们的客户端实现，而在 Sunshine v2025.924.154138 服务端的相位 2 回包。**
+**配对协议没问题，Sunshine 也没问题。之前一直失败是两个客户端侧错误叠加：**
 
-配对卡在相位 4：服务端永远算出 `same_hash == false`，返回 `paired=0`，证书因此
-永远不会进入授权名单（`/applist`、`/launch` 一律 `401`）。
+### 错误 A（致命）：第 4 步签名对象签错
 
-根因可以用两句话说明，两者都是逐字节验证过的：
+* ❌ 错：`clientpairingsecret` 里签的是 **serverchallenge**
+* ✅ 对：签的是 **client_secret**（`temp/pairing.c` 第 371 行
+  `sign_it(client_secret_data, 16, &signature, &s_len, g_PrivateKey)`）
 
-1. **密钥是对的。** 服务端相位 2 回包里的那 32 字节，精确等于
-   `SHA256(我们发出的明文挑战 ‖ 服务端证书签名 ‖ serversecret)`。
-   这只有当服务端用自己的 AES 密钥**成功解出我们的明文挑战**时才可能成立，
-   即双方密钥（= PIN）完全一致。
-2. **服务端回包里的 16 字节不是它后来要用的那个挑战。** 服务端在相位 4 用
-   `sess.serverchallenge` 重算哈希，而按源码它与回包里的 16 字节同源；
-   实测两者不相等，于是 `same_hash` 恒为假。
+服务端 `clientpairingsecret` 有两项检查，第 2 项是
+`crypto::verify256(x509(client.cert), secret, sign)` —— 验签对象是 **secret**。
+签了 serverchallenge，第 2 项恒假，`if (same_hash && verify)` 永不成立，
+`paired` 恒为 0。
 
-由于相位 3/4 的哈希输入完全由服务端决定，客户端**无法**构造出使
-`same_hash == true` 的值。这是一个死锁，不是客户端能绕过的。
+### 错误 B（授权阶段）：同一张证书在名单里出现两条
+
+新版 Sunshine（`2026.914.233613`）的 `nvhttp::is_client_enabled()`：
+
+```cpp
+if (matched || !named_cert.enabled) {
+  return false;      // 同一张证书匹配到第二条 => 直接判定不可用
+}
+matched = true;
+```
+
+重复条目（早前手工注入的绕过条目 + 正规配对写入的条目）会让该证书**被主动否决**，
+表现为 `401 Certificate verification failed`，即使证书本身完全正确、`enabled=true`。
+用 `scripts/authorize_client.py dedup` 清理后即恢复 200。
+
+> ⚠ 我此前在本文档里写的"服务端相位 2/4 内部自相矛盾、属 Sunshine 缺陷"是
+> **错误结论**，已删除。两轮误判的真实原因就是上面 A、B 两条。
+> 教训：自己的实现与权威参考不一致时，应先逐字节对照参考实现，而不是先怀疑服务端。
 
 ---
 
-## 2. 协议与两侧实现
+## 2. 协议与两侧实现（对照 `temp/pairing.c`）
 
-| 相位 | 客户端发送 | 服务端行为（`src/nvhttp.cpp`） |
+| 相位 | 客户端（`pairing.c`） | 服务端（`src/nvhttp.cpp`） |
 |---|---|---|
-| 1 | `phrase=getservercert` + `clientcert` + `salt` | 阻塞等操作员在 UI 输入 PIN；`key = SHA256(salt‖pin)[:16]`；回 `plaincert`（PEM 的 hex） |
-| 2 | `clientchallenge` = AES-ECB(明文挑战 16B) | `decrypted = AES-dec(挑战)`；`hash = SHA256(decrypted ‖ 服务端证书签名 ‖ serversecret)`；回 `AES-enc(hash(32) ‖ serverchallenge(16))` |
-| 3 | `serverchallengeresp` = AES-ECB(clienthash) | 存 `sess.clienthash = AES-dec(该值)`；回 `serversecret(16) ‖ RSA-SHA256(serversecret)` |
-| 4 | `clientpairingsecret` = `client_secret(16) ‖ RSA-SHA256(serverchallenge)` | 比对 `SHA256(sess.serverchallenge ‖ 我方证书签名 ‖ client_secret) == sess.clienthash`，并 `verify256` 签名 |
+| 1 | `phrase=getservercert` + `clientcert`(PEM 的 hex) + `salt`(32 hex) → 校验 `<paired>1</paired>`，取 `plaincert` | 阻塞等操作员在 UI 输入 PIN；`key = SHA256(salt‖pin)[:16]`；回 `plaincert` |
+| 2 | `clientchallenge` = AES-128-ECB(明文挑战 16B) | `decrypted = AES-dec(挑战)`；`hash = SHA256(decrypted ‖ 服务端证书签名 ‖ serversecret)`；回 `AES-enc(hash(32) ‖ serverchallenge(16))` |
+| 3 | `serverchallengeresp` = AES-128-ECB(SHA256(回包[32:48] ‖ **我方证书签名** ‖ client_secret)) | `sess.clienthash = AES-dec(该值)`；回 `serversecret(16) ‖ RSA-SHA256(serversecret)` |
+| 4 | `clientpairingsecret` = `client_secret(16) ‖ RSA-SHA256(**client_secret**)` | `same_hash = SHA256(sess.serverchallenge ‖ 我方证书签名 ‖ secret) == sess.clienthash`；`verify = verify256(我方证书, secret, sign)`；两者皆真才 `paired=1` |
 
-关键源码位置（tag `v2025.924.154138`）：
+要点：
 
-* `getservercert()`：`key = crypto::gen_aes_key(salt, pin)`，回 `hex_vec(conf_intern.servercert)`
-* `clientchallenge()`：`decrypted` 直接来自解析 `clientchallenge` 字段（**不校验解密是否成功**）
-* `serverchallengeresp()`：`sess.clienthash = decrypted`；回 `serversecret ‖ sign256(serversecret)`
-* `clientpairingsecret()`：`data = sess.serverchallenge ‖ x509_sign ‖ secret`；
-  `same_hash = hash.size()==sess.clienthash.size() && std::equal(...)`
-
-**客户端侧权威参考**（本仓库实现即照此写出）：
-`LizardByte/moonlight-xboxog` → `src/network/host_pairing.cpp`
-`send_server_challenge_response()`（相位 3）与相位 4：
-
-```
-clientSecretBytes   = 随机 16 字节                    # ★ 相位 3 生成, 相位 4 复用
-clientHashSource    = challengeresponse明文[32:48]    # serverchallenge
-                    + 我方证书签名 (256B)
-                    + clientSecretBytes (16B)
-clientHash          = SHA256(clientHashSource)
-serverchallengeresp = AES-ECB-enc(clientHash)
-```
+* **`hash_length = 32`**（serverMajorVersion ≥ 7 用 SHA256，否则 SHA1/20）
+* `client_secret` 在 **相位 3** 生成，相位 4 **复用同一个**（不能重新随机）
+* 相位 4 的签名对象 = `client_secret`；被签数据与验签数据都是它
+* `devicename` / `updateState` 服务端**不读**，可任意（参考实现写 `devicename=roth`）
 
 ---
 
-## 3. 证据（逐字节，可复现）
+## 3. 修正清单（本次改动）
 
-从 `scripts/pair_sunshine.py` 落盘的证据（`PAIR_DUMP_DIR`，本次为
-`/mnt/e/rk3568/local/creds/pairev`）取一组实测值：
+`scripts/pair_sunshine.py` / `scripts/pair_sunshine.cpp`：
 
-```
-明文挑战          f5d5788677f163a19ecad941a281b3af
-AES key           SHA256(salt‖"5678")[:16]
-回包密文          48B  ->  解密 = c518626e…e6714 (32B)  ‖  d5fad910…15a9b (16B)
-pairingsecret[0:16]          368e0f6826c33fc90e05259d026aa8c2
-```
+1. **相位 4 签名对象由 `serverchallenge` 改为 `client_secret`** ← 关键修复（错误 A）
+2. `clientcert` 必须是 **PEM 的 hex**（不是 DER 的 hex）。
+   Sunshine `crypto::x509()` 用 `PEM_read_bio_X509`；发 DER 会让相位 2 的
+   `crypto::x509()` 抛异常（被异常兜底吞掉），相位 4 报误导性的
+   `Invalid client certificate`。
+3. `client_secret` 必须在相位 3 生成、相位 4 复用（曾两次各自随机）
+4. `pair-run.sh` 不能用 `UID` 作变量名（bash 里是 readonly，会静默失败，
+   让每轮都退化成同一个 `uniqueid`）
 
-三条判定：
+`scripts/authorize_client.py`：新增 `dedup` 子命令，并在 `list` 里检出
+**重复证书条目**（错误 B），因为重复会让服务端主动否决该证书。
 
-```
-A) 回包[0:32] == SHA256(明文挑战 ‖ srv_sig ‖ pairingsecret[0:16])   ->  True
-B) 回包[0:32] == SHA256(回包[32:48] ‖ srv_sig ‖ pairingsecret[0:16]) ->  False
-C) 回包[32:48] == pairingsecret[0:16]                                ->  False
-```
-
-* **A 为真** ⇒ 服务端确实解出了我们的明文挑战 ⇒ **AES 密钥/PIN/salt 全部正确**。
-  （穷举验证：在 5 种 salt 解释 × 全部 10000 个 4 位 PIN 下，只有用*明文挑战*
-  才能命中服务端哈希；用*解密出的挑战*永远不命中。）
-* **B 为假** ⇒ 服务端回包里的 32 字节哈希，与它自己回包里的 16 字节挑战不自洽。
-* **C 为假** ⇒ 服务端回包里的 16 字节，不是它相位 4 要用的 `sess.serverchallenge`。
-
-另外，`pairingsecret[0:16]` 已被**服务端证书公钥验签通过**，可确定它就是
-`sess.serversecret`。因此相位 3/4 的 `client_secret` 与挑战在两侧是确定的，
-客户端没有任何自由度去"试"出一个能通过的值。
+**授权名单必须保证同一张证书只有一条**；重复条目常见成因是"手工注入的绕过条目"
+与"正规配对写入的条目"并存。
 
 ---
 
 ## 4. 复现
 
 ```bash
-# WSL (需要 python3 + cryptography)
+# WSL (python3 + cryptography)
 cd /mnt/e/rk3568/project/myproject/assitant
-scripts/pair-run.sh 5678          # 期间在 https://localhost:47990/pin 输入 5678
-python3 scripts/pair_analyze.py /mnt/e/rk3568/local/creds/pairev
+scripts/pair-run.sh 5678        # 期间在 https://localhost:47990/pin 输入 5678
+# 直接跑参考实现移植版:
+python3 scripts/pair_ref.py 172.25.32.1 \
+        /mnt/e/rk3568/local/creds/client.pem \
+        /mnt/e/rk3568/local/creds/client.key 5678
 ```
 
-`pair-run.sh` 每轮生成全新的 32 位 hex `uniqueid`（**必须如此**：Sunshine 的
-`nvhttp::pin()` 是把 PIN 套用到 `map_id_sess` 的**第一个**会话上，
-重复 uniqueid 会让 PIN 落到陈旧会话）。
+成功输出：
 
-服务端 `min_log_level = debug` 可在 `sunshine.log` 中看到每一相位的
-`uniqueid` / `salt` / `clientcert` / `clientchallenge` / `serverchallengeresp` /
-`clientpairingsecret`，与客户端记录完全一致。
+```
+step1 paired=1 → step2 OK → step3 OK (验签 PASS) → step4 paired=1
+=== 配对成功 ===
+```
 
----
-
-## 5. 我们踩过的坑（都已在代码注释中标注）
-
-1. **`clientcert` 必须发 PEM 的 hex，不是 DER 的 hex。**
-   `crypto::x509()` 用 `PEM_read_bio_X509` 解析。发 DER 会让服务端相位 2 的
-   `crypto::x509()` 抛异常（被 `get_arg` 的异常兜底吞掉），相位 4 报出
-   误导性的 `Invalid client certificate`。
-2. **`client_secret` 必须在相位 3 生成，相位 4 复用同一个。** 相位 3 提交的是
-   *客户端自己* 算的哈希；两次随机会让服务端重算的哈希必然对不上。
-3. **bash 里不能用 `UID` 作变量名**（readonly），否则每轮都退化成 `uniqueid=1000`。
-4. **服务端错误信息不可信**：`fail_pair` 会析构 `sess.client`，把真实原因覆盖成
-   `Invalid client certificate`；`/serverinfo` 的 `PairStatus` 是*服务端*状态，
-   判断本机证书是否已授权应看 `/applist` 是否 200。
+⚠ 配对成功后**必须重启一次 Sunshine**：`add_cert->raise(...)` 把证书写进
+`sunshine_state.json` 并刷新运行中的 `cert_chain`，但 HTTPS 侧的客户端证书
+校验链是**启动时**从 state 载入的。不重启的话 `/applist` 仍会
+`401 Certificate verification failed`。
 
 ---
 
-## 6. 本次如何达成目标（绕过）
+## 5. 验证（`scripts/verify-authorized.sh`）
 
-配对协议在服务端侧是坏的，而 `/applist`、`/launch` 又强制要求已授权证书，
-因此本次采用**显式、可逆、带备份**的替代路径：
-`scripts/authorize_client.py add <clientcert.pem> <name>` 把客户端证书写入
-`sunshine_state.json` 的 `root.named_devices`，重启 Sunshine 后生效。
-
-> ⚠ 这是运维层面的绕过，**不具备 SRSAES 的中间人防护语义**。一旦 Sunshine 修好
-> 配对，应改回 `scripts/pair_sunshine.py` 正规流程，并用
-> `scripts/authorize_client.py remove agent-native` 清掉手工条目。
-
-验证结果（`scripts/verify-authorized.sh`）：
+重启后（去重 + 正规配对完成）：
 
 ```
 1) /serverinfo   HTTP 200
-2) /applist      HTTP 200   (此前为 401 Certificate verification failed)
+2) /applist      HTTP 200   <App>Desktop(881448767)</App><App>Steam Big Picture(1093255277)</App>
 3) appid=881448767  Desktop
-4) /launch       HTTP 200
-   <sessionUrl0>rtsp://172.25.32.1:48010</sessionUrl0><gamesession>1</gamesession>
+4) /launch       HTTP 200   <sessionUrl0>rtsp://172.25.32.1:48010</sessionUrl0>
+                            <gamesession>1</gamesession>
 ```
 
-即 `native/moonlight_adapter` 所需的 `sessionUrl0` 已拿到。
+若 `/launch` 返回 `400 An app is already running on this host`，那是**业务规则**
+拒绝（主机上已有应用在跑，`state=SUNSHINE_SERVER_BUSY`），不是失败；
+此时用 `/resume` 取当前会话地址。
+
+---
+
+## 6. 历史弯路（留档，避免重犯）
+
+排查过程中我先后给出过两个**错误**结论，均已推翻：
+
+1. "PIN 不匹配" —— 实际 AES 密钥一直是对的。判据：
+   服务端回包[0:32] 恒等于 `SHA256(我们发出的**明文挑战** ‖ 服务端证书签名 ‖
+   pairingsecret[0:16])`，说明服务端解出的正是我们的明文挑战。
+2. "服务端相位 2/4 值不自洽，是 Sunshine 缺陷" —— 我错在把
+   回包[32:48] 当成了服务端 phase4 要用的 challenge。真正的问题在
+   **相位 4 的签名对象**，与哈希无关。
+
+另外两个真实存在的坑（都在代码注释里）：
+
+* `clientcert` 发 DER 会引发 `Invalid client certificate`（该报错具有误导性）
+* Sunshine `nvhttp::pin()` 把 PIN 套到 `map_id_sess` 的**第一个**会话上，
+  重复 `uniqueid` 会让 PIN 落到陈旧会话
 
 ---
 
 ## 7. 遗留事项
 
-* [`todo.md`](../todo.md) 记录待办；`min_log_level = debug` 属调试期配置，
-  定案后应移除（备份见 `sunshine.conf.bak`）。
-* 建议向上游 LizardByte/Sunshine 提 issue，附上本文第 3 节的 A/B/C 三条判据
-  与 `pair_analyze.py` 的可复现输出。
-* `scripts/pair_hashprobe.cpp`、`pair_pinsearch.cpp`、`pair_verify.cpp`
-  是排查过程中的诊断工具，保留作证据复算之用；日常只需 `pair_sunshine.py`
-  与 `pair-run.sh`。
+* `sunshine.conf` 里的 `min_log_level = debug` 是排查期的调试项，定位结束应移除
+  （备份见 `sunshine.conf.bak`）；本次已从文件删除，下次重启生效。
+* 授权名单里我们的证书曾同时存在 `agent-native`（早前手工注入的绕过条目）与
+  `roth`（正规配对写入）两条，已被 `authorize_client.py dedup` 清理为一条。
+  日常用 `authorize_client.py list` 检查是否又出现重复。
+* `scripts/pair_ref.py` 是参考实现（`temp/pairing.c`）的忠实移植，保留作对照基线；
+  日常使用 `scripts/pair_sunshine.py` + `pair-run.sh` 即可。
+* `scripts/pair_verify.cpp` / `pair_hashprobe.cpp` / `pair_pinsearch.cpp`
+  / `pair_analyze.py` / `pair_probe.py` 是排查期的诊断工具，保留作证据复算之用。
+  注意其中 `pair_verify.cpp` 的结论段落基于当时的错误假设，仅供参考。
