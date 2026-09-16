@@ -25,7 +25,12 @@ Sunshine v2025.924.154138 的 SRSAES 配对存在一个服务端侧缺陷 (本�
 ---------------------------------------------------------------------------
     python3 authorize_client.py add    <clientcert.pem> <name> [state.json]
     python3 authorize_client.py remove <name>                  [state.json]
+    python3 authorize_client.py dedup                           [state.json]
     python3 authorize_client.py list                            [state.json]
+
+⚠ 同一张证书绝不能在名单里出现两条: Sunshine v2026.x 的
+  nvhttp::is_client_enabled() 遇到重复匹配会直接返回 false, 结果是
+  401 Certificate verification failed。用 `dedup` 清理。
 
 默认 state.json = /mnt/d/tool/sunshine/config/sunshine_state.json
 每次写入都会先生成 <state.json>.bak-<时间戳> 备份。
@@ -54,15 +59,66 @@ def save(path, data):
     return bak
 
 
+def _cert_sha(cert_pem):
+    """证书 DER 的 SHA256 前 16 hex, 用于识别重复条目 (只用标准库)。"""
+    import base64
+    import hashlib
+    import re
+    m = re.search(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----",
+                  cert_pem or "", re.S)
+    if not m:
+        return None
+    try:
+        der = base64.b64decode(re.sub(r"\s+", "", m.group(1)))
+    except Exception:
+        return None
+    return hashlib.sha256(der).hexdigest()[:16]
+
+
 def cmd_list(state):
     d = load(state)
     nd = d.get("root", {}).get("named_devices", [])
     print("state=%s" % state)
     print("named_devices = %d" % len(nd))
+    seen = {}
     for i, e in enumerate(nd):
-        print("  [%d] name=%-16s uuid=%-40s certlen=%d"
-              % (i, e.get("name"), e.get("uuid"), len(e.get("cert") or "")))
+        sha = _cert_sha(e.get("cert"))
+        seen.setdefault(sha, []).append(i)
+        print("  [%d] name=%-16s uuid=%-40s certlen=%-5d enabled=%-5s cert=%s"
+              % (i, e.get("name"), e.get("uuid"), len(e.get("cert") or ""),
+                 e.get("enabled", True), sha or "?"))
+    # ⚠ Sunshine 的 nvhttp::is_client_enabled() 对**同一张证书出现多条**时直接
+    #   返回 false (源码: `if (matched || !named_cert.enabled) return false;`)。
+    #   重复条目会让该证书彻底无法通过 401 校验 —— 必须清成唯一一条。
+    dups = {k: v for k, v in seen.items() if k is not None and len(v) > 1}
+    if dups:
+        print("\n!! 检测到重复证书条目 (会导致 401 Certificate verification failed):")
+        for sha, idxs in dups.items():
+            names = [nd[i].get("name") for i in idxs]
+            print("   cert=%s 出现在索引 %s (name=%s)" % (sha, idxs, names))
+        print("   修正: python3 authorize_client.py dedup   (每张证书只留最后一条)")
     return 0
+
+
+def cmd_dedup(state):
+    """删除重复证书条目, 每张证书只保留最后一条 (通常是最新配对写入的那条)。"""
+    d = load(state)
+    root = d.setdefault("root", {})
+    nd = root.get("named_devices", [])
+    last = {}
+    for i, e in enumerate(nd):
+        last[_cert_sha(e.get("cert"))] = i
+    keep = [e for i, e in enumerate(nd) if last.get(_cert_sha(e.get("cert"))) == i]
+    removed = len(nd) - len(keep)
+    if removed == 0:
+        print("没有重复条目")
+        return 0
+    root["named_devices"] = keep
+    bak = save(state, d)
+    print("已移除 %d 条重复条目 (每张证书保留最后一条)" % removed)
+    print("备份: %s" % bak)
+    print("重启 Sunshine 后生效。")
+    return cmd_list(state)
 
 
 def cmd_add(state, cert_path, name):
@@ -120,6 +176,9 @@ def main():
     if op == "list":
         state = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_STATE
         return cmd_list(state)
+    if op == "dedup":
+        state = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_STATE
+        return cmd_dedup(state)
     print(__doc__)
     return 2
 

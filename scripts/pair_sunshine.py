@@ -238,29 +238,38 @@ def main():
         print("  FAIL 验签失败: %r" % (e,))
 
     # ---- step4: clientpairingsecret ----
-    # 复用 step3 就已生成的 client_secret (关键!), 并用我方私钥对服务端挑战签名。
-    # Sunshine clientpairingsecret 会做两件事:
-    #   1) SHA256(sess.serverchallenge || 我方证书签名 || secret) == step3 收到的 clienthash
-    #   2) RSA-verify256(我方证书, secret, sign)
-    client_sign = client_key.sign(srv_secret, padding.PKCS1v15(), hashes.SHA256())
+    # ★ 权威依据 (temp/pairing.c, Moonlight Embedded) 第 369-380 行:
+    #     sign_it(client_secret_data, 16, &signature, ..., g_PrivateKey)
+    #     client_pairing_secret = client_secret_data(16) || signature(256)
+    #   即 **用私钥对 client_secret 本身签名**, 而**不是**对 serverchallenge 签名。
+    #   服务端 clientpairingsecret 的两项检查:
+    #     1) SHA256(sess.serverchallenge || 我方证书签名 || secret) == step3 收到的 clienthash
+    #     2) crypto::verify256(我方证书, secret, sign)   <-- 验签对象就是 secret
+    #   之前这里签的是 srv_secret(serverchallenge), 于是第 2 项永远失败 -> paired=0。
+    #   注意 client_secret 必须与 step3 用的是同一个 (绝不能在这里再随机一次)。
+    client_sign = client_key.sign(client_secret, padding.PKCS1v15(), hashes.SHA256())
     payload = client_secret + client_sign
     dump("15_client_secret", client_secret)
     dump("16_client_signature", client_sign)
 
-    step4_hash = hashlib.sha256(srv_secret + client_sig + client_secret).digest()
-    print("\n[step4] 服务端将比对的哈希")
-    print("        SHA256(sess.serverchallenge || 我方证书签名 || client_secret)")
-    print("          = %s" % step4_hash.hex())
-    print("        sess.clienthash (我们 step3 提交后被服务端解密得到的) = %s" % client_hash.hex())
-    print("        >>> 两者一致? %s"
-          % ("是 (预期配对成功)" if step4_hash == client_hash else "否  <== 仍会 paired=0"))
+    def phase4_hash(serverchallenge):
+        return hashlib.sha256(serverchallenge + client_sig + client_secret).digest()
+
+    print("\n[step4] 服务端将比对的哈希 SHA256(serverchallenge || 我方证书签名 || client_secret)")
+    print("        以 pairingsecret[0:16] 为 serverchallenge -> %s" % phase4_hash(srv_secret).hex())
+    print("        以 回包[32:48]           为 serverchallenge -> %s" % phase4_hash(srv_chal_in_resp).hex())
+    print("        我们 step3 提交的 clienthash                   -> %s" % client_hash.hex())
+    print("        >>> step3 提交值 == 以 pairingsecret[0:16] 复算值 ? %s"
+          % ("是" if phase4_hash(srv_secret) == client_hash else "否 (服务端 phase4 用的挑战与回包不同)"))
+    print("        >>> step3 提交值 == 以 回包[32:48] 复算值 ? %s"
+          % ("是" if phase4_hash(srv_chal_in_resp) == client_hash else "否"))
 
     print("\n[step4] 提交 clientpairingsecret (%d B), 我方签名 %d B" % (len(payload), len(client_sign)))
-    # 自检
+    # 自检: 验签对象是 client_secret (与 reference 一致)
     x509.load_der_x509_certificate(client_cert_der).public_key().verify(
-        client_sign, srv_secret, padding.PKCS1v15(), hashes.SHA256()
+        client_sign, client_secret, padding.PKCS1v15(), hashes.SHA256()
     )
-    print("        我方签名自检 PASS")
+    print("        我方签名自检 PASS (验签对象 = client_secret)")
     st, body = http_get(
         host, port, "/pair?uniqueid=%s&clientpairingsecret=%s" % (uid, payload.hex()), 30
     )

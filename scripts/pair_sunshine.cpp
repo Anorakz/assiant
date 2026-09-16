@@ -554,22 +554,31 @@ int main(int argc, char** argv) {
     Bytes pairingsecret = from_hex(pairingsecret_hex);
     std::printf("[step3] OK, 收到 pairingsecret (%zu bytes)\n", pairingsecret.size());
 
-    // serverchallenge = pairingsecret 前 16 字节; 后 32 字节是服务端签名
+    // serverchallenge = pairingsecret 前 16 字节 (= sess.serversecret); 后 256 字节是服务端签名
     if (pairingsecret.size() < 16) {
         die("pairingsecret 太短");
     }
     Bytes server_challenge(pairingsecret.begin(), pairingsecret.begin() + 16);
     dump_hex("13_pairingsecret", pairingsecret);
     dump_hex("14_server_challenge", server_challenge);
+    std::printf("[step4] pairingsecret[0:16]=%s (服务端 phase4 的会话字段)\n",
+                to_hex(server_challenge).c_str());
 
     // ---- step4: clientpairingsecret ----
-    // ★ 复用 step3 已生成的 client_secret (绝不能再随机一次, 否则服务端重算的
-    //   哈希与我们 step3 提交的对不上, 必然 paired=0)。
-    Bytes signature = rsa_sign_sha256(key, server_challenge);
+    // ★ 权威依据 (temp/pairing.c, Moonlight Embedded, 行 369-380):
+    //     sign_it(client_secret_data, 16, &signature, ..., g_PrivateKey)
+    //     client_pairing_secret = client_secret_data || signature
+    //   即用私钥对 **client_secret 本身** 签名, 而不是对 serverchallenge 签名。
+    //   服务端 clientpairingsecret 的两项检查:
+    //     1) SHA256(sess.serverchallenge || 我方证书签名 || secret) == step3 的 clienthash
+    //     2) crypto::verify256(我方证书, secret, sign)   <-- 验签对象是 secret
+    //   之前签的是 serverchallenge, 第 2 项必然失败 -> paired=0。
+    //   ★ client_secret 必须复用 step3 已生成的那个, 不能重新随机。
+    Bytes signature = rsa_sign_sha256(key, client_secret);
     if (signature.empty()) {
         die("RSA 签名失败");
     }
-    std::printf("[step4] 复用 step3 的 client_secret, RSA-SHA256(serverchallenge) 签名=%zu 字节\n",
+    std::printf("[step4] 复用 step3 的 client_secret, 对其签名 RSA-SHA256(client_secret) = %zu 字节\n",
                 signature.size());
     dump_hex("16_client_signature", signature);
     Bytes payload = client_secret;
