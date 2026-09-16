@@ -26,9 +26,15 @@ agent/
 │   └── third_party/             # 子模块: moonlight-common-c, pybind11, googletest
 ├── agent/                       # Python Agent Core
 │   ├── __init__.py
-│   └── config.py                # YAML 配置加载/保存/点号路径读取
-│   (main.py / io.py / state.py / scheduler.py / router.py / llm.py /
-│    vision.py / ipc.py / tools/ —— 待实现)
+│   ├── config.py                # YAML 配置加载/保存/点号路径读取
+│   └── io/                      # native 的 asyncio 包装 + 输入汇聚
+│       ├── chat_bus.py          # ChatInputBus: 终端/GUI/主机键盘 三源统一事件流
+│       ├── image_reader.py      # ImageReader: image_rb → numpy 帧
+│       ├── host_input_reader.py # HostInputReader: 轮询 host_input_rb → bus
+│       ├── input_sender.py      # InputSender: send_key / send_hotkey / send_mouse
+│       └── _native.py           # native 解析 + 专属单线程执行器 (SPSC)
+│   (main.py / state.py / scheduler.py / router.py / llm.py / vision.py /
+│    ipc.py / tools/ —— 待实现)
 ├── gui/                         # PySide6 GUI (待实现: main.py / panels.py / zmq_client.py)
 ├── config/                      # 配置模板 (真实配置不入 git)
 │   ├── config.example.yaml      # 全局: llm.mode, sunshine.*, ipc.*
@@ -36,14 +42,18 @@ agent/
 │   └── schedule.example.yaml    # 日程
 ├── scripts/                     # 构建 / 部署 / 测试 / 配对工具
 │   ├── build.ps1                # aarch64 交叉编译
-│   ├── test-host.ps1            # 宿主机单测 (ctest)
+│   ├── test-host.ps1            # 宿主机 C++ 单测 (ctest)
+│   ├── test-python.ps1          # 宿主机 Python 单测 (unittest)
 │   ├── deploy.ps1               # 打包并推到板端
 │   ├── setup-sysroot-deps.ps1   # 给 sysroot 补 python3.8-dev / ffmpeg-dev
 │   └── pair_sunshine.py 等      # Sunshine SRSAES 配对 (见 docs/)
 ├── tests/                       # 宿主机单测
 │   ├── CMakeLists.txt
 │   ├── test_*.cpp               # C++ 单测 (gtest, 由 ctest 驱动)
-│   ├── test_config.py           # Python 单测 (unittest, 直接 python 跑)
+│   ├── test_config.py           # 配置模块单测 (unittest)
+│   ├── test_chat_bus.py         # ChatInputBus 单测
+│   ├── test_io.py               # image_reader / host_input_reader / input_sender
+│   ├── mocks/                   # mock_agent_native: native 替身
 │   ├── host/                    # 需要 numpy 的绑定层测试 (按需手动跑)
 │   └── board/                   # 板端真机验收脚本
 ├── docs/                        # 文档
@@ -70,11 +80,53 @@ scripts/build.ps1
 scripts/test-host.ps1
 
 # 宿主机单测 (Python)
-python tests/test_config.py
+scripts/test-python.ps1
 
 # 部署到板端
 scripts/deploy.ps1
 ```
+
+---
+
+## I/O 层
+
+`agent/io/` 把 native (`agent_native`) 的阻塞接口包成 asyncio 友好的 awaitable，
+并把三个输入源汇成一条事件流：
+
+```
+终端 ─────┐
+GUI ──────┼─→ ChatInputBus ─→ 下游 (scheduler / agent core)
+主机键盘 ─┘        ▲
+                   └── HostInputReader (轮询 host_input_rb)
+
+ImageReader   → numpy (256,256,3) 帧
+InputSender   → send_key / send_hotkey / send_mouse
+```
+
+```python
+from agent.io import ChatInputBus, HostInputReader, ImageReader, InputSender
+
+bus = ChatInputBus()
+reader = HostInputReader()
+await reader.start_polling(bus, interval_ms=50)   # 主机键盘 → bus
+
+event = await bus.get()          # {"source", "text", "timestamp"}
+frame = await ImageReader().read_latest()
+
+sender = InputSender()
+await sender.send_key("ctrl", "C", "down")
+await sender.send_hotkey(["ctrl", "alt", "S"])
+```
+
+约定：
+
+- **所有 native 调用都跑在专属的单线程执行器上**，不阻塞事件循环。这不只是性能：
+  `image_rb` / `host_input_rb` 是 SPSC 无锁结构，消费者必须**始终是同一个线程**，
+  所以不能用 asyncio 默认的共享线程池。
+- `agent/io` **不在 import 时加载 native 扩展**（宿主机没有 `.so`）。缺 `.so` 只在真正
+  调用时报错；测试用 `agent.io.set_native(mock)` 注入替身。
+- `HostInputReader` 是轮询模式（默认 50ms），读到事件后渲染成文本投递到 bus。
+  它**不做**键盘事件解析、不做快捷键识别，也不做输入合法性校验。
 
 ---
 
