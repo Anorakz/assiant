@@ -231,14 +231,20 @@ TEST(MoonlightLive, LaunchReportsServerSideStatus) {
                                /*mode=*/"1280x720x60", /*unique_id=*/"0123456789ABCDEF",
                                kDefaultHttpPort, 5000);
 
-    // 这里不断言成功 —— 是否成功取决于服务端是否支持该端点。把实际结果打出来,
-    // 让"握手能不能走通"这件事有据可查 (而不是靠猜)。
+    // 这里不断言成功 —— 把实际结果打出来, 让"握手能不能走通"有据可查。
     std::fprintf(stderr, "[live] /launch status=%d sessionUrl=%s msg=%s raw=%s\n",
                  lr.status_code, lr.session_url.empty() ? "(none)" : lr.session_url.c_str(),
                  lr.status_message.c_str(),
                  lr.raw.size() > 160 ? (lr.raw.substr(0, 160) + "...").c_str() : lr.raw.c_str());
 
+    // ⚠ /applist /launch /resume 只注册在 **HTTPS 端口 (47984)** 上, 并且要求客户端
+    //   证书已在授权名单里; 明文 HTTP (47989) 上查它们必然 404。
+    //   实测 (2026-09-16): 带已授权证书走 https://<host>:47984/launch 返回
+    //   status_code=200 且 <sessionUrl0>rtsp://...:48010</sessionUrl0>。
+    //   所以 404 只说明"用错了端口/没带证书", 不代表 Sunshine 移除了该接口。
+    //   HTTPS + mTLS 的端到端验证见 scripts/verify-authorized.sh。
     if (lr.status_code == 404) {
-        GTEST_SKIP() << "服务端没有 /launch 端点 (Sunshine 新版本已移除该 GameStream 接口)";
+        GTEST_SKIP() << "明文 HTTP 端口上没有 /launch —— 该接口只在 HTTPS 47984 上, "
+                        "且需要已授权客户端证书 (见 scripts/verify-authorized.sh)";
     }
 }
