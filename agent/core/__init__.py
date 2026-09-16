@@ -1,7 +1,7 @@
 # ============================================================================
-#  agent/core/__init__.py — Agent Core: 状态层与调度层
+#  agent/core/__init__.py — Agent Core: 状态层、工具路由、调度层
 #
-#  当前只有状态机。scheduler / router / llm / vision 等后续加在这里。
+#  当前有状态机与工具路由。scheduler / router / llm / vision 等后续加在这里。
 #
 #  ⚠ 本包不在 import 时加载 native 扩展 (agent_native 是交叉编译产物, 宿主机
 #    上没有)。StateMachine.is_connected() 会按需去问 agent.io, 拿不到就报
@@ -9,5 +9,28 @@
 # ============================================================================
 
 from .state_machine import INITIAL_STATE, LEGAL_TRANSITIONS, State, StateMachine
+from .tool_router import (
+    DEFAULT_TIMEOUT_S,
+    SUPPORTED_KEYWORDS,
+    SchemaError,
+    Tool,
+    ToolRouter,
+    validate_args,
+    validate_schema,
+)
 
-__all__ = ["State", "StateMachine", "LEGAL_TRANSITIONS", "INITIAL_STATE"]
+__all__ = [
+    # 状态层
+    "State",
+    "StateMachine",
+    "LEGAL_TRANSITIONS",
+    "INITIAL_STATE",
+    # 工具路由
+    "Tool",
+    "ToolRouter",
+    "SchemaError",
+    "validate_args",
+    "validate_schema",
+    "SUPPORTED_KEYWORDS",
+    "DEFAULT_TIMEOUT_S",
+]

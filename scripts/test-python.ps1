@@ -21,6 +21,7 @@ $python = $py.Source
 $tests = @(
     "tests\test_config.py",
     "tests\test_state_machine.py",
+    "tests\test_tool_router.py",
     "tests\test_chat_bus.py",
     "tests\test_io.py"
 )

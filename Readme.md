@@ -27,8 +27,9 @@ agent/
 ├── agent/                       # Python Agent Core
 │   ├── __init__.py
 │   ├── config.py                # YAML 配置加载/保存/点号路径读取
-│   ├── core/                    # 状态层与调度层
-│   │   └── state_machine.py     # SLEEP ⇄ IDLE ⇄ STUDY/GAME 状态机
+│   ├── core/                    # 状态层、工具路由、调度层
+│   │   ├── state_machine.py     # SLEEP ⇄ IDLE ⇄ STUDY/GAME 状态机
+│   │   └── tool_router.py       # 工具注册 / 权限控制 / 执行调度
 │   └── io/                      # native 的 asyncio 包装 + 输入汇聚
 │       ├── chat_bus.py          # ChatInputBus: 终端/GUI/主机键盘 三源统一事件流
 │       ├── image_reader.py      # ImageReader: image_rb → numpy 帧
@@ -54,6 +55,7 @@ agent/
 │   ├── test_*.cpp               # C++ 单测 (gtest, 由 ctest 驱动)
 │   ├── test_config.py           # 配置模块单测 (unittest)
 │   ├── test_state_machine.py    # 状态机单测
+│   ├── test_tool_router.py      # 工具注册/权限/参数校验/超时/异常单测
 │   ├── test_chat_bus.py         # ChatInputBus 单测
 │   ├── test_io.py               # image_reader / host_input_reader / input_sender
 │   ├── mocks/                   # mock_agent_native: native 替身
@@ -130,6 +132,44 @@ await sender.send_hotkey(["ctrl", "alt", "S"])
   调用时报错；测试用 `agent.io.set_native(mock)` 注入替身。
 - `HostInputReader` 是轮询模式（默认 50ms），读到事件后渲染成文本投递到 bus。
   它**不做**键盘事件解析、不做快捷键识别，也不做输入合法性校验。
+
+---
+
+## 工具路由
+
+负责**注册**、**权限控制**、**执行调度**三件事。具体工具在 `agent/tools/`，
+本模块只认接口，不做编排（谁调谁由 LLM 决定）。
+
+```python
+from agent.core import State, StateMachine, Tool, ToolRouter
+
+sm = StateMachine()
+router = ToolRouter(state_provider=sm)
+
+router.register(Tool(
+    name="screenshot",
+    description="截取主机当前画面",
+    schema={"type": "object", "properties": {}, "additionalProperties": False},
+    handler=do_screenshot,
+    allowed_states={State.GAME, State.STUDY},
+))
+
+router.list_tools()                       # 给 LLM 的 schema 列表
+await router.execute("screenshot", {})    # {"ok": True, "result": ...}
+                                          # 或 {"ok": False, "error": "..."}
+```
+
+一次 `execute` 的顺序：**工具存在 → 状态允许 → 参数符合 schema → 执行（带超时）→ 异常兜底**。
+`execute` **永不抛异常**，调用方（LLM 循环）只看 `ok`。默认超时 5s。
+
+约定：
+
+- 状态不允许时工具**绝不执行**；拿不到当前状态时 **fail closed**（拒绝而不是放行）。
+- 同步 handler 会被丢到线程池，不阻塞事件循环；超时后线程仍在跑（Python 无法强杀线程），
+  调用方需自行考虑幂等。异步 handler 会被真正 cancel。
+- 参数校验用的是**自己实现的 JSON Schema 子集**（`SUPPORTED_KEYWORDS`）——实测宿主/WSL/板端
+  都没有 `jsonschema`，不为一个字段校验往板端塞依赖。子集外的关键字默认静默忽略，
+  用 `ToolRouter(permissive_schema=False)` 可以把"写了但没生效"变成报错。
 
 ---
 
