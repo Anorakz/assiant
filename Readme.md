@@ -30,6 +30,9 @@ agent/
 │   ├── core/                    # 状态层、工具路由、调度层
 │   │   ├── state_machine.py     # SLEEP ⇄ IDLE ⇄ STUDY/GAME 状态机
 │   │   └── tool_router.py       # 工具注册 / 权限控制 / 执行调度
+│   ├── llm/                     # LLM 三模式 + 规则兜底
+│   │   ├── provider.py          # edge / cloud / disabled 分发
+│   │   └── rule_engine.py       # 无 LLM 时的正则规则兜底
 │   └── io/                      # native 的 asyncio 包装 + 输入汇聚
 │       ├── chat_bus.py          # ChatInputBus: 终端/GUI/主机键盘 三源统一事件流
 │       ├── image_reader.py      # ImageReader: image_rb → numpy 帧
@@ -56,6 +59,7 @@ agent/
 │   ├── test_config.py           # 配置模块单测 (unittest)
 │   ├── test_state_machine.py    # 状态机单测
 │   ├── test_tool_router.py      # 工具注册/权限/参数校验/超时/异常单测
+│   ├── test_llm.py              # LLM 三模式切换 / cloud mock / 规则匹配
 │   ├── test_chat_bus.py         # ChatInputBus 单测
 │   ├── test_io.py               # image_reader / host_input_reader / input_sender
 │   ├── mocks/                   # mock_agent_native: native 替身
@@ -170,6 +174,37 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
 - 参数校验用的是**自己实现的 JSON Schema 子集**（`SUPPORTED_KEYWORDS`）——实测宿主/WSL/板端
   都没有 `jsonschema`，不为一个字段校验往板端塞依赖。子集外的关键字默认静默忽略，
   用 `ToolRouter(permissive_schema=False)` 可以把"写了但没生效"变成报错。
+
+---
+
+## LLM 三模式
+
+```
+edge      板端 RKNN 0.6B 小模型   ⚠ 当前是 mock，真实现待接
+cloud     OpenAI 兼容 API          (openai SDK，按需 import)
+disabled  不调模型，走 RuleEngine 规则兜底
+```
+
+```python
+from agent.llm import LLMProvider
+
+provider = LLMProvider(mode=None, tools=router)   # None = 去 config 读 llm.mode
+await provider.chat("现在几点", {"state": "idle"})        # -> str，失败抛异常
+await provider.chat_with_tools("截个图", {"state": "game"})  # -> dict，失败不抛
+
+provider.set_mode("cloud")     # 运行时切换；set_mode(None) 重新读配置
+```
+
+约定：
+
+- **两条入口的错误语义不同**：`chat()` 返回 str、失败**抛出**（终端/GUI 要知道模型挂了）；
+  `chat_with_tools()` 是自动循环入口，**永不抛**，错误收进 `{"ok", "text", "tool_calls", "error", "mode"}`。
+- 模式从 `llm.mode` 读；非法模式名**降级到 disabled**（记在 `mode_errors`），
+  配置写错时系统应该降级可用而不是起不来。默认模式是 `disabled`——
+  默认值不该在用户没配置的时候就去调模型/发网络请求。
+- `edge` 目前是 mock（`EdgeBackend.is_ready()` 恒为 False），接口先定死，真实现只需替换 `respond()`。
+- `openai` SDK **只在 cloud 模式真正请求时**才 import；缺包会给带安装提示的
+  `OpenAIClientError`。宿主/板端都没装它，所以 disabled/edge 完全不依赖。
 
 ---
 
