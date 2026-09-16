@@ -33,6 +33,9 @@ agent/
 │   ├── llm/                     # LLM 三模式 + 规则兜底
 │   │   ├── provider.py          # edge / cloud / disabled 分发
 │   │   └── rule_engine.py       # 无 LLM 时的正则规则兜底
+│   ├── vision/                  # 视觉层
+│   │   ├── roi.py               # ROI 字符串解析 ("x,y,w,h")
+│   │   └── siglip_encoder.py    # SigLIP 图像编码 (⚠ 当前 mock)
 │   └── io/                      # native 的 asyncio 包装 + 输入汇聚
 │       ├── chat_bus.py          # ChatInputBus: 终端/GUI/主机键盘 三源统一事件流
 │       ├── image_reader.py      # ImageReader: image_rb → numpy 帧
@@ -60,6 +63,7 @@ agent/
 │   ├── test_state_machine.py    # 状态机单测
 │   ├── test_tool_router.py      # 工具注册/权限/参数校验/超时/异常单测
 │   ├── test_llm.py              # LLM 三模式切换 / cloud mock / 规则匹配
+│   ├── test_vision.py           # ROI 解析 / SigLIP mock (有无 numpy 两条路径)
 │   ├── test_chat_bus.py         # ChatInputBus 单测
 │   ├── test_io.py               # image_reader / host_input_reader / input_sender
 │   ├── mocks/                   # mock_agent_native: native 替身
@@ -174,6 +178,33 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
 - 参数校验用的是**自己实现的 JSON Schema 子集**（`SUPPORTED_KEYWORDS`）——实测宿主/WSL/板端
   都没有 `jsonschema`，不为一个字段校验往板端塞依赖。子集外的关键字默认静默忽略，
   用 `ToolRouter(permissive_schema=False)` 可以把"写了但没生效"变成报错。
+
+---
+
+## 视觉层
+
+```python
+from agent.vision import parse_roi, SigLIPEncoder
+
+roi = parse_roi("100,100,200,200")   # {"x","y","w","h","x2","y2","area","space","clamped",...}
+frame[y2:y1, x2:x1] = ...            # x2/y2 是开区间边界，可直接切片
+
+encoder = SigLIPEncoder("models/siglip.rknn")
+emb = encoder.encode(frame)          # (768,) float32；encoder.ready 为 False
+```
+
+约定：
+
+- **坐标平面是 256×256**（native preprocess 的输出），与鼠标坐标同一平面，
+  所以 ROI 坐标可以直接交给 `InputSender.send_mouse`，不用换算。
+- **超界不报错，而是夹到平面内并置 `clamped=True`**，同时保留 `raw` / `requested`。
+  超界是语义问题不是格式问题（`"100,100,200,200"` 在 256 平面上确实超界，
+  但那是很自然的写法）；报错会卡死链路，静默截断又会让"以为 200×200、实际 156×156"
+  查不出来。格式错误（字段数/非整数/空字段/w,h≤0/负坐标）仍然抛 `RoiError`。
+- `SigLIPEncoder` 目前是 **mock**：返回由图像内容决定的**确定性**伪随机向量
+  （同一张图恒得同一向量，便于上层逻辑先写先测），但**没有语义**，别拿它做识别。
+  `ready` 恒为 `False`。真实现只需替换 `encode()`。
+- 视觉层**不做**预处理（native 已做）也**不做** embedding 缓存（失效策略依赖调用场景）。
 
 ---
 
