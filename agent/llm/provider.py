@@ -53,6 +53,17 @@ __all__ = [
 #: 支持的三种模式
 MODES = ("edge", "cloud", "disabled")
 
+#: 模式别名 —— 规范名之外的常见写法, 静默归一而不是报"非法模式"。
+#: "board" 尤其重要: 板端本地模型口语上就叫 board 模型, 而规范名是 edge。
+_MODE_ALIASES = {
+    "board": "edge",
+    "local": "edge",
+    "onboard": "edge",
+    "off": "disabled",
+    "none": "disabled",
+    "nollm": "disabled",
+}
+
 #: 默认模式: disabled。
 #: 刻意不默认 edge/cloud —— 默认值不该在用户没配置的时候就去调模型/发网络请求。
 DEFAULT_MODE = "disabled"
@@ -243,6 +254,7 @@ class LLMProvider:
 
     def _normalize_mode(self, mode: Any) -> str:
         name = mode.strip().lower() if isinstance(mode, str) else ""
+        name = _MODE_ALIASES.get(name, name)
         if name in MODES:
             return name
         self._mode_errors.append(

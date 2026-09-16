@@ -16,7 +16,7 @@
 □ 交叉编译通过，产出 agent_native.cpython-38-aarch64-linux-gnu.so
 □ file 命令确认 ELF aarch64
 □ host 编译一份 .pyd/.so 用于 Python 单测（mock 掉 moonlight 连接） -->
-Phase 3 — Python Agent Core
+<!-- Phase 3 — Python Agent Core
 □ io/image_reader.py：包装 image_rb，asyncio 友好（run_in_executor）
 □ io/host_input_reader.py：轮询 host_input_rb，投递到 Chat Input Bus
 □ io/chat_bus.py：asyncio.Queue + 统一事件格式（source/text/timestamp）
@@ -30,7 +30,7 @@ Phase 3 — Python Agent Core
 □ vision/roi.py：ROI 配置解析
 □ config/loader.py + config/schema.py：YAML 加载 + 校验
 □ main.py：装配所有组件，启动 asyncio 事件循环
-□ 单元测试：state_machine、chat_bus、tool_router、config_loader 全绿
+□ 单元测试：state_machine、chat_bus、tool_router、config_loader 全绿 -->
 Phase 4 — GUI（板端）
 □ gui/app/main.py：PySide6 主窗口
 □ widgets/wallpaper_panel.py：壁纸展示 + 手动换一张
@@ -63,3 +63,6 @@ Phase 7 — 固化与优化
 □ 性能基线：NPU 推理延迟、解码延迟、端到端延迟写入 bench.sh 输出
 □ 板端 systemd/agent.service 开机自启
 □ 崩溃日志落盘 + 重启策略
+
+#未完成的必要实现
+板测LLM、SigLIP部署、硬件编码器底层驱动打开

@@ -11,17 +11,21 @@
 # ============================================================================
 
 llm:
-  # 推理位置。board = 板端本地模型(RKNN), remote = 调远端 API
-  mode: board
+  # 推理位置。三个合法值 (见 agent/llm/provider.py 的 MODES):
+  #   edge     板端本地小模型 (RKNN); 别名 board / local
+  #   cloud    调远端 OpenAI 兼容 API
+  #   disabled 不调模型, 走 RuleEngine 规则兜底 (只回问候/时间/状态)
+  # ⚠ 模型还没装好之前保持 disabled, 系统照样起得来
+  mode: disabled
 
-  # ---- mode=board 时使用 ----
+  # ---- mode=edge 时使用 ----
   model_path: /home/kickpi/myproject/assitant/models/llm.rknn
   # 上下文长度上限, 超过要截断
   max_tokens: 512
   # 采样温度
   temperature: 0.7
 
-  # ---- mode=remote 时使用 ----
+  # ---- mode=cloud 时使用 ----
   api_base: https://api.example.com/v1
   api_key: ""
   model: gpt-4o-mini
@@ -56,3 +60,25 @@ ipc:
   sub_connect: tcp://127.0.0.1:5556
   # 收不到消息时的等待上限(毫秒)
   recv_timeout_ms: 1000
+
+# ---------------------------------------------------------------------------
+# 本机终端输入 (第三个输入源: 终端 / GUI / 主机键盘)
+# ---------------------------------------------------------------------------
+terminal:
+  # 没有 GUI/IPC 时, 这是唯一能直接敲字的通道; 服务型进程没有 stdin 会自动跳过
+  enabled: true
+
+# ---------------------------------------------------------------------------
+# 调度器
+# ---------------------------------------------------------------------------
+scheduler:
+  # 每多少分钟检查一次日程
+  interval_min: 1
+  # 触发窗口宽度(分钟)
+  window_min: 1
+  # 迟到的容忍度(分钟): 设备休眠/重启后晚几分钟仍认这次触发
+  late_grace_min: 0
+  # 主机输入轮询间隔(毫秒)
+  host_input_interval_ms: 50
+  # 快捷键映射: 组合键 -> 动作 (state 切状态 / prompt 发消息)
+  hotkeys: []

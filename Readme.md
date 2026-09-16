@@ -26,6 +26,7 @@ agent/
 │   └── third_party/             # 子模块: moonlight-common-c, pybind11, googletest
 ├── agent/                       # Python Agent Core
 │   ├── __init__.py
+│   ├── main.py                  # 进程入口: 装配全部组件 + asyncio 主循环
 │   ├── config.py                # YAML 配置加载/保存/点号路径读取
 │   ├── core/                    # 状态层、工具路由、调度层
 │   │   ├── state_machine.py     # SLEEP ⇄ IDLE ⇄ STUDY/GAME 状态机
@@ -65,6 +66,7 @@ agent/
 │   ├── test_tool_router.py      # 工具注册/权限/参数校验/超时/异常单测
 │   ├── test_llm.py              # LLM 三模式切换 / cloud mock / 规则匹配
 │   ├── test_vision.py           # ROI 解析 / SigLIP mock (有无 numpy 两条路径)
+│   ├── test_main.py             # 进程装配: 启停顺序 / 异常隔离 / 主循环
 │   ├── test_scheduler.py        # 日程触发 / 去重 / 快捷键识别
 │   ├── test_chat_bus.py         # ChatInputBus 单测
 │   ├── test_io.py               # image_reader / host_input_reader / input_sender
@@ -180,6 +182,54 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
 - 参数校验用的是**自己实现的 JSON Schema 子集**（`SUPPORTED_KEYWORDS`）——实测宿主/WSL/板端
   都没有 `jsonschema`，不为一个字段校验往板端塞依赖。子集外的关键字默认静默忽略，
   用 `ToolRouter(permissive_schema=False)` 可以把"写了但没生效"变成报错。
+
+---
+
+## 运行
+
+```bash
+python3 agent/main.py                 # 板端主进程
+python3 agent/main.py --check-config  # 只校验配置
+python3 agent/main.py --dry-run       # 不连串流/不读 stdin, 只验证装配
+AGENT_RUN_SECONDS=5 python3 agent/main.py   # 跑 5 秒自动退出 (冒烟)
+```
+
+启动顺序（按依赖，停止时**严格反向**）：
+
+```
+日志 → config → native → ChatInputBus → io 层 → StateMachine
+     → ToolRouter → LLMProvider → Scheduler → IPC → 终端输入
+```
+
+约定：
+
+- **单组件失败不影响其他组件**：每个组件包两层保护（组件自身失败、步骤里组件之外的代码
+  失败），失败记进 `failures` 并在收尾汇总。可操作性优先于完整性 —— 摄像头没插不该让
+  快捷键也失效。
+- **日志**：同时写 `logs/agent.log`（含 DEBUG）和 stdout（INFO 起）。
+  正常跑只有 INFO + 少量自解释的 WARNING；**完整 traceback 只进 DEBUG**，
+  免得正常日志看起来像崩了。排查时把级别调到 DEBUG 即可。
+- 关闭：`SIGINT` / `SIGTERM` 都会触发干净退出（systemd 停服务发的是 SIGTERM）。
+- 尚未实现、启动时跳过并记一条 WARNING 的组件：`agent/tools/`（工具为空）、
+  `agent/ipc.py`（GUI 连不上）。它们**不算失败**，放到位即自动接入，不用改 `main.py`。
+
+systemd 管理（不做 daemon 化）：
+
+```ini
+[Unit]
+Description=Agent (RK3568)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/kickpi/myproject/assitant
+Environment=LD_LIBRARY_PATH=/home/kickpi/myproject/assitant
+ExecStart=/usr/bin/python3 /home/kickpi/myproject/assitant/agent/main.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
 
 ---
 
