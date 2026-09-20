@@ -53,6 +53,12 @@
 #include "input_sender.h"
 #include "moonlight_adapter.h"
 
+#ifdef AGENT_HAVE_MOONLIGHT
+// 只有交叉编译才配置了这个头文件的搜索路径与宏 (见 native/CMakeLists.txt):
+// LiGetLaunchUrlQueryParameters() 的声明在 Limelight.h 里。
+#include "Limelight.h"
+#endif
+
 namespace py = pybind11;
 using agent::AdapterState;
 using agent::HostInputRingBuffer;
@@ -132,6 +138,48 @@ PYBIND11_MODULE(agent_native, m) {
         py::arg("host"), py::arg("app"), py::arg("w"), py::arg("h"), py::arg("fps"),
         "连接主机并开始收流 (阻塞直到连接建立或失败).\n"
         "失败原因见 status()['error']。");
+
+    ml.def(
+        "start_with_session",
+        [](const std::string& host, const std::string& app, int width, int height, int fps,
+           const std::string& app_version, const std::string& gfe_version,
+           int codec_mode_support, const std::string& session_url) {
+            bool ok = false;
+            {
+                // LiStartConnection 是阻塞的, 必须放开 GIL
+                py::gil_scoped_release release;
+                ok = adapter().start_with_session(host, app, width, height, fps,
+                                                  app_version, gfe_version,
+                                                  codec_mode_support, session_url);
+            }
+            return ok;
+        },
+        py::arg("host"), py::arg("app"), py::arg("w"), py::arg("h"), py::arg("fps"),
+        py::arg("app_version"), py::arg("gfe_version"), py::arg("codec_mode_support"),
+        py::arg("session_url"),
+        "连接主机并开始收流 —— 握手**已经在外面做完了**。\n"
+        "Sunshine 的 /serverinfo /applist /launch 在 HTTPS 47984 + 客户端证书后面,\n"
+        "那半由 agent/net/sunshine_client.py 负责; 这里只接 app_version 与 session_url\n"
+        "(= /launch 或 /resume 的 sessionUrl0) 直接进 LiStartConnection, 一次 HTTP 都不发。\n"
+        "失败原因见 status()['error']。");
+
+    // LiGetLaunchUrlQueryParameters() 由 moonlight-common-c 提供, 返回的串要追加到
+    // /launch 与 /resume 的 query 后面 (Sunshine 的扩展参数)。导出它是为了这份知识
+    // 只有一处真源: Python 侧拼串时用它, 而不是抄一份常量进 Python。
+    // host 构建没有链接 moonlight-common-c -> 返回空串。
+    ml.def(
+        "launch_url_query_parameters",
+        []() -> std::string {
+#ifdef AGENT_HAVE_MOONLIGHT
+            const char* params = LiGetLaunchUrlQueryParameters();
+            return params != nullptr ? std::string(params) : std::string();
+#else
+            return std::string();
+#endif
+        },
+        "追加到 /launch 与 /resume query 串后面的库级扩展参数\n"
+        "(LiGetLaunchUrlQueryParameters(); 本版本返回 \"&corever=1\")。\n"
+        "host 构建未链接 moonlight-common-c, 返回空串。");
 
     ml.def(
         "stop",

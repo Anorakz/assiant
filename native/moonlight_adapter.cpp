@@ -148,11 +148,11 @@ MoonlightAdapter::~MoonlightAdapter() {
 // ===========================================================================
 //  start / stop
 // ===========================================================================
-bool MoonlightAdapter::start(const std::string& host,
-                             const std::string& app,
-                             int width,
-                             int height,
-                             int fps) {
+bool MoonlightAdapter::prepare_start(const std::string& host,
+                                     const std::string& app,
+                                     int width,
+                                     int height,
+                                     int fps) {
     if (impl_->state.load() != static_cast<int>(AdapterState::kIdle)) {
         impl_->set_error("already started (call stop() first)");
         return false;
@@ -177,6 +177,17 @@ bool MoonlightAdapter::start(const std::string& host,
     impl_->fps = fps;
     impl_->set_error("");
     impl_->state.store(static_cast<int>(AdapterState::kConnecting));
+    return true;
+}
+
+bool MoonlightAdapter::start(const std::string& host,
+                             const std::string& app,
+                             int width,
+                             int height,
+                             int fps) {
+    if (!prepare_start(host, app, width, height, fps)) {
+        return false;
+    }
 
     // ---- 1) HTTP 握手: /serverinfo → appversion ----
     const auto si = moonlight_connection::fetch_server_info(host);
@@ -207,7 +218,49 @@ bool MoonlightAdapter::start(const std::string& host,
         return false;
     }
 
-    // ---- 3) 交给 moonlight 接管 ----
+    return connect_limelight(si.app_version, si.gfe_version,
+                             static_cast<int>(si.codec_mode_support), lr.session_url);
+}
+
+bool MoonlightAdapter::start_with_session(const std::string& host,
+                                          const std::string& app,
+                                          int width,
+                                          int height,
+                                          int fps,
+                                          const std::string& app_version,
+                                          const std::string& gfe_version,
+                                          int codec_mode_support,
+                                          const std::string& session_url) {
+    if (!prepare_start(host, app, width, height, fps)) {
+        return false;
+    }
+
+    // 握手是调用方做完的 (Sunshine 那半在 agent/net/sunshine_client.py: HTTPS
+    // 47984 + 客户端证书)。这里只校验拿到的字段 —— 一次 HTTP 都不发, 连主机地址
+    // 都不碰, 所以"HTTPS 通了但这里失败"的原因只可能是字段不对。
+    if (app_version.empty()) {
+        impl_->set_error("empty app_version (需要 /serverinfo 的 <appversion>)");
+        impl_->state.store(static_cast<int>(AdapterState::kIdle));
+        return false;
+    }
+    if (session_url.empty()) {
+        impl_->set_error(
+            "empty session_url (需要 /launch 或 /resume 的 <sessionUrl0>)");
+        impl_->state.store(static_cast<int>(AdapterState::kIdle));
+        return false;
+    }
+
+    set_log("session supplied by caller: appversion=" + app_version +
+            " session=" + session_url);
+    return connect_limelight(app_version, gfe_version, codec_mode_support,
+                             session_url);
+}
+
+bool MoonlightAdapter::connect_limelight(const std::string& app_version,
+                                         const std::string& gfe_version,
+                                         int codec_mode_support,
+                                         const std::string& session_url) {
+    // ---- 交给 moonlight 接管 ----
     //
     // ⚠ 解码器**不在这里**初始化: 用什么编码 (H.264/H.265) 是 LiStartConnection
     //   过程中协商出来的, 提前猜就是猜。真正的初始化在 cb_decoder_setup 里,
@@ -217,7 +270,7 @@ bool MoonlightAdapter::start(const std::string& host,
 #ifndef AGENT_HAVE_MOONLIGHT
     impl_->set_error(
         "moonlight integration not linked in this build "
-        "(AGENT_HAVE_MOONLIGHT undefined); HTTP handshake succeeded");
+        "(AGENT_HAVE_MOONLIGHT undefined)");
     impl_->state.store(static_cast<int>(AdapterState::kIdle));
     return false;
 #else
@@ -227,9 +280,10 @@ bool MoonlightAdapter::start(const std::string& host,
     // --- 流配置 ---
     STREAM_CONFIGURATION sc;
     LiInitializeStreamConfiguration(&sc);
-    sc.width = width;
-    sc.height = height;
-    sc.fps = fps;
+    // 尺寸/帧率来自 prepare_start() 落地的值 (两条入口都先过它)
+    sc.width = impl_->width;
+    sc.height = impl_->height;
+    sc.fps = impl_->fps;
     sc.bitrate = 20000;          // kbps; 后续按网络状况自适应
     sc.packetSize = 1024;
     sc.streamingRemotely = STREAM_CFG_AUTO;
@@ -261,10 +315,10 @@ bool MoonlightAdapter::start(const std::string& host,
     SERVER_INFORMATION srv;
     LiInitializeServerInformation(&srv);
     srv.address = impl_->host.c_str();
-    srv.serverInfoAppVersion = si.app_version.c_str();
-    srv.serverInfoGfeVersion = si.gfe_version.c_str();
-    srv.rtspSessionUrl = lr.session_url.c_str();
-    srv.serverCodecModeSupport = static_cast<int>(si.codec_mode_support);
+    srv.serverInfoAppVersion = app_version.c_str();
+    srv.serverInfoGfeVersion = gfe_version.c_str();
+    srv.rtspSessionUrl = session_url.c_str();
+    srv.serverCodecModeSupport = codec_mode_support;
 
     // 音频先不接 (arCallbacks = nullptr)。moonlight 允许这样吗? 见文档:
     // 传 nullptr 表示不要音频。

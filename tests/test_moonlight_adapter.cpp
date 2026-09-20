@@ -108,6 +108,74 @@ TEST(MoonlightAdapterTest, RejectsInvalidDimensions) {
 }
 
 // ===========================================================================
+//  start_with_session: 握手由调用方 (Python/HTTPS) 做完, 这里一次 HTTP 都不发
+// ===========================================================================
+
+TEST(MoonlightAdapterTest, StartWithSessionRejectsEmptyAppVersion) {
+    MoonlightAdapter a;
+
+    EXPECT_FALSE(a.start_with_session("127.0.0.1", "Desktop", 1280, 720, 60,
+                                      /*app_version=*/"", "3.23.0.74", 0x1f0301,
+                                      "rtsp://127.0.0.1:48010"));
+    EXPECT_EQ(a.state(), AdapterState::kIdle) << "失败后必须回到 Idle";
+    EXPECT_NE(a.last_error().find("app_version"), std::string::npos)
+        << "要说清缺的是哪一项: " << a.last_error();
+}
+
+TEST(MoonlightAdapterTest, StartWithSessionRejectsEmptySessionUrl) {
+    MoonlightAdapter a;
+
+    EXPECT_FALSE(a.start_with_session("127.0.0.1", "Desktop", 1280, 720, 60,
+                                      "7.1.431.-1", "3.23.0.74", 0x1f0301,
+                                      /*session_url=*/""));
+    EXPECT_EQ(a.state(), AdapterState::kIdle);
+    EXPECT_NE(a.last_error().find("session_url"), std::string::npos) << a.last_error();
+}
+
+TEST(MoonlightAdapterTest, StartWithSessionDoesNotTouchTheNetwork) {
+    // 与 start() 的关键区别: 给一个必然连不上的主机也**不会**出现握手阶段的报错,
+    // 因为它压根不发 HTTP —— 这就是"握手交给 Python"的全部意义。
+    MoonlightAdapter a;
+
+    EXPECT_FALSE(a.start_with_session(kBadHost, "Desktop", 1280, 720, 60,
+                                      "7.1.431.-1", "3.23.0.74", 0x1f0301,
+                                      "rtsp://127.0.0.1:48010"))
+        << "host 构建没链接 moonlight, 必然失败";
+
+    const std::string err = a.last_error();
+    EXPECT_EQ(err.find("handshake failed"), std::string::npos)
+        << "不该出现握手阶段的错误 (说明它去发 HTTP 了): " << err;
+#ifndef AGENT_HAVE_MOONLIGHT
+    // host 构建走的是"未链接 moonlight"那条分支; 交叉编译里会真去连, 不属单测范围
+    EXPECT_NE(err.find("not linked"), std::string::npos) << err;
+#endif
+    EXPECT_EQ(a.state(), AdapterState::kIdle);
+}
+
+TEST(MoonlightAdapterTest, StartWithSessionValidatesArgsLikeStart) {
+    // 两条入口的前置检查必须一致 (共用 prepare_start)
+    MoonlightAdapter a;
+
+    EXPECT_FALSE(a.start_with_session("", "app", 1280, 720, 60, "v", "", 0, "rtsp://x"));
+    EXPECT_FALSE(a.start_with_session("h", "", 1280, 720, 60, "v", "", 0, "rtsp://x"));
+    EXPECT_FALSE(a.start_with_session("h", "app", 0, 720, 60, "v", "", 0, "rtsp://x"));
+    EXPECT_FALSE(a.start_with_session("h", "app", 1280, 720, 0, "v", "", 0, "rtsp://x"));
+    EXPECT_EQ(a.state(), AdapterState::kIdle);
+    EXPECT_FALSE(a.last_error().empty());
+}
+
+TEST(MoonlightAdapterTest, StartWithSessionCanBeRetriedAfterFailure) {
+    MoonlightAdapter a;
+
+    ASSERT_FALSE(a.start_with_session(kBadHost, "Desktop", 1280, 720, 60,
+                                      "7.1.431.-1", "", 0, "rtsp://x"));
+    // 失败后回到 Idle, 所以还能再来一次 (状态机与 start() 一致)
+    EXPECT_FALSE(a.start_with_session(kBadHost, "Desktop", 1280, 720, 60,
+                                      "7.1.431.-1", "", 0, "rtsp://x"));
+    EXPECT_EQ(a.state(), AdapterState::kIdle);
+}
+
+// ===========================================================================
 //  握手失败路径 (服务端不在)
 // ===========================================================================
 

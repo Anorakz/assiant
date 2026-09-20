@@ -4,12 +4,16 @@
 //  架构位置 (docs/architecure.md §3.1)
 //  ---------------------------------------------------------------------------
 //      MoonlightAdapter
-//        ├── 连接握手 (moonlight_connection) → LiStartConnection
+//        ├── 连接握手 —— 两条入口, 只差"谁做握手":
+//        │     start()                明文 HTTP 47989 (留给无 TLS 的 GFE 主机)
+//        │     start_with_session()   握手在外面做完 (Sunshine: HTTPS 47984 +
+//        │                            客户端证书, 见 agent/net/sunshine_client.py)
+//        │   两条都汇到 connect_limelight() → LiStartConnection
 //        ├── 视频接收线程 (moonlight 内部): decoderSetup (协商结果)
 //        │     → Decoder(MPP 硬解) → submitDecodeUnit (Annex-B 帧)
 //        │     → preprocess_frame → image_rb_ (256×256 RGB888)
-//        └── 主机输入接收线程 (moonlight 内部): connectionStatusUpdate /
-//              moonlight 的输入回调 → host_input_rb_
+//        └── host_input_rb_ 目前只有读取侧 —— moonlight-common-c 没有"主机→
+//              客户端"的输入 API, 原设计的接收线程已删除 (todo.md 决策 2)
 //
 //  ⚠ 线程归属 (很重要, 决定了能不能加锁)
 //  ---------------------------------------------------------------------------
@@ -84,12 +88,35 @@ public:
     /// @param width/height/fps 期望的流参数
     /// @return false 表示失败, 原因见 last_error()
     ///
-    /// @note 这是阻塞调用, 内部会做 HTTP 握手 + LiStartConnection。
+    /// @note 这是阻塞调用, 内部会做 **明文 HTTP** 握手 (47989) + LiStartConnection。
+    ///       这条路径留给无 TLS 的 GFE 主机; Sunshine 请用 start_with_session(),
+    ///       因为它的握手在 HTTPS 47984 + 客户端证书后面 (C++ 侧不引 OpenSSL)。
     bool start(const std::string& host,
                const std::string& app,
                int width,
                int height,
                int fps);
+
+    /// 连接并开始收流 —— **握手已经由调用方做完了**。
+    ///
+    /// @param app_version        /serverinfo 的 <appversion>  → serverInfoAppVersion
+    /// @param gfe_version        /serverinfo 的 <GfeVersion>  → serverInfoGfeVersion
+    /// @param codec_mode_support /serverinfo 的 <ServerCodecModeSupport>
+    /// @param session_url        /launch 或 /resume 的 <sessionUrl0> → rtspSessionUrl
+    /// @return false 表示失败, 原因见 last_error()
+    ///
+    /// @note 与 start() 的唯一区别: **一次 HTTP 都不发**。app_version 为空时
+    ///       LiStartConnection 必然失败, session_url 为空则没有会话可接 ——
+    ///       两者都在这里当场拦下, 报错话说清缺的是哪一项。
+    bool start_with_session(const std::string& host,
+                            const std::string& app,
+                            int width,
+                            int height,
+                            int fps,
+                            const std::string& app_version,
+                            const std::string& gfe_version,
+                            int codec_mode_support,
+                            const std::string& session_url);
 
     /// 断开并停止接收线程; 可重复调用
     void stop();
@@ -128,6 +155,21 @@ public:
     void on_connection_terminated(int error_code);
 
 private:
+    /// start() / start_with_session() 共用的前置检查与参数落地
+    /// (状态必须是 kIdle、host/app 非空、尺寸为正; 通过后进入 kConnecting)
+    bool prepare_start(const std::string& host,
+                       const std::string& app,
+                       int width,
+                       int height,
+                       int fps);
+
+    /// 握手字段到手之后真正交给 moonlight —— start() 与 start_with_session() 共用,
+    /// 保证两条入口在"进 LiStartConnection 之前"的行为完全一致。
+    bool connect_limelight(const std::string& app_version,
+                           const std::string& gfe_version,
+                           int codec_mode_support,
+                           const std::string& session_url);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
