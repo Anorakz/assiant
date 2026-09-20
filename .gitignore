@@ -109,6 +109,10 @@ config/secrets.yaml
 config/*.yaml
 !config/*.example.yaml
 config/creds/
+# 板端部署用的凭据目录（deploy.ps1 之外的 creds/，见 docs/sunshine-pairing-findings.md）:
+# 除 client.pem / client.key 外还可能放 client.der / clientcert.hex 等中间产物，
+# 那些**不在** *.pem / *.key 的覆盖范围内，所以整个目录一起忽略。
+creds/
 *.pem
 *.key
 # ---- GUI 运行期产物 / 验收证据 ----

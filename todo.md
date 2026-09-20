@@ -94,7 +94,24 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
      （完成 15fb6a3 + 6251474 + c32c8b3；实测对照与分层见 docs/sunshine-pairing-findings.md §5.1）
      （原描述"moonlight_connection 改 HTTPS"是当时的写法，实际按评审结论改在 Python 侧；
        那条明文 HTTP 路径保留给无 TLS 的 GFE 主机，是否删除等 B3 板端跑通后再定）
-□ B2 板端配对落地：部署 creds/ + 校验 Sunshine 授权名单 + 重启 Sunshine + verify-authorized.sh 对照
+■ B2 板端配对落地：部署 creds/ + 校验授权名单 + 重启 Sunshine + verify-authorized.sh 对照
+     creds/ 已部署到板端 (/home/kickpi/myproject/assitant/creds/)，client.pem/key 的 sha256
+     与 PC 上一致；板端 live config.yaml **本来就配了** sunshine.cert/key，所以无需改配置
+     （https_port 缺省由代码按 47984 处理）。
+     授权名单（D:\tool\sunshine\config\sunshine_state.json）：agent-native 在列且 enabled，
+     cert 长度 1208 = 我们的 client.pem；另有 Anorak(1013)×2、ALN-AL00(1021)、Anorak_TV(1021)
+     —— 按决策 6 不清理。
+     板端验证：verify-authorized.sh（curl，用 CLIENT_CERT/CLIENT_KEY 覆盖路径）200/200，
+     /launch 400 "An app is already running"（主机上确有另一个 Moonlight 客户端）；
+     我们的 SunshineClient 从板端拿到 PairStatus=1 与 sessionUrl0=rtsp://192.168.137.1:48010（走 /resume）。
+     ⚠ **重启 Sunshine 没做成**：它是 Windows 服务 SunshineService（Automatic/Running），
+       本会话无管理员权限，Restart-Service 报 "Cannot open SunshineService service"。
+       实测这次重启并非必需（名单早已生效：PC 与板端都拿到 PairStatus=1），所以没有为此
+       卡住；需要重启时请用管理员权限执行 `Restart-Service SunshineService`。
+     安全副作用（顺手补掉）：板端 .gitignore 停在 gui 分支的老版本，没有 *pem/*key 规则 ——
+       私钥只差一个 `git add -A` 就会入库。已在板端 .gitignore 补上 creds/ + *.pem + *.key，
+       main 的 .gitignore 也补了 creds/（PC 的 creds 目录还有 client.der/clientcert.hex，
+       那两类不在 *.pem/*.key 覆盖内）。
 □ B3 Moonlight 连接验证：板端 moonlight.start → Sunshine 主机
 □ B4 moonlight.status() 返回 connected
 □ B5 Image RB 实流验证：板端读到真实解码帧
