@@ -5,6 +5,8 @@ venv/
 .venv/
 env/
 
+model/
+
 # Python缓存
 __pycache__/
 *.py[cod]

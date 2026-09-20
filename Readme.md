@@ -35,6 +35,8 @@ agent/
 │   ├── llm/                     # LLM 三模式 + 规则兜底
 │   │   ├── provider.py          # edge / cloud / disabled 分发
 │   │   └── rule_engine.py       # 无 LLM 时的正则规则兜底
+│   ├── ipc/                     # Agent ⇄ GUI 通信
+│   │   └── protocol.py          # IPC 协议: topic/command 常量 + 编解码 (无 server)
 │   ├── vision/                  # 视觉层
 │   │   ├── roi.py               # ROI 字符串解析 ("x,y,w,h")
 │   │   └── siglip_encoder.py    # SigLIP 图像编码 (⚠ 当前 mock)
@@ -67,6 +69,7 @@ agent/
 │   ├── test_llm.py              # LLM 三模式切换 / cloud mock / 规则匹配
 │   ├── test_vision.py           # ROI 解析 / SigLIP mock (有无 numpy 两条路径)
 │   ├── test_main.py             # 进程装配: 启停顺序 / 异常隔离 / 主循环
+│   ├── test_ipc_protocol.py     # IPC 线格式契约 (字节级)
 │   ├── test_scheduler.py        # 日程触发 / 去重 / 快捷键识别
 │   ├── test_chat_bus.py         # ChatInputBus 单测
 │   ├── test_io.py               # image_reader / host_input_reader / input_sender
@@ -106,7 +109,6 @@ scripts/deploy.ps1
 ---
 
 ## I/O 层
-
 `agent/io/` 把 native (`agent_native`) 的阻塞接口包成 asyncio 友好的 awaitable，
 并把三个输入源汇成一条事件流：
 
@@ -182,6 +184,36 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
 - 参数校验用的是**自己实现的 JSON Schema 子集**（`SUPPORTED_KEYWORDS`）——实测宿主/WSL/板端
   都没有 `jsonschema`，不为一个字段校验往板端塞依赖。子集外的关键字默认静默忽略，
   用 `ToolRouter(permissive_schema=False)` 可以把"写了但没生效"变成报错。
+
+---
+
+## IPC 协议（Agent ⇄ GUI）
+
+协议已定，**实现未做**（server/client 在 `todo.md` 里）。完整规范见
+[`docs/ipc-protocol.md`](docs/ipc-protocol.md)，常量与编解码在 `agent/ipc/protocol.py`。
+
+| 项 | 值 |
+| --- | --- |
+| 传输 | Unix domain socket `/tmp/agent.sock` |
+| 分隔 | 换行 `\n`（NDJSON，每条消息一行） |
+| 编码 | UTF-8 |
+| 信封 | `{"topic": str, "data": object, "timestamp": float}` |
+| 时间戳 | Unix epoch **秒**（浮点，C++ 侧必须用 `double`，`float` 在 epoch 尺度只有约 128 秒分辨率） |
+
+```python
+from agent.ipc import encode, decode, decode_full, TOPIC_STATUS, MODE_STUDY
+
+sock.sendall(encode(TOPIC_STATUS, {"mode": MODE_STUDY, "connected": True}))
+topic, data = decode(line)          # 需要时间戳用 decode_full()
+```
+
+约定：
+
+- **`data` 必须是 object**，数组/标量判为非法；没有参数也要写 `{}`。
+- **未知字段忽略、未知 topic 忽略** —— 这是没有版本号时唯一的向前兼容手段。
+- **一条坏消息只影响它自己**：非法 JSON / 结构不对 → 丢弃 + 记日志，**不断开连接**。
+- `status.mode` 用**大写**（`SLEEP`/`IDLE`/`STUDY`/`GAME`），而 `StateMachine` 内部是
+  小写；转换只在 ipc server 那层做，不要混着传。
 
 ---
 

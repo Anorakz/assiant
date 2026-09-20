@@ -17,7 +17,9 @@ tests/test_main.py — agent/main.py 的装配与生命周期单测
 """
 
 import asyncio
+import atexit
 import logging
+import os
 import shutil
 import sys
 import tempfile
@@ -28,7 +30,27 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from agent.ipc import (  # noqa: E402
+    COMMAND_CHAT_INPUT,
+    UNIX_SOCKET_SUPPORTED,
+    LocalServer,
+    NullServer,
+    encode,
+)
 from agent.main import Runtime, run, setup_logging  # noqa: E402
+
+#: 测试用的 socket 一律放在临时目录里, **绝不碰 /tmp/agent.sock** ——
+#: 板端跑测试时真 Agent 可能正占着那个路径, 撞上去只会得到"另一个实例在监听"。
+_IPC_TMP = tempfile.mkdtemp(prefix="agent-test-ipc-")
+atexit.register(shutil.rmtree, _IPC_TMP, ignore_errors=True)
+_IPC_SEQ = [0]
+
+
+def _ipc_socket_path() -> str:
+    """每次调用给一个**唯一**路径, 免得同进程里两个 Runtime 抢同一个文件。"""
+    _IPC_SEQ[0] += 1
+    return os.path.join(_IPC_TMP, "agent-%d.sock" % _IPC_SEQ[0])
+
 
 #: 装配顺序 (与模块头的第 1..11 步一致; 只列会注册成组件的)
 EXPECTED_ORDER = [
@@ -45,12 +67,16 @@ EXPECTED_ORDER = [
 
 
 def quiet_config(**overrides):
-    """一份不连网、不读 stdin、不落盘的最小配置。"""
+    """一份不连网、不读 stdin、不落盘的最小配置。
+
+    ipc.socket_path 指向临时目录: 每个 Runtime 一个独立 socket 文件。
+    """
     cfg = {
         "llm": {"mode": "disabled"},
         "sunshine": {},
         "terminal": {"enabled": False},
         "scheduler": {"interval_min": 1},
+        "ipc": {"socket_path": _ipc_socket_path()},
     }
     cfg.update(overrides)
     return cfg
@@ -274,12 +300,66 @@ class TestFailureIsolation(unittest.IsolatedAsyncioTestCase):
         finally:
             await rt.stop()
 
-    async def test_missing_ipc_module_is_not_a_failure(self):
+    async def test_ipc_component_starts(self):
+        # agent/ipc/ 现在有 build_ipc() 了: 它必须真的起来, 且不算失败
         rt = make_runtime()
         await rt.start()
         try:
-            self.assertIsNone(rt.ipc)
             self.assertEqual(rt.failures, [])
+            if UNIX_SOCKET_SUPPORTED:
+                self.assertIsInstance(rt.ipc, LocalServer)
+                self.assertTrue(rt.ipc.is_running)
+                self.assertTrue(os.path.exists(rt.ipc.path))
+                self.assertIn("ipc", [c.name for c in rt._components])
+            else:
+                # Windows: 明确降级成空实现, 而不是让启动报错
+                self.assertIsInstance(rt.ipc, NullServer)
+        finally:
+            path = getattr(rt.ipc, "path", None)
+            await rt.stop()
+        if UNIX_SOCKET_SUPPORTED:
+            self.assertFalse(os.path.exists(path), "stop() 要删掉 socket 文件")
+
+    async def test_ipc_without_factory_is_not_a_failure(self):
+        # 还没有 server 的状态 (agent/ipc 里只有 protocol.py) 只记 WARNING
+        import agent.ipc as ipc_pkg
+
+        saved = ipc_pkg.build_ipc
+        del ipc_pkg.build_ipc
+        try:
+            rt = make_runtime()
+            await rt.start()
+            try:
+                self.assertIsNone(rt.ipc)
+                self.assertEqual(rt.failures, [])
+            finally:
+                await rt.stop()
+        finally:
+            ipc_pkg.build_ipc = saved
+
+    async def test_gui_command_reaches_bus(self):
+        # 端到端: GUI -> socket -> ipc -> bus (source="gui")
+        if not UNIX_SOCKET_SUPPORTED:
+            self.skipTest("需要 AF_UNIX")
+        rt = make_runtime()
+        await rt.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(rt.ipc.path)
+            try:
+                writer.write(encode(COMMAND_CHAT_INPUT, {"text": "给我讲个故事"}))
+                await writer.drain()
+
+                for _ in range(200):
+                    if rt.bus.qsize():
+                        break
+                    await asyncio.sleep(0.01)
+                event = rt.bus.get_nowait()
+                self.assertIsNotNone(event, "GUI 的命令没有进 bus")
+                self.assertEqual(event["source"], "gui")
+                self.assertEqual(event["text"], "给我讲个故事")
+            finally:
+                writer.close()
+                await writer.wait_closed()
         finally:
             await rt.stop()
 

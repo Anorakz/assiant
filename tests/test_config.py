@@ -611,7 +611,7 @@ class TestShippedExamples(unittest.TestCase):
             self.assertIn(section, data)
         self.assertIn("mode", data["llm"])
         self.assertIn("host", data["sunshine"])
-        self.assertIn("pub_bind", data["ipc"])
+        self.assertIn("socket_path", data["ipc"])
 
     def test_falls_back_to_example_when_no_real_config(self):
         # 仓库里没有 config.yaml 时 (刚 clone), 应当读到 example

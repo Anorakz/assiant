@@ -1,0 +1,969 @@
+#!/usr/bin/env python3
+"""
+tests/test_ipc_local_server.py — agent/ipc/local_server.py 单测
+
+运行:
+    python tests/test_ipc_local_server.py
+
+分两层, 因为 **Windows 的 CPython 根本没有 socket.AF_UNIX** (连
+asyncio.start_unix_server 都不导出):
+
+  TestClientSession*   收发逻辑 (_ClientSession)。只依赖 asyncio 的 reader/writer
+                       接口, 用假 stream 驱动 —— 所以在 Windows / WSL / 板端
+                       都能跑, 覆盖切帧、坏消息丢弃、发送队列背压。
+  TestLocalServerSocket 真 socket 端到端 (bind/accept/push/命令/残留文件)。
+                       只在 POSIX 上跑, Windows 上整类 skip。
+
+跳过的那一类在 test-python.ps1 的输出里会显示成 skipped, 不会假装通过。
+
+覆盖:
+  常量/平台    UNIX_SOCKET_SUPPORTED、默认路径与队列长度
+  模式转换     mode_to_wire / mode_from_wire 的大小写与非法值
+  构造        默认 path、repr、on_command 注册与清空
+  生命周期    start 幂等 / stop 幂等 / 没启动就 push
+  切帧        一条/多条/跨 chunk/\r\n/空行/超长行
+  错误容忍    坏 JSON、非 object、缺 timestamp 一律丢弃但连接继续
+  背压        队列满丢最旧、不踢客户端、push 不阻塞
+  真 socket   权限 0600、广播、命令回调、残留 socket、活实例不被抢、
+              路径不是 socket 时拒绝删除、父目录自动创建、stop 删文件
+"""
+
+import asyncio
+import json
+import logging
+import os
+import shutil
+import socket
+import stat
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from agent.core.state_machine import State  # noqa: E402
+from agent.ipc import build_ipc  # noqa: E402
+from agent.ipc.local_server import (  # noqa: E402
+    DEFAULT_QUEUE_SIZE,
+    UNIX_SOCKET_SUPPORTED,
+    IpcServerError,
+    LocalServer,
+    NullServer,
+    _ClientSession,
+    mode_from_wire,
+    mode_to_wire,
+)
+from agent.ipc.protocol import (  # noqa: E402
+    COMMAND_CHAT_INPUT,
+    COMMAND_NEXT_WALLPAPER,
+    COMMAND_SWITCH_MODE,
+    MAX_LINE_BYTES,
+    SOCKET_PATH,
+    TOPIC_STATUS,
+    IpcProtocolError,
+    decode,
+    encode,
+)
+
+# 测试里不关心日志内容, 但会**故意**制造一堆 WARNING (坏消息/超长行/慢客户端)
+# —— 关掉它们, 否则 unittest 的输出会被这些预期内的告警淹没
+logging.getLogger("agent.ipc").setLevel(logging.CRITICAL)
+logging.getLogger("agent.ipc.local_server").setLevel(logging.CRITICAL)
+logging.getLogger("agent.test.ipc").setLevel(logging.CRITICAL)
+
+
+# ===========================================================================
+#  测试替身 / 工具
+# ===========================================================================
+class _RecordingWriter:
+    """最小的 StreamWriter 替身。
+
+    _ClientSession 只用 write / drain / close / wait_closed 四个方法, 所以不需要
+    真的 transport —— 这也是它能脱离 AF_UNIX 被单测的原因。
+
+    @param blocking True 时 drain() 会卡在 gate 上, 用来把"客户端消费不过来"
+                    这个状态**确定性地**造出来 (否则要靠塞满 socket 缓冲区, 很飘)。
+    """
+
+    def __init__(self, blocking: bool = False) -> None:
+        self.written = bytearray()
+        self.closed = False
+        self.drain_calls = 0
+        self._gate = asyncio.Event()
+        if not blocking:
+            self._gate.set()
+
+    def write(self, data: bytes) -> None:
+        self.written += data
+
+    async def drain(self) -> None:
+        self.drain_calls += 1
+        await self._gate.wait()
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
+
+    def release(self) -> None:
+        self._gate.set()
+
+
+def _short() -> bytes:
+    """一条**很短**的合法消息 (约 42 字节)。
+
+    超长行用例把上限压到 64~96 字节, 而一条真的 chat_input 光信封就 70+ 字节
+    —— 用它当"超长行后面的好消息"会连带被丢, 那是用例自己的错。所以这里用
+    空的 data + 短 topic。
+    """
+    return encode("ping", {}, timestamp=1000000000.0)
+
+
+async def _wait_until(predicate, timeout: float = 3.0, what: str = "条件") -> None:
+    """自旋等某个状态成立 (异步测试里等 accept / 等回调都靠它)。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("%s 在 %.1fs 内没有成立" % (what, timeout))
+
+
+def _command(topic: str = COMMAND_CHAT_INPUT, timestamp: float = None, **data) -> bytes:
+    """一条完整的 GUI 命令线。
+
+    @param timestamp None = 用当前时间; 显式给一个固定值可以让**行长可复现**
+                     (算"刚好卡在上限"的用例需要它)。
+    """
+    return encode(topic, data or {"text": "hi"}, timestamp=timestamp)
+
+
+# ===========================================================================
+#  平台 / 常量
+# ===========================================================================
+class TestPlatformAndDefaults(unittest.TestCase):
+    def test_unix_socket_supported_matches_platform(self):
+        expected = hasattr(socket, "AF_UNIX") and hasattr(asyncio, "start_unix_server")
+        self.assertEqual(UNIX_SOCKET_SUPPORTED, expected)
+        if sys.platform == "win32":
+            # 这一条是给"以后有人想在 Windows 上跑 Agent"留的说明
+            self.assertFalse(UNIX_SOCKET_SUPPORTED)
+
+    def test_default_path_is_protocol_path(self):
+        self.assertEqual(LocalServer().path, SOCKET_PATH)
+        self.assertEqual(SOCKET_PATH, "/tmp/agent.sock")
+        self.assertEqual(LocalServer("/tmp/other.sock").path, "/tmp/other.sock")
+
+    def test_default_queue_size_is_positive(self):
+        self.assertGreater(DEFAULT_QUEUE_SIZE, 0)
+
+    def test_repr(self):
+        server = LocalServer("/tmp/x.sock")
+        text = repr(server)
+        self.assertIn("/tmp/x.sock", text)
+        self.assertIn("running=False", text)
+        self.assertIn("clients=0", text)
+
+
+# ===========================================================================
+#  模式名大小写转换
+# ===========================================================================
+class TestModeConversion(unittest.TestCase):
+    def test_to_wire_from_state_enum(self):
+        # StateMachine.State.value 是小写, IPC 上必须是全大写
+        self.assertEqual(mode_to_wire(State.SLEEP), "SLEEP")
+        self.assertEqual(mode_to_wire(State.IDLE), "IDLE")
+        self.assertEqual(mode_to_wire(State.STUDY), "STUDY")
+        self.assertEqual(mode_to_wire(State.GAME), "GAME")
+
+    def test_to_wire_from_string(self):
+        self.assertEqual(mode_to_wire("study"), "STUDY")
+        self.assertEqual(mode_to_wire("STUDY"), "STUDY")
+        self.assertEqual(mode_to_wire("  game  "), "GAME")
+
+    def test_to_wire_rejects_bad_values(self):
+        for bad in ("banana", "", "  ", 123, None, ["study"]):
+            with self.assertRaises(IpcProtocolError):
+                mode_to_wire(bad)
+
+    def test_from_wire_is_lowercase(self):
+        self.assertEqual(mode_from_wire("STUDY"), "study")
+        self.assertEqual(mode_from_wire("game"), "game")
+        self.assertEqual(mode_from_wire(" Idle "), "idle")
+
+    def test_from_wire_rejects_bad_values(self):
+        for bad in ("banana", "", 1, None, {"mode": "study"}):
+            with self.assertRaises(IpcProtocolError):
+                mode_from_wire(bad)
+
+    def test_round_trip_matches_state_values(self):
+        for state in State:
+            self.assertEqual(mode_from_wire(mode_to_wire(state)), state.value)
+
+    def test_error_is_value_error(self):
+        # 与 protocol.py 的错误保持一致: 调用方 except ValueError 也能兜住
+        with self.assertRaises(ValueError):
+            mode_from_wire("nope")
+
+
+# ===========================================================================
+#  构造 / 注册 (不需要跑起来)
+# ===========================================================================
+class TestServerSkeleton(unittest.IsolatedAsyncioTestCase):
+    async def test_not_running_initially(self):
+        server = LocalServer("/tmp/nope.sock")
+        self.assertFalse(server.is_running)
+        self.assertEqual(server.client_count, 0)
+        self.assertEqual(server.received, 0)
+        self.assertEqual(server.dropped, 0)
+        self.assertEqual(server.pushed, 0)
+
+    async def test_push_without_clients_is_not_an_error(self):
+        server = LocalServer("/tmp/nope.sock")
+        self.assertEqual(await server.push(TOPIC_STATUS, {"mode": "IDLE"}), 0)
+
+    async def test_stop_without_start_is_noop(self):
+        server = LocalServer("/tmp/nope.sock")
+        await server.stop()
+        await server.stop()
+        self.assertFalse(server.is_running)
+
+    async def test_push_rejects_bad_payload(self):
+        # 参数写错要在**调用点**就炸, 而不是悄悄丢掉
+        server = LocalServer("/tmp/nope.sock")
+        with self.assertRaises(IpcProtocolError):
+            await server.push(TOPIC_STATUS, ["not", "an", "object"])
+
+    async def test_on_command_registers_and_clears(self):
+        server = LocalServer("/tmp/nope.sock")
+
+        def handler(action, payload):
+            return None
+
+        self.assertIs(server.on_command(handler), handler)
+        self.assertEqual(server._callbacks, [handler])
+        self.assertIsNone(server.on_command(None))
+        self.assertEqual(server._callbacks, [])
+
+    async def test_on_command_rejects_non_callable(self):
+        server = LocalServer("/tmp/nope.sock")
+        with self.assertRaises(IpcServerError):
+            server.on_command("not a function")
+
+    async def test_dispatch_ignores_unknown_topic(self):
+        server = LocalServer("/tmp/nope.sock")
+        seen = []
+        server.on_command(lambda a, p: seen.append((a, p)))
+
+        await server._dispatch("bogus_topic", {"x": 1})
+        self.assertEqual(seen, [], "未知 topic 必须忽略 (向前兼容)")
+        self.assertEqual(server.received, 1, "但它确实是一条解出来的消息")
+
+    async def test_dispatch_without_callback_is_ignored(self):
+        server = LocalServer("/tmp/nope.sock")
+        await server._dispatch(COMMAND_SWITCH_MODE, {"mode": "STUDY"})
+        self.assertEqual(server.received, 1)
+
+    async def test_dispatch_calls_sync_callbacks_in_order(self):
+        server = LocalServer("/tmp/nope.sock")
+        order = []
+        server.on_command(lambda a, p: order.append(("first", a, p)))
+        server.on_command(lambda a, p: order.append(("second", a, p)))
+
+        await server._dispatch(COMMAND_CHAT_INPUT, {"text": "你好"})
+        self.assertEqual(
+            order,
+            [
+                ("first", COMMAND_CHAT_INPUT, {"text": "你好"}),
+                ("second", COMMAND_CHAT_INPUT, {"text": "你好"}),
+            ],
+        )
+
+    async def test_dispatch_awaits_async_callbacks(self):
+        server = LocalServer("/tmp/nope.sock")
+        seen = []
+
+        async def slow(action, payload):
+            await asyncio.sleep(0)
+            seen.append((action, payload))
+
+        server.on_command(slow)
+        await server._dispatch(COMMAND_CHAT_INPUT, {"text": "x"})
+        self.assertEqual(seen, [(COMMAND_CHAT_INPUT, {"text": "x"})])
+
+    async def test_dispatch_survives_callback_exception(self):
+        server = LocalServer("/tmp/nope.sock")
+        seen = []
+
+        def boom(action, payload):
+            raise RuntimeError("回调炸了")
+
+        async def boom_async(action, payload):
+            raise RuntimeError("异步回调炸了")
+
+        server.on_command(boom)
+        server.on_command(boom_async)
+        server.on_command(lambda a, p: seen.append(a))
+
+        await server._dispatch(COMMAND_CHAT_INPUT, {"text": "x"})   # 不该抛
+        self.assertEqual(seen, [COMMAND_CHAT_INPUT], "一个回调炸了不该影响后面的")
+
+    async def test_note_drop_counts(self):
+        server = LocalServer("/tmp/nope.sock")
+        server._note_drop("whatever")
+        server._note_drop("again")
+        self.assertEqual(server.dropped, 2)
+
+
+# ===========================================================================
+#  空实现 (Windows 上的降级)
+# ===========================================================================
+class TestNullServer(unittest.IsolatedAsyncioTestCase):
+    async def test_interface_is_complete_and_silent(self):
+        server = NullServer(reason="测试用")
+        self.assertFalse(server.is_running)
+        self.assertEqual(server.client_count, 0)
+        self.assertIsNone(await server.stop())
+        self.assertEqual(await server.push(TOPIC_STATUS, {"mode": "IDLE"}), 0)
+
+        def handler(action, payload):
+            return None
+
+        self.assertIs(server.on_command(handler), handler)
+
+    async def test_start_does_not_raise(self):
+        server = NullServer(reason="测试用")
+        await server.start()          # 只记一条 WARNING, 不抛
+        self.assertFalse(server.is_running)
+
+
+# ===========================================================================
+#  build_ipc 的接线
+# ===========================================================================
+class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
+    async def test_returns_working_server_or_null_server(self):
+        server = build_ipc(None, {})
+        try:
+            if UNIX_SOCKET_SUPPORTED:
+                self.assertIsInstance(server, LocalServer)
+                self.assertEqual(server.path, SOCKET_PATH)
+            else:
+                self.assertIsInstance(server, NullServer)
+        finally:
+            await server.stop()
+
+    async def test_socket_path_comes_from_config(self):
+        if not UNIX_SOCKET_SUPPORTED:
+            self.skipTest("需要 AF_UNIX")
+        server = build_ipc(None, {"ipc": {"socket_path": "/tmp/from-config.sock"}})
+        try:
+            self.assertEqual(server.path, "/tmp/from-config.sock")
+        finally:
+            await server.stop()
+
+    async def test_bad_queue_size_falls_back_to_default(self):
+        if not UNIX_SOCKET_SUPPORTED:
+            self.skipTest("需要 AF_UNIX")
+        for bad in ("many", 0, -3, True, None):
+            server = build_ipc(None, {"ipc": {"queue_size": bad}})
+            try:
+                self.assertEqual(server.queue_size, DEFAULT_QUEUE_SIZE, repr(bad))
+            finally:
+                await server.stop()
+
+    async def test_chat_input_goes_to_bus(self):
+        from agent.ipc import _make_command_handler
+        from agent.io.chat_bus import ChatInputBus
+
+        bus = ChatInputBus()
+        handler = _make_command_handler(bus)
+
+        await handler(COMMAND_CHAT_INPUT, {"text": "帮我看看这个"})
+        event = bus.get_nowait()
+        self.assertIsNotNone(event)
+        self.assertEqual(event["source"], "gui", "GUI 来的消息要标成 gui")
+        self.assertEqual(event["text"], "帮我看看这个")
+
+    async def test_chat_input_without_text_is_ignored(self):
+        from agent.ipc import _make_command_handler
+        from agent.io.chat_bus import ChatInputBus
+
+        bus = ChatInputBus()
+        handler = _make_command_handler(bus)
+
+        for payload in ({}, {"text": ""}, {"text": "   "}, {"text": 42}):
+            await handler(COMMAND_CHAT_INPUT, payload)
+        self.assertEqual(bus.qsize(), 0)
+
+    async def test_chat_input_without_bus_is_ignored(self):
+        from agent.ipc import _make_command_handler
+
+        handler = _make_command_handler(None)
+        await handler(COMMAND_CHAT_INPUT, {"text": "喂"})   # 不该抛
+
+    async def test_unwired_commands_are_ignored_not_crashed(self):
+        from agent.ipc import _make_command_handler
+        from agent.io.chat_bus import ChatInputBus
+
+        bus = ChatInputBus()
+        handler = _make_command_handler(bus)
+
+        await handler(COMMAND_SWITCH_MODE, {"mode": "STUDY"})      # 还没接线
+        await handler(COMMAND_SWITCH_MODE, {"mode": "banana"})     # 非法模式
+        await handler(COMMAND_SWITCH_MODE, {})
+        await handler(COMMAND_NEXT_WALLPAPER, {})
+        await handler("something_new", {})
+
+        self.assertEqual(bus.qsize(), 0, "未接线的命令不能变成聊天输入")
+
+
+# ===========================================================================
+#  切帧 / 错误容忍 / 背压 (跨平台: 假 stream)
+# ===========================================================================
+class _SessionTestCase(unittest.IsolatedAsyncioTestCase):
+    max_line_bytes = MAX_LINE_BYTES
+    queue_size = 8
+
+    def setUp(self):
+        self.log = logging.getLogger("agent.test.ipc")
+        self.messages = []
+        self.drops = []
+
+    def make_session(self, data=b"", writer=None, on_message=None, feed_eof=True,
+                     max_line_bytes=None, queue_size=None):
+        limit = self.max_line_bytes if max_line_bytes is None else max_line_bytes
+        reader = asyncio.StreamReader(limit=limit + 1)
+        if data:
+            reader.feed_data(data)
+        if feed_eof:
+            reader.feed_eof()
+        writer = writer if writer is not None else _RecordingWriter()
+        session = _ClientSession(
+            reader=reader,
+            writer=writer,
+            on_message=on_message or (lambda t, d: self.messages.append((t, d))),
+            on_drop=self.drops.append,
+            max_line_bytes=limit,
+            queue_size=self.queue_size if queue_size is None else queue_size,
+            logger=self.log,
+        )
+        # run() 里会 close(), 幂等; 万一测试中途失败也不留 pending task
+        self.addAsyncCleanup(session.close)
+        return session, reader, writer
+
+    async def run_session(self, data=b"", **kwargs):
+        session, reader, writer = self.make_session(data, **kwargs)
+        await session.run()
+        return session, reader, writer
+
+
+class TestClientSessionFraming(_SessionTestCase):
+    async def test_single_message(self):
+        await self.run_session(_command(text="你好"))
+        self.assertEqual(self.messages, [(COMMAND_CHAT_INPUT, {"text": "你好"})])
+        self.assertEqual(self.drops, [])
+
+    async def test_two_messages_in_one_chunk(self):
+        data = _command(text="一") + _command(text="二")
+        session, _, _ = await self.run_session(data)
+        self.assertEqual([m[1]["text"] for m in self.messages], ["一", "二"])
+        self.assertEqual(session.received, 2)
+
+    async def test_message_split_across_chunks(self):
+        # 一次 TCP/unix 读常常只到一半, 必须能拼回来
+        session, reader, _ = self.make_session(feed_eof=False)
+        task = asyncio.create_task(session.run())
+        raw = _command(text="分两段")
+        reader.feed_data(raw[:10])
+        await asyncio.sleep(0)
+        self.assertEqual(self.messages, [], "半条消息不能被解析")
+        reader.feed_data(raw[10:])
+        reader.feed_eof()
+        await asyncio.wait_for(task, 2)
+        self.assertEqual(self.messages, [(COMMAND_CHAT_INPUT, {"text": "分两段"})])
+
+    async def test_crlf_is_tolerated(self):
+        await self.run_session(_command(text="crlf").rstrip(b"\n") + b"\r\n")
+        self.assertEqual(self.messages[0][1]["text"], "crlf")
+
+    async def test_empty_line_is_dropped_but_connection_survives(self):
+        session, _, _ = await self.run_session(b"\n" + _command(text="活着"))
+        self.assertEqual(session.dropped, 1)
+        self.assertEqual(len(self.drops), 1)
+        self.assertEqual(self.messages, [(COMMAND_CHAT_INPUT, {"text": "活着"})])
+
+    async def test_bad_json_is_dropped(self):
+        session, _, _ = await self.run_session(b"{not json}\n" + _command(text="ok"))
+        self.assertEqual(session.dropped, 1)
+        self.assertEqual(self.messages, [(COMMAND_CHAT_INPUT, {"text": "ok"})])
+
+    async def test_non_object_message_is_dropped(self):
+        session, _, _ = await self.run_session(b'{"topic":"x","data":1}\n')
+        self.assertEqual(session.dropped, 1)
+        self.assertEqual(self.messages, [])
+
+    async def test_missing_timestamp_is_dropped(self):
+        line = json.dumps({"topic": COMMAND_CHAT_INPUT, "data": {"text": "x"}})
+        session, _, _ = await self.run_session(line.encode() + b"\n")
+        self.assertEqual(session.dropped, 1, "timestamp 是协议必填字段")
+
+    async def test_invalid_utf8_is_dropped(self):
+        session, _, _ = await self.run_session(b"\xff\xfe\xfd\n" + _command(text="ok"))
+        self.assertEqual(session.dropped, 1)
+        self.assertEqual(len(self.messages), 1)
+
+    async def test_unknown_topic_reaches_upper_layer(self):
+        # 会话层只切帧, 不认识 topic —— 过滤是 LocalServer._dispatch 的事
+        await self.run_session(_command(topic="brand_new_thing", text="x"))
+        self.assertEqual(self.messages, [("brand_new_thing", {"text": "x"})])
+
+    async def test_many_bad_lines_do_not_close_connection(self):
+        data = b"garbage\n" * 20 + _command(text="最后一条")
+        session, _, _ = await self.run_session(data)
+        self.assertEqual(session.dropped, 20)
+        self.assertEqual(self.messages, [(COMMAND_CHAT_INPUT, {"text": "最后一条"})])
+
+    async def test_eof_with_partial_message_is_dropped(self):
+        session, _, _ = await self.run_session(b'{"topic":"chat_input","data":{')
+        self.assertEqual(session.dropped, 1)
+        self.assertEqual(self.messages, [])
+        self.assertEqual(self.drops, ["truncated at EOF"])
+
+    async def test_received_counter(self):
+        session, _, _ = await self.run_session(_command(text="a") + _command(text="b"))
+        self.assertEqual(session.received, 2)
+        self.assertEqual(session.dropped, 0)
+
+
+class TestClientSessionOversize(_SessionTestCase):
+    # 故意把上限压小, 方便造超长行。96 仍然装得下 _short() (约 42 字节)。
+    max_line_bytes = 96
+
+    async def test_oversize_line_is_dropped_once_and_connection_survives(self):
+        oversize = b"x" * 200 + b"\n"
+        session, _, _ = await self.run_session(oversize + _short())
+        self.assertEqual(session.dropped, 1, "一条超长行只能记一次")
+        self.assertEqual(self.messages, [("ping", {})])
+
+    async def test_two_oversize_lines(self):
+        session, _, _ = await self.run_session(
+            b"y" * 300 + b"\n" + b"z" * 300 + b"\n" + _short()
+        )
+        self.assertEqual(session.dropped, 2)
+        self.assertEqual(self.messages, [("ping", {})])
+
+    async def test_oversize_without_newline_closes_connection(self):
+        # 丢掉的内容超过预算 -> 认为对端在灌垃圾, 断开, 后面的消息不再处理
+        session, _, _ = await self.run_session(b"x" * 80000 + _short())
+        self.assertEqual(session.dropped, 1)
+        self.assertEqual(self.messages, [])
+        self.assertEqual(self.drops, ["oversize without newline"])
+
+    async def test_line_exactly_at_limit_is_ok(self):
+        # 上限内的消息不许被误杀。用固定 timestamp 让行长可复现:
+        # 先量出空消息有多长, 再补字段到"正好等于上限"。
+        base = _command(text="", timestamp=1700000000.5)
+        pad = 5
+        limit = len(base) - 1 + pad
+        raw = _command(text="a" * pad, timestamp=1700000000.5)
+        self.assertEqual(len(raw) - 1, limit, "用例构造错了")
+
+        session, _, _ = await self.run_session(raw, max_line_bytes=limit)
+        self.assertEqual(session.dropped, 0)
+        self.assertEqual(len(self.messages), 1)
+
+
+class TestClientSessionBackpressure(_SessionTestCase):
+    queue_size = 2
+
+    async def test_enqueue_writes_exact_bytes(self):
+        session, _, writer = self.make_session(feed_eof=False)
+        pump = asyncio.create_task(session._pump_loop())
+        session._pump = pump
+        payload = encode(TOPIC_STATUS, {"mode": "STUDY", "connected": True})
+        self.assertTrue(session.enqueue(payload))
+        await _wait_until(lambda: bytes(writer.written) == payload, what="字节写出")
+        self.assertEqual(writer.drain_calls, 1)
+
+    async def test_queue_full_drops_oldest_and_keeps_client(self):
+        writer = _RecordingWriter(blocking=True)
+        session, _, _ = self.make_session(feed_eof=False, writer=writer)
+        pump = asyncio.create_task(session._pump_loop())
+        session._pump = pump
+
+        first = encode(TOPIC_STATUS, {"n": 1})
+        second = encode(TOPIC_STATUS, {"n": 2})
+        third = encode(TOPIC_STATUS, {"n": 3})
+        fourth = encode(TOPIC_STATUS, {"n": 4})
+
+        # 第一条已经被取走并写进 writer, 现在 drain 卡住了
+        self.assertTrue(session.enqueue(first))
+        await _wait_until(lambda: bytes(writer.written) == first, what="第一条写出")
+
+        self.assertTrue(session.enqueue(second))
+        self.assertTrue(session.enqueue(third))
+        # 队列满了 -> 丢最旧的 second, 收下 fourth
+        self.assertFalse(session.enqueue(fourth))
+        self.assertFalse(session.closing, "消费不过来只能丢消息, 不能踢客户端")
+
+        writer.release()
+        expected = first + third + fourth
+        await _wait_until(lambda: bytes(writer.written) == expected, what="丢最旧后补上")
+        self.assertEqual(bytes(writer.written), expected)
+        self.assertNotIn(second, bytes(writer.written))
+
+    async def test_enqueue_after_close_returns_false(self):
+        session, _, _ = self.make_session(feed_eof=False)
+        await session.close()
+        self.assertTrue(session.closing)
+        self.assertFalse(session.enqueue(b"x\n"))
+
+    async def test_close_is_idempotent(self):
+        session, _, writer = self.make_session(feed_eof=False)
+        await session.close()
+        await session.close()
+        self.assertTrue(writer.closed)
+
+    async def test_enqueue_flood_does_not_block(self):
+        session, _, writer = self.make_session(feed_eof=False)
+        writer._gate.clear()               # 永远卡住 drain
+        pump = asyncio.create_task(session._pump_loop())
+        session._pump = pump
+
+        # 1000 条进去必须立刻返回 (靠丢最旧保持有界), 不能把调用方挂住
+        async def flood():
+            for i in range(1000):
+                session.enqueue(encode(TOPIC_STATUS, {"n": i}))
+
+        await asyncio.wait_for(flood(), 3)
+        self.assertFalse(session.closing)
+
+
+class TestClientSessionCallbacks(_SessionTestCase):
+    async def test_callback_exception_does_not_kill_session(self):
+        calls = []
+
+        def boom(topic, payload):
+            calls.append(topic)
+            raise RuntimeError("炸")
+
+        session, _, _ = await self.run_session(
+            _command(text="a") + _command(text="b"), on_message=boom
+        )
+        self.assertEqual(calls, [COMMAND_CHAT_INPUT, COMMAND_CHAT_INPUT])
+        self.assertEqual(session.received, 2, "回调抛错也要算收到了")
+
+    async def test_async_callback_is_awaited_in_order(self):
+        seen = []
+
+        async def handler(topic, payload):
+            await asyncio.sleep(0)
+            seen.append(payload["text"])
+
+        await self.run_session(
+            _command(text="1") + _command(text="2") + _command(text="3"),
+            on_message=handler,
+        )
+        self.assertEqual(seen, ["1", "2", "3"], "命令必须按顺序处理")
+
+    async def test_repr(self):
+        session, _, _ = await self.run_session(_command(text="x"))
+        self.assertIn("received=1", repr(session))
+
+
+# ===========================================================================
+#  真 socket 端到端 (POSIX only)
+# ===========================================================================
+@unittest.skipUnless(UNIX_SOCKET_SUPPORTED, "需要 AF_UNIX (Windows 的 CPython 不支持)")
+class TestLocalServerSocket(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ipc-server-")
+        self.path = os.path.join(self.tmp, "agent.sock")
+        self.servers = []
+
+    async def asyncTearDown(self):
+        for server in self.servers:
+            await server.stop()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def make_server(self, path=None, **kwargs):
+        # 注意用 `is None` 而不是 `or`: path="" 也是要测的输入
+        server = LocalServer(self.path if path is None else path, **kwargs)
+        self.servers.append(server)
+        return server
+
+    async def connect(self, path=None):
+        """连上并**等到 server 那边真的 accept 了**。
+
+        accept 是异步的: 刚 open_unix_connection 完, server._sessions 里还没有这个
+        连接, 这时候 push() 会当成"没有 GUI"直接丢掉。真实 GUI 是先连上再等推送,
+        不存在这个问题; 测试要自己等这一刻, 否则断言会变成随机失败。
+        """
+        reader, writer = await asyncio.open_unix_connection(path or self.path)
+        self.addAsyncCleanup(_close_writer, writer)
+        return reader, writer
+
+    async def wait_for_clients(self, server, count=1):
+        await _wait_until(
+            lambda: server.client_count == count, what="server accept %d 个连接" % count
+        )
+
+    # ---- 生命周期 ----
+    async def test_start_creates_socket_with_0600(self):
+        server = self.make_server()
+        await server.start()
+        self.assertTrue(server.is_running)
+        self.assertEqual(server.client_count, 0)
+        self.assertTrue(os.path.exists(self.path))
+        self.assertTrue(stat.S_ISSOCK(os.lstat(self.path).st_mode))
+        mode = stat.S_IMODE(os.lstat(self.path).st_mode)
+        self.assertEqual(mode, 0o600, "socket 权限应该是 %s, 实际 %s" % (oct(0o600), oct(mode)))
+
+    async def test_start_is_idempotent(self):
+        server = self.make_server()
+        await server.start()
+        await server.start()
+        self.assertTrue(server.is_running)
+
+    async def test_stop_unlinks_socket_file(self):
+        server = self.make_server()
+        await server.start()
+        await server.stop()
+        self.assertFalse(server.is_running)
+        self.assertFalse(os.path.exists(self.path), "stop() 必须把 socket 文件删掉")
+        with self.assertRaises((FileNotFoundError, ConnectionRefusedError, OSError)):
+            await asyncio.open_unix_connection(self.path)
+
+    async def test_parent_directories_are_created(self):
+        nested = os.path.join(self.tmp, "a", "b", "agent.sock")
+        server = self.make_server(path=nested)
+        await server.start()
+        self.assertTrue(os.path.exists(nested))
+
+    async def test_parent_that_is_a_file_is_refused(self):
+        blocker = os.path.join(self.tmp, "blocker")
+        with open(blocker, "w", encoding="utf-8") as handle:
+            handle.write("x")
+        server = self.make_server(path=os.path.join(blocker, "agent.sock"))
+        with self.assertRaises(IpcServerError):
+            await server.start()
+
+    async def test_empty_path_is_refused(self):
+        server = self.make_server(path="")
+        with self.assertRaises(IpcServerError):
+            await server.start()
+
+    async def test_regular_file_at_path_is_refused_not_deleted(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write("重要数据")
+        server = self.make_server()
+        with self.assertRaises(IpcServerError):
+            await server.start()
+        self.assertTrue(os.path.exists(self.path), "不是 socket 就不能删")
+        with open(self.path, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "重要数据")
+
+    async def test_stale_socket_file_is_replaced(self):
+        # 模拟上次被 kill -9: 文件还在, 但没人 listen
+        raw = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        raw.bind(self.path)
+        raw.close()
+        self.assertTrue(os.path.exists(self.path))
+
+        server = self.make_server()
+        await server.start()
+        self.assertTrue(server.is_running)
+        reader, _ = await self.connect()
+        await self.wait_for_clients(server)
+        await server.push(TOPIC_STATUS, {"mode": "IDLE"})
+        topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+        self.assertEqual(topic, TOPIC_STATUS)
+
+    async def test_live_instance_is_not_stolen(self):
+        first = self.make_server()
+        await first.start()
+
+        second = self.make_server()
+        with self.assertRaises(IpcServerError) as ctx:
+            await second.start()
+        self.assertIn("另一个 agent 实例", str(ctx.exception))
+
+        # 关键: 第一个实例的 socket 文件必须原封不动, 还能正常服务
+        self.assertTrue(os.path.exists(self.path))
+        self.assertTrue(first.is_running)
+        reader, _ = await self.connect()
+        await self.wait_for_clients(first)
+        await first.push(TOPIC_STATUS, {"mode": "GAME"})
+        topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+        self.assertEqual(data["mode"], "GAME")
+
+    # ---- 发送 ----
+    async def test_push_reaches_gui(self):
+        server = self.make_server()
+        await server.start()
+        reader, _ = await self.connect()
+        await self.wait_for_clients(server, 1)
+
+        sent = {"mode": "STUDY", "connected": True}
+        self.assertEqual(await server.push(TOPIC_STATUS, sent), 1)
+
+        line = await asyncio.wait_for(reader.readline(), 2)
+        topic, data = decode(line)
+        self.assertEqual(topic, TOPIC_STATUS)
+        self.assertEqual(data, sent)
+        self.assertEqual(server.pushed, 1)
+
+    async def test_push_broadcasts_to_all_clients(self):
+        server = self.make_server()
+        await server.start()
+        reader_a, _ = await self.connect()
+        reader_b, _ = await self.connect()
+        await self.wait_for_clients(server, 2)
+
+        self.assertEqual(await server.push("music", {"title": "歌"}), 2)
+        for reader in (reader_a, reader_b):
+            topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+            self.assertEqual((topic, data), ("music", {"title": "歌"}))
+
+    async def test_push_preserves_order(self):
+        server = self.make_server()
+        await server.start()
+        reader, _ = await self.connect()
+        await self.wait_for_clients(server, 1)
+
+        for i in range(20):
+            await server.push(TOPIC_STATUS, {"n": i})
+        got = []
+        for _ in range(20):
+            topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+            got.append(data["n"])
+        self.assertEqual(got, list(range(20)))
+
+    async def test_unicode_survives_the_socket(self):
+        server = self.make_server()
+        await server.start()
+        reader, _ = await self.connect()
+        await self.wait_for_clients(server, 1)
+
+        await server.push("llm", {"text": "你好, 世界 🌏"})
+        topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+        self.assertEqual(data["text"], "你好, 世界 🌏")
+
+    async def test_push_with_no_client_returns_zero(self):
+        server = self.make_server()
+        await server.start()
+        self.assertEqual(await server.push(TOPIC_STATUS, {"mode": "IDLE"}), 0)
+
+    async def test_slow_client_does_not_block_or_get_disconnected(self):
+        server = self.make_server(queue_size=2)
+        await server.start()
+        _, writer = await self.connect()          # 连上但不读
+        await self.wait_for_clients(server, 1)
+
+        payload = {"text": "x" * 4096}
+
+        async def flood():
+            for _ in range(500):
+                await server.push("llm", payload)
+
+        await asyncio.wait_for(flood(), 10)       # 不能挂住
+        self.assertEqual(server.client_count, 1, "消费不过来也不该被踢掉")
+        self.assertFalse(writer.is_closing())
+
+    # ---- 接收 ----
+    async def test_command_reaches_callback(self):
+        server = self.make_server()
+        seen = []
+        server.on_command(lambda action, payload: seen.append((action, payload)))
+        await server.start()
+
+        _, writer = await self.connect()
+        writer.write(encode(COMMAND_CHAT_INPUT, {"text": "开灯"}))
+        await writer.drain()
+
+        await _wait_until(lambda: seen, what="命令回调")
+        self.assertEqual(seen, [(COMMAND_CHAT_INPUT, {"text": "开灯"})])
+        self.assertEqual(server.received, 1)
+
+    async def test_async_command_callback(self):
+        server = self.make_server()
+        seen = []
+
+        async def handler(action, payload):
+            await asyncio.sleep(0)
+            seen.append((action, payload))
+
+        server.on_command(handler)
+        await server.start()
+
+        _, writer = await self.connect()
+        writer.write(encode(COMMAND_SWITCH_MODE, {"mode": "STUDY"}))
+        await writer.drain()
+        await _wait_until(lambda: seen, what="异步命令回调")
+        self.assertEqual(seen, [(COMMAND_SWITCH_MODE, {"mode": "STUDY"})])
+
+    async def test_bad_line_does_not_break_connection(self):
+        server = self.make_server()
+        seen = []
+        server.on_command(lambda action, payload: seen.append(payload))
+        await server.start()
+
+        _, writer = await self.connect()
+        writer.write(b"{not json}\n")
+        writer.write(b"[]\n")
+        writer.write("\n".encode())
+        writer.write(encode(COMMAND_CHAT_INPUT, {"text": "还在"}))
+        await writer.drain()
+
+        await _wait_until(lambda: seen, what="坏消息之后的好消息")
+        self.assertEqual(seen, [{"text": "还在"}])
+        self.assertEqual(server.dropped, 3)
+        self.assertEqual(server.client_count, 1, "坏消息不能断连接")
+
+    async def test_gui_can_reconnect(self):
+        server = self.make_server()
+        await server.start()
+
+        _, first = await self.connect()
+        await self.wait_for_clients(server, 1)
+        first.close()
+        await self.wait_for_clients(server, 0)
+
+        reader, _ = await self.connect()
+        await self.wait_for_clients(server, 1)
+        await server.push(TOPIC_STATUS, {"mode": "SLEEP"})
+        topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+        self.assertEqual(data["mode"], "SLEEP")
+
+    async def test_stop_disconnects_clients(self):
+        server = self.make_server()
+        await server.start()
+        reader, _ = await self.connect()
+        await self.wait_for_clients(server, 1)
+
+        await server.stop()
+        try:
+            rest = await asyncio.wait_for(reader.read(), 2)
+        except (ConnectionResetError, BrokenPipeError):
+            rest = b""
+        self.assertEqual(rest, b"", "stop() 应该让 GUI 读到 EOF")
+        self.assertEqual(server.client_count, 0)
+
+
+async def _close_writer(writer):
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except (ConnectionResetError, BrokenPipeError):
+        pass
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

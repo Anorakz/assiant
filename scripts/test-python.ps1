@@ -26,6 +26,8 @@ $tests = @(
     "tests\test_vision.py",
     "tests\test_scheduler.py",
     "tests\test_main.py",
+    "tests\test_ipc_protocol.py",
+    "tests\test_ipc_local_server.py",
     "tests\test_chat_bus.py",
     "tests\test_io.py"
 )
@@ -38,6 +40,25 @@ foreach ($t in $tests) {
     Write-Host "=== $t ===" -ForegroundColor Cyan
     & $python $path
     if ($LASTEXITCODE -ne 0) { $failed += $t }
+}
+
+# tests/test_ipc.py is the one pytest-based file (pytest-asyncio fixtures).
+# It is run separately and ONLY when pytest is importable, so the tests above stay
+# runnable with a bare Python install (no extra packages).
+$pytestFile = "tests\test_ipc.py"
+$pytestPath = Join-Path $root $pytestFile
+Write-Host ""
+if (-not (Test-Path $pytestPath)) {
+    Write-Host "skip $pytestFile (file not found)" -ForegroundColor Yellow
+} else {
+    & $python -c "import pytest, pytest_asyncio" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "=== $pytestFile (pytest) ===" -ForegroundColor Cyan
+        & $python -m pytest $pytestPath
+        if ($LASTEXITCODE -ne 0) { $failed += $pytestFile }
+    } else {
+        Write-Host "skip $pytestFile (pytest / pytest-asyncio not installed)" -ForegroundColor Yellow
+    }
 }
 
 Write-Host ""
