@@ -86,8 +86,14 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
      （完成，本提交；含三方冲突护栏，-Test 可跑板端 ctest 16/16）
 
 -- B 打通连接（最硬的堵点：握手层是纯 HTTP，配对再好也连不上）--
-□ B1 moonlight_connection 改 HTTPS + 客户端证书（端口 47984），launch 查询串改用 LiGetLaunchUrlQueryParameters()
-     （现状：纯 HTTP 47989、无 TLS、无证书 → /serverinfo 的 PairStatus 恒 0、/launch 必然失败）
+■ B1 握手改走 HTTPS 47984 + 客户端证书 —— **实现放在 Python**（已评审：不在 C++ 里引 OpenSSL）
+     agent/net/sunshine_client.py 负责 /serverinfo /applist /launch /resume；
+     native 新增 moonlight.start_with_session() 只接字段，一次 HTTP 都不发；
+     launch 查询串追加 LiGetLaunchUrlQueryParameters()（由绑定导出，不抄一份进 Python）。
+     主机上已有别的客户端时 /launch 回 400，自动退到 /resume 加入同一会话（共存）。
+     （完成 15fb6a3 + 6251474 + c32c8b3；实测对照与分层见 docs/sunshine-pairing-findings.md §5.1）
+     （原描述"moonlight_connection 改 HTTPS"是当时的写法，实际按评审结论改在 Python 侧；
+       那条明文 HTTP 路径保留给无 TLS 的 GFE 主机，是否删除等 B3 板端跑通后再定）
 □ B2 板端配对落地：部署 creds/ + 校验 Sunshine 授权名单 + 重启 Sunshine + verify-authorized.sh 对照
 □ B3 Moonlight 连接验证：板端 moonlight.start → Sunshine 主机
 □ B4 moonlight.status() 返回 connected

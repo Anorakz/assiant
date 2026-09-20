@@ -140,6 +140,40 @@ step1 paired=1 → step2 OK → step3 OK (验签 PASS) → step4 paired=1
 
 ---
 
+### 5.1 握手分层：TLS 在 Python，会话在 C++（Phase 6 B1）
+
+上面这串 curl 能成、而 Agent 当时连不上，差别只在**传输层**。同一台主机、同一时刻的对照
+（2026-09-20；主机上另有一个 Moonlight 客户端正在串流）：
+
+| 请求 | 明文 HTTP 47989（无证书） | HTTPS 47984 + 客户端证书 |
+|---|---|---|
+| `/serverinfo` | `<PairStatus>0</PairStatus>`，另带 `<state>SUNSHINE_SERVER_BUSY</state>`、`<currentgame>881448767</currentgame>` | `PairStatus=1`、`appversion=7.1.431.-1` |
+| `/applist` | HTTP 200，但 `<root status_code="404"/>` —— 该接口不注册在明文端口上 | 两个应用：`Desktop=881448767`、`Steam Big Picture=1093255277` |
+| `/launch` | 同样 `<root status_code="404"/>` | 主机忙 → `400 An app is already running on this host`；改 `/resume` → `200 <sessionUrl0>rtsp://…:48010</sessionUrl0><resume>1</resume>` |
+
+> ⚠ Sunshine 的"404"是 **HTTP 200 + XML `<root status_code="404"/>`** —— 只看 HTTP 状态码
+> 会以为成功了。`native/moonlight_connection.cpp` 取的是 XML 里的 `status_code`，所以它报
+> `handshake failed: /launch status=404`，两者并不矛盾。
+> `/serverinfo` 还会返回 `<HttpsPort>47984</HttpsPort>`：HTTPS 端口本来就是主机告诉我们的。
+
+分层实现（`agent/net/sunshine_client.py` + `native/moonlight_adapter.*`）：
+
+| 步骤 | 谁做 | 怎么做的 |
+|---|---|---|
+| `/serverinfo` `/applist` `/launch` `/resume` | **Python** | `ssl.SSLContext(PROTOCOL_TLS_CLIENT)` + `load_cert_chain`，`verify_mode=CERT_NONE`（Sunshine 用自签证书，等价于 `curl -sk`）；证书/私钥缺了或坏了在**构造时**就报，不拖到握手 |
+| `LiStartConnection` | **C++** | `moonlight.start_with_session(app_version, gfe_version, codec_mode_support, session_url)` —— **一次 HTTP 都不发** |
+| `LiGetLaunchUrlQueryParameters()` | C++ 提供，Python 使用 | 经 `moonlight.launch_url_query_parameters()` 导出（本版本返回 `&corever=1`），避免把"Sunshine 扩展参数"抄一份进 Python |
+
+* **为什么不在 C++ 里做 TLS**：得给交叉编译再引一个 OpenSSL，而 Python 的 `ssl` 本来就在。
+  `native/moonlight_connection.cpp` 那条明文路径**保留**，留给无 TLS 的 GFE 主机。
+* **共存**：主机上已有应用时 `/launch` 的 400 不是失败（见上），`start_session()` 会自动退到
+  `/resume` 加入**同一个**会话，画面与对方一致；反向也安全 —— 我们 `stop()` 只断开自己的
+  RTSP 客户端，Sunshine 要等最后一个客户端断开才收应用，不会把对方踢下线。
+* 绑定是否真的通向库，由 `tests/test_native_integration.py` 在**板端**验（它按架构自跳，
+  PC/WSL 上是 skip）—— 因为 moonlight 只集成在交叉编译产物里，host 那份根本没有该符号。
+
+---
+
 ## 6. 历史弯路（留档，避免重犯）
 
 排查过程中我先后给出过两个**错误**结论，均已推翻：
