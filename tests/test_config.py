@@ -606,7 +606,15 @@ class TestShippedExamples(unittest.TestCase):
                 self.assertTrue(data, "%s.example.yaml 不该是空的" % name)
 
     def test_config_example_has_expected_sections(self):
-        data = cfg.load_config("config")
+        # ⚠ 这里必须**显式读 config.example.yaml**, 不能走 load_config("config"):
+        #   后者在存在真实 config/config.yaml 时会优先返回**它** —— 板端就是这样,
+        #   于是这个名字里写着 "example" 的测试实际在测运维手里的 live 配置,
+        #   只要那份配置旧一点(比如还留着 zmq 的 pub_bind)就会红, 而且红得莫名其妙。
+        #   (PC 上因为真实 config 被 gitignore、根本没这个文件, 所以永远看不到)
+        example = cfg.config_dir() / "config.example.yaml"
+        self.assertTrue(example.is_file(), "缺少 config.example.yaml: %s" % example)
+        data = cfg._read_yaml(example)
+
         for section in ("llm", "sunshine", "ipc"):
             self.assertIn(section, data)
         self.assertIn("mode", data["llm"])

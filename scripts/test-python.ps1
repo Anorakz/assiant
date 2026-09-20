@@ -51,8 +51,17 @@ Write-Host ""
 if (-not (Test-Path $pytestPath)) {
     Write-Host "skip $pytestFile (file not found)" -ForegroundColor Yellow
 } else {
-    & $python -c "import pytest, pytest_asyncio" 2>$null
-    if ($LASTEXITCODE -eq 0) {
+    # NOTE: never redirect a native command's stderr here. With
+    # $ErrorActionPreference = "Stop", PS 5.1 turns a redirected native stderr
+    # into a TERMINATING error -- and it does so even when stderr is empty,
+    # because it re-raises stderr left over from an EARLIER native command
+    # (tests\test_main.py logs deliberate tracebacks). That produced a bogus
+    # NativeCommandError that aborted the whole suite with exit 1.
+    # So: ask Python to report on STDOUT and judge by the text. find_spec() is
+    # used instead of import so a broken/missing module cannot raise either.
+    $depProbe = "import importlib.util as u; print(1 if (u.find_spec('pytest') and u.find_spec('pytest_asyncio')) else 0)"
+    $havePytest = (& $python -c $depProbe).Trim()
+    if ($havePytest -eq "1") {
         Write-Host "=== $pytestFile (pytest) ===" -ForegroundColor Cyan
         & $python -m pytest $pytestPath
         if ($LASTEXITCODE -ne 0) { $failed += $pytestFile }

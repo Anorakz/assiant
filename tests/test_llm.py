@@ -21,6 +21,7 @@ import asyncio
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -454,11 +455,17 @@ class TestCloudChat(unittest.IsolatedAsyncioTestCase):
             await provider.chat("x", {})
 
     async def test_missing_sdk_error_is_actionable(self):
-        # 不注入 client -> 真的去 import openai (宿主/板上都没装)
+        # 用 sys.modules["openai"] = None **模拟**"SDK 没装"。
+        #
+        # 不能指望它真的没装: 板端是有 openai 的 (部署 llm/ 时装的), 于是这里会
+        # 真的去连 API, 报出来的是 "Network is unreachable" 而不是我们想验的安装
+        # 提示 —— 环境一变测试就红, 而它验的本来不是环境。
+        # (sys.modules 里放 None 时, `import openai` 会抛 ImportError)
         backend = CloudBackend(api_key="sk-test")
         provider = LLMProvider(mode="cloud", cloud_backend=backend)
-        with self.assertRaises(OpenAIClientError) as ctx:
-            await provider.chat("x", {})
+        with mock.patch.dict(sys.modules, {"openai": None}):
+            with self.assertRaises(OpenAIClientError) as ctx:
+                await provider.chat("x", {})
         self.assertIn("openai", str(ctx.exception))
         self.assertIn("pip3 install openai", str(ctx.exception))
 

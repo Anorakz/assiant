@@ -790,6 +790,18 @@ class TestLocalServerSocket(unittest.IsolatedAsyncioTestCase):
         first = self.make_server()
         await first.start()
 
+        # ⚠ 顺序很关键: 先建立并确认**我们自己的**连接, 再去触发"第二个实例"。
+        #
+        # second.start() 里的"残留 socket 探测"会**真的连上** first, 而那条连接在
+        # first 侧是**异步**登记、**异步**注销的。如果先探测再连接, 那么
+        # "client_count >= 1" 完全可能被那条探测连接满足 —— push() 于是推给了它
+        # (板端日志里就是 fd=8 BrokenPipe), 我们自己的 reader 什么都收不到。
+        #
+        # 反过来写就没有这个歧义: 探测连接只可能**多出**一个瞬时 session, 而
+        # push() 是广播, 我们这条连接一定收得到。
+        reader, _ = await self.connect()
+        await self.wait_for_clients(first, 1)
+
         second = self.make_server()
         with self.assertRaises(IpcServerError) as ctx:
             await second.start()
@@ -798,8 +810,7 @@ class TestLocalServerSocket(unittest.IsolatedAsyncioTestCase):
         # 关键: 第一个实例的 socket 文件必须原封不动, 还能正常服务
         self.assertTrue(os.path.exists(self.path))
         self.assertTrue(first.is_running)
-        reader, _ = await self.connect()
-        await self.wait_for_clients(first)
+
         await first.push(TOPIC_STATUS, {"mode": "GAME"})
         topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
         self.assertEqual(data["mode"], "GAME")
