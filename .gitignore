@@ -105,3 +105,7 @@ config/*.yaml
 config/creds/
 *.pem
 *.key
+# ---- GUI 运行期产物 / 验收证据 ----
+temp/
+gui/config/gui.yaml
+*.bak
