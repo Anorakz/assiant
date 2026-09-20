@@ -72,13 +72,18 @@
 Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾）
 
 -- A 基础设施（先做 A0：它是所有同步动作的前提）--
-□ A0 板端 git 状态核实：弄清 llm/ sig/ net/ runtimes/ 是「已跟踪 / 被忽略 / 未跟踪」，
+■ A0 板端 git 状态核实：弄清 llm/ sig/ net/ runtimes/ 是「已跟踪 / 被忽略 / 未跟踪」，
      再决定同步方式是 git pull 还是 scp（否则后续同步可能覆盖板端工作）
-□ A1 scripts/deploy.ps1 重写：build → scp(.so + libmoonlight-common-c.so + config) → 板端 health_check.sh
+     （已核实；板端 origin 已改用 SSH + core.sshCommand=ssh -4）
+■ A1 scripts/deploy.ps1 重写：build → scp(.so + libmoonlight-common-c.so + config) → 板端 health_check.sh
      （现版本坏：部署到 agent 子目录会拷成 agent/agent、不传 libmoonlight、无 health check、ANSI 乱码）
-□ A2 scripts/health_check.sh（新，板端侧）：import agent_native / --check-config / 关键文件指纹
-□ A3 scripts/run-board-tests.ps1：SSH 到板端跑 Python 测试（板端已装 pytest + pytest-asyncio）
-□ A4 scripts/sync-gui.ps1：gui/ 同步到板端 + 板端本地 cmake 重编（GUI 是板端本地构建）
+     （完成 c707243）
+■ A2 scripts/health_check.sh（新，板端侧）：import agent_native / --check-config / 关键文件指纹
+     （完成 c707243）
+■ A3 scripts/run-board-tests.ps1：SSH 到板端跑 Python 测试（板端已装 pytest + pytest-asyncio）
+     （完成 d858fbe；顺带修掉它首次跑出来的 3 个板端测试失败）
+■ A4 scripts/sync-gui.ps1：gui/ 同步到板端 + 板端本地 cmake 重编（GUI 是板端本地构建）
+     （完成，本提交；含三方冲突护栏，-Test 可跑板端 ctest 16/16）
 
 -- B 打通连接（最硬的堵点：握手层是纯 HTTP，配对再好也连不上）--
 □ B1 moonlight_connection 改 HTTPS + 客户端证书（端口 47984），launch 查询串改用 LiGetLaunchUrlQueryParameters()
