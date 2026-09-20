@@ -1,0 +1,152 @@
+// ============================================================================
+//  gui/tests/test_settings_page.cpp — 设置页测试（T13）
+//
+//  验：载入配置、保存写回 gui.yaml（含**控制条独立时间**）、恢复默认只改界面不写文件、
+//  路径缺失不崩。全部用临时 gui.yaml，不碰生产配置。
+// ============================================================================
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDir>
+#include <QFile>
+#include <QLabel>
+#include <QPushButton>
+#include <QSpinBox>
+#include <QTemporaryDir>
+#include <QtTest/QtTest>
+
+#include "core/config_store.h"
+#include "ui/settings_page.h"
+
+class TestSettingsPage : public QObject {
+    Q_OBJECT
+
+private slots:
+    void loadFromConfigFillsWidgets();
+    void saveWritesGuiYamlWithSeparateTimeouts();
+    void restoreDefaultsOnlyTouchesUi();
+    void missingConfigIsReportedNotCrash();
+
+private:
+    QString writeConfig(QTemporaryDir& tmp, const QString& extra = QString());
+};
+
+QString TestSettingsPage::writeConfig(QTemporaryDir& tmp, const QString& extra)
+{
+    const QString path = tmp.path() + QStringLiteral("/gui.yaml");
+    QFile file(path);
+    file.open(QIODevice::WriteOnly);
+    file.write(QStringLiteral("theme: grey\n"
+                              "fullscreen: true\n"
+                              "start_page: system\n"
+                              "debug: true\n"
+                              "wake:\n"
+                              "  top: locked\n"
+                              "  bottom: active\n"
+                              "  left: active\n"
+                              "  right: locked\n"
+                              "  idle_ms: 7000\n"
+                              "video_overlay:\n"
+                              "  mode: locked\n"
+                              "  idle_ms: 1500\n"
+                              "input_source: pc\n").toUtf8());
+    file.write(extra.toUtf8());
+    file.close();
+    return path;
+}
+
+void TestSettingsPage::loadFromConfigFillsWidgets()
+{
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString path = writeConfig(tmp);
+
+    SettingsPage page;
+    page.loadFromConfig(path);
+    QVERIFY(page.debugCheck()->isChecked());
+    QCOMPARE(page.regionMode(QStringLiteral("top"))->currentData().toString(),
+             QStringLiteral("locked"));
+    QCOMPARE(page.regionMode(QStringLiteral("bottom"))->currentData().toString(),
+             QStringLiteral("active"));
+    QCOMPARE(page.regionIdleSpin()->value(), 7000);
+    QCOMPARE(page.overlayMode()->currentData().toString(), QStringLiteral("locked"));
+    QCOMPARE(page.overlayIdleSpin()->value(), 1500);          // 控制条自己的时间
+    QCOMPARE(page.startPageBox()->currentData().toString(), QStringLiteral("system"));
+    QCOMPARE(page.inputSourceBox()->currentData().toString(), QStringLiteral("pc"));
+    QVERIFY(page.pathLabel()->text().contains(path));
+    QVERIFY(page.aboutLabel()->text().contains(QStringLiteral("RK3568")));
+}
+
+void TestSettingsPage::saveWritesGuiYamlWithSeparateTimeouts()
+{
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString path = writeConfig(tmp);
+
+    SettingsPage page;
+    page.loadFromConfig(path);
+    QSignalSpy spy(&page, &SettingsPage::configSaved);
+
+    // 改：上区域改活动、区域时间 9000、控制条时间 800（**两个时间互相独立**）
+    page.regionMode(QStringLiteral("top"))->setCurrentIndex(
+        page.regionMode(QStringLiteral("top"))->findData(QStringLiteral("active")));
+    page.regionIdleSpin()->setValue(9000);
+    page.overlayIdleSpin()->setValue(800);
+    page.debugCheck()->setChecked(false);
+    page.saveButton()->click();
+    QCOMPARE(spy.count(), 1);
+
+    core::ConfigStore after;
+    QString error;
+    QVERIFY(after.load(path, &error));
+    QCOMPARE(after.value(QStringLiteral("wake.top")), QStringLiteral("active"));
+    QCOMPARE(after.value(QStringLiteral("wake.idle_ms")), QStringLiteral("9000"));
+    QCOMPARE(after.value(QStringLiteral("video_overlay.idle_ms")), QStringLiteral("800"));
+    QVERIFY(!after.boolValue(QStringLiteral("debug"), true));
+    // 没动过的项保持原样
+    QCOMPARE(after.value(QStringLiteral("wake.right")), QStringLiteral("locked"));
+    QCOMPARE(after.value(QStringLiteral("input_source")), QStringLiteral("pc"));
+}
+
+void TestSettingsPage::restoreDefaultsOnlyTouchesUi()
+{
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString path = writeConfig(tmp);
+
+    SettingsPage page;
+    page.loadFromConfig(path);
+    page.defaultsButton()->click();
+
+    // 界面回到默认
+    QVERIFY(!page.debugCheck()->isChecked());
+    QCOMPARE(page.regionMode(QStringLiteral("top"))->currentData().toString(),
+             QStringLiteral("locked"));
+    QCOMPARE(page.regionIdleSpin()->value(), 5000);
+    QCOMPARE(page.overlayIdleSpin()->value(), 3000);
+
+    // **文件没被动**（避免点错就改掉生产配置）
+    core::ConfigStore after;
+    QString error;
+    QVERIFY(after.load(path, &error));
+    QCOMPARE(after.value(QStringLiteral("wake.idle_ms")), QStringLiteral("7000"));
+    QCOMPARE(after.value(QStringLiteral("video_overlay.idle_ms")), QStringLiteral("1500"));
+    QVERIFY(after.boolValue(QStringLiteral("debug"), false));
+}
+
+void TestSettingsPage::missingConfigIsReportedNotCrash()
+{
+    SettingsPage page;
+    // 没设置路径 → 保存明确失败
+    QString error;
+    QVERIFY(!page.saveToConfig(&error));
+    QVERIFY(!error.isEmpty());
+
+    // 指向不存在的文件 → 载入只警告、保存失败，都不崩
+    page.loadFromConfig(QStringLiteral("/tmp/definitely-missing-gui.yaml"));
+    QVERIFY(!page.saveToConfig(&error));
+    page.defaultsButton()->click();     // 只改界面
+    QVERIFY(page.regionIdleSpin()->value() == 5000);
+}
+
+QTEST_MAIN(TestSettingsPage)
+#include "test_settings_page.moc"
