@@ -1,0 +1,137 @@
+# GUI ⇄ Agent 对接说明（给 Agent 侧完善用）
+
+> 本文只讲**GUI 这一端实际发什么、收什么、怎么反应**，用途是让你把 Agent 补齐。
+> 协议总说明在 `docs/ipc-protocol.md`（唯一真源）；GUI 自身的使用/配置见 `docs/gui.md`。
+> 文中每条载荷都对着 GUI 代码核过。
+
+---
+
+## 1. 传输
+
+| 项 | 值 |
+|---|---|
+| 通道 | Unix domain socket，默认 `/tmp/agent.sock`（`--socket` 可改） |
+| 角色 | **Agent 是服务端**（`bind`+`listen`+`accept`），**GUI 是客户端** |
+| 编码 | UTF-8，**一行一条 JSON**（NDJSON），不要多行、不要 BOM |
+| 方向 | 同一条连接**双向**：GUI → Agent 发命令；Agent → GUI 推状态 |
+| 重连 | GUI 断线后**每 1s 重试**；Agent 重启后重新 `accept` 即可 |
+
+GUI 侧日志（排查用）：连上打 `[ipc] 已连接`；每条收到的报文打 `[recv] <topic> {...}`；
+每个命令打 `[send] ...`。**Agent 只要保证"能连上 + 按行收发 JSON"**，界面就会跟着动。
+
+调试替代：`agent_gui --stdio` 走终端（`@switch_mode` 之类），`agent_gui <socket>` 等价 `--socket`。
+
+---
+
+## 2. Agent → GUI：推送（topic）
+
+信封（字段名固定）：
+
+```json
+{"topic": "status", "data": { ... }, "timestamp": 1730000000.123}
+```
+
+| topic | data 字段 | GUI 反应 |
+|---|---|---|
+| `status` | `mode`: `"SLEEP"｜"IDLE"｜"STUDY"｜"GAME"`（**必须大写**）；`connected`: bool | 顶栏三态结论 + 模式徽标；`mode=GAME` → 主区切**视频区**、下区域切**B站封面**；其它模式 → 主区还给壁纸、下区域切**音乐条**；右区域按钮组按模式变化（见 §4） |
+| `llm` | `text`: string | 追加一条助手气泡；并收起"思考中…"。**只在你回过 `chat_input` 之后才有意义** |
+| `wallpaper` | `path`: string（本地路径）；`index`: int | 设为全局壁纸（等比铺满 + 居中裁切，200ms 淡入）。同一个 `path` 重复推会被忽略；**文件读不到** → 兜底底色 + 主区橙色提示，程序不崩 |
+| `music` | `title`: string；`playing`: bool | 音乐条曲目名 + 播放/暂停图标。`title` 为空 → 显示"未播放" |
+
+**兼容性要点**
+
+- **未知 topic 不会被当成错误**：GUI 计入 `ignoredTopicCount` 后忽略。所以你**新增 topic 不会打崩 GUI**（但也不会显示，需要 GUI 侧加代码）。
+- **字段是部分更新**：只推你有的字段，缺的字段保持原值（例如 `status` 只带 `mode` 不会把 `connected` 清掉）。
+- `status.connected` 表示**串流主机（moonlight/sunshine）**是否就绪，**不是** IPC 链路本身。
+  不确定就别带这个字段，GUI 会按"主机状态未知"处理。
+
+---
+
+## 3. GUI → Agent：命令（action）
+
+信封（字段名固定）：
+
+```json
+{"action": "chat_input", "payload": {"text": "现在几点了"}}
+```
+
+| action | payload | GUI 里何处触发 | 期望 Agent 做什么 |
+|---|---|---|---|
+| `switch_mode` | `{"value": "SLEEP｜IDLE｜STUDY｜GAME"}` | 右区域模式按钮。当前是 IDLE/未知/非法值时给三个入口（睡眠/学习/游戏）；非空闲时只给「退出当前模式」，点它发 `IDLE` | 切模式（真正行为在你这边），然后**回推 `status{mode}`** 让界面同步 |
+| `chat_input` | `{"text": "..."}` | 对话区输入行 + 发送按钮（**仅"已连接"时可发**；断连时按钮禁用并提示） | 跑 LLM，然后推 `llm{text}`（若模式有变再推 `status`） |
+| `next_wallpaper` | `{}` | 主区右下角「下一张」 | 挑下一张壁纸并推 `wallpaper{path,index}` |
+| `next_bilibili` | `{}` | 视频控制条「下一集」 | 切下一集，并推你有的状态（`status`/封面等） |
+
+⚠ 注意 `switch_mode` 的键是 **`value`**（不是 `mode`）——与 `docs/ipc-protocol.md` §4 的 GUI 侧格式一致。
+
+GUI 在**未连接 / 主机未就绪**时不会发这些命令（会先在界面上提示"没发出去：与 Agent 未连接"）。
+
+---
+
+## 4. 界面状态是怎么由你的消息决定的
+
+**三态结论（顶栏那个圆点）**是 GUI 自己合成的，规则：
+
+| 情况 | 显示 |
+|---|---|
+| 从没连上过 Agent | 未连接（灰） |
+| 连过但当前断了 | 重连中（黄） |
+| Agent 在线、主机状态未知或就绪 | 已连接（绿） |
+| Agent 在线、但 `status.connected=false` | 重连中（黄） |
+
+**模式 → 界面**（`status.mode` 驱动）：
+
+| mode | 主区 | 下区域 | 右区域按钮组 |
+|---|---|---|---|
+| `GAME` | 视频区（本地文件可播；控制条内嵌） | B站封面（与音乐条**互斥**） | 只给「退出当前模式」（发 `IDLE`） |
+| `STUDY` / `SLEEP` | 留给壁纸 | 音乐条 | 只给「退出当前模式」（发 `IDLE`） |
+| `IDLE` / 未知 | 留给壁纸 | 音乐条 | 睡眠 / 学习 / 游戏 三选 |
+
+---
+
+## 5. 待你完善 Agent 才能"由占位变真"的清单
+
+界面里这些位置**现在是占位**（看得见、点了只给"未接入"说明、不发协议）。要让它们变真，
+需要你在 Agent 侧提供对应能力（同时告诉我，我加 GUI 侧的命令/字段）：
+
+| 界面位置 | 现状 | 建议的协议扩展 |
+|---|---|---|
+| 音乐条 歌手 / 专辑 / 播放进度 | 灰显 + `未接入` | `music` 增加 `artist` `album` `position_s` `duration_s` |
+| 音乐条 歌词字幕槽 | 灰显 + `未接入` | `music` 增加 `lyric`（或新 topic `lyric{line,next}`）；GUI 已预留 `LyricsProvider` 接口 |
+| 音乐条 上一首 / 播放暂停 / 下一首 | 占位 | 新命令 `music_prev` `music_play_pause` `music_next` |
+| 视频 上一集 / 倍速 | 占位（播放/暂停/全屏是**本地真功能**） | 新命令 `prev_bilibili` `set_speed{value}`；可选 topic `video{url}` 让 GUI 播串流 |
+| 下区域 B站封面缩略图 | `未接入` | 新 topic `bilibili{cover, title}`（封面路径/URL + 标题） |
+| 系统页 看门狗 | `未接入` | 新命令 `watchdog{enable}` + 新 topic `watchdog{enabled, last_feed}` |
+| SigLIP 视觉 | 固定只读块 | 按 D2 定案**不提供开关**；如需可配置再说 |
+
+另外两件事**本来就该 Agent 负责**（GUI 只发命令/显示结果）：模式（SLEEP/STUDY/GAME）的实际行为、
+LLM 调用与降级。GUI 的"模型测试页"会把配置写进 `gui/config/gui.yaml` 并同步到
+`llm/config/llm.env` 与 `config/config.yaml`（`local → edge`、`cloud → cloud`），
+**请让 Agent 读取这两个文件**而不是自己另存一份。
+
+---
+
+## 6. 没有真 Agent 时怎么测
+
+仓里留了假 Agent 脚本（`temp/gui/tools/`，`temp/` 不入库）：
+
+```bash
+# 推一条 status + 一条 music，并打印收到的命令
+python3 temp/gui/tools/t8_agent.py --socket /tmp/a.sock --mode IDLE --connected true \
+        --wallpaper /path/w.png --index 3 --hold 30 &
+./gui/build/agent_gui --windowed --socket /tmp/a.sock
+```
+
+`t7_agent.py`（推 music）、`t8_agent.py`（推 status/wallpaper + 打印 `RECV`）覆盖了主要 topic。
+验收脚本 `temp/gui/tools/t*_evidence.sh` 里能查到每类消息怎么造。
+
+---
+
+## 7. 不要破坏的约定（改 Agent 时请守住）
+
+1. `status.mode` 用**大写** `SLEEP/IDLE/STUDY/GAME`（GUI 按字面比较）。
+2. 一行一条 JSON；不要发非 JSON 的行（会被记成解析错误并计数）。
+3. `llm.text` 必须是字符串（GUI 直接当纯文本显示）。
+4. 新增字段随便加（GUI 忽略未知字段）；**新增命令要跟 GUI 同步**，否则界面上不会有入口。
+5. 断开时把连接关干净，让 GUI 走重连逻辑（不要只半关，GUI 会一直等）。
+6. `wallpaper.path` 用**绝对路径**；同一张重复推会被 GUI 忽略（想强制刷新就先换个 index/path）。

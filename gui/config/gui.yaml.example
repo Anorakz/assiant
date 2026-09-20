@@ -1,0 +1,76 @@
+# ============================================================================
+#  gui/config/gui.yaml.example — GUI 配置模板（**唯一真源**）
+#
+#  用法:
+#      cp gui/config/gui.yaml.example gui/config/gui.yaml
+#      然后按需修改；也可以在 GUI 的"设置页"里改（写回同一个文件）
+#
+#  ⚠ gui.yaml 是唯一真源：与它**同名**的配置项会被同步写进
+#      llm/config/llm.env   （LLM_MODEL_PATH / LLM_MODEL_NAME / LLM_CTX_SIZE / ...）
+#      config/config.yaml   （llm.mode / llm.model_path / llm.api_key / ...）
+#    映射表见 gui/src/core/config_sync.h 与 docs/gui-qt5-plan.md §5。
+#    同步是"文本级替换"：只改目标行的值，注释与顺序原样保留。
+# ============================================================================
+
+# ------------------------------------------------------------------ 界面 ---
+theme: grey              # 高级灰（当前只有这一档）
+fullscreen: true         # 启动即全屏 kiosk（--windowed 可临时覆盖）
+start_page: home         # home | model | system | settings
+debug: false             # 开：日志输出每条收到的报文与连接细节（界面不显示标记）
+
+# ------------------------------------------------- 唤醒（四区域，方案 §4）---
+wake:
+  top: locked            # locked = 常显；active = 空闲后自动隐藏
+  bottom: active
+  left: active
+  right: locked
+  idle_ms: 5000          # 统一休眠时间（四个活动区共用这一个值；**视频控制条不共享它**）
+
+# ------------------------------------------------- 视频控制条（内嵌在画面里）---
+# 与四个区域一样有 活动/锁定，但**时间单独设置**，不跟 wake.idle_ms 共享
+video_overlay:
+  mode: active           # locked = 常显；active = 空闲后自动隐藏（点一下再出现）
+  idle_ms: 3000          # 只作用于内嵌控制条
+
+# -------------------------------------------------------- 对话 / 输入 ---
+chat_channel: via_agent  # 主页面对话只走 agent（chat_input -> llm）
+input_source: keyboard   # keyboard | pc | terminal（只有 keyboard 会真控 onboard）
+onboard_auto: true       # 选"键盘"时自动弹 onboard，切走自动关
+
+# ------------------------------------------------------------ 系统监控 ---
+monitor_interval_ms: 1000
+
+# ------------------------------------------------- 视频（游戏模式主区）---
+video:
+  speed: 1.0             # 0.5 - 3.0
+  fullscreen: true
+
+# ------------------------------- LLM（会同步到 llm.env 与 config.yaml）---
+llm:
+  # local | cloud | disabled
+  #   同步到 config/config.yaml 时: local -> edge（板端 llama.cpp）, cloud -> cloud
+  #   默认沿用 Agent 当前状态(disabled)，改这里等于显式改 Agent 的推理位置
+  mode: disabled
+  local_model: /home/kickpi/model/Qwen3-0.6B-Q4_K_M.gguf
+  model_name: qwen3-0.6b
+  port: 9000
+  ctx_size: 2048
+  batch_size: 256
+  threads: 4
+  threads_batch: 4
+  api_key: sk-kickpi-llm-secret-2026
+  temperature: 0.7
+  # 云端参数（仅 mode: cloud 时 api_key 会写进 config.yaml）
+  cloud:
+    base: https://api.example.com/v1
+    model: gpt-4o-mini
+    key: ""
+    timeout_s: 30
+
+# ---------------------------------------------------------------------------
+# 注意
+#   1. SigLIP 是**固定**的（siglip_full.rknn），不在这里提供任何开关 ——
+#      按约定"统一为 sig 固定，只有 llm 配置可改"。
+#   2. wake / theme / debug / start_page / input_source / onboard_auto /
+#      monitor_interval_ms / video 这些是 GUI 私有项，不同步到任何其它文件。
+# ---------------------------------------------------------------------------
