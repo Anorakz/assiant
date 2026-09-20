@@ -52,6 +52,9 @@
 □ gui/src/main_window.h/.cpp：主窗口骨架
 □ gui/src/services/local_client.h/.cpp：Unix socket 客户端（Phase 4 完成）
 □ gui/src/services/input_capture.h/.cpp：Qt 键盘事件 → Command
+□ **【GUI 待删除】** 主机输入（host input）相关内容：moonlight-common-c 没有「主机 → 客户端」
+  输入接收 API，本方向已从 Phase 6 删除（C2/C3）。GUI 里凡涉及主机输入的 UI 入口 /
+   命令 / 文案 / 信号，需一并移除或明确标注「不提供」（对应 Phase 6 的 C4）
 □ gui/src/widgets/wallpaper_panel.h/.cpp：壁纸显示 + "换一张"按钮
 □ gui/src/widgets/chat_panel.h/.cpp：LLM 输出（只读 QTextEdit）+ 输入框（QLineEdit）
 □ gui/src/widgets/control_panel.h/.cpp：模式切换（QButtonGroup）+ LLM 模式（QComboBox）
@@ -66,19 +69,68 @@
 □ GUI 点"换一张"，Agent 收到命令
 □ GUI 单测：local_client、input_capture（QT_QPA_PLATFORM=offscreen） -->
 
-Phase 6 — 双机联调
-□ scripts/deploy.ps1：交叉编译 → scp → 板端 health_check.sh
-□ scripts/run-board-tests.ps1：通过 SSH 在板端跑 pytest
-□ scripts/sync-gui.ps1：PC 源码同步到板端（如果 GUI 在 PC 侧开发）
-□ Sunshine 配对流程（解决 PairStatus=0）
-□ Moonlight 连接验证：板端 moonlight.start → Sunshine 主机
-□ moonlight.status() 返回 connected
-□ Image RB 实流验证：板端读到真实解码帧
-□ Host Input RB 实流验证：主机原生键盘事件被板端读到
-□ send_key 端到端验证：板端调用 → Windows 主机锁屏
-□ Host Input Bus 三源合并验证：终端 / GUI / Host RB
-□ Agent 状态推送到 GUI 验证
-□ GUI 命令到 Agent 验证
+Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾）
+
+-- A 基础设施（先做 A0：它是所有同步动作的前提）--
+□ A0 板端 git 状态核实：弄清 llm/ sig/ net/ runtimes/ 是「已跟踪 / 被忽略 / 未跟踪」，
+     再决定同步方式是 git pull 还是 scp（否则后续同步可能覆盖板端工作）
+□ A1 scripts/deploy.ps1 重写：build → scp(.so + libmoonlight-common-c.so + config) → 板端 health_check.sh
+     （现版本坏：部署到 agent 子目录会拷成 agent/agent、不传 libmoonlight、无 health check、ANSI 乱码）
+□ A2 scripts/health_check.sh（新，板端侧）：import agent_native / --check-config / 关键文件指纹
+□ A3 scripts/run-board-tests.ps1：SSH 到板端跑 Python 测试（板端已装 pytest + pytest-asyncio）
+□ A4 scripts/sync-gui.ps1：gui/ 同步到板端 + 板端本地 cmake 重编（GUI 是板端本地构建）
+
+-- B 打通连接（最硬的堵点：握手层是纯 HTTP，配对再好也连不上）--
+□ B1 moonlight_connection 改 HTTPS + 客户端证书（端口 47984），launch 查询串改用 LiGetLaunchUrlQueryParameters()
+     （现状：纯 HTTP 47989、无 TLS、无证书 → /serverinfo 的 PairStatus 恒 0、/launch 必然失败）
+□ B2 板端配对落地：部署 creds/ + 校验 Sunshine 授权名单 + 重启 Sunshine + verify-authorized.sh 对照
+□ B3 Moonlight 连接验证：板端 moonlight.start → Sunshine 主机
+□ B4 moonlight.status() 返回 connected
+□ B5 Image RB 实流验证：板端读到真实解码帧
+
+-- C 输入方向 --
+□ C1 send_key 端到端验证：板端调用 → Windows 主机动作
+     （先用不锁屏动作：WIN 打开开始菜单 / ALT+F4 关测试窗口；锁屏作为最后一项单独做）
+□ C2 ~~Host Input RB 实流验证：主机原生键盘事件被板端读到~~ **【已删除】**
+     原因：moonlight-common-c 没有任何「主机 → 客户端」输入接收 API（只有 LiSendKeyboardEvent
+     等发送方向），原设计假设不成立，见 docs/sunshine-pairing-findings.md 同期调研
+□ C3 ~~Host Input Bus 三源合并验证（终端 / GUI / Host RB）~~ **【随之取消】**
+     第三源不存在；若要改成「终端 + GUI 两源」需另行讨论
+□ C4 GUI 侧删除主机输入相关内容（Phase 5 的 input_capture 之外，凡涉及「主机输入」的
+     UI 入口 / 命令 / 文案一并移除）—— 改动在 GUI，需与 GUI 侧同步
+
+-- D 状态与命令 --
+□ D1 IPC 命令格式统一为 GUI 实际实现：{"action": str, "payload": object}，一行一条
+     （docs/ipc-protocol.md §4 现写的是命令也放 topic 字段，与 GUI 不一致）
+□ D2 修 switch_mode 的键：payload 里是 value（不是 mode）
+□ D3 三份文档同步：ipc-protocol.md §4 / gui-agent-integration.md §3（那句「与 protocol §4 一致」是错的）/
+     gui/src/services/local_client.cpp 的注释
+□ D4 build_ipc(bus, config, runtime=None) 接线出方向推送（status / llm）
+     （现在只拿得到 bus，handle_event() 的回复又被主循环丢弃，推不出去）
+□ D5 Agent 状态推送到 GUI 验证
+□ D6 GUI 命令到 Agent 验证（switch_mode 往返 / chat_input 往返）
+□ D7 未接线的命令（next_wallpaper / next_bilibili）回推一条 llm 说明「功能未接入」
+     （下游属 Phase 7；已确认可接受，避免 GUI 上点了没反应）
+
+Phase 6 决策记录（已评审）
+1. IPC 命令格式**以 GUI 实际实现为准**：{"action","payload"}
+2. Host Input 方向**删除**（moonlight-common-c 无此能力），三源合并随之取消
+3. build_ipc 签名扩为 (bus, config, runtime=None)，保持向后兼容
+4. 板端**安装** pytest + pytest-asyncio（不再只跑 unittest）
+5. send_key 端到端先用**不锁屏**动作验证，锁屏最后单独做
+6. 不清理 Sunshine 侧历史遗留（重复证书条目 / min_log_level=debug）
+7. next_wallpaper / next_bilibili 本期只做「收到 + 回推说明」
+8. **Agent 只读 config/config.yaml**：不读 gui/config/gui.yaml，也不读 llm/config/llm.env
+
+项目归一化处理（新增，与 Phase 6 并行）
+□ 唯一真源收敛：命令信封以实际实现为准后，docs/ipc-protocol.md 必须同步改，避免"文档说 A、代码做 B"
+□ 配置入口收敛：只有 config/config.yaml 是 Agent 的运行时配置；
+     gui/config/gui.yaml 与 llm/config/llm.env 不再被 Agent 读取 —— 需明确「谁写、谁读」，
+     否则 GUI 模型测试页写三份、Agent 只认一份，改了不生效
+□ 清理并存实现：agent/ipc/server.py（收 {action,payload}）与 local_server.py（按 protocol 收 topic）
+     两份 server 现都躺在仓库里且格式不同 —— 二选一，另一份删除或明确标注废弃
+□ 板端 ⇄ PC 同步机制固化：明确 git pull 与 deploy.ps1 各自负责什么，杜绝"板端落后好几个提交却没人发现"
+□ 文档去重：gui-agent-integration.md §3 与 ipc-protocol.md §4 内容重叠且互相矛盾，合并到一处
 
 Phase 7 — 工具层
 □ tools/base.py：工具基类（name、schema、execute、权限、allowed_states）
