@@ -28,6 +28,7 @@ $tests = @(
     "tests\test_main.py",
     "tests\test_ipc_protocol.py",
     "tests\test_ipc_local_server.py",
+    "tests\test_sunshine_client.py",
     "tests\test_chat_bus.py",
     "tests\test_io.py"
 )
