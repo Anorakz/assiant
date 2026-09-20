@@ -25,11 +25,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from agent.io import _native as native_mod  # noqa: E402
 from agent.ipc import (  # noqa: E402
     COMMAND_CHAT_INPUT,
     UNIX_SOCKET_SUPPORTED,
@@ -38,6 +40,7 @@ from agent.ipc import (  # noqa: E402
     encode,
 )
 from agent.main import Runtime, run, setup_logging  # noqa: E402
+from agent.net import LaunchResult, ServerInfo, SessionStart, SunshineError  # noqa: E402
 
 #: 测试用的 socket 一律放在临时目录里, **绝不碰 /tmp/agent.sock** ——
 #: 板端跑测试时真 Agent 可能正占着那个路径, 撞上去只会得到"另一个实例在监听"。
@@ -692,6 +695,130 @@ class TestRunEntry(unittest.IsolatedAsyncioTestCase):
                     os.environ.pop(cfg.CONFIG_DIR_ENV, None)
                 else:
                     os.environ[cfg.CONFIG_DIR_ENV] = old
+
+
+class TestNativeSunshineHandshake(unittest.IsolatedAsyncioTestCase):
+    """native 那一步的两段式: Python 做 HTTPS 握手, native 只接字段 (Phase 6 B1)。
+
+    真实网络与真实 native 都替掉 —— 这里验的是**接线**:
+    握手结果有没有原样递到 start_with_session, 以及失败时话有没有说对地方。
+    """
+
+    def setUp(self):
+        native_mod.reset_native()
+
+    def tearDown(self):
+        native_mod.reset_native()
+
+    def _fake_native(self, start_ok=True, error=""):
+        fake = mock.MagicMock()
+        fake.moonlight.launch_url_query_parameters.return_value = "&corever=1"
+        fake.moonlight.start_with_session.return_value = start_ok
+        fake.moonlight.status.return_value = {"error": error}
+        native_mod.set_native(fake)
+        return fake
+
+    @staticmethod
+    def _fake_client(endpoint="resume", session_url="rtsp://192.168.137.1:48010"):
+        client = mock.MagicMock()
+        client.server_info.return_value = ServerInfo(
+            hostname="Anorak_Host",
+            app_version="7.1.431.-1",
+            gfe_version="3.23.0.74",
+            codec_mode_support=0x1F0301,
+            pair_status=1,
+        )
+        client.resolve_app_id.return_value = "881448767"
+        client.start_session.return_value = SessionStart(
+            LaunchResult(session_url=session_url, status_code=200), endpoint
+        )
+        return client
+
+    async def _run_with(self, fake_client, fake_native, **sunshine):
+        cfg = {"host": "192.168.137.1", "app": "Desktop"}
+        cfg.update(sunshine)
+        ctor = mock.patch("agent.net.SunshineClient", return_value=fake_client)
+        with ctor as patched:
+            rt = make_runtime(
+                config=quiet_config(sunshine=cfg), start_native=True
+            )
+            await rt.start()
+            try:
+                return rt, patched
+            finally:
+                await rt.stop()
+
+    async def test_handshake_result_is_handed_to_native(self):
+        fake_native = self._fake_native()
+        rt, patched = await self._run_with(self._fake_client(), fake_native)
+
+        self.assertEqual(rt.failures, [], "native 这步不该失败")
+
+        # 1) 参数原样过去: host/app/尺寸 + 握手拿到的三个字段 + sessionUrl
+        args = fake_native.moonlight.start_with_session.call_args[0]
+        self.assertEqual(args[:5], ("192.168.137.1", "Desktop", 1280, 720, 60))
+        self.assertEqual(
+            args[5:],
+            ("7.1.431.-1", "3.23.0.74", 0x1F0301, "rtsp://192.168.137.1:48010"),
+        )
+
+        # 2) 客户端是按 sunshine.* 配出来的, 且扩展参数取自 native (不抄进 Python)
+        client_kwargs = patched.call_args[1]
+        self.assertEqual(patched.call_args[0], ("192.168.137.1", 47984))
+        self.assertEqual(client_kwargs["launch_extra_query"], "&corever=1")
+        self.assertIsNone(client_kwargs["cert"], "没配 cert 就传 None, 不用空串")
+
+    async def test_https_port_can_be_overridden_by_config(self):
+        fake_native = self._fake_native()
+        _, patched = await self._run_with(
+            self._fake_client(), fake_native, https_port=47985,
+            cert="/tmp/client.pem", key="/tmp/client.key",
+        )
+        self.assertEqual(patched.call_args[0], ("192.168.137.1", 47985))
+        self.assertEqual(patched.call_args[1]["cert"], "/tmp/client.pem")
+        self.assertEqual(patched.call_args[1]["key"], "/tmp/client.key")
+
+    async def test_handshake_failure_is_contained_and_never_reaches_native(self):
+        fake_native = self._fake_native()
+        fake_client = mock.MagicMock()
+        fake_client.server_info.side_effect = SunshineError(
+            "HTTPS 401: 客户端证书未被主机授权"
+        )
+
+        rt, _ = await self._run_with(fake_client, fake_native)
+
+        # native 这步失败被记下, 但不能拦住后面的组件 (native 只是可选增强)
+        failed = [name for name, _ in rt.failures]
+        self.assertIn("native", failed)
+        self.assertIsNotNone(rt.bus, "native 失败不该影响其他组件")
+
+        # 握手都没成就绝不能去动 native (否则会把"会话被占"这类真原因盖掉)
+        fake_native.moonlight.start_with_session.assert_not_called()
+
+        detail = [d for name, d in rt.failures if name == "native"][0]
+        self.assertIn("401", str(detail), "要把主机的原话带出来")
+
+    async def test_native_failure_does_not_blame_the_handshake(self):
+        # 握手成功、native 失败 -> 提示必须指向 native, 不能再叫人去查证书
+        fake_native = self._fake_native(start_ok=False, error="LiStartConnection failed, rc=-1")
+
+        rt, _ = await self._run_with(self._fake_client(), fake_native)
+
+        detail = str([d for name, d in rt.failures if name == "native"][0])
+        self.assertIn("LiStartConnection failed", detail)
+        self.assertIn("握手本身是成功的", detail)
+        self.assertNotIn("证书", detail, "握手已经成功了, 不该再让人去查证书")
+
+    async def test_resume_endpoint_is_used_when_the_host_is_busy(self):
+        # 主机上挂着别的客户端时 start_session 会给 endpoint=resume;
+        # 这里确认 sessionUrl 照样被送到 native (共存路径不能只在单测里通)
+        fake_native = self._fake_native()
+        await self._run_with(
+            self._fake_client(endpoint="resume", session_url="rtsp://127.0.0.1:48010"),
+            fake_native,
+        )
+        args = fake_native.moonlight.start_with_session.call_args[0]
+        self.assertEqual(args[-1], "rtsp://127.0.0.1:48010")
 
 
 if __name__ == "__main__":

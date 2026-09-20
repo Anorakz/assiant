@@ -38,8 +38,11 @@ llm:
 sunshine:
   # 主机地址; 从板端访问宿主机时填宿主在局域网里的地址
   host: 192.168.137.1
-  # GameStream HTTP 端口 (握手 / serverinfo / pair)
+  # GameStream HTTP 端口 (配对用; /serverinfo /applist /launch 在它上面**没有**)
   port: 47989
+  # HTTPS 端口: /serverinfo /applist /launch /resume 都在这里, 且需要客户端证书。
+  # 缺这个键时代码按 47984 处理 —— 板端那份旧配置不改也能跑。
+  https_port: 47984
   # 应用名或 appid (Sunshine 的 /applist 里能看到)
   app: Desktop
   # 期望的流参数

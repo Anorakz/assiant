@@ -323,6 +323,67 @@ class Runtime:
         )
 
     # ---- 1) native ----
+    async def _sunshine_handshake(self, host: str, app: str, width: int, height: int, fps: int):
+        """Sunshine 的 HTTPS 握手 (47984 + 客户端证书), 返回 (ServerInfo, SessionStart)。
+
+        为什么握手在这一层而不是 C++: /serverinfo /applist /launch 都在 TLS +
+        客户端证书后面, 而 native/moonlight_connection.cpp 是手写的裸 socket HTTP
+        客户端 —— 要支持 TLS 就得给交叉编译再引一个 OpenSSL。Python 的 ssl 本来
+        就在, 所以这边拿到 app_version 与 sessionUrl0, 交给 native 的
+        start_with_session() 直接进 LiStartConnection (见 agent/net/sunshine_client.py)。
+
+        全是阻塞调用 -> 丢到线程里跑, 不占事件循环。
+        """
+        from agent.io._native import get_native
+        from agent.net import (
+            DEFAULT_HTTPS_PORT,
+            DEFAULT_TIMEOUT,
+            DEFAULT_UNIQUE_ID,
+            SunshineClient,
+            stream_mode,
+        )
+
+        cert = self._cfg("sunshine", "cert")
+        key = self._cfg("sunshine", "key")
+        https_port = int(self._cfg("sunshine", "https_port", default=DEFAULT_HTTPS_PORT))
+        unique_id = str(self._cfg("sunshine", "unique_id", default=DEFAULT_UNIQUE_ID))
+
+        # Sunshine 的扩展参数由 moonlight-common-c 说了算, 不抄一份常量进来。
+        # (host 构建没链接 moonlight, 会拿到空串 —— 那是正常的)
+        extra = ""
+        try:
+            extra = get_native().moonlight.launch_url_query_parameters()
+        except Exception as exc:  # noqa: BLE001 - 取不到就当没有扩展参数
+            self.log.debug("native: 取不到 launch_url_query_parameters (%s)", exc)
+
+        client = SunshineClient(
+            host,
+            https_port,
+            cert=cert or None,
+            key=key or None,
+            unique_id=unique_id,
+            timeout=DEFAULT_TIMEOUT,
+            launch_extra_query=extra or "",
+            logger=self.log,
+        )
+
+        loop = asyncio.get_running_loop()
+        info = await loop.run_in_executor(None, client.server_info)
+        self.log.info(
+            "sunshine: %s appversion=%s PairStatus=%s",
+            host, info.app_version, info.pair_status,
+        )
+        app_id = await loop.run_in_executor(None, client.resolve_app_id, app)
+        start = await loop.run_in_executor(
+            None, client.start_session, app_id, stream_mode(width, height, fps)
+        )
+        # 主机上挂着别的 Moonlight 客户端时走的是 /resume (共存), 这里记下来
+        self.log.info(
+            "sunshine: app=%s -> appid=%s (走 /%s) sessionUrl=%s",
+            app, app_id, start.endpoint, start.session_url,
+        )
+        return info, start
+
     async def _start_native(self) -> None:
         host = self._cfg("sunshine", "host")
         app = self._cfg("sunshine", "app")
@@ -344,13 +405,22 @@ class Runtime:
         async def _start() -> None:
             from agent.io._native import get_native, run_native
 
+            # 1) 握手 (HTTPS 47984 + 客户端证书) —— 失败会带着主机原话抛出来
+            info, start = await self._sunshine_handshake(
+                host, str(app), width, height, fps
+            )
+
+            # 2) 把握手结果交给 native, 由它进 LiStartConnection (不再发 HTTP)
             ok = await run_native(
                 "input_sender",
-                get_native().moonlight.start,
+                get_native().moonlight.start_with_session,
                 host, str(app), width, height, fps,
+                info.app_version, info.gfe_version, info.codec_mode_support,
+                start.session_url,
             )
             if not ok:
-                # 失败原因在 native 的 status().error 里; 拼一句可操作的提示
+                # 失败原因在 native 的 status().error 里。这里的措辞很关键:
+                # 握手已经成功, 所以别再让人去查 host/app/证书。
                 reason = ""
                 try:
                     status = get_native().moonlight.status()
@@ -358,9 +428,10 @@ class Runtime:
                 except Exception:  # noqa: BLE001
                     pass
                 raise RuntimeError(
-                    "moonlight.start(%s, %s) 失败: %s —— 检查 sunshine.host/app 是否可达, "
-                    "以及客户端证书 (sunshine.cert/key) 是否已配对"
-                    % (host, app, reason or "未返回原因")
+                    "moonlight.start_with_session(%s, %s) 失败: %s —— 握手本身是成功的 "
+                    "(appversion=%s, sessionUrl=%s), 所以问题在 native 侧 "
+                    "(解码器初始化 / 会话被占)"
+                    % (host, app, reason or "未返回原因", info.app_version, start.session_url)
                 )
 
         async def _stop() -> None:
