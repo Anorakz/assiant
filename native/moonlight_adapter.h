@@ -5,9 +5,9 @@
 //  ---------------------------------------------------------------------------
 //      MoonlightAdapter
 //        ├── 连接握手 (moonlight_connection) → LiStartConnection
-//        ├── 视频接收线程 (moonlight 内部): submitDecodeUnit (Annex-B 帧)
-//        │     → Decoder(H.265 硬解) → preprocess_frame
-//        │     → image_rb_ (256×256 RGB888)
+//        ├── 视频接收线程 (moonlight 内部): decoderSetup (协商结果)
+//        │     → Decoder(MPP 硬解) → submitDecodeUnit (Annex-B 帧)
+//        │     → preprocess_frame → image_rb_ (256×256 RGB888)
 //        └── 主机输入接收线程 (moonlight 内部): connectionStatusUpdate /
 //              moonlight 的输入回调 → host_input_rb_
 //
@@ -52,6 +52,24 @@ enum class AdapterState {
     kStopping,
 };
 
+/// moonlight 协商到的视频格式分类 (on_decoder_setup 用)
+enum class VideoFormatCheck {
+    kOk = 0,      ///< 能用, 编码格式见 out_codec
+    kTenBit,      ///< 10bit (HDR) —— I420 这条路表达不了, 明确拒绝
+    kYuv444,      ///< 4:4:4 —— 只支持 4:2:0
+    kUnknown,     ///< 既不是 H.264 也不是 H.265 (比如 AV1)
+};
+
+/// 把 moonlight 的 VIDEO_FORMAT_* 位掩码翻译成我们的编码格式。
+///
+/// @param video_format Limelight.h 里的 VIDEO_FORMAT_* 值
+/// @param out_codec    [out] kOk 时写入编码格式 (其它情况不动)
+/// @return 分类结果
+///
+/// @note 这里是**纯函数**且不 include Limelight.h: 宿主机(不链接 moonlight)
+///       也能单独测这段映射 —— 它是"协商到 10bit 要拒绝"这类判断的唯一出处。
+VideoFormatCheck classify_video_format(int video_format, VideoCodec* out_codec);
+
 class MoonlightAdapter {
 public:
     MoonlightAdapter();
@@ -95,6 +113,12 @@ public:
     std::size_t frames_pushed() const;
 
     // 回调入口 (public 是为了让 C 风格静态函数能转发进来; 不要直接调用)
+    /// 视频参数协商好了 —— 在这里按**协商到的编码格式**初始化解码器
+    /// @param video_format moonlight 的 VIDEO_FORMAT_* (见 Limelight.h)
+    /// @param width/height 流参数 (来自 StreamConfig, 不是屏幕分辨率)
+    /// @return false 表示解码器起不来 (会让 LiStartConnection 失败, 这是有意的:
+    ///         与其连上了却一帧都解不出来, 不如当场失败并说清原因)
+    bool on_decoder_setup(int video_format, int width, int height);
     /// @param annex_b  moonlight 给的 Annex-B 码流 (可能跨多个 buffer)
     /// @return true 表示这一帧处理成功
     bool on_video_frame(const std::uint8_t* annex_b, std::size_t size);

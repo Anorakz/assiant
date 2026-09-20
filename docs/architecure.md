@@ -45,7 +45,7 @@
 ```
 Sunshine 视频流
   → moonlight-common-c 接收 RTP
-  → FFmpeg-rk 解码
+  → Rockchip MPP 硬解 (decoder_mpp.cpp; 详见 docs/decoder-mpp.md)
   → ROI 裁剪 + 256×256 + RGB888
   → Image RingBuffer (lock-free, 300 帧)
   → pybind11: image_rb.read_latest()
@@ -156,7 +156,9 @@ D:\projects\agent\
 │   ├── image_rb.cpp/.h
 │   ├── host_input_rb.cpp/.h
 │   ├── moonlight_adapter.cpp/.h
-│   ├── decoder.cpp/.h
+│   ├── decoder.cpp/.h          ← 解码器对外接口 + 后端分发 + FFmpeg 软解
+│   ├── decoder_mpp.cpp         ← MPP 硬解后端 (RK3568 上真正用的那条路)
+│   ├── decoder_backend.h       ← 后端内部接口 (不属于对外 API)
 │   ├── input_sender.cpp/.h
 │   ├── binding.cpp
 │   └── third_party/

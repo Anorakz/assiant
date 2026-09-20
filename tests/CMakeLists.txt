@@ -51,10 +51,16 @@ agent_add_host_test(test_preprocess
     ../native/preprocess.cpp
 )
 
-# decoder: 骨架阶段只测 stub 契约 (不链接 FFmpeg)
+# decoder: host 上两个后端都编不进来 (没有 MPP / FFmpeg), 所以能测的是
+#   1) collapse_yuv420_to_i420 这个纯函数 (真正能验的正确性)
+#   2) Decoder 的契约: 非法入参不崩、没有可用后端时明确失败并给出原因、
+#      后端选择(kMpp/kFfmpegSw/kAuto)的行为
+# decoder_mpp.cpp 必须一起编: 里面有无 MPP 时的 make_mpp_backend() 工厂,
+# 少了它会链接失败。
 agent_add_host_test(test_decoder
     test_decoder.cpp
     ../native/decoder.cpp
+    ../native/decoder_mpp.cpp
 )
 
 # input_sender: stub 模式, 不链接 moonlight-common-c
@@ -78,6 +84,7 @@ agent_add_host_test(test_moonlight_adapter
     ../native/moonlight_adapter.cpp
     ../native/moonlight_connection.cpp
     ../native/decoder.cpp
+    ../native/decoder_mpp.cpp
     ../native/image_rb.cpp
     ../native/host_input_rb.cpp
     ../native/preprocess.cpp

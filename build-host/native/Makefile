@@ -187,6 +187,30 @@ decoder.cpp.s:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/decoder.cpp.s
 .PHONY : decoder.cpp.s
 
+decoder_mpp.obj: decoder_mpp.cpp.obj
+.PHONY : decoder_mpp.obj
+
+# target to build an object file
+decoder_mpp.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/decoder_mpp.cpp.obj
+.PHONY : decoder_mpp.cpp.obj
+
+decoder_mpp.i: decoder_mpp.cpp.i
+.PHONY : decoder_mpp.i
+
+# target to preprocess a source file
+decoder_mpp.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/decoder_mpp.cpp.i
+.PHONY : decoder_mpp.cpp.i
+
+decoder_mpp.s: decoder_mpp.cpp.s
+.PHONY : decoder_mpp.s
+
+# target to generate assembly for a file
+decoder_mpp.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f native\CMakeFiles\agent_native.dir\build.make native/CMakeFiles/agent_native.dir/decoder_mpp.cpp.s
+.PHONY : decoder_mpp.cpp.s
+
 host_input_rb.obj: host_input_rb.cpp.obj
 .PHONY : host_input_rb.obj
 
@@ -347,6 +371,9 @@ help:
 	@echo ... decoder.obj
 	@echo ... decoder.i
 	@echo ... decoder.s
+	@echo ... decoder_mpp.obj
+	@echo ... decoder_mpp.i
+	@echo ... decoder_mpp.s
 	@echo ... host_input_rb.obj
 	@echo ... host_input_rb.i
 	@echo ... host_input_rb.s

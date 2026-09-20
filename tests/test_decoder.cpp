@@ -4,14 +4,17 @@
 //  运行方式:
 //      scripts/test-host.ps1
 //
-//  host 构建 **不** 定义 AGENT_HAVE_FFMPEG (宿主机没装 FFmpeg), 所以这里能测
-//  的是两类东西:
+//  host 构建 **不** 定义 AGENT_HAVE_MPP / AGENT_HAVE_FFMPEG (宿主机两个都没有),
+//  所以这里能测的是三类东西:
 //
-//    1) NV12 → I420 转换  —— 纯函数, 不依赖 FFmpeg, 是真正能验的正确性
-//    2) Decoder 的状态机契约 —— 未初始化/非法入参时行为明确、不崩、不吐野指针
+//    1) collapse_yuv420_to_i420 / convert_nv12_to_i420 —— 纯函数, 两个后端共用,
+//       是真正能验的正确性 (含 stride 收拢、U/V 顺序、平面布局)
+//    2) Decoder 的契约 —— 未初始化/非法入参时行为明确、不崩、不吐野指针;
+//       以及**后端选择**: 没编进来的后端要明确失败并说清原因, 而不是假成功
+//    3) classify_video_format 在 test_moonlight_adapter.cpp 里
 //
-//  "真解出一帧" 必须在带硬解的板端做 (需要真实 H.264 码流 + rkvdec),
-//  那里由部署后的板端冒烟测试覆盖。
+//  "真解出一帧" 必须在板端做 (需要 MPP + 真实码流), 由板端冒烟测试覆盖:
+//      tests/board/mpp_decode_smoke.cpp + tests/data/color_*.h26x
 // ============================================================================
 
 #include "decoder.h"
@@ -19,13 +22,17 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
+using agent::collapse_yuv420_to_i420;
 using agent::convert_nv12_to_i420;
 using agent::Decoder;
+using agent::DecoderBackend;
 using agent::DecodeStatus;
 using agent::i420_frame_bytes;
 using agent::VideoCodec;
+using agent::YuvLayout;
 
 namespace {
 
@@ -64,6 +71,44 @@ Nv12 make_nv12(int w, int h, int y_stride, int uv_stride,
         for (int col = 0; col < w / 2; ++col) {
             f.uv[base + col * 2 + 0] = u_val;
             f.uv[base + col * 2 + 1] = v_val;
+        }
+    }
+    return f;
+}
+
+/// 一块独立平面的 YUV420 (I420 / YV12): Y / U / V 三块, 各自的行跨度可 > width
+struct Planar {
+    std::vector<std::uint8_t> y, u, v;
+    int y_stride = 0;
+    int uv_stride = 0;
+    int w = 0;
+    int h = 0;
+};
+
+/// @param swap_uv true 时把两个色度平面的**内容**对调 (模拟 YV12: 先 V 后 U)
+Planar make_planar(int w, int h, int y_stride, int uv_stride, std::uint8_t y_val,
+                   std::uint8_t u_val, std::uint8_t v_val, bool swap_uv = false) {
+    Planar f;
+    f.w = w;
+    f.h = h;
+    f.y_stride = y_stride;
+    f.uv_stride = uv_stride;
+    const int cw = w / 2;
+    const int ch = h / 2;
+    f.y.assign(static_cast<std::size_t>(y_stride) * h, 0xEE);
+    // 第一块色度平面 (I420 里是 U; YV12 里是 V)
+    f.u.assign(static_cast<std::size_t>(uv_stride) * ch, 0xEE);
+    f.v.assign(static_cast<std::size_t>(uv_stride) * ch, 0xEE);
+
+    for (int row = 0; row < h; ++row) {
+        for (int col = 0; col < w; ++col) {
+            f.y[static_cast<std::size_t>(row) * y_stride + col] = y_val;
+        }
+    }
+    for (int row = 0; row < ch; ++row) {
+        for (int col = 0; col < cw; ++col) {
+            f.u[static_cast<std::size_t>(row) * uv_stride + col] = swap_uv ? v_val : u_val;
+            f.v[static_cast<std::size_t>(row) * uv_stride + col] = swap_uv ? u_val : v_val;
         }
     }
     return f;
@@ -391,5 +436,274 @@ TEST(DecoderStub, CanInitAgainAfterRelease) {
     EXPECT_FALSE(d.init(1920, 1080, VideoCodec::kH264));
     d.release();
 
+    EXPECT_FALSE(d.is_initialized());
+}
+
+// ===========================================================================
+//  collapse_yuv420_to_i420: 独立平面 (I420 / YV12)
+//
+//  这一组是 board 上真解码之前的最后一道保险: MPP 给的是 I420 (planar) 还是
+//  NV12 (semi-planar) 由 mpp_frame_get_fmt() 决定, 两条路都得对。而 1272 这种
+//  不对齐的宽会带来 hor_stride=1280 —— stride 收拢错一点整幅图就斜掉。
+// ===========================================================================
+
+TEST(CollapseYuv420, PlanarI420PassthroughWithStrideCollapse) {
+    const int w = 8;
+    const int h = 4;
+    // stride 故意大于 width, 行尾填 0xEE 当"垃圾": 收拢对了就绝不会读到它
+    const Planar src = make_planar(w, h, /*y_stride=*/12, /*uv_stride=*/8,
+                                   /*y=*/100, /*u=*/120, /*v=*/140);
+
+    std::vector<std::uint8_t> out(i420_frame_bytes(w, h));
+    collapse_yuv420_to_i420(src.y.data(), src.u.data(), src.v.data(), src.y_stride,
+                            src.uv_stride, YuvLayout::kPlanar, /*uv_swapped=*/false,
+                            w, h, out.data());
+
+    const Planes p = split_i420(out, w, h);
+    EXPECT_EQ(p.y, std::vector<std::uint8_t>(p.y.size(), 100));
+    EXPECT_EQ(p.u, std::vector<std::uint8_t>(p.u.size(), 120));
+    EXPECT_EQ(p.v, std::vector<std::uint8_t>(p.v.size(), 140));
+}
+
+TEST(CollapseYuv420, PlanarYv12SwapsUv) {
+    const int w = 8;
+    const int h = 4;
+    // YV12: 内存里第一块色度是 V 不是 U。给 swap_uv=true, 期望输出仍然是 I420
+    const Planar src = make_planar(w, h, w, w, /*y=*/10, /*u=*/200, /*v=*/30,
+                                   /*swap_uv=*/true);
+
+    std::vector<std::uint8_t> out(i420_frame_bytes(w, h));
+    collapse_yuv420_to_i420(src.y.data(), src.u.data(), src.v.data(), src.y_stride,
+                            src.uv_stride, YuvLayout::kPlanar, /*uv_swapped=*/true, w, h,
+                            out.data());
+
+    const Planes p = split_i420(out, w, h);
+    EXPECT_EQ(p.u[0], 200) << "U 必须还原成真正的 U (不能把 V 当 U)";
+    EXPECT_EQ(p.v[0], 30);
+}
+
+TEST(CollapseYuv420, SemiPlanarNv12SplitsInterleavedUv) {
+    const int w = 8;
+    const int h = 4;
+    const Nv12 src = make_nv12(w, h, /*y_stride=*/16, /*uv_stride=*/16, 50, 60, 70);
+
+    std::vector<std::uint8_t> out(i420_frame_bytes(w, h));
+    collapse_yuv420_to_i420(src.y.data(), src.uv.data(), nullptr, src.y_stride,
+                            src.uv_stride, YuvLayout::kSemiPlanar, /*uv_swapped=*/false,
+                            w, h, out.data());
+
+    const Planes p = split_i420(out, w, h);
+    EXPECT_EQ(p.y, std::vector<std::uint8_t>(p.y.size(), 50));
+    EXPECT_EQ(p.u, std::vector<std::uint8_t>(p.u.size(), 60));
+    EXPECT_EQ(p.v, std::vector<std::uint8_t>(p.v.size(), 70));
+}
+
+TEST(CollapseYuv420, SemiPlanarNv21SwapsUv) {
+    const int w = 8;
+    const int h = 4;
+    // NV21: 交织平面里第一个字节是 V。用 make_nv12 把 u_val/v_val 对调来模拟
+    const Nv12 src = make_nv12(w, h, w, w, /*y=*/50, /*u_val=*/70, /*v_val=*/60);
+
+    std::vector<std::uint8_t> out(i420_frame_bytes(w, h));
+    collapse_yuv420_to_i420(src.y.data(), src.uv.data(), nullptr, src.y_stride,
+                            src.uv_stride, YuvLayout::kSemiPlanar, /*uv_swapped=*/true, w,
+                            h, out.data());
+
+    const Planes p = split_i420(out, w, h);
+    EXPECT_EQ(p.u[0], 60) << "NV21 的第一个字节是 V, 要当成 U 的邻居";
+    EXPECT_EQ(p.v[0], 70);
+}
+
+TEST(CollapseYuv420, RejectsOddDimensionsWithoutWriting) {
+    const int w = 7;  // 奇数
+    const int h = 4;
+    const Planar src = make_planar(8, h, 8, 8, 10, 20, 30);
+
+    std::vector<std::uint8_t> out(i420_frame_bytes(8, h), 0xAB);
+    const std::vector<std::uint8_t> before = out;
+    collapse_yuv420_to_i420(src.y.data(), src.u.data(), src.v.data(), 8, 8,
+                            YuvLayout::kPlanar, false, w, h, out.data());
+    EXPECT_EQ(out, before) << "奇数宽必须原样返回, 不许写半个像素";
+}
+
+TEST(CollapseYuv420, RejectsStrideSmallerThanWidth) {
+    const int w = 8;
+    const int h = 4;
+    const Planar src = make_planar(w, h, w, w, 10, 20, 30);
+
+    std::vector<std::uint8_t> out(i420_frame_bytes(w, h), 0xAB);
+    const std::vector<std::uint8_t> before = out;
+    // uv_stride < width 是明显不可能的输入
+    collapse_yuv420_to_i420(src.y.data(), src.u.data(), src.v.data(), w, /*uv_stride=*/4,
+                            YuvLayout::kPlanar, false, w, h, out.data());
+    EXPECT_EQ(out, before);
+}
+
+TEST(CollapseYuv420, PlanarRequiresBothChromaPlanes) {
+    const int w = 8;
+    const int h = 4;
+    const Planar src = make_planar(w, h, w, w, 10, 20, 30);
+
+    std::vector<std::uint8_t> out(i420_frame_bytes(w, h), 0xAB);
+    const std::vector<std::uint8_t> before = out;
+    // planar 布局下 v 不能为空 (semi-planar 才允许)
+    collapse_yuv420_to_i420(src.y.data(), src.u.data(), nullptr, w, w,
+                            YuvLayout::kPlanar, false, w, h, out.data());
+    EXPECT_EQ(out, before);
+}
+
+TEST(CollapseYuv420, SemiPlanarIgnoresNullV) {
+    const int w = 8;
+    const int h = 4;
+    const Nv12 src = make_nv12(w, h, w, w, 50, 60, 70);
+
+    std::vector<std::uint8_t> out(i420_frame_bytes(w, h));
+    // semi-planar 时第三个参数本来就该是 null, 不该因此拒绝
+    collapse_yuv420_to_i420(src.y.data(), src.uv.data(), nullptr, w, w,
+                            YuvLayout::kSemiPlanar, false, w, h, out.data());
+
+    const Planes p = split_i420(out, w, h);
+    EXPECT_EQ(p.u[0], 60);
+}
+
+// ===========================================================================
+//  后端选择: 没编进来的后端必须"明确失败 + 说清原因"
+//
+//  这正是旧实现的病根 —— 它用"解码器名字存不存在"来判断硬解可用, 于是
+//  hevc_v4l2m2m 明明开不起来却当成硬解, 软解回退永远不执行, 最后只对外丢一句
+//  "decoder init failed"。现在每个候选失败都会带上自己的原因。
+// ===========================================================================
+
+TEST(DecoderBackend, MppOnlyFailsWithReasonOnHost) {
+    Decoder d;
+
+    EXPECT_FALSE(d.init(1280, 720, VideoCodec::kH265, DecoderBackend::kMpp))
+        << "host 构建没有 MPP, kMpp 必须失败";
+    EXPECT_FALSE(d.is_initialized());
+
+    const std::string err = d.last_error();
+    EXPECT_NE(err.find("MPP"), std::string::npos)
+        << "失败原因必须点出是 MPP, 实际: " << err;
+    EXPECT_NE(err.find("AGENT_HAVE_MPP"), std::string::npos)
+        << "要说清是这一次构建没编进来, 而不是含糊的失败。实际: " << err;
+}
+
+TEST(DecoderBackend, FfmpegSwOnlyFailsWithReasonOnHost) {
+    Decoder d;
+
+    EXPECT_FALSE(d.init(1280, 720, VideoCodec::kH264, DecoderBackend::kFfmpegSw));
+    const std::string err = d.last_error();
+    EXPECT_NE(err.find("FFmpeg"), std::string::npos) << "实际: " << err;
+}
+
+TEST(DecoderBackend, AutoTriesBothAndReportsBothReasons) {
+    Decoder d;
+
+    EXPECT_FALSE(d.init(1280, 720, VideoCodec::kH265, DecoderBackend::kAuto));
+    const std::string err = d.last_error();
+    // kAuto = 先 MPP 后软解, 两个都不行时两边的理由都要留下
+    EXPECT_NE(err.find("MPP"), std::string::npos) << "实际: " << err;
+    EXPECT_NE(err.find("FFmpeg"), std::string::npos)
+        << "回退过去了也要说明它为什么也不行。实际: " << err;
+}
+
+TEST(DecoderBackend, AutoIsTheDefault) {
+    Decoder a;
+    Decoder b;
+
+    EXPECT_FALSE(a.init(1280, 720, VideoCodec::kH265));
+    EXPECT_FALSE(b.init(1280, 720, VideoCodec::kH265, DecoderBackend::kAuto));
+    // 不带参数 == 显式 kAuto (默认值不能变, 否则 adapter 的行为会跟着变)。
+    // 注意用 STREQ: 两个 const char* 用 EXPECT_EQ 比的是指针不是内容。
+    EXPECT_STREQ(a.last_error(), b.last_error());
+}
+
+TEST(DecoderBackend, ActiveBackendBeforeInitIsWhatWasRequested) {
+    Decoder d;
+
+    EXPECT_EQ(d.active_backend(), DecoderBackend::kAuto) << "默认是 kAuto";
+    EXPECT_FALSE(d.init(640, 480, VideoCodec::kH264, DecoderBackend::kMpp));
+    // 没生效时返回"请求的那个", 不假装成别的
+    EXPECT_EQ(d.active_backend(), DecoderBackend::kMpp);
+}
+
+TEST(DecoderBackend, LastErrorIsEmptyBeforeAnyFailure) {
+    Decoder d;
+    EXPECT_STREQ(d.last_error(), "");
+}
+
+TEST(DecoderBackend, InvalidArgumentsReportWhy) {
+    Decoder d;
+
+    EXPECT_FALSE(d.init(0, 720, VideoCodec::kH264));
+    EXPECT_EQ(d.status(), DecodeStatus::kInvalidArgument);
+    EXPECT_NE(std::string(d.last_error()).find("宽高"), std::string::npos)
+        << "非法宽高要说清楚, 实际: " << d.last_error();
+
+    EXPECT_FALSE(d.init(-1, -1, VideoCodec::kH265));
+    EXPECT_EQ(d.status(), DecodeStatus::kInvalidArgument);
+}
+
+TEST(DecoderBackend, DecodeAfterFailedInitSaysNotInitialized) {
+    Decoder d;
+    EXPECT_FALSE(d.init(1280, 720, VideoCodec::kH265, DecoderBackend::kMpp));
+
+    std::uint8_t* yuv = reinterpret_cast<std::uint8_t*>(0x1);
+    int w = 7;
+    int h = 9;
+    const std::uint8_t fake[4] = {0, 0, 0, 1};
+    EXPECT_FALSE(d.decode(fake, sizeof(fake), &yuv, &w, &h));
+    EXPECT_EQ(yuv, nullptr) << "失败时必须把出参清干净, 不能留野指针";
+    EXPECT_EQ(w, 0);
+    EXPECT_EQ(h, 0);
+}
+
+// ===========================================================================
+//  flush 的契约
+//
+//  flush 会给出**新的**借用指针, 这一点很要紧: 调用方在 decode() 拿到的指针在
+//  flush() 之后就失效了 (缓冲被下一帧覆盖)。板端冒烟测试第一版就是拿旧指针去读,
+//  直接段错误 —— 所以这里把"出参必须每次都给全/清干净"钉住。
+// ===========================================================================
+
+TEST(DecoderFlush, BeforeInitClearsOutParamsAndFails) {
+    Decoder d;
+
+    std::uint8_t* yuv = reinterpret_cast<std::uint8_t*>(0x1);
+    int w = 11;
+    int h = 13;
+    EXPECT_FALSE(d.flush(&yuv, &w, &h));
+    EXPECT_EQ(d.status(), DecodeStatus::kNotInitialized);
+    EXPECT_EQ(yuv, nullptr) << "flush 失败也要把出参清干净";
+    EXPECT_EQ(w, 0);
+    EXPECT_EQ(h, 0);
+}
+
+TEST(DecoderFlush, IsSafeWithoutOutParams) {
+    Decoder d;
+    // 老用法 (不带出参) 必须继续能编能跑
+    EXPECT_FALSE(d.flush());
+    EXPECT_EQ(d.status(), DecodeStatus::kNotInitialized);
+}
+
+TEST(DecoderFlush, AfterFailedInitStillFailsCleanly) {
+    Decoder d;
+    EXPECT_FALSE(d.init(1280, 720, VideoCodec::kH265, DecoderBackend::kMpp));
+
+    std::uint8_t* yuv = reinterpret_cast<std::uint8_t*>(0x1);
+    int w = 5;
+    int h = 6;
+    EXPECT_FALSE(d.flush(&yuv, &w, &h));
+    EXPECT_EQ(yuv, nullptr);
+    EXPECT_EQ(w, 0);
+    EXPECT_EQ(h, 0);
+}
+
+TEST(DecoderFlush, IsIdempotentOnAHostBuildWithoutBackends) {
+    Decoder d;
+    d.flush();
+    d.flush();
+    d.flush();
+    d.release();
     EXPECT_FALSE(d.is_initialized());
 }

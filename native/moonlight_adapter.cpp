@@ -35,12 +35,37 @@ extern "C" {
 namespace agent {
 namespace {
 
+/// moonlight 协议里的编码能力位 (Limelight.h 的 VIDEO_FORMAT_*)。
+///
+/// 为什么不直接 include Limelight.h 用那些宏: 这段映射是纯逻辑, 应该能在
+/// 宿主机上单独测, 而 host 构建根本不链接 moonlight。它们是**协议常量**,
+/// 不会跟着库版本变; 下面还有 static_assert 在交叉编译时和真头文件对一遍,
+/// 所以抄一份不会悄悄跑偏。
+constexpr int kFormatMaskH264 = 0x000F;
+constexpr int kFormatMaskH265 = 0x0F00;
+constexpr int kFormatMask10Bit = 0xAA00;
+constexpr int kFormatMaskYuv444 = 0xCC04;
+
+#ifdef AGENT_HAVE_MOONLIGHT
+static_assert(kFormatMaskH264 == VIDEO_FORMAT_MASK_H264, "H.264 掩码和 Limelight.h 不一致");
+static_assert(kFormatMaskH265 == VIDEO_FORMAT_MASK_H265, "H.265 掩码和 Limelight.h 不一致");
+static_assert(kFormatMask10Bit == VIDEO_FORMAT_MASK_10BIT, "10bit 掩码和 Limelight.h 不一致");
+static_assert(kFormatMaskYuv444 == VIDEO_FORMAT_MASK_YUV444, "444 掩码和 Limelight.h 不一致");
+#endif
+
 /// moonlight 的 submitDecodeUnit 没有 user context, 只能用单例找回实例。
 /// 用原子指针, 保证在 stop() 之后回调不会再摸到已析构的对象。
 std::atomic<MoonlightAdapter*> g_instance{nullptr};
 
 void set_log(const std::string& msg) {
     std::fprintf(stderr, "[moonlight] %s\n", msg.c_str());
+}
+
+/// "0x0100" 这样的十六进制, 用于把 moonlight 的视频格式码打进日志
+std::string to_hex(int value) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%#06x", value);
+    return std::string(buf);
 }
 
 #ifdef AGENT_HAVE_MOONLIGHT
@@ -60,6 +85,34 @@ void cb_conn_log(const char* format, ...);
 #endif
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+//  视频格式 → 编码格式 (纯函数, 宿主机可测)
+// ---------------------------------------------------------------------------
+VideoFormatCheck classify_video_format(int video_format, VideoCodec* out_codec) {
+    // 顺序有讲究: 先排除 10bit / 4:4:4, 再认编码。
+    // H265_MAIN10 同时落在 H265 掩码里, 如果先认编码就会把 10bit 当成能解的
+    // H.265 收下来 —— 然后解码器在运行时才发现格式不对。
+    if ((video_format & kFormatMask10Bit) != 0) {
+        return VideoFormatCheck::kTenBit;
+    }
+    if ((video_format & kFormatMaskYuv444) != 0) {
+        return VideoFormatCheck::kYuv444;
+    }
+    if ((video_format & kFormatMaskH265) != 0) {
+        if (out_codec != nullptr) {
+            *out_codec = VideoCodec::kH265;
+        }
+        return VideoFormatCheck::kOk;
+    }
+    if ((video_format & kFormatMaskH264) != 0) {
+        if (out_codec != nullptr) {
+            *out_codec = VideoCodec::kH264;
+        }
+        return VideoFormatCheck::kOk;
+    }
+    return VideoFormatCheck::kUnknown;
+}
 
 struct MoonlightAdapter::Impl {
     ImageRingBuffer image_rb;
@@ -125,14 +178,7 @@ bool MoonlightAdapter::start(const std::string& host,
     impl_->set_error("");
     impl_->state.store(static_cast<int>(AdapterState::kConnecting));
 
-    // ---- 1) 初始化硬解 (H.265) ----
-    if (!impl_->decoder.init(width, height, VideoCodec::kH265)) {
-        impl_->set_error("decoder init failed");
-        impl_->state.store(static_cast<int>(AdapterState::kIdle));
-        return false;
-    }
-
-    // ---- 2) HTTP 握手: /serverinfo → appversion ----
+    // ---- 1) HTTP 握手: /serverinfo → appversion ----
     const auto si = moonlight_connection::fetch_server_info(host);
     if (!si.ok) {
         char buf[256];
@@ -140,14 +186,13 @@ bool MoonlightAdapter::start(const std::string& host,
                       "handshake failed: /serverinfo status=%d (connect=%s)",
                       si.status_code, si.raw.empty() ? "no" : "yes");
         impl_->set_error(buf);
-        impl_->decoder.release();
         impl_->state.store(static_cast<int>(AdapterState::kIdle));
         return false;
     }
     set_log("serverinfo ok: host=" + si.hostname + " appversion=" + si.app_version +
             " pair_status=" + std::to_string(si.pair_status));
 
-    // ---- 3) HTTP 握手: /launch → sessionUrl0 ----
+    // ---- 2) HTTP 握手: /launch → sessionUrl0 ----
     char mode[64];
     std::snprintf(mode, sizeof(mode), "%dx%dx%d", width, height, fps);
     const auto lr = moonlight_connection::launch_app(host, /*app_id=*/"", /*app_name=*/app, mode,
@@ -158,17 +203,21 @@ bool MoonlightAdapter::start(const std::string& host,
                       "handshake failed: /launch status=%d %s",
                       lr.status_code, lr.status_message.c_str());
         impl_->set_error(buf);
-        impl_->decoder.release();
         impl_->state.store(static_cast<int>(AdapterState::kIdle));
         return false;
     }
 
-    // ---- 4) 交给 moonlight 接管 ----
+    // ---- 3) 交给 moonlight 接管 ----
+    //
+    // ⚠ 解码器**不在这里**初始化: 用什么编码 (H.264/H.265) 是 LiStartConnection
+    //   过程中协商出来的, 提前猜就是猜。真正的初始化在 cb_decoder_setup 里,
+    //   那里能拿到 NegotiatedVideoFormat。
+    //   失败也仍然是"快速失败": setup 返回非 0 会让 LiStartConnection 直接失败,
+    //   所以连上了却一帧解不出来的情况不会发生。
 #ifndef AGENT_HAVE_MOONLIGHT
     impl_->set_error(
         "moonlight integration not linked in this build "
         "(AGENT_HAVE_MOONLIGHT undefined); HTTP handshake succeeded");
-    impl_->decoder.release();
     impl_->state.store(static_cast<int>(AdapterState::kIdle));
     return false;
 #else
@@ -185,8 +234,9 @@ bool MoonlightAdapter::start(const std::string& host,
     sc.packetSize = 1024;
     sc.streamingRemotely = STREAM_CFG_AUTO;
     sc.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
-    // 只协商 H.265 (用户选择); 硬解走 hevc_v4l2m2m
-    sc.supportedVideoFormats = VIDEO_FORMAT_H265;
+    // 两种都报, 让服务端挑: 板端 MPP 对 H.264/H.265 都有硬解, 不挑食反而更兼容
+    // (以前只报 H.265, 服务端没开 HEVC 时根本连不上)。
+    sc.supportedVideoFormats = VIDEO_FORMAT_H264 | VIDEO_FORMAT_H265;
 
     // --- 解码器回调 ---
     DECODER_RENDERER_CALLBACKS dr;
@@ -223,7 +273,14 @@ bool MoonlightAdapter::start(const std::string& host,
                                      /*audioContext=*/nullptr, /*arFlags=*/0);
     if (rc != 0) {
         g_instance.store(nullptr);
-        impl_->set_error("LiStartConnection failed, rc=" + std::to_string(rc));
+        // 解码器起不来是最常见的失败原因, 把它的原话带上, 别只说"rc=-1"
+        const char* decoder_why = impl_->decoder.last_error();
+        std::string detail = "LiStartConnection failed, rc=" + std::to_string(rc);
+        if (decoder_why != nullptr && decoder_why[0] != '\0') {
+            detail += "; decoder: ";
+            detail += decoder_why;
+        }
+        impl_->set_error(detail);
         impl_->decoder.release();
         impl_->state.store(static_cast<int>(AdapterState::kIdle));
         return false;
@@ -278,8 +335,55 @@ std::size_t MoonlightAdapter::frames_pushed() const {
 }
 
 // ===========================================================================
-//  视频通路: Annex-B → 解码 → 预处理 → 写 Image RB
+//  视频通路: 协商 → 初始化解码器 → Annex-B → 解码 → 预处理 → 写 Image RB
 // ===========================================================================
+bool MoonlightAdapter::on_decoder_setup(int video_format, int width, int height) {
+    VideoCodec codec = VideoCodec::kH265;
+    switch (classify_video_format(video_format, &codec)) {
+        case VideoFormatCheck::kTenBit:
+            impl_->set_error("协商到 10bit 编码 (HDR), 当前只支持 8bit; "
+                             "请在 Sunshine 侧关掉 HDR / 10bit");
+            set_log("decoder setup rejected: 10bit format 0x" + to_hex(video_format));
+            return false;
+        case VideoFormatCheck::kYuv444:
+            impl_->set_error("协商到 4:4:4 编码, 当前只支持 4:2:0");
+            set_log("decoder setup rejected: 444 format 0x" + to_hex(video_format));
+            return false;
+        case VideoFormatCheck::kUnknown:
+            impl_->set_error("协商到不支持的视频格式 0x" + to_hex(video_format) +
+                             " (只支持 H.264 / H.265)");
+            set_log("decoder setup rejected: unknown format 0x" + to_hex(video_format));
+            return false;
+        case VideoFormatCheck::kOk:
+        default:
+            break;
+    }
+
+    if (width <= 0 || height <= 0) {
+        width = impl_->width;
+        height = impl_->height;
+    }
+
+    // 后端选择交给 Decoder 自己: kAuto = 先 MPP 硬解, 起不来才退 FFmpeg 软解,
+    // 并且会把"为什么没用上硬解"记在 last_error() 里。
+    if (!impl_->decoder.init(width, height, codec, DecoderBackend::kAuto)) {
+        impl_->set_error(std::string("decoder init failed: ") + impl_->decoder.last_error());
+        set_log(std::string("decoder init FAILED: ") + impl_->decoder.last_error());
+        return false;
+    }
+
+    // 板端确认走的是哪条路全靠这一行 (status() 里没有这个字段)
+    set_log(std::string("decoder ready: ") + impl_->decoder.active_decoder_name() +
+            (impl_->decoder.is_hardware() ? " [硬件]" : " [软件]") + " codec=" +
+            (codec == VideoCodec::kH265 ? "H.265" : "H.264") + " " +
+            std::to_string(width) + "x" + std::to_string(height));
+    const char* note = impl_->decoder.last_error();
+    if (note != nullptr && note[0] != '\0') {
+        set_log(std::string("decoder note: ") + note);
+    }
+    return true;
+}
+
 bool MoonlightAdapter::on_video_frame(const std::uint8_t* annex_b, std::size_t size) {
     if (annex_b == nullptr || size == 0) {
         return false;
@@ -363,14 +467,16 @@ void cb_decoder_setup_ok() {}
 
 int cb_decoder_setup(int videoFormat, int width, int height, int redrawRate, void* context,
                      int drFlags) {
-    (void)videoFormat;
-    (void)width;
-    (void)height;
     (void)redrawRate;
     (void)context;
     (void)drFlags;
-    // 解码器已在 start() 里初始化; moonlight 只要求这里返回 0
-    return 0;
+    MoonlightAdapter* self = g_instance.load();
+    if (self == nullptr) {
+        return -1;
+    }
+    // 返回非 0 会让 LiStartConnection 直接失败 —— 这正是想要的:
+    // 编解码对不上 / 硬解起不来时, 宁可在连接阶段就明确失败。
+    return self->on_decoder_setup(videoFormat, width, height) ? 0 : -1;
 }
 
 void cb_decoder_start() {

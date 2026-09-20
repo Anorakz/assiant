@@ -2,7 +2,7 @@
 □ image_rb.h/.cpp：固定容量 300 帧，支持 read_latest、read_by_timestamp
 □ host_input_rb.h/.cpp：固定容量 128 事件，read_latest、read_all
 □ moonlight_adapter.h/.cpp：LiStartConnection、视频接收线程、主机输入接收线程
-□ decoder_ffmpeg_rk.cpp：H.264/H.265 硬解，输出 YUV
+□ decoder.h/.cpp + decoder_mpp.cpp：H.264/H.265 硬解（Rockchip MPP），输出 YUV
 □ preprocess.cpp：ROI 裁剪 + 缩放 256×256 + RGB888
 □ input_sender.h/.cpp：封装 LiSendKeyboardEvent、LiSendMouseEvent
 □ host 单测：test_ring_buffer、test_image_rb、test_host_input_rb 全绿
@@ -46,7 +46,7 @@
 □ 板端跑通：C++ 发 switch_mode → Python 收到
 □ 单测：ipc 往返（PC 上跑） -->
 
-Phase 5 — GUI（板端 C++ Qt5）
+<!-- Phase 5 — GUI（板端 C++ Qt5）
 □ gui/CMakeLists.txt：Qt5 + AUTOMOC
 □ gui/src/main.cpp：入口
 □ gui/src/main_window.h/.cpp：主窗口骨架
@@ -64,7 +64,7 @@ Phase 5 — GUI（板端 C++ Qt5）
 □ 窗口正常显示
 □ Agent 切状态，GUI 更新
 □ GUI 点"换一张"，Agent 收到命令
-□ GUI 单测：local_client、input_capture（QT_QPA_PLATFORM=offscreen）
+□ GUI 单测：local_client、input_capture（QT_QPA_PLATFORM=offscreen） -->
 
 Phase 6 — 双机联调
 □ scripts/deploy.ps1：交叉编译 → scp → 板端 health_check.sh

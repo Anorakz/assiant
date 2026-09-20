@@ -24,13 +24,25 @@
 #include <string>
 
 using agent::AdapterState;
+using agent::classify_video_format;
 using agent::ImageRingBuffer;
 using agent::MoonlightAdapter;
+using agent::VideoCodec;
+using agent::VideoFormatCheck;
 
 namespace {
 
 /// 一个几乎不可能有服务的地址, 让 start() 快速失败在握手阶段
 const char* kBadHost = "127.0.0.1:9";
+
+// moonlight 的视频格式码 (Limelight.h 的 VIDEO_FORMAT_*)。这里写字面量是因为
+// host 构建不 include Limelight.h; decoder 侧的 static_assert 会在交叉编译时
+// 拿真头文件核对同一组值。
+constexpr int kFmtH264 = 0x0001;
+constexpr int kFmtH264High8444 = 0x0004;
+constexpr int kFmtH265 = 0x0100;
+constexpr int kFmtH265Main10 = 0x0200;
+constexpr int kFmtAv1 = 0x1000;
 
 }  // namespace
 
@@ -226,4 +238,85 @@ TEST(MoonlightAdapterTest, DestructorStopsCleanly) {
         ASSERT_TRUE(a.is_connected());
     }
     SUCCEED();
+}
+
+// ===========================================================================
+//  协商到的视频格式 → 编码格式
+//
+//  解码器什么时候初始化、用哪种编码, 全看这个映射。以前这里是写死的 H.265,
+//  服务端只给 H.264 时就会拿 H.265 解码器去解 H.264 的流。
+// ===========================================================================
+
+TEST(ClassifyVideoFormat, AcceptsH264AndH265) {
+    VideoCodec codec = VideoCodec::kH265;
+
+    EXPECT_EQ(classify_video_format(kFmtH264, &codec), VideoFormatCheck::kOk);
+    EXPECT_EQ(codec, VideoCodec::kH264);
+
+    EXPECT_EQ(classify_video_format(kFmtH265, &codec), VideoFormatCheck::kOk);
+    EXPECT_EQ(codec, VideoCodec::kH265);
+}
+
+TEST(ClassifyVideoFormat, RejectsTenBitBeforeLookingAtCodec) {
+    // H265_MAIN10 同时落在 H.265 掩码里 —— 必须先认出 10bit, 否则会被当成
+    // 能解的 H.265 收下, 然后解码器在运行期才发现格式不对。
+    VideoCodec codec = VideoCodec::kH264;
+    EXPECT_EQ(classify_video_format(kFmtH265Main10, &codec), VideoFormatCheck::kTenBit);
+    EXPECT_EQ(codec, VideoCodec::kH264) << "被拒绝时不该动 out 参数";
+}
+
+TEST(ClassifyVideoFormat, RejectsYuv444) {
+    VideoCodec codec = VideoCodec::kH265;
+    EXPECT_EQ(classify_video_format(kFmtH264High8444, &codec), VideoFormatCheck::kYuv444);
+}
+
+TEST(ClassifyVideoFormat, RejectsUnknownCodecs) {
+    VideoCodec codec = VideoCodec::kH265;
+    EXPECT_EQ(classify_video_format(kFmtAv1, &codec), VideoFormatCheck::kUnknown);
+    EXPECT_EQ(classify_video_format(0, &codec), VideoFormatCheck::kUnknown);
+}
+
+TEST(ClassifyVideoFormat, ToleratesNullOutCodec) {
+    // 只想问"能不能用"时不该要求必须给出参
+    EXPECT_EQ(classify_video_format(kFmtH265, nullptr), VideoFormatCheck::kOk);
+}
+
+// ===========================================================================
+//  on_decoder_setup: moonlight 协商完之后走这里
+// ===========================================================================
+
+TEST(AdapterDecoderSetup, RejectsTenBitWithActionableMessage) {
+    MoonlightAdapter a;
+
+    EXPECT_FALSE(a.on_decoder_setup(kFmtH265Main10, 1280, 720));
+    const std::string err = a.last_error();
+    EXPECT_NE(err.find("10bit"), std::string::npos) << "实际: " << err;
+    EXPECT_NE(err.find("Sunshine"), std::string::npos)
+        << "要说清去哪儿改, 不是只报错。实际: " << err;
+}
+
+TEST(AdapterDecoderSetup, RejectsYuv444) {
+    MoonlightAdapter a;
+
+    EXPECT_FALSE(a.on_decoder_setup(kFmtH264High8444, 1280, 720));
+    EXPECT_NE(a.last_error().find("4:4:4"), std::string::npos) << a.last_error();
+}
+
+TEST(AdapterDecoderSetup, RejectsUnknownFormat) {
+    MoonlightAdapter a;
+
+    EXPECT_FALSE(a.on_decoder_setup(kFmtAv1, 1280, 720));
+    EXPECT_NE(a.last_error().find("H.264"), std::string::npos) << a.last_error();
+}
+
+TEST(AdapterDecoderSetup, FailedDecodeInitSurfacesTheReason) {
+    MoonlightAdapter a;
+
+    // host 上 MPP/FFmpeg 都没编进来, 所以这里必然失败 —— 但关键是不能只给
+    // "decoder init failed", 必须带上后面那串原因。
+    EXPECT_FALSE(a.on_decoder_setup(kFmtH265, 1280, 720));
+    const std::string err = a.last_error();
+    EXPECT_NE(err.find("decoder init failed"), std::string::npos) << "实际: " << err;
+    EXPECT_GT(err.size(), std::string("decoder init failed: ").size() + 10)
+        << "失败原因不能是空的。实际: " << err;
 }

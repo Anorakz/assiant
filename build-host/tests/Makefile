@@ -264,6 +264,33 @@ __/native/decoder.cpp.s:
 	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/decoder.cpp.s
 .PHONY : __/native/decoder.cpp.s
 
+__/native/decoder_mpp.obj: __/native/decoder_mpp.cpp.obj
+.PHONY : __/native/decoder_mpp.obj
+
+# target to build an object file
+__/native/decoder_mpp.cpp.obj:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_decoder.dir\build.make tests/CMakeFiles/test_decoder.dir/__/native/decoder_mpp.cpp.obj
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/decoder_mpp.cpp.obj
+.PHONY : __/native/decoder_mpp.cpp.obj
+
+__/native/decoder_mpp.i: __/native/decoder_mpp.cpp.i
+.PHONY : __/native/decoder_mpp.i
+
+# target to preprocess a source file
+__/native/decoder_mpp.cpp.i:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_decoder.dir\build.make tests/CMakeFiles/test_decoder.dir/__/native/decoder_mpp.cpp.i
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/decoder_mpp.cpp.i
+.PHONY : __/native/decoder_mpp.cpp.i
+
+__/native/decoder_mpp.s: __/native/decoder_mpp.cpp.s
+.PHONY : __/native/decoder_mpp.s
+
+# target to generate assembly for a file
+__/native/decoder_mpp.cpp.s:
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_decoder.dir\build.make tests/CMakeFiles/test_decoder.dir/__/native/decoder_mpp.cpp.s
+	cd /d E:\rk3568\project\myproject\assitant\build-host && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test_moonlight_adapter.dir\build.make tests/CMakeFiles/test_moonlight_adapter.dir/__/native/decoder_mpp.cpp.s
+.PHONY : __/native/decoder_mpp.cpp.s
+
 __/native/host_input_rb.obj: __/native/host_input_rb.cpp.obj
 .PHONY : __/native/host_input_rb.obj
 
@@ -632,6 +659,9 @@ help:
 	@echo ... __/native/decoder.obj
 	@echo ... __/native/decoder.i
 	@echo ... __/native/decoder.s
+	@echo ... __/native/decoder_mpp.obj
+	@echo ... __/native/decoder_mpp.i
+	@echo ... __/native/decoder_mpp.s
 	@echo ... __/native/host_input_rb.obj
 	@echo ... __/native/host_input_rb.i
 	@echo ... __/native/host_input_rb.s

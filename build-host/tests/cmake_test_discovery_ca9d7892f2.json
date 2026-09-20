@@ -1,5 +1,5 @@
 {
-  "tests": 20,
+  "tests": 40,
   "name": "AllTests",
   "testsuites": [
     {
@@ -9,37 +9,37 @@
         {
           "name": "ProducesCorrectPlaneLayout",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 93
+          "line": 138
         },
         {
           "name": "SplitsInterleavedUvCorrectly",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 111
+          "line": 156
         },
         {
           "name": "CollapsesYStride",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 137
+          "line": 182
         },
         {
           "name": "CollapsesUvStride",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 155
+          "line": 200
         },
         {
           "name": "FullFrameRoundTrip",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 172
+          "line": 217
         },
         {
           "name": "OutputSizeMatchesI420Formula",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 213
+          "line": 258
         },
         {
           "name": "NullAndInvalidArgsAreSafe",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 229
+          "line": 274
         }
       ]
     },
@@ -50,67 +50,185 @@
         {
           "name": "ConstructsAndDestructsSafely",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 246
+          "line": 291
         },
         {
           "name": "FreshDecoderIsNotInitialized",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 255
+          "line": 300
         },
         {
           "name": "DecodeBeforeInitReturnsFalseAndClearsOutParams",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 265
+          "line": 310
         },
         {
           "name": "DecodeIsSafeWithNullOutParams",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 282
+          "line": 327
         },
         {
           "name": "InitRejectsNonPositiveDimensions",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 293
+          "line": 338
         },
         {
           "name": "DecodeRejectsNullDataOrZeroSize",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 307
+          "line": 352
         },
         {
           "name": "FlushBeforeInitFailsCleanly",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 319
+          "line": 364
         },
         {
           "name": "InitReturnsFalseWithoutFFmpeg",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 329
+          "line": 374
         },
         {
           "name": "InitIsSafeForBothCodecs",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 339
+          "line": 384
         },
         {
           "name": "InitIsIdempotentAndReleasesPreviousState",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 347
+          "line": 392
         },
         {
           "name": "ReleaseIsIdempotent",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 362
+          "line": 407
         },
         {
           "name": "ReleaseAfterFailedInitLeavesCleanState",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 374
+          "line": 419
         },
         {
           "name": "CanInitAgainAfterRelease",
           "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
-          "line": 386
+          "line": 431
+        }
+      ]
+    },
+    {
+      "name": "CollapseYuv420",
+      "tests": 8,
+      "testsuite": [
+        {
+          "name": "PlanarI420PassthroughWithStrideCollapse",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 450
+        },
+        {
+          "name": "PlanarYv12SwapsUv",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 468
+        },
+        {
+          "name": "SemiPlanarNv12SplitsInterleavedUv",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 485
+        },
+        {
+          "name": "SemiPlanarNv21SwapsUv",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 501
+        },
+        {
+          "name": "RejectsOddDimensionsWithoutWriting",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 517
+        },
+        {
+          "name": "RejectsStrideSmallerThanWidth",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 529
+        },
+        {
+          "name": "PlanarRequiresBothChromaPlanes",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 542
+        },
+        {
+          "name": "SemiPlanarIgnoresNullV",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 555
+        }
+      ]
+    },
+    {
+      "name": "DecoderBackend",
+      "tests": 8,
+      "testsuite": [
+        {
+          "name": "MppOnlyFailsWithReasonOnHost",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 577
+        },
+        {
+          "name": "FfmpegSwOnlyFailsWithReasonOnHost",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 591
+        },
+        {
+          "name": "AutoTriesBothAndReportsBothReasons",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 599
+        },
+        {
+          "name": "AutoIsTheDefault",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 610
+        },
+        {
+          "name": "ActiveBackendBeforeInitIsWhatWasRequested",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 621
+        },
+        {
+          "name": "LastErrorIsEmptyBeforeAnyFailure",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 630
+        },
+        {
+          "name": "InvalidArgumentsReportWhy",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 635
+        },
+        {
+          "name": "DecodeAfterFailedInitSaysNotInitialized",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 647
+        }
+      ]
+    },
+    {
+      "name": "DecoderFlush",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "BeforeInitClearsOutParamsAndFails",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 669
+        },
+        {
+          "name": "IsSafeWithoutOutParams",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 682
+        },
+        {
+          "name": "AfterFailedInitStillFailsCleanly",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 689
+        },
+        {
+          "name": "IsIdempotentOnAHostBuildWithoutBackends",
+          "file": "E:\\rk3568\\project\\myproject\\assitant\\tests\\test_decoder.cpp",
+          "line": 702
         }
       ]
     }

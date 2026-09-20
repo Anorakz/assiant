@@ -11,6 +11,7 @@ endif()
 pybind11_add_module(agent_native
     binding.cpp
     decoder.cpp
+    decoder_mpp.cpp
     image_rb.cpp
     host_input_rb.cpp
     preprocess.cpp
@@ -25,6 +26,18 @@ target_include_directories(agent_native PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # (MinGW 不认 #pragma comment(lib, ...))。sysroot 侧不需要额外库。
 if(WIN32)
     target_link_libraries(agent_native PRIVATE ws2_32)
+endif()
+
+# ------------------------------------------------------------------ RPATH -----
+# 板端 import agent_native 时报 "libmoonlight-common-c.so: cannot open shared
+# object file" 就是因为构建期的 rpath 指向宿主机目录, 而部署时只拷了 .so。
+# 把 $ORIGIN (自己所在目录) 写进 rpath, 两个库放在一起就能直接 import,
+# 不必再要求 LD_LIBRARY_PATH=.
+# 只在交叉编译时加: 宿主机构建产出的是 PE, rpath 没意义。
+if(CMAKE_CROSSCOMPILING AND UNIX)
+    set_target_properties(agent_native PROPERTIES
+        BUILD_RPATH "$ORIGIN"
+        INSTALL_RPATH "$ORIGIN")
 endif()
 
 # ------------------------------------------------------- moonlight-common-c ---
@@ -54,14 +67,42 @@ if(CMAKE_CROSSCOMPILING)
     target_link_libraries(agent_native PRIVATE moonlight-common-c)
 endif()
 
+# ------------------------------------------------------------- Rockchip MPP ---
+# 视频硬解走 MPP (Rockchip Media Process Platform): 板端有 /dev/mpp_service +
+# librockchip_mpp 1.3.8, 而 **没有** V4L2 M2M 解码设备 —— 所以原来那条
+# FFmpeg h264_v4l2m2m / hevc_v4l2m2m 的路在这块板子上根本走不通 (已删)。
+# 详见 docs/decoder-mpp.md。
+#
+# host 构建 **不** 打开 AGENT_HAVE_MPP: 宿主机没有 MPP, 而 decoder_mpp.cpp 在
+# 没有这个宏时只会提供一个返回 nullptr 的工厂, 不需要任何 MPP 头文件。
+if(CMAKE_CROSSCOMPILING)
+    set(_mpp_hdr "${CMAKE_SYSROOT}/usr/include/rockchip/rk_mpi.h")
+    set(_mpp_lib "${CMAKE_SYSROOT}/usr/lib/aarch64-linux-gnu/librockchip_mpp.so")
+    if(NOT EXISTS "${_mpp_hdr}" OR NOT EXISTS "${_mpp_lib}")
+        message(FATAL_ERROR
+            "sysroot 里找不到 Rockchip MPP 开发文件:\n"
+            "    头文件: ${_mpp_hdr}\n"
+            "    库:     ${_mpp_lib}\n"
+            "板端对应的包是 librockchip-mpp-dev (pkgconfig 名 rockchip_mpp), "
+            "把它装进 sysroot (见 docs/cross-build-rk3568.md 的 MPP 一节)。")
+    endif()
+
+    target_compile_definitions(agent_native PRIVATE AGENT_HAVE_MPP)
+    # 头文件在 <sysroot>/usr/include/rockchip/*.h, 彼此之间用相对 include,
+    # 所以源码里写 #include <rockchip/rk_mpi.h> 即可。
+    target_include_directories(agent_native PRIVATE "${CMAKE_SYSROOT}/usr/include")
+    target_link_libraries(agent_native PRIVATE rockchip_mpp)
+endif()
+
 # ---------------------------------------------------------------- FFmpeg -----
 # 板端 FFmpeg 4.2.7 的 dev 文件装在多架构目录里:
 #     <sysroot>/usr/include/aarch64-linux-gnu/libavcodec/avcodec.h
 # 而 toolchain.cmake 已经把 .../usr/include/aarch64-linux-gnu 加进 -isystem,
 # 所以源码里直接 #include <libavcodec/avcodec.h> 就能找到。
 #
-# host 构建 **不** 打开 AGENT_HAVE_FFMPEG: 宿主机没有这套头文件, 而且骨架
-# 阶段的 decoder stub 本来就不需要它 (decoder.cpp 里的 #include 被条件编译挡住)。
+# host 构建 **不** 打开 AGENT_HAVE_FFMPEG: 宿主机没有这套头文件, 而没有这个宏时
+# decoder.cpp 里的 FFmpeg 软解后端整个被条件编译挡掉, 只留纯函数和分发逻辑
+# (宿主机正好用它们测 Decoder 的契约)。
 if(CMAKE_CROSSCOMPILING)
     set(_ffmpeg_hdr "${CMAKE_SYSROOT}/usr/include/aarch64-linux-gnu/libavcodec/avcodec.h")
     if(NOT EXISTS "${_ffmpeg_hdr}")
@@ -72,9 +113,5 @@ if(CMAKE_CROSSCOMPILING)
     endif()
 
     target_compile_definitions(agent_native PRIVATE AGENT_HAVE_FFMPEG)
-
-    # 真正链接 FFmpeg。骨架阶段 decoder.cpp 不引用任何 libav* 符号, 所以现在
-    # 加上只是提前把链接链路打通 (并验证 sysroot 里的 .so 链接脚本可用)。
-    # 等 decoder.cpp 填了真实实现, 这里不用改。
     target_link_libraries(agent_native PRIVATE avcodec avutil)
 endif()

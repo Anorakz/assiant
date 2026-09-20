@@ -107,8 +107,32 @@ http://ports.ubuntu.com/ubuntu-ports/pool/universe/f/ffmpeg/
 > **这个 FFmpeg 没有 rkmpp 支持。** 在 `libavcodec.so.58.54.100` 里搜不到任何
 > rkmpp 符号（`rkmpp` / `h264_rkmpp` / `drm_prime` 全是 0 次）。
 > 它带的是 **V4L2 M2M** 硬解：`h264_v4l2m2m` / `hevc_v4l2m2m`。
-> 在 RK3568 上这条路径走内核 `rkvdec` / `VEPU`，**就是硬件解码**，
-> 所以 `decoder.cpp` 封的是它，而不是 rkmpp。
+
+> ⚠ **更新（板端实测）**：V4L2 M2M 这条路在这块板子上走不通 ——
+> `v4l2-ctl --list-devices` 里只有 rkisp 摄像头，**没有任何 V4L2 M2M 解码设备**
+> （`/dev/video-dec0` 是个写着 "dec" 的普通文件，不是设备节点）。
+> 那两个解码器虽然编在 libavcodec 里，`avcodec_open2()` 必然失败。
+> **视频硬解现在走 Rockchip MPP**，见 `docs/decoder-mpp.md`；
+> FFmpeg 只保留软件解码作为兜底（`libavcodec-dev` / `libavutil-dev` 仍然需要）。
+
+### 3.2.1 Rockchip MPP 开发文件
+
+好消息：**sysroot 里已经有了**，不需要额外补包。需要的东西是：
+
+```
+<sysroot>/usr/include/rockchip/rk_mpi.h          (以及 mpp_frame.h / mpp_buffer.h /
+                                                  mpp_packet.h / rk_type.h / rk_vdec_cfg.h)
+<sysroot>/usr/lib/aarch64-linux-gnu/librockchip_mpp.so      (链接名)
+<sysroot>/lib/aarch64-linux-gnu/librockchip_mpp.so.1        (运行库)
+<sysroot>/usr/lib/aarch64-linux-gnu/pkgconfig/rockchip_mpp.pc
+```
+
+板端对应的包是 `librockchip-mpp-dev`（pkgconfig 名 `rockchip_mpp`，Version 1.3.8）。
+`native/CMakeLists.txt` 在交叉编译时会检查上面两个文件，缺了直接
+`FATAL_ERROR` 报清楚路径。
+
+头文件之间是相对 include（`#include "rk_mpi_cmd.h"`），所以源码里写
+`#include <rockchip/rk_mpi.h>` 就行，CMake 会把 `<sysroot>/usr/include` 加进去。
 
 ### 3.3 Windows 上的两个坑
 

@@ -1,41 +1,40 @@
 // ============================================================================
-//  decoder.cpp — FFmpeg 硬解封装实现
+//  decoder.cpp — Decoder 的分发层 + YUV 收拢 + FFmpeg 软解后端
+//
+//  三部分
+//  ---------------------------------------------------------------------------
+//  1) collapse_yuv420_to_i420()  纯函数, 两个后端共用, 也是最好测的一块
+//  2) Decoder                    参数校验 + 选后端(含回退) + 状态转发
+//  3) FfmpegSwBackend            FFmpeg 软解 (AGENT_HAVE_FFMPEG 才真的实现)
 //
 //  编译期开关
 //  ---------------------------------------------------------------------------
-//  AGENT_HAVE_FFMPEG 打开时才会 #include FFmpeg 头文件并编入真实解码逻辑;
-//  关掉时退化成"参数校验 + 明确失败"的 stub。这样:
-//    · host 单测不需要宿主机装 FFmpeg (只测 NV12→I420 这个纯函数)
-//    · 交叉编译打开它, 用 sysroot 里的 FFmpeg 4.2.7
+//  两个宏都关掉时 (宿主机就是这样), 本文件仍然编译通过: 没有 FFmpeg 符号,
+//  工厂返回 nullptr, Decoder::init() 会**明确失败并说明原因**。这样:
+//    · host 单测不需要装 FFmpeg, 照样能测纯函数 + Decoder 的契约
+//    · 交叉编译打开 AGENT_HAVE_MPP / AGENT_HAVE_FFMPEG, 用 sysroot 里的库
 //
-//  解码路径
+//  回退到底怎么判 (旧实现的 bug 就在这)
 //  ---------------------------------------------------------------------------
-//    avcodec_find_decoder_by_name("h264_v4l2m2m")   硬解, 走内核 rkvdec/VEPU
-//      └─ 找不到 → 回退 "h264" / "hevc" 软解, is_hardware() 变 false
-//    avcodec_send_packet / avcodec_receive_frame
-//      └─ 硬解给的是 DRM_PRIME 包装的 AVFrame → av_hwframe_transfer_data 拷回
-//         CPU 可读的 NV12
-//    NV12 (带对齐 stride) → convert_nv12_to_i420 → 连续 I420
-//
-//  帧池与"借用指针"
-//  ---------------------------------------------------------------------------
-//  V4L2 M2M 的帧池很小, 不能长期持有 AVFrame; 所以每解出一帧就立刻转成
-//  I420 存进自己的缓冲 (pending_i420_), 并把 AVFrame 立刻 unref 还回帧池。
-//  对外交出的指针指向 pending_i420_, 因此"下一次 decode()/release() 前有效"。
-//  多余帧 (一次包吐多帧) 暂存在 queued_ 里, 由下一次 decode() 直接返回,
-//  不丢帧。
+//  旧代码: avcodec_find_decoder_by_name("hevc_v4l2m2m") 不为空 → 认为硬解可用
+//          → avcodec_open2 失败 → return false (软解回退永远不执行)
+//  现在:   候选后端**必须 init() 成功**才算可用, 失败的把原因记下来换下一个。
+//          "名字存在"和"能不能开"是两件事, 只有后者算数。
 // ============================================================================
 
 #include "decoder.h"
 
+#include "decoder_backend.h"
+
 #include <cstring>
+#include <string>
 #include <vector>
 
 #ifdef AGENT_HAVE_FFMPEG
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/error.h>
 #include <libavutil/frame.h>
-#include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
 }
@@ -44,19 +43,33 @@ extern "C" {
 namespace agent {
 
 // ===========================================================================
-//  NV12 → I420 (纯函数, 不依赖 FFmpeg, host 也能测)
+//  YUV420 → I420 收拢 (纯函数)
 // ===========================================================================
-void convert_nv12_to_i420(const std::uint8_t* nv12_y,
-                          const std::uint8_t* nv12_uv,
-                          int y_stride,
-                          int uv_stride,
-                          int width,
-                          int height,
-                          std::uint8_t* i420_out) {
-    if (nv12_y == nullptr || nv12_uv == nullptr || i420_out == nullptr) {
+void collapse_yuv420_to_i420(const std::uint8_t* y,
+                             const std::uint8_t* u,
+                             const std::uint8_t* v,
+                             int y_stride,
+                             int uv_stride,
+                             YuvLayout layout,
+                             bool uv_swapped,
+                             int width,
+                             int height,
+                             std::uint8_t* i420_out) {
+    // 参数非法就什么都不做 —— 宁可少解一帧, 也不要越界写坏内存
+    if (y == nullptr || u == nullptr || i420_out == nullptr) {
+        return;
+    }
+    if (layout == YuvLayout::kPlanar && v == nullptr) {
         return;
     }
     if (width <= 0 || height <= 0) {
+        return;
+    }
+    // YUV420 的色度是 2×2 抽样; 宽高是奇数就没法完整表达, 明确拒绝而不是猜
+    if ((width & 1) != 0 || (height & 1) != 0) {
+        return;
+    }
+    if (y_stride < width || uv_stride < width) {
         return;
     }
 
@@ -67,110 +80,79 @@ void convert_nv12_to_i420(const std::uint8_t* nv12_y,
     std::uint8_t* dst_u = dst_y + static_cast<std::size_t>(width) * height;
     std::uint8_t* dst_v = dst_u + static_cast<std::size_t>(cw) * ch;
 
-    // Y 平面: 逐行拷贝, 收拢 stride
+    // Y 平面: 逐行拷贝, 顺手把 stride 收成 width
     for (int row = 0; row < height; ++row) {
         std::memcpy(dst_y + static_cast<std::size_t>(row) * width,
-                    nv12_y + static_cast<std::size_t>(row) * y_stride,
+                    y + static_cast<std::size_t>(row) * y_stride,
                     static_cast<std::size_t>(width));
     }
 
-    // UV 平面: NV12 是 U,V 交织 (UVUV...), 需要拆成两个平面
-    for (int row = 0; row < ch; ++row) {
-        const std::uint8_t* src = nv12_uv + static_cast<std::size_t>(row) * uv_stride;
-        std::uint8_t* du = dst_u + static_cast<std::size_t>(row) * cw;
-        std::uint8_t* dv = dst_v + static_cast<std::size_t>(row) * cw;
-        for (int col = 0; col < cw; ++col) {
-            du[col] = src[col * 2 + 0];  // U
-            dv[col] = src[col * 2 + 1];  // V
+    // uv_swapped 的语义: **源里第一个色度字节/平面是 V 而不是 U** (NV21 / YV12)
+    if (layout == YuvLayout::kSemiPlanar) {
+        // NV12 / NV21: 一块交错平面, 每 2 字节一组
+        const int u_index = uv_swapped ? 1 : 0;  // U 在组内的下标
+        const int v_index = uv_swapped ? 0 : 1;  // V 在组内的下标
+        for (int row = 0; row < ch; ++row) {
+            const std::uint8_t* src = u + static_cast<std::size_t>(row) * uv_stride;
+            std::uint8_t* du = dst_u + static_cast<std::size_t>(row) * cw;
+            std::uint8_t* dv = dst_v + static_cast<std::size_t>(row) * cw;
+            for (int col = 0; col < cw; ++col) {
+                du[col] = src[col * 2 + u_index];
+                dv[col] = src[col * 2 + v_index];
+            }
+        }
+    } else {
+        // 已经是独立平面 (I420 / YV12): 各自收拢 stride。
+        // YV12 时传进来的 u 其实是 V, 所以要按"哪个才是真 U"取。
+        const std::uint8_t* src_u = uv_swapped ? v : u;
+        const std::uint8_t* src_v = uv_swapped ? u : v;
+        for (int row = 0; row < ch; ++row) {
+            std::memcpy(dst_u + static_cast<std::size_t>(row) * cw,
+                        src_u + static_cast<std::size_t>(row) * uv_stride,
+                        static_cast<std::size_t>(cw));
+            std::memcpy(dst_v + static_cast<std::size_t>(row) * cw,
+                        src_v + static_cast<std::size_t>(row) * uv_stride,
+                        static_cast<std::size_t>(cw));
         }
     }
 }
 
-#ifdef AGENT_HAVE_FFMPEG
-
-namespace {
-
-/// 像素格式的平面布局
-enum class PlaneLayout {
-    kNone,        ///< 不支持
-    kSemiPlanar,  ///< NV12 / NV21: UV 交织
-    kPlanar,      ///< I420 / YV12: U/V 各自独立平面
-};
-
-struct FmtInfo {
-    PlaneLayout layout = PlaneLayout::kNone;
-    bool uv_swapped = false;  ///< NV21 / YV12: 第一个色度字节是 V
-};
-
-FmtInfo classify_format(int fmt) {
-    switch (fmt) {
-        case AV_PIX_FMT_NV12:
-            return {PlaneLayout::kSemiPlanar, false};
-        case AV_PIX_FMT_NV21:
-            return {PlaneLayout::kSemiPlanar, true};
-        case AV_PIX_FMT_YUV420P:
-        case AV_PIX_FMT_YUVJ420P:  // 4.2 里仍在用; 与 YUV420P 布局相同
-            return {PlaneLayout::kPlanar, false};
-        // 高位深一律明确拒绝, 不猜布局
-        case AV_PIX_FMT_YUV420P10LE:
-        case AV_PIX_FMT_YUV420P10BE:
-        case AV_PIX_FMT_YUV420P9LE:
-        case AV_PIX_FMT_YUV420P9BE:
-        case AV_PIX_FMT_YUV420P12LE:
-        case AV_PIX_FMT_YUV420P12BE:
-        case AV_PIX_FMT_YUV420P14LE:
-        case AV_PIX_FMT_YUV420P14BE:
-        case AV_PIX_FMT_YUV420P16LE:
-        case AV_PIX_FMT_YUV420P16BE:
-            return {PlaneLayout::kNone, false};
-        default:
-            return {PlaneLayout::kNone, false};
-    }
+void convert_nv12_to_i420(const std::uint8_t* nv12_y,
+                          const std::uint8_t* nv12_uv,
+                          int y_stride,
+                          int uv_stride,
+                          int width,
+                          int height,
+                          std::uint8_t* i420_out) {
+    collapse_yuv420_to_i420(nv12_y, nv12_uv, nullptr, y_stride, uv_stride,
+                            YuvLayout::kSemiPlanar, /*uv_swapped=*/false, width,
+                            height, i420_out);
 }
 
-}  // namespace
-
-#endif  // AGENT_HAVE_FFMPEG
-
 // ===========================================================================
-//  Impl
+//  Decoder::Impl — 只放"跨后端"的东西
 // ===========================================================================
 struct Decoder::Impl {
     int width = 0;
     int height = 0;
-    VideoCodec codec = VideoCodec::kH264;
-    bool initialized = false;
-    bool hardware = false;
-
+    DecoderBackend requested = DecoderBackend::kAuto;
     DecodeStatus last_status = DecodeStatus::kNotInitialized;
-    std::size_t frames = 0;
-    const char* decoder_name = nullptr;
 
-    /// 转换后的 I420; 对外借出的指针指向它
-    std::vector<std::uint8_t> i420;
-    bool has_frame = false;
-    /// 已解码但还没交出去的帧 (硬件一次吐多帧时用)
-    std::size_t queued = 0;
+    /// 初始化期说明 (含"为什么没用上硬解"); 见 Decoder::last_error()
+    std::string note;
 
-#ifdef AGENT_HAVE_FFMPEG
-    AVCodecContext* ctx = nullptr;
-    AVFrame* av_frame = nullptr;    ///< 复用的接收帧
-    AVFrame* sw_frame = nullptr;    ///< hw→sw 转换目标 (NV12)
-    AVPacket* pkt = nullptr;        ///< 复用的输入包 (零拷贝引用调用方缓冲)
-#endif
+    std::unique_ptr<detail::VideoDecoderBackend> backend;
 
     void reset() {
         width = 0;
         height = 0;
-        initialized = false;
-        hardware = false;
+        requested = DecoderBackend::kAuto;
         last_status = DecodeStatus::kNotInitialized;
-        frames = 0;
-        decoder_name = nullptr;
-        i420.clear();
-        has_frame = false;
-        queued = 0;
+        note.clear();
+        backend.reset();
     }
+
+    bool initialized() const { return backend != nullptr; }
 };
 
 Decoder::Decoder() : impl_(new Impl()) {}
@@ -179,88 +161,102 @@ Decoder::~Decoder() {
     release();
 }
 
-bool Decoder::init(int width, int height, VideoCodec codec) {
+// ===========================================================================
+//  init: 选后端 (含回退)
+// ===========================================================================
+namespace {
+
+/// 一个候选后端: 工厂 + 人类可读的名字 (拿不到时用它解释原因)
+struct Candidate {
+    std::unique_ptr<detail::VideoDecoderBackend> (*factory)();
+    const char* label;
+    const char* missing_reason;
+};
+
+/// 按请求的 backend 排好候选顺序。
+/// kAuto 的顺序就是"先硬解, 再软解"; 指定单个后端时只有一个候选 (不回退)。
+std::vector<Candidate> candidates_for(DecoderBackend requested) {
+    const Candidate mpp = {&detail::make_mpp_backend, "MPP 硬解",
+                           "本次构建没编入 MPP (AGENT_HAVE_MPP 未定义)"};
+    const Candidate ff = {&detail::make_ffmpeg_sw_backend, "FFmpeg 软解",
+                          "本次构建没编入 FFmpeg (AGENT_HAVE_FFMPEG 未定义)"};
+
+    switch (requested) {
+        case DecoderBackend::kMpp:
+            return {mpp};
+        case DecoderBackend::kFfmpegSw:
+            return {ff};
+        case DecoderBackend::kAuto:
+        default:
+            return {mpp, ff};
+    }
+}
+
+void append_reason(std::string* acc, const std::string& text) {
+    if (!acc->empty()) {
+        *acc += "; ";
+    }
+    *acc += text;
+}
+
+}  // namespace
+
+bool Decoder::init(int width, int height, VideoCodec codec, DecoderBackend backend) {
     release();
 
     if (width <= 0 || height <= 0) {
         impl_->last_status = DecodeStatus::kInvalidArgument;
+        impl_->note = "宽高必须为正 (收到 " + std::to_string(width) + "x" +
+                      std::to_string(height) + ")";
         return false;
     }
     if (codec != VideoCodec::kH264 && codec != VideoCodec::kH265) {
         impl_->last_status = DecodeStatus::kInvalidArgument;
+        impl_->note = "不支持的编码格式";
         return false;
     }
 
     // YUV420 要求偶数尺寸
     impl_->width = width & ~1;
     impl_->height = height & ~1;
-    impl_->codec = codec;
+    impl_->requested = backend;
 
     if (impl_->width <= 0 || impl_->height <= 0) {
         impl_->last_status = DecodeStatus::kInvalidArgument;
+        impl_->note = "宽高取偶后变成 0";
         return false;
     }
 
-#ifdef AGENT_HAVE_FFMPEG
-    const bool is_h265 = (codec == VideoCodec::kH265);
-    const char* hw_name = is_h265 ? "hevc_v4l2m2m" : "h264_v4l2m2m";
-    const char* sw_name = is_h265 ? "hevc" : "h264";
+    std::string failures;
+    for (const Candidate& candidate : candidates_for(backend)) {
+        std::unique_ptr<detail::VideoDecoderBackend> made = candidate.factory();
+        if (!made) {
+            append_reason(&failures,
+                          std::string(candidate.label) + ": " + candidate.missing_reason);
+            continue;
+        }
 
-    const AVCodec* av_codec = avcodec_find_decoder_by_name(hw_name);
-    if (av_codec != nullptr) {
-        impl_->hardware = true;
-    } else {
-        // 硬解不可用 → 回退软解, 保证功能可用
-        av_codec = avcodec_find_decoder_by_name(sw_name);
-        impl_->hardware = false;
-    }
-    if (av_codec == nullptr) {
-        impl_->last_status = DecodeStatus::kDecodeError;
-        return false;
-    }
-
-    impl_->ctx = avcodec_alloc_context3(av_codec);
-    if (impl_->ctx == nullptr) {
-        impl_->last_status = DecodeStatus::kDecodeError;
-        return false;
+        std::string reason;
+        if (made->init(impl_->width, impl_->height, codec, &reason)) {
+            impl_->backend = std::move(made);
+            impl_->last_status = DecodeStatus::kOk;
+            // 硬解没起来但软解起来了: 把"为什么"留下, 否则这个信息就丢了
+            impl_->note = failures.empty()
+                              ? ""
+                              : (failures + "; 已回退到 " + impl_->backend->name());
+            return true;
+        }
+        append_reason(&failures, std::string(candidate.label) + ": " + reason);
     }
 
-    impl_->ctx->width = impl_->width;
-    impl_->ctx->height = impl_->height;
-    impl_->ctx->pkt_timebase = AVRational{1, 1000000};
-
-    // 硬解要提前给对分辨率; 线程数交给 FFmpeg 默认
-    if (impl_->hardware) {
-        impl_->ctx->thread_count = 1;
-    }
-
-    if (avcodec_open2(impl_->ctx, av_codec, nullptr) < 0) {
-        avcodec_free_context(&impl_->ctx);
-        impl_->last_status = DecodeStatus::kDecodeError;
-        return false;
-    }
-
-    impl_->av_frame = av_frame_alloc();
-    impl_->sw_frame = av_frame_alloc();
-    impl_->pkt = av_packet_alloc();
-    if (impl_->av_frame == nullptr || impl_->sw_frame == nullptr || impl_->pkt == nullptr) {
-        release();
-        impl_->last_status = DecodeStatus::kDecodeError;
-        return false;
-    }
-
-    impl_->decoder_name = av_codec->name;
-    impl_->initialized = true;
-    impl_->last_status = DecodeStatus::kOk;
-    return true;
-#else
-    // 没有 FFmpeg: 明确失败, 不假装成功
-    impl_->initialized = false;
     impl_->last_status = DecodeStatus::kDecodeError;
+    impl_->note = failures.empty() ? "没有可用的解码后端" : failures;
     return false;
-#endif
 }
 
+// ===========================================================================
+//  decode / flush
+// ===========================================================================
 bool Decoder::decode(const std::uint8_t* data,
                      std::size_t size,
                      std::uint8_t** yuv_out,
@@ -289,245 +285,331 @@ bool Decoder::decode(const std::uint8_t* data,
     // 注意: data == null 且 size == 0 是合法的 —— 表示
     // "不发新包, 只把解码器里已有的帧取出来" (flush 用)。
 
-    if (!impl_->initialized) {
+    if (!impl_->initialized()) {
         impl_->last_status = DecodeStatus::kNotInitialized;
         return false;
     }
 
-#ifdef AGENT_HAVE_FFMPEG
-
-    // 把上一次的帧标记为失效 —— 借用窗口到此为止
-    impl_->has_frame = false;
-
-    // 1) 还有上次没交出去的帧, 直接给它
-    if (impl_->queued > 0) {
-        --impl_->queued;
-        impl_->has_frame = true;
-        impl_->last_status = DecodeStatus::kOk;
-        if (yuv_out != nullptr) {
-            *yuv_out = impl_->i420.data();
-        }
-        if (w != nullptr) {
-            *w = impl_->width;
-        }
-        if (h != nullptr) {
-            *h = impl_->height;
-        }
-        return true;
-    }
-
-    // 2) 送包 (零拷贝: 直接引用调用方缓冲, 不同步也不复制)
-    if (data != nullptr && size > 0) {
-        av_packet_unref(impl_->pkt);
-        impl_->pkt->data = const_cast<std::uint8_t*>(data);
-        impl_->pkt->size = static_cast<int>(size);
-
-        const int send_ret = avcodec_send_packet(impl_->ctx, impl_->pkt);
-        if (send_ret < 0 && send_ret != AVERROR(EAGAIN)) {
-            impl_->last_status = DecodeStatus::kDecodeError;
-            return false;
-        }
-    } else {
-        // flush: 送空包让解码器把流水线里剩下的帧吐出来
-        avcodec_send_packet(impl_->ctx, nullptr);
-    }
-
-    // 3) 收帧
-    const int recv_ret = avcodec_receive_frame(impl_->ctx, impl_->av_frame);
-    if (recv_ret == AVERROR(EAGAIN)) {
-        // 硬解流水线延迟, 属正常
-        impl_->last_status = DecodeStatus::kNeedMoreInput;
-        return false;
-    }
-    if (recv_ret == AVERROR_EOF) {
-        impl_->last_status = DecodeStatus::kNeedMoreInput;
-        return false;
-    }
-    if (recv_ret < 0) {
-        impl_->last_status = DecodeStatus::kDecodeError;
-        return false;
-    }
-
-    // 4) 硬解的帧要搬回 CPU 可读内存
-    AVFrame* src = impl_->av_frame;
-    if (src->format == AV_PIX_FMT_DRM_PRIME ||
-        (src->hw_frames_ctx != nullptr)) {
-        av_frame_unref(impl_->sw_frame);
-        const int tr = av_hwframe_transfer_data(impl_->sw_frame, src, 0);
-        av_frame_unref(impl_->av_frame);  // 帧池小, 立刻还回去
-        if (tr < 0) {
-            impl_->last_status = DecodeStatus::kDecodeError;
-            return false;
-        }
-        src = impl_->sw_frame;
-    }
-
-    const int fmt = src->format;
-    const FmtInfo info = classify_format(fmt);
-    if (info.layout == PlaneLayout::kNone) {
-        if (src != impl_->av_frame) {
-            av_frame_unref(impl_->sw_frame);
-        } else {
-            av_frame_unref(impl_->av_frame);
-        }
-        impl_->last_status = DecodeStatus::kUnsupportedFormat;
-        return false;
-    }
-
-    // 用解码器报的可见尺寸, 而不是 init 时猜的
-    int vw = src->width;
-    int vh = src->height;
-    if (vw <= 0 || vh <= 0) {
-        vw = impl_->width;
-        vh = impl_->height;
-    }
-    vw &= ~1;
-    vh &= ~1;
-    if (vw <= 0 || vh <= 0) {
-        impl_->last_status = DecodeStatus::kDecodeError;
-        return false;
-    }
-
-    // 5) 转成连续 I420
-    const std::size_t need = i420_frame_bytes(vw, vh);
-    if (impl_->i420.size() < need) {
-        impl_->i420.resize(need);
-    }
-    std::uint8_t* dst = impl_->i420.data();
-
-    if (info.layout == PlaneLayout::kSemiPlanar) {
-        // NV12 / NV21: data[1] 是交织的 UV
-        const std::uint8_t* chroma = src->data[1];
-        const int cstride = src->linesize[1];
-        const int cw = vw / 2;
-        const int ch = vh / 2;
-
-        // Y
-        for (int row = 0; row < vh; ++row) {
-            std::memcpy(dst + static_cast<std::size_t>(row) * vw,
-                        src->data[0] + static_cast<std::size_t>(row) * src->linesize[0],
-                        static_cast<std::size_t>(vw));
-        }
-        // UV 拆分 (uv_swapped 时第一字节是 V)
-        std::uint8_t* du = dst + static_cast<std::size_t>(vw) * vh;
-        std::uint8_t* dv = du + static_cast<std::size_t>(cw) * ch;
-        for (int row = 0; row < ch; ++row) {
-            const std::uint8_t* s = chroma + static_cast<std::size_t>(row) * cstride;
-            std::uint8_t* a = du + static_cast<std::size_t>(row) * cw;
-            std::uint8_t* b = dv + static_cast<std::size_t>(row) * cw;
-            if (info.uv_swapped) {
-                for (int col = 0; col < cw; ++col) {
-                    b[col] = s[col * 2 + 0];
-                    a[col] = s[col * 2 + 1];
-                }
-            } else {
-                for (int col = 0; col < cw; ++col) {
-                    a[col] = s[col * 2 + 0];
-                    b[col] = s[col * 2 + 1];
-                }
-            }
-        }
-    } else {
-        // 已经是 planar (I420/YV12): 只收拢 stride
-        const int cw = vw / 2;
-        const int ch = vh / 2;
-        const int ia = info.uv_swapped ? 2 : 1;  // YV12 的 U/V 顺序相反
-        const int ib = info.uv_swapped ? 1 : 2;
-
-        for (int row = 0; row < vh; ++row) {
-            std::memcpy(dst + static_cast<std::size_t>(row) * vw,
-                        src->data[0] + static_cast<std::size_t>(row) * src->linesize[0],
-                        static_cast<std::size_t>(vw));
-        }
-        std::uint8_t* du = dst + static_cast<std::size_t>(vw) * vh;
-        std::uint8_t* dv = du + static_cast<std::size_t>(cw) * ch;
-        for (int row = 0; row < ch; ++row) {
-            std::memcpy(du + static_cast<std::size_t>(row) * cw,
-                        src->data[ia] + static_cast<std::size_t>(row) * src->linesize[ia],
-                        static_cast<std::size_t>(cw));
-            std::memcpy(dv + static_cast<std::size_t>(row) * cw,
-                        src->data[ib] + static_cast<std::size_t>(row) * src->linesize[ib],
-                        static_cast<std::size_t>(cw));
-        }
-    }
-
-    if (src == impl_->sw_frame) {
-        av_frame_unref(impl_->sw_frame);
-    } else {
-        av_frame_unref(impl_->av_frame);
-    }
-
-    impl_->width = vw;
-    impl_->height = vh;
-    impl_->has_frame = true;
-    ++impl_->frames;
-    impl_->last_status = DecodeStatus::kOk;
-
-    if (yuv_out != nullptr) {
-        *yuv_out = impl_->i420.data();
-    }
-    if (w != nullptr) {
-        *w = vw;
-    }
-    if (h != nullptr) {
-        *h = vh;
-    }
-    return true;
-
-#else
-    impl_->last_status = DecodeStatus::kNotInitialized;
-    return false;
-#endif
+    return impl_->backend->decode(data, size, yuv_out, w, h);
 }
 
-bool Decoder::flush() {
-    if (!impl_->initialized) {
+bool Decoder::flush(std::uint8_t** yuv_out, int* w, int* h) {
+    // 和 decode() 一样: 出参先清干净, 失败路径绝不留野指针
+    if (yuv_out != nullptr) {
+        *yuv_out = nullptr;
+    }
+    if (w != nullptr) {
+        *w = 0;
+    }
+    if (h != nullptr) {
+        *h = 0;
+    }
+
+    if (!impl_->initialized()) {
         impl_->last_status = DecodeStatus::kNotInitialized;
         return false;
     }
-    // 送空包触发冲刷; 随后的帧用 decode(nullptr, 0, ...) 取
-    return decode(nullptr, 0, nullptr, nullptr, nullptr);
+    return impl_->backend->flush(yuv_out, w, h);
 }
 
 void Decoder::release() {
     if (!impl_) {
         return;
     }
-#ifdef AGENT_HAVE_FFMPEG
-    if (impl_->pkt != nullptr) {
-        av_packet_free(&impl_->pkt);
+    if (impl_->backend) {
+        impl_->backend->release();
     }
-    if (impl_->sw_frame != nullptr) {
-        av_frame_free(&impl_->sw_frame);
-    }
-    if (impl_->av_frame != nullptr) {
-        av_frame_free(&impl_->av_frame);
-    }
-    if (impl_->ctx != nullptr) {
-        avcodec_free_context(&impl_->ctx);
-    }
-#endif
     impl_->reset();
 }
 
+// ===========================================================================
+//  状态查询
+// ===========================================================================
 DecodeStatus Decoder::status() const {
+    if (impl_->backend) {
+        return impl_->backend->status();
+    }
     return impl_->last_status;
 }
 
 bool Decoder::is_initialized() const {
-    return impl_->initialized;
+    return impl_->initialized();
+}
+
+DecoderBackend Decoder::active_backend() const {
+    // 没初始化时返回"请求的那个" —— 反正它没生效, 别假装是别的
+    return impl_->backend ? impl_->backend->kind() : impl_->requested;
 }
 
 const char* Decoder::active_decoder_name() const {
-    return impl_->decoder_name;
+    return impl_->backend ? impl_->backend->name() : nullptr;
 }
 
 bool Decoder::is_hardware() const {
-    return impl_->hardware;
+    return impl_->backend && impl_->backend->hardware();
 }
 
 std::size_t Decoder::frames_decoded() const {
-    return impl_->frames;
+    return impl_->backend ? impl_->backend->frames() : 0;
 }
+
+const char* Decoder::last_error() const {
+    if (impl_->backend) {
+        const char* runtime = impl_->backend->last_error();
+        if (runtime != nullptr && runtime[0] != '\0') {
+            return runtime;
+        }
+    }
+    return impl_->note.c_str();
+}
+
+// ===========================================================================
+//  FFmpeg 软解后端
+// ===========================================================================
+#ifdef AGENT_HAVE_FFMPEG
+
+namespace {
+
+struct FmtInfo {
+    bool supported = false;
+    YuvLayout layout = YuvLayout::kPlanar;
+    bool uv_swapped = false;
+};
+
+/// FFmpeg 像素格式 → 平面布局。只认 8bit YUV420; 其余**明确拒绝**, 不猜。
+FmtInfo classify_format(int fmt) {
+    switch (fmt) {
+        case AV_PIX_FMT_NV12:
+            return {true, YuvLayout::kSemiPlanar, false};
+        case AV_PIX_FMT_NV21:
+            return {true, YuvLayout::kSemiPlanar, true};
+        case AV_PIX_FMT_YUV420P:
+        case AV_PIX_FMT_YUVJ420P:  // 4.2 里仍在用; 与 YUV420P 布局相同
+            return {true, YuvLayout::kPlanar, false};
+        // YUV422P / YUV444P / 各种 10~16bit: 都不是 8bit YUV420
+        default:
+            return {false, YuvLayout::kPlanar, false};
+    }
+}
+
+}  // namespace
+
+class FfmpegSwBackend : public detail::VideoDecoderBackend {
+public:
+    ~FfmpegSwBackend() override { release(); }
+
+    bool init(int width, int height, VideoCodec codec, std::string* error) override {
+        release();
+
+        const bool is_h265 = (codec == VideoCodec::kH265);
+        const char* decoder_name = is_h265 ? "hevc" : "h264";
+
+        const AVCodec* av_codec = avcodec_find_decoder_by_name(decoder_name);
+        if (av_codec == nullptr) {
+            *error = std::string("FFmpeg 里没有 ") + decoder_name + " 解码器";
+            return false;
+        }
+
+        ctx_ = avcodec_alloc_context3(av_codec);
+        if (ctx_ == nullptr) {
+            *error = "avcodec_alloc_context3 失败 (内存不足?)";
+            return false;
+        }
+
+        width_ = width;
+        height_ = height;
+        ctx_->width = width;
+        ctx_->height = height;
+        ctx_->pkt_timebase = AVRational{1, 1000000};
+        ctx_->thread_count = 0;  // 0 = 让 FFmpeg 按核数自己决定 (软解才需要多线程)
+
+        const int rc = avcodec_open2(ctx_, av_codec, nullptr);
+        if (rc < 0) {
+            // 这一句就是旧实现缺的东西: 到底为什么开不起来
+            *error = std::string("avcodec_open2(") + decoder_name + ") 失败: " +
+                     err_text(rc);
+            avcodec_free_context(&ctx_);
+            return false;
+        }
+
+        frame_ = av_frame_alloc();
+        pkt_ = av_packet_alloc();
+        if (frame_ == nullptr || pkt_ == nullptr) {
+            *error = "av_frame_alloc / av_packet_alloc 失败";
+            release();
+            return false;
+        }
+
+        name_ = is_h265 ? "ffmpeg-sw(hevc)" : "ffmpeg-sw(h264)";
+        status_ = DecodeStatus::kOk;
+        return true;
+    }
+
+    bool decode(const std::uint8_t* data,
+                std::size_t size,
+                std::uint8_t** yuv_out,
+                int* w,
+                int* h) override {
+        if (ctx_ == nullptr) {
+            status_ = DecodeStatus::kNotInitialized;
+            return false;
+        }
+
+        // 1) 送包 (零拷贝: 直接引用调用方缓冲, 不同步也不复制)
+        if (data != nullptr && size > 0) {
+            av_packet_unref(pkt_);
+            pkt_->data = const_cast<std::uint8_t*>(data);
+            pkt_->size = static_cast<int>(size);
+
+            const int send_ret = avcodec_send_packet(ctx_, pkt_);
+            // EAGAIN = 解码器还没吃下上一包, 这一包先不算错;
+            // 继续去 receive 把已有的帧取出来, 下一轮再送。
+            if (send_ret < 0 && send_ret != AVERROR(EAGAIN)) {
+                error_ = std::string("avcodec_send_packet 失败: ") + err_text(send_ret);
+                status_ = DecodeStatus::kDecodeError;
+                return false;
+            }
+        } else {
+            // flush: 送空包让解码器把流水线里剩下的帧吐出来
+            avcodec_send_packet(ctx_, nullptr);
+        }
+
+        // 2) 收帧
+        const int recv_ret = avcodec_receive_frame(ctx_, frame_);
+        if (recv_ret == AVERROR(EAGAIN) || recv_ret == AVERROR_EOF) {
+            status_ = DecodeStatus::kNeedMoreInput;
+            return false;
+        }
+        if (recv_ret < 0) {
+            error_ = std::string("avcodec_receive_frame 失败: ") + err_text(recv_ret);
+            status_ = DecodeStatus::kDecodeError;
+            return false;
+        }
+
+        const bool ok = convert_frame();
+        av_frame_unref(frame_);  // 立刻还回去, 不跨帧持有
+        return ok;
+    }
+
+    bool flush(std::uint8_t** yuv_out, int* w, int* h) override {
+        if (ctx_ == nullptr) {
+            status_ = DecodeStatus::kNotInitialized;
+            return false;
+        }
+        return decode(nullptr, 0, yuv_out, w, h);
+    }
+
+    void release() override {
+        if (pkt_ != nullptr) {
+            av_packet_free(&pkt_);
+        }
+        if (frame_ != nullptr) {
+            av_frame_free(&frame_);
+        }
+        if (ctx_ != nullptr) {
+            avcodec_free_context(&ctx_);
+        }
+        i420_.clear();
+        out_w_ = 0;
+        out_h_ = 0;
+        frames_ = 0;
+        name_ = nullptr;
+        error_.clear();
+        status_ = DecodeStatus::kNotInitialized;
+    }
+
+    const char* name() const override { return name_ != nullptr ? name_ : "ffmpeg-sw"; }
+
+    DecoderBackend kind() const override { return DecoderBackend::kFfmpegSw; }
+
+    bool hardware() const override { return false; }
+
+    DecodeStatus status() const override { return status_; }
+
+    std::size_t frames() const override { return frames_; }
+
+    const char* last_error() const override { return error_.c_str(); }
+
+private:
+    static std::string err_text(int rc) {
+        char buf[128];
+        buf[0] = '\0';
+        av_strerror(rc, buf, sizeof(buf));
+        return std::string(buf);
+    }
+
+    /// 把 frame_ 收拢成连续 I420 放进 i420_
+    bool convert_frame() {
+        const FmtInfo info = classify_format(frame_->format);
+        if (!info.supported) {
+            char buf[96];
+            av_get_pix_fmt_string(buf, sizeof(buf),
+                                  static_cast<AVPixelFormat>(frame_->format));
+            error_ = std::string("解码输出像素格式不支持 (只要 8bit YUV420): ") + buf;
+            status_ = DecodeStatus::kUnsupportedFormat;
+            return false;
+        }
+
+        // 用解码器报的可见尺寸, 而不是 init 时猜的
+        int vw = frame_->width;
+        int vh = frame_->height;
+        if (vw <= 0 || vh <= 0) {
+            vw = width_;
+            vh = height_;
+        }
+        vw &= ~1;
+        vh &= ~1;
+        if (vw <= 0 || vh <= 0) {
+            error_ = "解码器报了非法尺寸";
+            status_ = DecodeStatus::kDecodeError;
+            return false;
+        }
+
+        const std::size_t need = i420_frame_bytes(vw, vh);
+        if (i420_.size() < need) {
+            i420_.resize(need);
+        }
+
+        collapse_yuv420_to_i420(frame_->data[0], frame_->data[1], frame_->data[2],
+                                frame_->linesize[0], frame_->linesize[1], info.layout,
+                                info.uv_swapped, vw, vh, i420_.data());
+
+        out_w_ = vw;
+        out_h_ = vh;
+        ++frames_;
+        status_ = DecodeStatus::kOk;
+        return true;
+    }
+
+    int out_w_ = 0;
+    int out_h_ = 0;
+    int width_ = 0;
+    int height_ = 0;
+    std::size_t frames_ = 0;
+    const char* name_ = nullptr;
+    std::string error_;
+    DecodeStatus status_ = DecodeStatus::kNotInitialized;
+
+    /// 收拢后的 I420; 对外借出的指针指向它 (下一次 decode 会被覆写)
+    std::vector<std::uint8_t> i420_;
+
+    AVCodecContext* ctx_ = nullptr;
+    AVFrame* frame_ = nullptr;
+    AVPacket* pkt_ = nullptr;
+};
+
+#endif  // AGENT_HAVE_FFMPEG
+
+namespace detail {
+
+std::unique_ptr<VideoDecoderBackend> make_ffmpeg_sw_backend() {
+#ifdef AGENT_HAVE_FFMPEG
+    return std::unique_ptr<VideoDecoderBackend>(new FfmpegSwBackend());
+#else
+    return nullptr;
+#endif
+}
+
+}  // namespace detail
 
 }  // namespace agent

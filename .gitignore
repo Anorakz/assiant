@@ -93,6 +93,10 @@ venv/
 # 板端本地状态（如果误建）
 logs/
 data/
+# 但 tests/data/ 是**测试夹具**（代码流 + 期望值），必须进库 ——
+# 取反必须排在忽略规则之后才生效（和上面 config/*.example.yaml 同理）
+!tests/data/
+!tests/data/**
 models/*.rknn
 
 # 密钥
