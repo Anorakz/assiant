@@ -6,18 +6,37 @@
 #        "板端现在到底能不能正常起来?" —— 而不是靠人肉敲一堆命令。
 #
 #  跑法:
-#      sh scripts/health_check.sh            # 在仓库根目录
-#      sh /tmp/health_check.sh               # deploy.ps1 就是这么调的 (先 scp 过来)
+#      sh scripts/health_check.sh              # 在仓库根目录
+#      sh /tmp/health_check.sh                 # deploy.ps1 就是这么调的 (先 scp 过来)
+#      sh scripts/health_check.sh --list-extra # 只打印"板端多出来、该清掉的"路径
 #
-#  退出码: 0 = 关键项全过; 1 = 有必需项没过
+#  退出码: 0 = 关键项全过; 1 = 有必需项没过 (含"落后判定"不通过)
 #
 #  检查项 (必需项标 *):
 #      * native 扩展能 import, 且 ping() 有响应
 #      * config/config.yaml 存在 (并且**没被部署覆盖**——只报告指纹, 不判断内容)
 #      * python3 -m agent.main --check-config 返回 0
 #      * agent/ipc/ 的关键文件在位
-#      只报告不判定: .so 指纹 / pytest 是否可用 / creds 是否就位 / 冒烟二进制
+#      * 落后判定: 板端文件与 logs/deployed-manifest 逐个 sha256 对照
+#      只报告不判定: .so 指纹 / pytest 是否可用 / creds 是否就位 / 冒烟二进制 /
+#                    多出来的文件 (那些用 deploy.ps1 -Prune 清)
+#
+#  为什么要有"落后判定"与"多余文件"
+#  ---------------------------------------------------------------------------
+#  deploy.ps1 用的是 `tar -xzf`(增量解包, 没有 --delete), 所以:
+#    · 仓库里**删掉**的文件会继续留在板端 —— 属于"多余", 不报就没人知道
+#    · 板端被手改过的文件会与仓库不一致 —— 属于"落后"
+#  两者都是"板端和 PC 悄悄不一样"的形态。清单 + 逐文件 sha256 让它们可见。
+#
+#  ⚠ 这里是"哪些算多余"的**唯一出处**: deploy.ps1 -Prune 调 --list-extra 取清单,
+#    不在 PowerShell 侧再写一份规则 (否则两处规则一定会漂移)。
 # ============================================================================
+
+# ---- 模式 (必须在打印任何东西之前处理, --list-extra 的输出要能被程序消费) ----
+MODE="full"
+if [ "$1" = "--list-extra" ]; then
+    MODE="list-extra"
+fi
 
 # deploy.ps1 会把它 scp 到 /tmp 再调, 所以不依赖调用时的 cwd
 cd /home/kickpi/myproject/assitant 2>/dev/null || {
@@ -27,6 +46,49 @@ cd /home/kickpi/myproject/assitant 2>/dev/null || {
 
 FAIL=0
 ROOT=$(pwd)
+
+#: deploy.ps1 推上来的清单 (放在 logs/ 下: 那个目录已被 .gitignore 覆盖,
+#: 所以这两个文件不会让板端 git status 变脏)
+MANIFEST="$ROOT/logs/deployed-manifest"
+REV_FILE="$ROOT/logs/deployed-rev"
+
+#: 部署覆盖的范围 —— "多余文件"只在这个范围内讨论, 范围外一律不碰
+SCOPE="agent tests docs scripts config/config.example.yaml"
+
+#: 板端本地 / 生成物: 既不删, 也不算"多余"
+exempt() {
+    case "$1" in
+        tests/test_llm_integration.py) return 0 ;;                # 板端专有测试
+        docs/gui-qt5-plan.md|docs/gui-qt5-tasks.md) return 0 ;;   # 板端 GUI 迭代文档
+        config/config.yaml) return 0 ;;                           # 板端实盘配置
+        */__pycache__/*|*.pyc|*.pyo) return 0 ;;                  # python 生成物
+        *) return 1 ;;
+    esac
+}
+
+#: 清单行 "<sha256>  <path>" -> 只取 path
+#: ⚠ awk 默认把连续空格当作**一个**分隔符, 所以 "<hash>  <path>" 的 NF 是 2 不是 3
+manifest_paths() {
+    awk 'NF>=2 { sub(/^[^ ]+ +/, ""); print }' "$MANIFEST"
+}
+
+#: 板端在部署范围内、但清单里没有的文件 (一行一个, 排序)
+list_extra() {
+    paths=$(manifest_paths)
+    for f in $(find $SCOPE -type f 2>/dev/null | sort); do
+        exempt "$f" && continue
+        printf '%s\n' "$paths" | grep -Fxq -- "$f" || printf '%s\n' "$f"
+    done
+}
+
+if [ "$MODE" = "list-extra" ]; then
+    if [ ! -f "$MANIFEST" ]; then
+        echo "FATAL: 缺少 $MANIFEST (先跑一次 deploy.ps1)" >&2
+        exit 1
+    fi
+    list_extra
+    exit 0
+fi
 
 line() { printf '%-52s %s\n' "$1" "$2"; }
 ok()   { line "$1" "OK   $2"; }
@@ -124,6 +186,44 @@ for f in agent/main.py agent/config.py agent/ipc/__init__.py agent/ipc/local_ser
 done
 SO=$(ls agent_native*.so 2>/dev/null | head -1)
 [ -n "$SO" ] && note "$SO" "$(sha256sum "$SO" | cut -c1-16)"
+
+echo
+echo "--- 7. 部署一致性 (板端 vs 部署清单) ---"
+if [ ! -f "$MANIFEST" ]; then
+    note "落后判定" "没有清单 ($MANIFEST) —— 跑一次 deploy.ps1 就会生成"
+else
+    REV=$(cat "$REV_FILE" 2>/dev/null || echo "?")
+    TOTAL=0; MISS=0; DIFF=0; DETAIL=""
+    while read -r want path; do
+        [ -n "$want" ] || continue
+        TOTAL=$((TOTAL + 1))
+        if [ ! -f "$path" ]; then
+            MISS=$((MISS + 1))
+            DETAIL="${DETAIL}缺失     $path
+"
+        elif [ "$(sha256sum "$path" | cut -d' ' -f1)" != "$want" ]; then
+            DIFF=$((DIFF + 1))
+            DETAIL="${DETAIL}内容不同 $path
+"
+        fi
+    done < "$MANIFEST"
+    if [ "$MISS" -eq 0 ] && [ "$DIFF" -eq 0 ]; then
+        ok "落后判定" "一致: $TOTAL 个文件全部匹配 ($REV)"
+    else
+        bad "落后判定" "落后 $((MISS + DIFF)) 个文件 (缺失 $MISS / 内容不同 $DIFF), 清单来自 $REV"
+        printf '%s' "$DETAIL" | head -8 | sed 's/^/     /'
+        [ $((MISS + DIFF)) -gt 8 ] && note "  (只列了前 8 条)" "共 $((MISS + DIFF)) 条"
+    fi
+
+    EXTRA=$(list_extra | wc -l)
+    if [ "$EXTRA" -eq 0 ]; then
+        ok "多余文件" "无 (板端没有仓库里已删除的文件)"
+    else
+        note "多余文件" "$EXTRA 个已不在仓库 (增量解包不会删它们)"
+        list_extra | head -8 | sed 's/^/      /'
+        note "  怎么清" "scripts/deploy.ps1 -PruneDryRun 先看, -Prune 真删"
+    fi
+fi
 
 echo
 if [ $FAIL -eq 0 ]; then

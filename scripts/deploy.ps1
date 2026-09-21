@@ -11,6 +11,8 @@
 #      scripts/deploy.ps1                 # build + ship + health check
 #      scripts/deploy.ps1 -NoBuild        # skip the cross build
 #      scripts/deploy.ps1 -NoCheck        # skip the board-side health check
+#      scripts/deploy.ps1 -PruneDryRun    # list board leftovers, delete nothing
+#      scripts/deploy.ps1 -Prune          # same, but actually deletes them
 #      scripts/deploy.ps1 -Target myhost  # ssh alias / host (default rk3568)
 #
 #  How the Python/tests/docs half is shipped (decided in Phase 6 / task A0):
@@ -21,6 +23,14 @@
 #    2) line endings: see the WARNING below -- we force LF explicitly
 #    3) extraction is ADDITIVE -- no --delete, so board-only files survive
 #       (config/config.yaml, tests/test_llm_integration.py, docs/gui-qt5-*.md)
+#
+#  But additive extraction has a second face: files DELETED in the repo keep
+#  living on the board. So this script also:
+#    * writes logs/deployed-rev + logs/deployed-manifest (sha256 per file) to the
+#      board, which is what lets health_check.sh report "behind by N files";
+#    * offers -Prune / -PruneDryRun to list/remove those leftovers.
+#  The rule for "what counts as a leftover" lives ONLY in health_check.sh
+#  (--list-extra) -- this script consumes that list instead of re-implementing it.
 #
 #  WARNING about line endings (this bit us in task A1):
 #    `git archive` applies the same text conversion as a checkout, so on Windows
@@ -41,6 +51,8 @@
 param(
     [switch]$NoBuild,
     [switch]$NoCheck,
+    [switch]$Prune,          # remove board leftovers that are no longer in the repo
+    [switch]$PruneDryRun,    # only list what -Prune would remove (do not delete)
     [string]$Target = "rk3568"
 )
 
@@ -120,10 +132,14 @@ if (-not (Test-Path $tarball)) { Fail "git archive produced no file" }
 Write-Host ("  tarball           : {0}  ({1} bytes)" -f (Split-Path $tarball -Leaf), (Get-Item $tarball).Length)
 
 # Guard: prove the tarball really is LF (the CRLF bug above was silent otherwise).
-$probe = Join-Path $env:TEMP "agent-deploy-probe"
+# We also unpack the WHOLE tarball here: the next step hashes every file to build
+# the deploy manifest.
+$probe = Join-Path $env:TEMP "agent-deploy-tree"
 if (Test-Path $probe) { Remove-Item $probe -Recurse -Force }
 New-Item -ItemType Directory -Force $probe | Out-Null
-& tar -xf $tarball -C $probe "agent/ipc/local_server.py" "scripts/verify-authorized.sh" 2>$null
+& tar -xf $tarball -C $probe
+if ($LASTEXITCODE -ne 0) { Fail "cannot unpack the tarball (needed to build the manifest)" }
+
 $probeFile = Join-Path $probe "scripts/verify-authorized.sh"
 if (Test-Path $probeFile) {
     $pb = [System.IO.File]::ReadAllBytes($probeFile)
@@ -134,6 +150,35 @@ if (Test-Path $probeFile) {
 } else {
     Write-Host "  line endings      : (probe file not found, skipped)" -ForegroundColor Yellow
 }
+
+# ------------------------------------------------- 3.5 manifest (sha256) -----
+# The board's health_check.sh uses this to answer "is the board behind?" with
+# per-file sha256 comparison, so it can name HOW MANY and WHICH files differ.
+# Written as LF + UTF-8 without BOM: the board reads it with `while read`, and
+# CRLF would leave a trailing \r on every path so nothing would ever match.
+Step 3.5 "build deploy manifest (sha256)"
+$manifestFile = Join-Path $env:TEMP "agent-deploy-manifest.txt"
+$revFile = Join-Path $env:TEMP "agent-deploy-rev.txt"
+$entries = New-Object System.Collections.Generic.List[string]
+
+function Add-ManifestEntry([string]$fullPath, [string]$relPath) {
+    $h = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToLower()
+    $script:entries.Add("$h  $relPath")
+}
+
+foreach ($f in (Get-ChildItem $probe -Recurse -File)) {
+    Add-ManifestEntry $f.FullName $f.FullName.Substring($probe.Length + 1).Replace('\', '/')
+}
+# The .so files and the smoke binary are scp'd separately (not in the tarball),
+# so add them by hand.
+Add-ManifestEntry $soItem.FullName $soItem.Name
+Add-ManifestEntry $mlItem.FullName $mlItem.Name
+if (Test-Path $smokePath) { Add-ManifestEntry $smokePath "tests/board/mpp_decode_smoke" }
+
+$enc = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($manifestFile, (($entries | Sort-Object) -join "`n") + "`n", $enc)
+[System.IO.File]::WriteAllText($revFile, "$head`n", $enc)
+Write-Host ("  manifest          : {0} files -> {1}" -f $entries.Count, (Split-Path $manifestFile -Leaf))
 Remove-Item $probe -Recurse -Force -ErrorAction SilentlyContinue
 
 # ------------------------------------------------------------- 4. transfer ---
@@ -144,12 +189,20 @@ Write-Host "  --- probing ssh ---"
 if ($LASTEXITCODE -ne 0) { Fail "ssh $Target failed (check ~/.ssh/config alias)" }
 
 Write-Host "  --- ensure remote dirs ---"
-& ssh $Target "mkdir -p $remoteRoot/tests/board $remoteRoot/tests/data"
+& ssh $Target "mkdir -p $remoteRoot/tests/board $remoteRoot/tests/data $remoteRoot/logs"
 if ($LASTEXITCODE -ne 0) { Fail "mkdir on board failed" }
 
 Write-Host "  --- scp tarball + artifacts ---"
 & scp $tarball "${Target}:${remoteTmp}/deploy.tar.gz"
 if ($LASTEXITCODE -ne 0) { Fail "scp tarball failed" }
+
+# The deploy manifest lives under logs/: that directory is already gitignored, so
+# these two files never make the board's `git status` dirty.
+& scp $manifestFile "${Target}:${remoteRoot}/logs/deployed-manifest"
+if ($LASTEXITCODE -ne 0) { Fail "scp manifest failed" }
+& scp $revFile "${Target}:${remoteRoot}/logs/deployed-rev"
+if ($LASTEXITCODE -ne 0) { Fail "scp deployed-rev failed" }
+Write-Host "  deployed-rev      : $head"
 
 & scp $soItem.FullName "${Target}:${remoteRoot}/"
 if ($LASTEXITCODE -ne 0) { Fail "scp agent_native failed" }
@@ -201,6 +254,60 @@ if ($changed -ne "0") {
     Write-Host "  note              : a 'git pull' on the board may refuse until these are stashed/committed" -ForegroundColor Yellow
 }
 
+# ------------------------------------------------------------- 5.5 prune -----
+# Additive extraction never deletes, so leftovers (files removed from the repo
+# but still on the board) need an explicit sweep.
+# The rule for "what counts as a leftover" lives ONLY in health_check.sh
+# (--list-extra); this block just re-validates and executes -- two copies of the
+# rule would drift apart.
+if ($Prune -or $PruneDryRun) {
+    Step 5.5 "prune board leftovers (by manifest)"
+
+    $raw = & ssh $Target "cd $remoteRoot && sh $remoteTmp/health_check.sh --list-extra"
+    if ($LASTEXITCODE -ne 0) { Fail "cannot list leftovers (no manifest on the board? run a plain deploy first)" }
+
+    # Second-pass validation: only delete paths inside the deploy scope and
+    # without suspicious characters. (Piping remote output straight into rm
+    # would be reckless; this layer is deliberate.)
+    $candidates = @()
+    $rejected = @()
+    foreach ($line in $raw) {
+        $p = "$line".Trim()
+        if (-not $p) { continue }
+        if ($p.StartsWith("/") -or $p.Contains("..")) { $rejected += $p; continue }
+        if ($p -notmatch '^(agent|tests|docs|scripts)/') { $rejected += $p; continue }
+        if ($p -match '[\s''"`$;&|<>]') { $rejected += $p; continue }
+        if ($p -match '(^|/)__pycache__/|\.pyc$') { $rejected += $p; continue }
+        if ($p -eq 'tests/test_llm_integration.py') { $rejected += $p; continue }
+        if ($p -match '^docs/gui-qt5-') { $rejected += $p; continue }
+        $candidates += $p
+    }
+
+    if ($rejected.Count -gt 0) {
+        Write-Host "  rejected          : $($rejected.Count) (out of scope / whitelisted / suspicious)" -ForegroundColor Yellow
+        $rejected | Select-Object -First 5 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+    }
+
+    if ($candidates.Count -eq 0) {
+        Write-Host "  nothing to prune  : the board has no file that the repo already deleted"
+    } else {
+        Write-Host ("  to remove {0} file(s):" -f $candidates.Count) -ForegroundColor Yellow
+        $candidates | ForEach-Object { Write-Host "      $_" }
+
+        if ($PruneDryRun -and -not $Prune) {
+            Write-Host "  (-PruneDryRun: listed only, nothing was deleted)" -ForegroundColor Yellow
+        } else {
+            $joined = ($candidates -join " ")
+            & ssh $Target "cd $remoteRoot && rm -f -- $joined && echo pruned"
+            if ($LASTEXITCODE -ne 0) { Fail "remote delete failed" }
+            Write-Host ("  removed {0} file(s)" -f $candidates.Count)
+            # Also drop directories this emptied (non-recursive rmdir semantics
+            # via -empty, so nothing that still holds files is touched).
+            & ssh $Target "cd $remoteRoot && find agent tests docs scripts -type d -empty -delete 2>/dev/null; echo done" | Out-Null
+        }
+    }
+}
+
 # ------------------------------------------------------------- 6. verify -----
 if (-not $NoCheck) {
     Step 6 "board health check"
@@ -218,6 +325,8 @@ if (-not $NoCheck) {
 # ------------------------------------------------------------- cleanup ------
 & ssh $Target "rm -f $remoteTmp/deploy.tar.gz"
 if (Test-Path $tarball) { Remove-Item $tarball -Force }
+if (Test-Path $manifestFile) { Remove-Item $manifestFile -Force }
+if (Test-Path $revFile) { Remove-Item $revFile -Force }
 
 Write-Host ""
 Write-Host "=== deploy ok (branch $branch @ $head) ===" -ForegroundColor Green
