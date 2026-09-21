@@ -8,29 +8,60 @@
 #  ⚠ config/config.yaml 不进 git (见 .gitignore); 本模板文件才进 git。
 #  ⚠ agent/config.py 不做 schema 校验, 字段的合法性由各模块自己检查;
 #     本文件里的注释就是各字段的事实约定来源。
+#
+#  谁读哪一段 (归一化 D 系列: 配置真源统一到本文件)
+#  ---------------------------------------------------------------------------
+#      agent/  (PC 交叉编译后部署到板端)  读 llm / sunshine / ipc / terminal / scheduler
+#      gui/    (板端 Qt5 程序)            读写 gui / llm
+#      llm/config/llm.env                 由本文件派生(喂 llama-server), **不是真源**
+#
+#  ⚠ 归一化 D 系列进行中: GUI 的界面参数正在从 gui/config/gui.yaml 并进本文件的
+#     gui: 段。合并完成后 gui/config/gui.yaml 会消失, GUI 只读写本文件。
 # ============================================================================
 
 llm:
   # 推理位置。三个合法值 (见 agent/llm/provider.py 的 MODES):
-  #   edge     板端本地小模型 (RKNN); 别名 board / local
+  #   edge     板端本地模型 —— **llama.cpp GGUF**, 经 OpenAI 兼容接口访问本机 llama-server
+  #            (默认 base_url = http://127.0.0.1:9000/v1; 与 cloud 共用一套客户端)
+  #            别名 board / local
   #   cloud    调远端 OpenAI 兼容 API
   #   disabled 不调模型, 走 RuleEngine 规则兜底 (只回问候/时间/状态)
+  # ⚠ 当前 EdgeBackend 仍是 mock(只记录 model_path, 不做真推理); 真正加载模型的是
+  #    llama-server 进程, 它的参数见下面"板端 llama-server"一组键。
   # ⚠ 模型还没装好之前保持 disabled, 系统照样起得来
   mode: disabled
 
-  # ---- mode=edge 时使用 ----
-  model_path: /home/kickpi/myproject/assitant/models/llm.rknn
+  # ---- mode=edge: 本地模型 ----
+  # GGUF 路径 —— **由 llama-server 加载**; Agent 只记录它 (不自己读模型文件)
+  model_path: /home/kickpi/model/Qwen3-0.6B-Q4_K_M.gguf
   # 上下文长度上限, 超过要截断
   max_tokens: 512
   # 采样温度
   temperature: 0.7
 
-  # ---- mode=cloud 时使用 ----
+  # ---- mode=cloud: 远端 API ----
   api_base: https://api.example.com/v1
+  # ⚠ 这是**云端**的 key (Agent 用); 本地 llama-server 的 key 见下面的 local_api_key
   api_key: ""
   model: gpt-4o-mini
   # 单次请求超时(秒)
   timeout_s: 30
+
+  # ---- 板端 llama-server (edge 模式) ----
+  # 这一组**只**用于派生 llm/config/llm.env (喂 llama-server 进程), Agent 自己不读
+  # (agent/config.py 不做 schema 校验, 多余键没有副作用)。
+  model_name: qwen3-0.6b
+  port: 9000
+  ctx_size: 2048
+  batch_size: 256
+  threads: 4
+  threads_batch: 4
+  # llama-server 自己的 API key (派生到 llm.env 的 LLM_API_KEY)
+  local_api_key: ***REMOVED-LLM-KEY***
+  #
+  # ⚠ llm.env 里另有 5 个与部署布局有关的键 (LLM_HOST / LLM_LOG_DIR / LLM_RUN_DIR /
+  #    LLM_PID_FILE / LLM_LOG_FILE) **不在**映射表里 —— 它们由 llm.env 自己维护。
+  #    同步是"文本级替换", 只改映射到的那几行, 不会动它们。
 
 # ---------------------------------------------------------------------------
 # Sunshine 串流主机
@@ -66,7 +97,7 @@ ipc:
   queue_size: 128
 
 # ---------------------------------------------------------------------------
-# 本机终端输入 (第三个输入源: 终端 / GUI / 主机键盘)
+# 本机终端输入 (两个输入源之一: 终端 / GUI)
 # ---------------------------------------------------------------------------
 terminal:
   # 没有 GUI/IPC 时, 这是唯一能直接敲字的通道; 服务型进程没有 stdin 会自动跳过
@@ -93,3 +124,48 @@ scheduler:
   # 也可以用 "命令名: 动作" 的 dict 写法。
   # ⚠ 命中不会把事件从 bus 里拿走, 所以命令那行**同时也会进 LLM**(订阅式的固有行为)。
   commands: []
+
+# ---------------------------------------------------------------------------
+# GUI (板端 Qt5 程序 gui/)
+# ---------------------------------------------------------------------------
+#  这一段的键路径都以 `gui.` 开头 (例如 gui.wake.idle_ms)。
+#  GUI 用**文本级替换**读写本段: 只改目标行的值, 注释与顺序原样保留 ——
+#  所以它不会动到上面的 llm / sunshine / ipc / terminal / scheduler 段。
+#
+#  ⚠ 本段由 GUI 拥有, Agent 不读它 (改这里不影响 Agent 行为)。
+#  ⚠ SigLIP 是固定的 (siglip_full.rknn), 不在这里提供开关 ——
+#    按约定"统一为 sig 固定, 只有 llm 配置可改"。
+gui:
+  # ---- 界面 ----
+  theme: grey              # 高级灰 (当前只有这一档)
+  fullscreen: true         # 启动即全屏 kiosk (--windowed 可临时覆盖)
+  start_page: home         # home | model | system | settings
+  debug: false             # 开: 日志输出每条收到的报文与连接细节 (界面不显示标记)
+
+  # ---- 唤醒 (四个区域) ----
+  wake:
+    top: locked            # locked = 常显; active = 空闲后自动隐藏
+    bottom: active
+    left: active
+    right: locked
+    idle_ms: 5000          # 统一休眠时间 (四个活动区共用这一个值; 视频控制条不共享)
+
+  # ---- 视频控制条 (内嵌在画面里) ----
+  # 与四个区域一样有 活动/锁定, 但**时间单独设置**, 不跟 wake.idle_ms 共享
+  video_overlay:
+    mode: active           # locked = 常显; active = 空闲后自动隐藏 (点一下再出现)
+    idle_ms: 3000          # 只作用于内嵌控制条
+
+  # ---- 对话 / 输入 ----
+  chat_channel: via_agent  # 主页面对话只走 agent (chat_input -> llm)
+  input_source: keyboard   # keyboard | terminal (只有 keyboard 会真控 onboard)
+                           # 原来的 "pc"(用宿主机键盘当输入源) 已随主机输入方向一起移除
+  onboard_auto: true       # 选"键盘"时自动弹 onboard, 切走自动关
+
+  # ---- 系统监控 ----
+  monitor_interval_ms: 1000
+
+  # ---- 视频 (游戏模式主区) ----
+  video:
+    speed: 1.0             # 0.5 - 3.0
+    fullscreen: true
