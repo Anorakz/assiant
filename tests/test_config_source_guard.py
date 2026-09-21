@@ -21,13 +21,20 @@ tests/test_config_source_guard.py — 配置真源守卫（归一化 D 系列）
 
   1) `agent/` 的 Python 源码里不许出现 GUI 专用配置名，也不许出现派生文件名
      —— Agent 只认 config/config.yaml。
-  2) GUI 专用配置的残留物不许复活: 那份模板文件必须不存在，
-     `.gitignore` 里也不许再为它留规则。
+  2) GUI 专用配置的残留物不许复活: 工作区里不许再出现那份模板，
+     `.gitignore` 与 `config/config.example.yaml`（都会送到板端）里不许再为它留规则。
   3) 反空转: 证明扫描真的读到了 agent/ 的源码，且里面真的出现过 config.yaml
      （否则第 1 条永远绿）。
+
+范围说明
+    本守卫只管**仓库内容**。"这台机器上还留着旧副本" 有两种正常来源，都不算回归:
+    板端 HEAD 落后于仓库、或者文件被本机 `.git/info/exclude` 忽略。所以判据里
+    带一次 `git check-ignore`: 被本机忽略的旧副本放过，工作区里**未被忽略**的
+    副本才算回归。
 """
 
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -51,6 +58,40 @@ TRUTH_PATH = "config/config.yaml"
 #: D 系列删掉的残留物, 不许复活。
 GONE_FILES = ["gui/config/gui.yaml.example"]
 GONE_GITIGNORE_PATTERNS = ["gui/config/gui.yaml"]
+
+#: 进库、会送到板端的文件里不许出现的字面量: (正则, 为什么)
+FORBIDDEN_IN_SHIPPED_CONFIG = [
+    (r"gui\.yaml",
+     "GUI 专用配置已经删除 —— 真源只有 config/config.yaml"),
+    (r"进行中",
+     "归一化 D 系列已完成, 不该再写'进行中'"),
+]
+
+#: 真源模板, 它必须体现"GUI 没有自己的配置"。
+EXAMPLE_CONFIG = "config/config.example.yaml"
+
+
+def _locally_ignored(rel_paths):
+    """返回其中被**本机** git 忽略的那些（`.gitignore` + `.git/info/exclude`）。
+
+    这是"仓库内容"与"这台机器上有什么"的分界: 板端用 `.git/info/exclude`
+    保留它自己的资产, 那些不该让守卫变红。git 不在 / 不是仓库时返回空集合。
+    """
+    if not rel_paths:
+        return set()
+    try:
+        proc = subprocess.run(
+            ["git", "check-ignore", "--stdin"],
+            cwd=str(_PROJECT_ROOT),
+            input="\n".join(rel_paths),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            universal_newlines=True,
+        )
+    except (OSError, ValueError):
+        return set()
+    if proc.returncode not in (0, 1):        # 128 = 不是 git 仓库
+        return set()
+    return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
 
 
 def _agent_python_files():
@@ -97,11 +138,15 @@ class TestAgentCopiesOnlyOneConfig(unittest.TestCase):
 class TestNoGuiConfigLeftovers(unittest.TestCase):
     """GUI 专用配置的残留物不许复活。"""
 
-    def test_template_is_gone(self):
+    def test_template_is_not_in_the_working_tree(self):
+        # 被本机忽略的旧副本放过（板端 / 落后于仓库的 checkout 都属正常）；
+        # 工作区里一份**未被忽略**的副本才是回归。
+        ignored = _locally_ignored(GONE_FILES)
         for rel in GONE_FILES:
-            self.assertFalse((_PROJECT_ROOT / rel).exists(),
-                             "%s 应该已经被删除（界面参数在 config/config.yaml 的 gui: 段）"
-                             % rel)
+            if (_PROJECT_ROOT / rel).exists() and rel not in ignored:
+                self.fail("%s 应该已经被删除（界面参数在 config/config.yaml 的 gui: 段）。"
+                          "如果这台机器只是落后于仓库，把它删掉，"
+                          "或者写进本机 .git/info/exclude。" % rel)
 
     def test_gitignore_has_no_rule_for_it(self):
         gitignore = (_PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
@@ -109,11 +154,26 @@ class TestNoGuiConfigLeftovers(unittest.TestCase):
             self.assertNotIn(pattern, gitignore,
                              ".gitignore 里还留着 %s 的规则；文件都删了, 规则也该删" % pattern)
 
+    def test_example_config_declares_the_single_truth(self):
+        """真源模板里必须能看出"GUI 没有自己的配置"。"""
+        text = (_PROJECT_ROOT / EXAMPLE_CONFIG).read_text(encoding="utf-8")
+        self.assertIn("gui:", text,
+                      "%s 里应该有 gui: 段（GUI 的界面参数住在这里）" % EXAMPLE_CONFIG)
+        for pattern, why in FORBIDDEN_IN_SHIPPED_CONFIG:
+            hits = [ln.strip() for ln in text.splitlines()
+                    if re.search(pattern, ln, re.IGNORECASE)]
+            if hits:
+                self.fail("%s 里还有 %d 行命中 /%s/:\n      %s\n      原因: %s"
+                          % (EXAMPLE_CONFIG, len(hits), pattern,
+                             "\n      ".join(hits), why))
+
     def test_scan_is_not_vacuous(self):
-        """证明 .gitignore 真的被读到了（否则 assertNotIn 永远绿）。"""
+        """证明这两个文件真的被读到了（否则上面的断言永远绿）。"""
         gitignore = (_PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("config/*.yaml", gitignore,
                       ".gitignore 读进来的内容不对, 检查路径")
+        self.assertTrue((_PROJECT_ROOT / EXAMPLE_CONFIG).is_file(),
+                        "%s 不见了" % EXAMPLE_CONFIG)
 
 
 if __name__ == "__main__":

@@ -66,12 +66,17 @@ $remoteTmp = "/tmp"
 # Paths archived with git archive (relative to repo root).
 # Deliberately selective: no native/ (sources), no gui/ (the board owns it),
 # no config/config.yaml (the board owns the live config).
+# .gitignore IS shipped on purpose: the board must share the repo's ignore rules,
+# otherwise its `git status` means something different from the PC's (found in
+# task D4 -- the board still carried the pre-normalisation rule for the deleted
+# GUI config, which made tests/test_config_source_guard.py fail there).
 $archivePaths = @(
     "agent",
     "tests",
     "docs",
     "scripts",
-    "config/config.example.yaml"
+    "config/config.example.yaml",
+    ".gitignore"
 )
 
 function Step($n, $text) {

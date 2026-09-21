@@ -16,8 +16,8 @@
 #      llm/config/llm.env                 由本文件派生(喂 llama-server), **不是真源**
 #
 #  ⚠ 归一化 D 系列已完成: GUI 的界面参数已全部并进本文件的 gui: 段,
-#     GUI 不再有独立的配置文件(gui/config/ 目录连同 gui.yaml.example 一起删除)。
-#     谁写、谁读、谁派生的完整约定见 docs/config-sources.md。
+#     GUI 不再有独立的配置文件(已随 D 系列删除)。谁写、谁读、谁派生的
+#     完整约定见 docs/config-sources.md。
 # ============================================================================
 
 llm:

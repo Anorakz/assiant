@@ -25,9 +25,15 @@ tests/test_docs.py — 文档守卫：相对链接有效 + 过时声明不得回
 注意
     扫描范围是**现状类文档**（Readme + docs/）。`todo.md` 是历史记录，里面出现旧词
     （例如 Phase 8 计划里提到的技术选项）是合理的，不在扫描范围内。
+
+    还有一类要排除：**本机独有的文档**。板端 `docs/` 下留着两份旧 GUI 方案
+    （它们在板端的 `.git/info/exclude` 里，不属于任何分支）。它们是历史材料，
+    说"gui.yaml 是真源"完全正常，不该让守卫变红。判据用 `git check-ignore`：
+    被本机忽略的文件不算仓库的文档。
 """
 
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -68,8 +74,30 @@ STALE_CLAIMS = [
 ]
 
 
+def _locally_ignored(paths):
+    """返回其中被**本机** git 忽略的那些（`.gitignore` + `.git/info/exclude`）。
+
+    git 不在 / 不是仓库时返回空集合 —— 那就退化成"全都扫"，与过去的行为一致。
+    """
+    if not paths:
+        return set()
+    try:
+        proc = subprocess.run(
+            ["git", "check-ignore", "--stdin"],
+            cwd=str(_PROJECT_ROOT),
+            input="\n".join(str(p) for p in paths),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            universal_newlines=True,
+        )
+    except (OSError, ValueError):
+        return set()
+    if proc.returncode not in (0, 1):        # 128 = 不是 git 仓库
+        return set()
+    return {Path(line.strip()).resolve() for line in proc.stdout.splitlines() if line.strip()}
+
+
 def _doc_paths():
-    """收集要扫描的 md 文件 (存在才收, 排序稳定)。"""
+    """收集要扫描的 md 文件 (存在才收, 排序稳定)。本机忽略的不算。"""
     out = []
     for rel in DOC_FILES:
         p = _PROJECT_ROOT / rel
@@ -78,7 +106,9 @@ def _doc_paths():
     for pattern in DOC_GLOBS:
         out.extend(p for p in _PROJECT_ROOT.glob(pattern) if p.is_file())
     # 去重 + 稳定顺序
-    return sorted(set(out))
+    paths = sorted(set(out))
+    ignored = _locally_ignored(paths)
+    return [p for p in paths if p.resolve() not in ignored]
 
 
 #: markdown 链接: [文本](目标)。目标里不含 ')' 就够用了 (本仓库没有带括号的路径)。
