@@ -392,7 +392,7 @@ Phase 6 决策记录（已评审）
      Readme 删掉"实现未做"并补上命令信封。另加 tests/test_docs.py 文档守卫（相对链接 + 过时说法黑名单），
      已注册进三端共享的套件清单 —— 以后漂移会直接让测试变红。
      还发现并修掉：Readme 的 ZeroMQ 约定、architecure.md 整篇旧设计（ZeroMQ + PC 侧 GUI）。
-☑ 配置入口收敛：**已完成**（归一化 D 系列 D1–D4）
+☑ 配置入口收敛：**已完成**（归一化 D 系列 D1–D5）
      · D1 `56d1ff9` config.yaml 成为唯一真源：原 GUI 专用配置的 17 个键整体并进它的 `gui:` 段，
        同时修正 `llm:` 段漂移（edge = llama.cpp GGUF + 本机 llama-server）并补齐 llama-server 参数
      · D2 `da1ae85` GUI 改读写 config.yaml：11 + 16 个键改到 `gui.*`，`--gui-config` → `--config`
@@ -401,6 +401,12 @@ Phase 6 决策记录（已评审）
      · D4 删掉 gui/config/（模板连同 .gitignore 规则）；新增 docs/config-sources.md 讲清
        「谁写 / 谁读 / 谁派生」；新增 tests/test_config_source_guard.py（agent/ 里出现
        gui.yaml 或 llm.env 字面量即失败）；docs 的过时说法黑名单加两条
+     · D5 `52e9459` 板端 live 配置落地：把原 GUI 专用配置里的界面参数并成 `gui:` 段、
+       补齐 llm 的 7 个 llama-server 参数与 sunshine.https_port、ipc 段从 ZeroMQ 时代的
+       pub_bind/sub_connect/recv_timeout_ms 改成 socket_path/queue_size、scheduler.hotkeys →
+       commands、删掉无引用的 host_input_interval_ms；板端 gui/config/gui.yaml 已删除。
+       落盘前逐键核对并在板端实测：目标配置 `--check-config` 退出 0、`gui_config_sync`
+       派生零差异（llm.env 逐字节不变）、模型页保存零差异（D3 的"新键追加到段尾"就此关闭）。
      判据: 归一化后全仓只剩历史注释提到 GUI 专用配置；板端模型页改 mode → 只有 config.yaml 变、
      llm.env 被重新派生（且派生结果与板端在用的那份逐字节相同）；Agent `--check-config`
      对含 `gui:` 段的配置仍退出 0
@@ -422,6 +428,26 @@ Phase 6 决策记录（已评审）
      · F4 **已完成**：新增 `docs/deploy.md`（三条同步路径各管什么 / 清单与落后判定 /
        板端不入库清单 / 常见操作 / 踩过的坑），`docs/architecure.md` §2 §8.2 §9.2 同步，
        Readme 的 docs 目录树补成实际 8 个文件。文档守卫（相对链接 + 过时说法）通过。
+☑ 板端卫生 + 四端复核（G1，归一化收尾）
+     · 推送与同步：F3/F4/D1–D5 共 8 个提交推到 GitHub（`f78d273..52e9459`），板端
+       `git fetch` + `git checkout -f -B main origin/main` 同步到 `52e9459`。
+       **板端 git status 0 条**，与部署清单 98 个文件全部匹配；板端本地资产
+       （config/config.yaml、llm/ sig/ net/ runtimes/ temp/ creds/、docs/gui-qt5-*.md、
+       tests/test_llm_integration.py、tests/board/mpp_decode_smoke、todo）逐项确认在位，
+       config.yaml 与 llm.env 的指纹一字未变。
+     · 字节码卫生：清掉 65 个**不属于本机**的 .pyc（cpython-312/313/314，mtime 全是
+       2026-09-16 —— 早期整树 scp 带过来的；板端全盘只有 python3.8，这些缓存永远不可能
+       被加载）。117 → 52 个 .pyc，剩下 50 个 cpython-38 + 2 个 cpython-38-pytest。
+       机制上也不会再回来：deploy.ps1 用 `git archive`，只送已跟踪的文件。
+     · 判据复核（仓库侧）：agent/ 里读 llm.env 0 处、提 GUI 专用配置 0 处；
+       全仓 `def decode_command` 1 处；agent/ipc/ 4 个文件；gui/config/ 目录不存在；
+       .gitignore 里旧规则 0 条；提到 GUI 专用配置的只剩 2 处历史注释 +
+       2 个守卫测试 + todo.md（历史记录，不在扫描范围）。
+     · 四端：PC 宿主机 ctest 172/172；PC python 套件 exit 0；WSL python 套件 15 文件
+       exit 0；板端 python 套件 16 文件 ALL OK；板端 GUI ctest 16/16。
+     · 顺手记一个坑：**别在 WSL 里对 /mnt/e 的这份 checkout 跑 `git status`** ——
+       WSL 的 git 默认 `core.autocrlf=false`，同一份工作树会假报约 100 个文件被改；
+       `git -c core.autocrlf=true status` 就是干净的（PC 侧 autocrlf=true，权威视角）。
 ☑ 文档去重：**已完成**（B1 `a364269`）。gui-agent-integration.md §2/§3 的两张字段表降级为指针
      （字段定义只在 ipc-protocol.md），该文档只管"GUI 在哪儿发、收到后界面怎么变"；
      §6 里指向 temp/（clone 后不存在）的假 Agent 换成了仓库内真实脚本。
