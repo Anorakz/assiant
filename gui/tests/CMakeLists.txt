@@ -63,7 +63,7 @@ target_compile_definitions(test_schedule_model PRIVATE
 # ------------------------------------------------- T5/T7: 控件级测试 ---
 # 真的点控件（输入框 / 发送按钮 / 模式按钮 / 音乐条占位块），所以需要
 # QApplication + Widgets，跑的时候用 offscreen 平台插件。
-foreach(gui_test test_main_page test_bottom_bar test_video_panel test_sys_page test_model_page test_bench_runner test_settings_page)
+foreach(gui_test test_main_page test_bottom_bar test_video_panel test_sys_page test_model_page test_bench_runner test_settings_page test_schedule_panel)
     add_executable(${gui_test} ${gui_test}.cpp)
     # 控件测试里用到图标（VideoPanel/MusicBar）→ 把资源一起编进来
     target_sources(${gui_test} PRIVATE ../resources/icons.qrc)

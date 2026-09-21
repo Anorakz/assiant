@@ -92,6 +92,8 @@ add_library(gui_widgets STATIC
     src/ui/mode_panel.cpp
     src/ui/chat_panel.h
     src/ui/chat_panel.cpp
+    src/ui/schedule_panel.h
+    src/ui/schedule_panel.cpp
     src/ui/music_bar.h
     src/ui/music_bar.cpp
     src/ui/bottom_bar.h
