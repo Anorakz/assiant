@@ -280,7 +280,32 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
      测试 +4（合法转换真的切状态 / 非法转换推真实状态 / 无 runtime 不炸 / 真 socket 往返）；
      三方：PC 整套 exit 0；WSL 14 文件 OK（TestBuildIpc 18 条全跑，含真 socket 往返）；
      板端 test_ipc_local_server 88 OK + 上面那次活体往返。
-□ D6 GUI 命令到 Agent 验证（switch_mode 往返 / chat_input 往返）
+■ D6 GUI 命令到 Agent 验证（switch_mode 往返 / chat_input 往返）
+     板端有真显示（Xorg :0 + XFCE + /dev/dri，Qt 的 libqxcb 在），GUI 二进制也在，
+     所以用的是**真 GUI**（不是替身）。GUI 自带验收开关，正好干这事：
+       · chat_input 往返：`--chat-demo "现在几点"` **走真实输入框 + 发送按钮**，
+         再 `--screenshot` 存下窗口图。GUI 日志与截图都拿到了：
+             [ipc] 发送: {"action":"chat_input","payload":{"text":"现在几点"}}
+             [recv] llm {"text":"现在是 2026-09-21 19:04:38。"}
+         截图里能看见：左上角绿点「已连接」、右侧「切换模式」面板、
+         用户气泡「现在几点」与助手气泡「现在是 2026-09-21 19:04:38。」——
+         推送确实渲染到了控件上。
+       · switch_mode 往返：`--stdio` 模式（`@<action> <json>` 语法）连真 Agent：
+             [ipc] 发送: {"action":"switch_mode","payload":{"value":"STUDY"}}
+             [recv] status {"connected":false,"mode":"STUDY"}
+             [ipc] 发送: {"action":"switch_mode","payload":{"value":"GAME"}}   (非法)
+             [recv] status {"connected":false,"mode":"STUDY"}   <- 被拒后把真实状态推回来
+         板端 Agent 的 state 从 idle 变成 study ✓（`stats: events=1 replies=1`）。
+     这两条同时把 **D1 的信封**在真 C++ 侧验了：GUI 真发的是 {"action","payload"}，
+     与 Agent 的 decode_command 逐字节一致（之前只是"按构造应该一致"）。
+     ⚠ 一处**没做成**：想用 XTEST 合成真实点击去按「学习」按钮（板端没有 xdotool，
+     但服务端启用了 XTEST 且有 libXtst.so.6）。第一版 ctypes 没声明 argtypes，64 位
+     Display* 被截断 → 点击静默无效；补上 argtypes 后，XTestFakeMotionEvent 之类的
+     请求会**挂住**（疑似被别的客户端 grab 了 X server —— 板端跑着 onboard 屏幕键盘）。
+     没有硬凑：GUI 的按钮点击与 stdio 命令走的是**同一个** `LocalClient::sendCommand`
+     （gui/src/main_window.cpp 的模式按钮），且按钮级点击另有 GUI 自己的 QTest 单测
+     覆盖（板端 ctest 16/16）。若要把"真按钮被点"也做成可复跑的验收，最干净的是给 GUI
+     加一个 `--switch-mode-demo <MODE>` 开关（与其既有 --*-demo 系列一致）—— 待你定。
 □ D7 未接线的命令（next_wallpaper / next_bilibili）回推一条 llm 说明「功能未接入」
      （下游属 Phase 7；已确认可接受，避免 GUI 上点了没反应）
 
