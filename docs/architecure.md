@@ -73,8 +73,11 @@ Python Agent
 ```python
 import agent_native
 
-# 连接
-agent_native.moonlight.start(host, app, w, h, fps)
+# 连接: 握手已经在 Python 侧做完 (HTTPS 47984 + 客户端证书, 见 agent/net/sunshine_client.py),
+# 这里只把 app_version 与 sessionUrl0 交给 moonlight —— native 一次 HTTP 都不发。
+agent_native.moonlight.start_with_session(host, app, w, h, fps,
+                                          app_version, gfe_version,
+                                          codec_mode_support, session_url)
 agent_native.moonlight.stop()
 agent_native.moonlight.status()
 

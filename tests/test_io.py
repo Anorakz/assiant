@@ -465,6 +465,20 @@ class TestInputSender(_IoTestBase):
         await sender.send_hotkey([])
         self.assertEqual(self.native.last_call("send_hotkey"), ("send_hotkey", []))
 
+    async def test_show_desktop_sends_win_d(self):
+        # 回到桌面 = WIN+D。注意 "d" 是小写 —— 它能对全靠 resolve_key 做了大写化
+        # (否则会变成 0x64 = VK_NUMPAD4, 见 test_resolve_key_lowercase_*)
+        sender = InputSender(native=self.native)
+        await sender.show_desktop()
+        self.assertEqual(self.native.last_call("send_hotkey"),
+                         ("send_hotkey", [0x5B, 0x44]))   # VK_LWIN, VK_D
+
+    async def test_show_desktop_does_not_touch_lock_keys(self):
+        # 锁屏 (VK_LWIN + 'L') 是被 Windows 过滤掉的合成组合, 这里明确不许再发
+        sender = InputSender(native=self.native)
+        await sender.show_desktop()
+        self.assertNotIn(0x4C, self.native.last_call("send_hotkey")[1])
+
     async def test_send_mouse(self):
         sender = InputSender(native=self.native)
         await sender.send_mouse(10, 20, "left")

@@ -5,14 +5,16 @@
 #  ---------------------------------------------------------------------------
 #  Sunshine 把 /serverinfo /applist /launch 放在 **HTTPS 47984 + 客户端证书** 上;
 #  不带证书的明文 HTTP 47989 只会得到 PairStatus=0, /launch 必然失败 —— 这正是
-#  Phase 6 之前连不上的根因。native 侧的 moonlight_connection.cpp 是手写的裸
-#  socket HTTP 客户端, 要支持 TLS 就得再给交叉编译引入 OpenSSL; 而 Python 的
-#  ssl 模块本来就在。所以分工是:
+#  Phase 6 之前连不上的根因。native 侧原来那个手写的裸 socket HTTP 客户端
+#  (native/moonlight_connection.cpp) 支持不了 TLS, 要支持就得给交叉编译引入
+#  OpenSSL; 而 Python 的 ssl 模块本来就在。所以分工是:
 #
 #      Python (本模块)   HTTPS 47984        → app_version + sessionUrl0
 #      native            start_with_session() → 直接进 LiStartConnection
 #
-#  moonlight_connection.cpp 那一层留给"无 TLS 的 GFE 主机", 不归本模块管。
+#  那一层明文 HTTP 客户端**已经删掉**了 (Phase 6, 实测它只能拿到 PairStatus=0 与
+#  /applist //launch 的 404, 留着只会让人以为还有一条能用的路); 现在 native 侧
+#  只有 start_with_session() 一个连接入口。
 #
 #  与别的 Moonlight 客户端共存 (同一台主机上)
 #  ---------------------------------------------------------------------------
@@ -204,7 +206,7 @@ class LaunchResult:
 #  纯解析函数
 #
 #  Sunshine 的响应是固定几个字段的 XML, 不需要通用解析器; 越通用越难在小样本上
-#  验证 (native/moonlight_connection.cpp 是同样的取舍)。
+#  验证 (已删掉的 native/moonlight_connection.cpp 当初是同样的取舍)。
 # ---------------------------------------------------------------------------
 
 
@@ -228,8 +230,8 @@ def _root_attrs(xml: str) -> str:
 def _attribute(xml: str, name: str) -> str:
     """取 <root name="value"> 的属性值; 找不到返回空串。
 
-    ⚠ Sunshine 的 status_message 是**属性**不是元素 (moonlight_connection.h 里也
-      专门记了这条), 用 _tag 是取不到的。
+    ⚠ Sunshine 的 status_message 是**属性**不是元素 (真机抓包确认过; 我们删掉的那个
+      native 明文客户端也专门记了这条), 用 _tag 是取不到的。
     """
     match = re.search(r'\b%s\s*=\s*"([^"]*)"' % re.escape(name), _root_attrs(xml))
     return match.group(1) if match else ""

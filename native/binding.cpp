@@ -3,7 +3,9 @@
 //
 //  暴露给 Python 的名字空间
 //  ---------------------------------------------------------------------------
-//      agent_native.moonlight.start(host, app, w, h, fps) -> bool
+//      agent_native.moonlight.start_with_session(host, app, w, h, fps,
+//                                                app_version, gfe_version,
+//                                                codec_mode_support, session_url) -> bool
 //      agent_native.moonlight.stop()                      -> None
 //      agent_native.moonlight.status()                    -> dict
 //
@@ -122,22 +124,6 @@ PYBIND11_MODULE(agent_native, m) {
 
     // ------------------------------------------------------------- moonlight --
     py::module_ ml = m.def_submodule("moonlight", "Moonlight 连接与接收线程");
-
-    ml.def(
-        "start",
-        [](const std::string& host, const std::string& app, int width, int height, int fps) {
-            bool ok = false;
-            {
-                // HTTP 握手 + LiStartConnection 是阻塞的, 必须放开 GIL,
-                // 否则板端 asyncio 会卡住。
-                py::gil_scoped_release release;
-                ok = adapter().start(host, app, width, height, fps);
-            }
-            return ok;
-        },
-        py::arg("host"), py::arg("app"), py::arg("w"), py::arg("h"), py::arg("fps"),
-        "连接主机并开始收流 (阻塞直到连接建立或失败).\n"
-        "失败原因见 status()['error']。");
 
     ml.def(
         "start_with_session",

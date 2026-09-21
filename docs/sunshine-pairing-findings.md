@@ -165,7 +165,10 @@ step1 paired=1 → step2 OK → step3 OK (验签 PASS) → step4 paired=1
 | `LiGetLaunchUrlQueryParameters()` | C++ 提供，Python 使用 | 经 `moonlight.launch_url_query_parameters()` 导出（本版本返回 `&corever=1`），避免把"Sunshine 扩展参数"抄一份进 Python |
 
 * **为什么不在 C++ 里做 TLS**：得给交叉编译再引一个 OpenSSL，而 Python 的 `ssl` 本来就在。
-  `native/moonlight_connection.cpp` 那条明文路径**保留**，留给无 TLS 的 GFE 主机。
+  原来那条手写裸 socket 的明文路径（`native/moonlight_connection.cpp`）本打算留给无 TLS 的
+  GFE 主机，**已在 Phase 6 删除**：它在这台主机上只能拿到 `PairStatus=0` 与 `/applist`
+  `/launch` 的 404，留着只会让人以为还有一条能用的路。现在 native 只有
+  `start_with_session()` 一个连接入口（`agent/net/sunshine_client.py` 负责握手）。
 * **共存**：主机上已有应用时 `/launch` 的 400 不是失败（见上），`start_session()` 会自动退到
   `/resume`。**注意 `/resume` 的语义**：它不是"加入对方那一路流"，而是"别因为应用已在运行就
   拒绝我，给我一路自己的会话"。实测（2026-09-21，板端连上时主机上另有一个 H.264 客户端在串流）：

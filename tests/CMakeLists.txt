@@ -69,20 +69,12 @@ agent_add_host_test(test_input_sender
     ../native/input_sender.cpp
 )
 
-# moonlight_connection: HTTP + XML 握手层 (纯 host, 不依赖 moonlight 库)
-agent_add_host_test(test_moonlight_connection
-    test_moonlight_connection.cpp
-    ../native/moonlight_connection.cpp
-)
-if(WIN32)
-    target_link_libraries(test_moonlight_connection PRIVATE ws2_32)
-endif()
-
 # moonlight_adapter: 状态机 + 参数校验 (host 不链接 moonlight)
+# 注: 原来这里还编 ../native/moonlight_connection.cpp —— 那一层(明文 HTTP 握手)
+# 已在 Phase 6 删除 (握手移到 Python 侧, 见 agent/net/sunshine_client.py)。
 agent_add_host_test(test_moonlight_adapter
     test_moonlight_adapter.cpp
     ../native/moonlight_adapter.cpp
-    ../native/moonlight_connection.cpp
     ../native/decoder.cpp
     ../native/decoder_mpp.cpp
     ../native/image_rb.cpp

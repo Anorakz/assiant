@@ -32,7 +32,9 @@ Sunshine v2025.924.154138 的 SRSAES 配对存在一个服务端侧缺陷 (本�
   nvhttp::is_client_enabled() 遇到重复匹配会直接返回 false, 结果是
   401 Certificate verification failed。用 `dedup` 清理。
 
-默认 state.json = /mnt/d/tool/sunshine/config/sunshine_state.json
+默认 state.json：Windows 上是 D:\\tool\\sunshine\\config\\sunshine_state.json，
+WSL 上是 /mnt/d/tool/sunshine/config/sunshine_state.json —— 按平台自动选，
+也可以用环境变量 SUNSHINE_STATE 覆盖。
 每次写入都会先生成 <state.json>.bak-<时间戳> 备份。
 """
 import json
@@ -41,10 +43,38 @@ import shutil
 import sys
 import time
 
-DEFAULT_STATE = "/mnt/d/tool/sunshine/config/sunshine_state.json"
+# Windows 的控制台默认是 GBK：本文档里有 ⚠ 这类字符，直接 print 会
+# UnicodeEncodeError 并把 `--help`/用法打印整个弄崩（2026-09-21 实测）。
+# 只放宽 errors、**不动 encoding** —— 中文仍然正常显示，编不出来的符号变成 '?'。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, ValueError):     # 非标准流 / 老解释器
+        pass
+
+
+def _default_state():
+    """默认 state.json：优先环境变量，其次按平台猜。"""
+    env = os.environ.get("SUNSHINE_STATE")
+    if env:
+        return env
+    if sys.platform == "win32":
+        return r"D:\tool\sunshine\config\sunshine_state.json"
+    return "/mnt/d/tool/sunshine/config/sunshine_state.json"
+
+
+DEFAULT_STATE = _default_state()
 
 
 def load(path):
+    if not os.path.isfile(path):
+        raise SystemExit(
+            "找不到 Sunshine 的 state.json: %s\n"
+            "  · Windows 默认找 D:\\tool\\sunshine\\config\\sunshine_state.json\n"
+            "  · WSL 默认找 /mnt/d/tool/sunshine/config/sunshine_state.json\n"
+            "  · 别的路径用环境变量 SUNSHINE_STATE 指定, 或作为最后一个参数传进来"
+            % path
+        )
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 

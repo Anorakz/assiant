@@ -92,8 +92,11 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
      launch 查询串追加 LiGetLaunchUrlQueryParameters()（由绑定导出，不抄一份进 Python）。
      主机上已有别的客户端时 /launch 回 400，自动退到 /resume 加入同一会话（共存）。
      （完成 15fb6a3 + 6251474 + c32c8b3；实测对照与分层见 docs/sunshine-pairing-findings.md §5.1）
-     （原描述"moonlight_connection 改 HTTPS"是当时的写法，实际按评审结论改在 Python 侧；
-       那条明文 HTTP 路径保留给无 TLS 的 GFE 主机，是否删除等 B3 板端跑通后再定）
+     （原描述"moonlight_connection 改 HTTPS"是当时的写法，实际按评审结论改在 Python 侧。
+       Phase 6 收尾时**已把那条明文 HTTP 路径删掉**（native/moonlight_connection.{h,cpp}
+       + tests/test_moonlight_connection.cpp，共 20 个用例）：实测它在这台主机上只能拿到
+       PairStatus=0 与 /applist //launch 的 404，留着只会让人以为还有一条能用的路。
+       现在 native 只有 start_with_session() 一个连接入口。详见下方"C 收尾"条目）
 ■ B2 板端配对落地：部署 creds/ + 校验授权名单 + 重启 Sunshine + verify-authorized.sh 对照
      creds/ 已部署到板端 (/home/kickpi/myproject/assitant/creds/)，client.pem/key 的 sha256
      与 PC 上一致；板端 live config.yaml **本来就配了** sunshine.cert/key，所以无需改配置
@@ -156,7 +159,9 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
             => Windows 把"合成输入"的锁屏组合过滤掉了（与 Ctrl+Alt+Del 同类安全动作）。
        影响：Phase 7 的 `tools/lockscreen.py` 若按 `send_hotkey(["META","L"])` 实现**不可能生效**；
        需要另一条路（板端 → 主机目前没有反向命令通道，可考虑宿主机侧放个小助手）。
-       ⚠ **待你定**：这个功能是砍掉，还是加一个宿主机侧机制 —— 属 Phase 7 设计。
+       ⚠ **你的决定（2026-09-21）：这个动作从"锁屏"改为"回到主页"**。
+         落地方式待明确（见下方"C 收尾"条目）："主页"指的是板端 GUI 的主页面，
+         还是宿主机的桌面/浏览器主页？两者实现完全不同，我不猜。
 ■ 【C1/C2 期间修掉】resolve_key 对小写单字符直接 ord() -> 发错键
      Windows 的字母 VK 是大写 ASCII；`ord('a')`=0x61 其实是 VK_NUMPAD1，
      于是 `send_key("ctrl","c")` 会变成 Ctrl+数字键盘3（"复制"根本不是复制）。
@@ -171,7 +176,9 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
      作为参考平面交给 LiSendMousePositionEvent（宿主按 0..1 归一化映射到显示器）。
      后果：中心点仍然对得上，但偏离中心的点击在水平方向会偏 —— **看见的像素与点到的
      位置不是同一个坐标系**。键盘不受影响（C1 因此全绿）。
-     建议：请求与显示器同比例的流（例如 720x1080），或让 Agent 按黑边补偿后再算 ROI。
+     ■ **已决定：不做**（2026-09-21 你的判定"不需要鼠标坐标"）。结论留在这里：
+       如果哪天真要用 vision 驱动点击，必须先解决这件事（改流比例 或 按黑边补偿），
+       否则点偏是必然的。代码里的 send_mouse 路径未动。
 □ C2 ~~Host Input RB 实流验证：主机原生键盘事件被板端读到~~ **【已删除】**
      原因：moonlight-common-c 没有任何「主机 → 客户端」输入接收 API（只有 LiSendKeyboardEvent
      等发送方向），原设计假设不成立，见 docs/sunshine-pairing-findings.md 同期调研
@@ -179,6 +186,35 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
      第三源不存在；若要改成「终端 + GUI 两源」需另行讨论
 □ C4 GUI 侧删除主机输入相关内容（Phase 5 的 input_capture 之外，凡涉及「主机输入」的
      UI 入口 / 命令 / 文案一并移除）—— 改动在 GUI，需与 GUI 侧同步
+     ■ **你的决定（2026-09-21）：本期不做。**
+
+-- C / B 收尾（2026-09-21 你的决定，逐条落地）--
+■ 删除 native 的明文 HTTP 握手层（原 B1 遗留的"方案 C：等 B3 跑通再定"）
+     B3 已在板端跑通 → 删掉：native/moonlight_connection.{h,cpp} + tests/test_moonlight_connection.cpp
+     （20 个用例）。同步改：moonlight_adapter.{h,cpp}（只剩 prepare_start + start_with_session +
+     connect_limelight，去掉 HTTP 分支与 unique_id）、binding.cpp（去掉 moonlight.start 绑定与头注释）、
+     native/CMakeLists.txt（去掉源文件与 ws2_32 链接）、tests/CMakeLists.txt（去掉该测试目标）、
+     tests/mocks/mock_agent_native.py（替身改为 start_with_session）、文档四处
+     （sunshine-pairing-findings §5.1、architecure、decoder-mpp、Readme 目录树）与
+     agent/{main.py,net/sunshine_client.py} 的注释。
+     验证：host ctest **193/193 passed**（213 − 20，正好是被删的那 20 条）；
+           交叉编译 exit 0（AArch64 / GLIBC 2.17）；PC 整套 exit 0。
+■ 修掉 authorize_client.py 的两个毛病
+     · 默认 state.json 按平台选：Windows `D:\tool\sunshine\config\sunshine_state.json` /
+       WSL `/mnt/d/tool/sunshine/config/sunshine_state.json`，另支持 `SUNSHINE_STATE` 覆盖；
+       缺文件时给出可操作提示（原来 Windows 上直接 FileNotFoundError）。
+     · cp936 控制台打印含 `⚠` 的文档会 UnicodeEncodeError → stdout/stderr 只放宽 `errors`
+       不动 encoding（中文照常，`⚠` 变 `?`）。
+     实测：PC 走 D:\、WSL 走 /mnt/d/，读到的都是同一份 5 条设备；无参数打印用法不再崩。
+     （顺手修掉自己引入的 SyntaxWarning：docstring 里的 Windows 路径要转义反斜杠。）
+     · 同类但**未动**：verify-authorized.sh / pair_*.py 仍是 WSL 写法 —— 它们在本项目里
+       是"排查期工具"，板端用 env 覆盖即可（B2 就是这么跑的），不属本次要求。
+■ 锁屏 → **改为"回到桌面"**（2026-09-21 你的决定："从锁屏改为回到主页" → 宿主机回到桌面）
+     机制已就位：`agent/io/input_sender.py::InputSender.show_desktop()` = `send_hotkey(["meta","d"])`
+     （WIN+D）。测试 +2（发出的码是 [0x5B, 0x44]，且**不含**锁屏键 0x4C）。
+     板端实测：主机桌面确实显示出来（截图 1718395 → 2060448 B，与 C1 那次 WIN+D 的特征尺寸一致），
+     再按一次窗口回来了。**但**两次里有一次没落地、还原也不是字节级精确 —— 详见 Phase 7 那条的 ⚠。
+     Phase 7 的对应条目已从 lockscreen.py 改成 back_to_desktop.py。
 
 -- D 状态与命令 --
 ■ D1 IPC 命令格式统一为 GUI 实际实现：{"action": str, "payload": object}，一行一条
@@ -306,8 +342,18 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
      （gui/src/main_window.cpp 的模式按钮），且按钮级点击另有 GUI 自己的 QTest 单测
      覆盖（板端 ctest 16/16）。若要把"真按钮被点"也做成可复跑的验收，最干净的是给 GUI
      加一个 `--switch-mode-demo <MODE>` 开关（与其既有 --*-demo 系列一致）—— 待你定。
-□ D7 未接线的命令（next_wallpaper / next_bilibili）回推一条 llm 说明「功能未接入」
-     （下游属 Phase 7；已确认可接受，避免 GUI 上点了没反应）
+■ D7 未接线的命令（next_wallpaper / next_bilibili）回推一条 llm 说明「功能未接入」
+     原来这两条只记一条 warning 就丢掉 —— GUI 上点了**毫无反应**，像坏了。
+     现在 `UNWIRED_COMMAND_NOTES`（agent/ipc/__init__.py）给出面向用户的一句话，
+     经 `push` 走 llm 通道回给 GUI：
+       next_wallpaper -> "换壁纸的功能还没接入（Phase 7），这次点击先没有生效。"
+       next_bilibili  -> "B 站「下一集」还没接入（Phase 7），这次点击先没有生效。"
+     不认识的 action **不**回话（只记 warning）—— 那是版本不一致的正常现象，别往聊天里塞。
+     板端活体验证：LocalClient 发这两条，各收到一条 llm（原文见上）。
+     文档：ipc-protocol.md §4 与 gui-agent-integration.md §3 都写明"会回一条说明"，
+     免得 GUI 侧以为这是 bug。
+     测试 +4（两条各回一句说明 / 陌生 action 不塞 llm / 没有 push 也不炸 / 真 socket 收到）；
+     三方：PC 整套 exit 0；WSL 14 文件 OK（92 条全跑，0 skipped）；板端 92 OK + 活体。
 
 Phase 6 决策记录（已评审）
 1. IPC 命令格式**以 GUI 实际实现为准**：{"action","payload"}
@@ -333,7 +379,13 @@ Phase 7 — 工具层
 □ tools/base.py：工具基类（name、schema、execute、权限、allowed_states）
 □ tools/init.py：工具注册入口
 □ core/tool_router.py：注册、权限、调度（Phase 3 已建骨架，此处完善）
-□ tools/lockscreen.py：send_hotkey(["META","L"])，仅 STUDY 未完成时
+□ tools/back_to_desktop.py（原 lockscreen.py）：调 InputSender.show_desktop()（= WIN+D），仅 STUDY 未完成时
+     为什么不是锁屏：Windows 过滤**合成输入**的 Win+L（实测连 host 本机 keybd_event 合成也锁不上，
+     与 Ctrl+Alt+Del 同属安全动作）→ 按你的决定改成"回到桌面"，而 WIN+D 在真机上是通的。
+     机制已经在 `agent/io/input_sender.py::InputSender.show_desktop()` 里（Phase 6 收尾时就位）。
+     ⚠ 它是**开关**且没有回执：实测连按两次里有一次没落地（第 2 次丢了，第 3 次才还原），
+       而且那次还原的截图字节数与基线不同（1352621 vs 1718395，右侧的 VS Code 没回来）。
+       所以工具层要么发完校验效果（例如看 image_rb 或让主机回执），要么别把它当幂等动作使。
 □ tools/netease_music.py：cloud-music-mcp 集成，动态歌单、批量加歌、URL Scheme
 □ tools/bilibili.py：搜索、order=play 排序、顺序播放、反馈切换
 □ tools/wallpaper.py：按 LLM 编排序列切换

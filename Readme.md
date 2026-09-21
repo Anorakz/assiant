@@ -19,8 +19,7 @@ agent/
 │   ├── preprocess.cpp/.h        # YUV420P → 256×256 RGB888
 │   ├── decoder.cpp/.h           # H.265 硬解 (板端 V4L2/FFmpeg)
 │   ├── input_sender.cpp/.h      # send_key / send_mouse / send_hotkey
-│   ├── moonlight_connection.cpp/.h  # HTTP 握手 / serverinfo / applist / pair
-│   ├── moonlight_adapter.cpp/.h # 连接状态机 + 两条接收线程
+│   ├── moonlight_adapter.cpp/.h # 连接状态机 + 两条接收线程 (握手在 Python 侧, 见 agent/net/)
 │   ├── binding_utils.h          # binding 与测试共用的转换工具 (Frame→numpy 等)
 │   ├── binding.cpp              # pybind11 模块 agent_native
 │   └── third_party/             # 子模块: moonlight-common-c, pybind11, googletest

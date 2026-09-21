@@ -16,17 +16,16 @@ pybind11_add_module(agent_native
     host_input_rb.cpp
     preprocess.cpp
     input_sender.cpp
-    moonlight_connection.cpp
     moonlight_adapter.cpp
 )
 
 target_include_directories(agent_native PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# moonlight_connection.cpp 用的是原始 socket: Windows 上要显式链接 ws2_32
-# (MinGW 不认 #pragma comment(lib, ...))。sysroot 侧不需要额外库。
-if(WIN32)
-    target_link_libraries(agent_native PRIVATE ws2_32)
-endif()
+# 注: 原来这里为 moonlight_connection.cpp (手写裸 socket HTTP 客户端) 在 Windows 上
+# 链接 ws2_32。那一层已在 Phase 6 删除 —— 握手移到 Python 侧
+# (agent/net/sunshine_client.py 走 HTTPS 47984 + 客户端证书), native 只通过
+# start_with_session() 接 app_version / sessionUrl, 不再有任何 socket 调用,
+# 所以 ws2_32 也不必链接了。
 
 # ------------------------------------------------------------------ RPATH -----
 # 板端 import agent_native 时报 "libmoonlight-common-c.so: cannot open shared

@@ -82,32 +82,25 @@ public:
     MoonlightAdapter(const MoonlightAdapter&) = delete;
     MoonlightAdapter& operator=(const MoonlightAdapter&) = delete;
 
-    /// 连接并开始收流 (阻塞直到连接建立或失败)
-    /// @param host  Sunshine/GFE 主机地址 ("192.168.1.10" 或 "host:port")
-    /// @param app   应用名或 appid (见 /applist; Sunshine 直接支持应用名)
-    /// @param width/height/fps 期望的流参数
-    /// @return false 表示失败, 原因见 last_error()
-    ///
-    /// @note 这是阻塞调用, 内部会做 **明文 HTTP** 握手 (47989) + LiStartConnection。
-    ///       这条路径留给无 TLS 的 GFE 主机; Sunshine 请用 start_with_session(),
-    ///       因为它的握手在 HTTPS 47984 + 客户端证书后面 (C++ 侧不引 OpenSSL)。
-    bool start(const std::string& host,
-               const std::string& app,
-               int width,
-               int height,
-               int fps);
-
     /// 连接并开始收流 —— **握手已经由调用方做完了**。
     ///
+    /// @param host  Sunshine/GFE 主机地址 ("192.168.1.10"; 端口不在这里用)
+    /// @param app   应用名或 appid (只影响日志; 真正决定会话的是 session_url)
+    /// @param width/height/fps 期望的流参数
     /// @param app_version        /serverinfo 的 <appversion>  → serverInfoAppVersion
     /// @param gfe_version        /serverinfo 的 <GfeVersion>  → serverInfoGfeVersion
     /// @param codec_mode_support /serverinfo 的 <ServerCodecModeSupport>
     /// @param session_url        /launch 或 /resume 的 <sessionUrl0> → rtspSessionUrl
     /// @return false 表示失败, 原因见 last_error()
     ///
-    /// @note 与 start() 的唯一区别: **一次 HTTP 都不发**。app_version 为空时
-    ///       LiStartConnection 必然失败, session_url 为空则没有会话可接 ——
-    ///       两者都在这里当场拦下, 报错话说清缺的是哪一项。
+    /// @note **这是唯一的连接入口**: native 侧不发任何 HTTP。Sunshine 的
+    ///       /serverinfo /applist /launch 都在 HTTPS 47984 + 客户端证书后面, 那半由
+    ///       agent/net/sunshine_client.py 负责。
+    ///       原来那个手写裸 socket 的明文 HTTP 层 (moonlight_connection.*) 已在
+    ///       Phase 6 删除 —— 它只能拿到 PairStatus=0 与 404, 留着只会让人以为
+    ///       还有一条能用的路。
+    /// @note app_version 为空时 LiStartConnection 必然失败, session_url 为空则没有
+    ///       会话可接 —— 两者都在这里当场拦下, 报错话说清缺的是哪一项。
     bool start_with_session(const std::string& host,
                             const std::string& app,
                             int width,

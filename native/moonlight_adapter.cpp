@@ -18,7 +18,6 @@
 
 #include "moonlight_adapter.h"
 
-#include "moonlight_connection.h"
 #include "preprocess.h"
 
 #include <cstdio>
@@ -178,48 +177,6 @@ bool MoonlightAdapter::prepare_start(const std::string& host,
     impl_->set_error("");
     impl_->state.store(static_cast<int>(AdapterState::kConnecting));
     return true;
-}
-
-bool MoonlightAdapter::start(const std::string& host,
-                             const std::string& app,
-                             int width,
-                             int height,
-                             int fps) {
-    if (!prepare_start(host, app, width, height, fps)) {
-        return false;
-    }
-
-    // ---- 1) HTTP 握手: /serverinfo → appversion ----
-    const auto si = moonlight_connection::fetch_server_info(host);
-    if (!si.ok) {
-        char buf[256];
-        std::snprintf(buf, sizeof(buf),
-                      "handshake failed: /serverinfo status=%d (connect=%s)",
-                      si.status_code, si.raw.empty() ? "no" : "yes");
-        impl_->set_error(buf);
-        impl_->state.store(static_cast<int>(AdapterState::kIdle));
-        return false;
-    }
-    set_log("serverinfo ok: host=" + si.hostname + " appversion=" + si.app_version +
-            " pair_status=" + std::to_string(si.pair_status));
-
-    // ---- 2) HTTP 握手: /launch → sessionUrl0 ----
-    char mode[64];
-    std::snprintf(mode, sizeof(mode), "%dx%dx%d", width, height, fps);
-    const auto lr = moonlight_connection::launch_app(host, /*app_id=*/"", /*app_name=*/app, mode,
-                                                     impl_->unique_id);
-    if (!lr.ok) {
-        char buf[320];
-        std::snprintf(buf, sizeof(buf),
-                      "handshake failed: /launch status=%d %s",
-                      lr.status_code, lr.status_message.c_str());
-        impl_->set_error(buf);
-        impl_->state.store(static_cast<int>(AdapterState::kIdle));
-        return false;
-    }
-
-    return connect_limelight(si.app_version, si.gfe_version,
-                             static_cast<int>(si.codec_mode_support), lr.session_url);
 }
 
 bool MoonlightAdapter::start_with_session(const std::string& host,

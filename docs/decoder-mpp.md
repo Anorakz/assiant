@@ -55,8 +55,8 @@ if (av_codec) hardware = true;          // ← 名字存在就当成硬解可用
 if (avcodec_open2(...) < 0) return false;   // ← 这里失败后**不会**再试软解
 ```
 
-于是 `moonlight.start()` 在 HTTP 握手**之前**就返回 `"decoder init failed"`，
-而且外面完全看不出原因。
+于是连接入口（当时还是 `moonlight.start()`，现在是 `start_with_session()`）在碰网络
+**之前**就返回 `"decoder init failed"`，而且外面完全看不出原因。
 
 现在：候选后端**必须 `init()` 成功**才算可用，失败的把原因记下来换下一个；
 全部失败时 `Decoder::last_error()` 会给出**每一层**的原因（例如

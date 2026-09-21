@@ -81,29 +81,44 @@ TEST(MoonlightAdapterTest, RingBufferReferencesAreStable) {
 }
 
 // ===========================================================================
-//  参数校验 (应当在碰网络之前就失败)
+//  参数校验 (应当在碰任何东西之前就失败)
+//
+//  Phase 6 起 native 只有 **一个** 连接入口 start_with_session():
+//  握手由调用方 (Python/HTTPS 47984 + 客户端证书) 做完, 原来那个手写裸 socket 的
+//  明文 HTTP 层已删除。所以下面全部用 start_with_session 驱动。
 // ===========================================================================
+
+/// 一条"看起来合法"的会话描述, 给只关心参数的用例用
+constexpr const char* kAppVersion = "7.1.431.-1";
+constexpr int kCodecSupport = 0x1f0301;
+constexpr const char* kSessionUrl = "rtsp://127.0.0.1:48010";
 
 TEST(MoonlightAdapterTest, RejectsEmptyHost) {
     MoonlightAdapter a;
-    EXPECT_FALSE(a.start("", "app", 1920, 1080, 60));
+    EXPECT_FALSE(a.start_with_session("", "app", 1920, 1080, 60,
+                                      kAppVersion, "", kCodecSupport, kSessionUrl));
     EXPECT_FALSE(a.last_error().empty());
     EXPECT_EQ(a.state(), AdapterState::kIdle) << "失败后必须回到 Idle";
 }
 
 TEST(MoonlightAdapterTest, RejectsEmptyApp) {
     MoonlightAdapter a;
-    EXPECT_FALSE(a.start("127.0.0.1", "", 1920, 1080, 60));
+    EXPECT_FALSE(a.start_with_session("127.0.0.1", "", 1920, 1080, 60,
+                                      kAppVersion, "", kCodecSupport, kSessionUrl));
     EXPECT_FALSE(a.last_error().empty());
     EXPECT_EQ(a.state(), AdapterState::kIdle);
 }
 
 TEST(MoonlightAdapterTest, RejectsInvalidDimensions) {
     MoonlightAdapter a;
-    EXPECT_FALSE(a.start("127.0.0.1", "Desktop", 0, 1080, 60));
-    EXPECT_FALSE(a.start("127.0.0.1", "Desktop", 1920, 0, 60));
-    EXPECT_FALSE(a.start("127.0.0.1", "Desktop", 1920, 1080, 0));
-    EXPECT_FALSE(a.start("127.0.0.1", "Desktop", -1, -1, -1));
+    EXPECT_FALSE(a.start_with_session("127.0.0.1", "Desktop", 0, 1080, 60,
+                                      kAppVersion, "", kCodecSupport, kSessionUrl));
+    EXPECT_FALSE(a.start_with_session("127.0.0.1", "Desktop", 1920, 0, 60,
+                                      kAppVersion, "", kCodecSupport, kSessionUrl));
+    EXPECT_FALSE(a.start_with_session("127.0.0.1", "Desktop", 1920, 1080, 0,
+                                      kAppVersion, "", kCodecSupport, kSessionUrl));
+    EXPECT_FALSE(a.start_with_session("127.0.0.1", "Desktop", -1, -1, -1,
+                                      kAppVersion, "", kCodecSupport, kSessionUrl));
     EXPECT_EQ(a.state(), AdapterState::kIdle);
 }
 
@@ -133,8 +148,8 @@ TEST(MoonlightAdapterTest, StartWithSessionRejectsEmptySessionUrl) {
 }
 
 TEST(MoonlightAdapterTest, StartWithSessionDoesNotTouchTheNetwork) {
-    // 与 start() 的关键区别: 给一个必然连不上的主机也**不会**出现握手阶段的报错,
-    // 因为它压根不发 HTTP —— 这就是"握手交给 Python"的全部意义。
+    // 给一个必然连不上的主机也**不会**出现"握手失败"这层错误 —— 因为它压根不发
+    // HTTP。这就是"握手交给 Python"的全部意义, 也是删掉那层明文客户端的理由。
     MoonlightAdapter a;
 
     EXPECT_FALSE(a.start_with_session(kBadHost, "Desktop", 1280, 720, 60,
@@ -152,38 +167,28 @@ TEST(MoonlightAdapterTest, StartWithSessionDoesNotTouchTheNetwork) {
     EXPECT_EQ(a.state(), AdapterState::kIdle);
 }
 
-TEST(MoonlightAdapterTest, StartWithSessionValidatesArgsLikeStart) {
-    // 两条入口的前置检查必须一致 (共用 prepare_start)
-    MoonlightAdapter a;
-
-    EXPECT_FALSE(a.start_with_session("", "app", 1280, 720, 60, "v", "", 0, "rtsp://x"));
-    EXPECT_FALSE(a.start_with_session("h", "", 1280, 720, 60, "v", "", 0, "rtsp://x"));
-    EXPECT_FALSE(a.start_with_session("h", "app", 0, 720, 60, "v", "", 0, "rtsp://x"));
-    EXPECT_FALSE(a.start_with_session("h", "app", 1280, 720, 0, "v", "", 0, "rtsp://x"));
-    EXPECT_EQ(a.state(), AdapterState::kIdle);
-    EXPECT_FALSE(a.last_error().empty());
-}
-
 TEST(MoonlightAdapterTest, StartWithSessionCanBeRetriedAfterFailure) {
     MoonlightAdapter a;
 
     ASSERT_FALSE(a.start_with_session(kBadHost, "Desktop", 1280, 720, 60,
                                       "7.1.431.-1", "", 0, "rtsp://x"));
-    // 失败后回到 Idle, 所以还能再来一次 (状态机与 start() 一致)
+    // 失败后回到 Idle, 所以还能再来一次 (状态机如此)
     EXPECT_FALSE(a.start_with_session(kBadHost, "Desktop", 1280, 720, 60,
                                       "7.1.431.-1", "", 0, "rtsp://x"));
     EXPECT_EQ(a.state(), AdapterState::kIdle);
 }
 
 // ===========================================================================
-//  握手失败路径 (服务端不在)
+//  失败之后的状态 (服务端不在 / 字段缺)
 // ===========================================================================
 
-TEST(MoonlightAdapterTest, StartFailsWhenServerUnreachable) {
+TEST(MoonlightAdapterTest, FailedStartLeavesACleanState) {
+    // 用一个**确定**的失败原因 (缺 app_version), 不依赖"host 构建没链接 moonlight"
     MoonlightAdapter a;
 
-    EXPECT_FALSE(a.start(kBadHost, "Desktop", 1280, 720, 60))
-        << "没有服务端时必须失败";
+    EXPECT_FALSE(a.start_with_session(kBadHost, "Desktop", 1280, 720, 60,
+                                      /*app_version=*/"", "", 0, kSessionUrl))
+        << "没有 app_version 时必须失败";
 
     EXPECT_FALSE(a.is_connected());
     EXPECT_EQ(a.state(), AdapterState::kIdle) << "失败后必须回到 Idle, 不能卡在 Connecting";
@@ -191,16 +196,19 @@ TEST(MoonlightAdapterTest, StartFailsWhenServerUnreachable) {
     EXPECT_EQ(a.frames_pushed(), 0u);
 }
 
-TEST(MoonlightAdapterTest, LastErrorIsClearedOnNextAttempt) {
+TEST(MoonlightAdapterTest, LastErrorIsRefreshedOnNextAttempt) {
     MoonlightAdapter a;
 
-    ASSERT_FALSE(a.start(kBadHost, "Desktop", 1280, 720, 60));
-    ASSERT_FALSE(a.last_error().empty());
+    ASSERT_FALSE(a.start_with_session(kBadHost, "Desktop", 1280, 720, 60,
+                                      "", "", 0, kSessionUrl));
+    const std::string first = a.last_error();
+    ASSERT_FALSE(first.empty());
 
-    // 合法参数 + 不可达服务端: 错误信息应当被这次尝试的内容覆盖,
-    // 但仍然是"失败且有原因"
-    EXPECT_FALSE(a.start(kBadHost, "Desktop", 1280, 720, 60));
+    // 换一个失败原因: 错误信息应当被这次尝试的内容覆盖, 而不是留着上一次的
+    ASSERT_FALSE(a.start_with_session(kBadHost, "Desktop", 1280, 720, 60,
+                                      kAppVersion, "", kCodecSupport, ""));
     EXPECT_FALSE(a.last_error().empty());
+    EXPECT_NE(a.last_error(), first) << "错误信息要反映**这一次**的失败";
 }
 
 // ===========================================================================
@@ -221,7 +229,8 @@ TEST(MoonlightAdapterTest, StopIsIdempotentWhenIdle) {
 TEST(MoonlightAdapterTest, StopAfterFailedStartIsSafe) {
     MoonlightAdapter a;
 
-    ASSERT_FALSE(a.start(kBadHost, "Desktop", 1280, 720, 60));
+    ASSERT_FALSE(a.start_with_session(kBadHost, "Desktop", 1280, 720, 60,
+                                      "", "", 0, kSessionUrl));
     a.stop();
 
     EXPECT_EQ(a.state(), AdapterState::kIdle);
@@ -231,9 +240,11 @@ TEST(MoonlightAdapterTest, StopAfterFailedStartIsSafe) {
 TEST(MoonlightAdapterTest, CanRetryAfterStop) {
     MoonlightAdapter a;
 
-    ASSERT_FALSE(a.start(kBadHost, "Desktop", 1280, 720, 60));
+    ASSERT_FALSE(a.start_with_session(kBadHost, "Desktop", 1280, 720, 60,
+                                      kAppVersion, "", kCodecSupport, kSessionUrl));
     a.stop();
-    EXPECT_FALSE(a.start(kBadHost, "Desktop", 1280, 720, 60));
+    EXPECT_FALSE(a.start_with_session(kBadHost, "Desktop", 1280, 720, 60,
+                                      kAppVersion, "", kCodecSupport, kSessionUrl));
     a.stop();
 
     EXPECT_EQ(a.state(), AdapterState::kIdle);
@@ -243,8 +254,10 @@ TEST(MoonlightAdapterTest, SecondStartWhileIdleIsAllowed) {
     // 第一次失败后状态回到 Idle, 所以第二次应当能再次尝试 (不被"已启动"挡住)
     MoonlightAdapter a;
 
-    ASSERT_FALSE(a.start(kBadHost, "Desktop", 640, 480, 30));
-    EXPECT_FALSE(a.start(kBadHost, "Desktop", 640, 480, 30));
+    ASSERT_FALSE(a.start_with_session(kBadHost, "Desktop", 640, 480, 30,
+                                      kAppVersion, "", kCodecSupport, kSessionUrl));
+    EXPECT_FALSE(a.start_with_session(kBadHost, "Desktop", 640, 480, 30,
+                                      kAppVersion, "", kCodecSupport, kSessionUrl));
     EXPECT_FALSE(a.last_error().empty());
 }
 

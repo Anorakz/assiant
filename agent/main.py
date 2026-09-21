@@ -5,7 +5,7 @@
 #  ---------------------------------------------------------------------------
 #      1. 日志         logs/agent.log — 最早, 后面出错才有地方看
 #      2. config       读 config.yaml; 读不到就用模板, 都不行就退出
-#      3. native       moonlight.start() —— **失败不致命**, 只记 warning
+#      3. native       moonlight.start_with_session() —— **失败不致命**, 只记 warning
 #      4. ChatInputBus 三源汇合点, 后面所有组件都挂在它上面
 #      5. io 层        host_input_reader(轮询→bus)
 #      6. StateMachine SLEEP/IDLE/STUDY/GAME
@@ -239,7 +239,7 @@ class Runtime:
         @param stop_event      外部停止信号 (测试/信号处理用)
         @param max_events      主循环处理多少条消息后退出 (冒烟测试)
         @param start_terminal  是否把 stdin 作为输入源接进 bus
-        @param start_native    是否调用 moonlight.start() (测试里关掉)
+        @param start_native    是否连接串流主机 (握手 + moonlight.start_with_session; 测试里关掉)
         """
         self.log = log or logging.getLogger("%s.main" % LOGGER_NAME)
         self.config = config if config is not None else load_config("config")
@@ -359,10 +359,11 @@ class Runtime:
         """Sunshine 的 HTTPS 握手 (47984 + 客户端证书), 返回 (ServerInfo, SessionStart)。
 
         为什么握手在这一层而不是 C++: /serverinfo /applist /launch 都在 TLS +
-        客户端证书后面, 而 native/moonlight_connection.cpp 是手写的裸 socket HTTP
-        客户端 —— 要支持 TLS 就得给交叉编译再引一个 OpenSSL。Python 的 ssl 本来
-        就在, 所以这边拿到 app_version 与 sessionUrl0, 交给 native 的
-        start_with_session() 直接进 LiStartConnection (见 agent/net/sunshine_client.py)。
+        客户端证书后面, 而 native 侧原来那个手写的裸 socket HTTP 客户端
+        (moonlight_connection.cpp, 已删除) 支持不了 TLS —— 要支持就得给交叉编译
+        再引一个 OpenSSL。Python 的 ssl 本来就在, 所以这边拿到 app_version 与
+        sessionUrl0, 交给 native 的 start_with_session() 直接进 LiStartConnection
+        (见 agent/net/sunshine_client.py)。
 
         全是阻塞调用 -> 丢到线程里跑, 不占事件循环。
         """
@@ -421,7 +422,7 @@ class Runtime:
         app = self._cfg("sunshine", "app")
 
         if not self._want_native:
-            self.log.info("native: 已按要求跳过 moonlight.start (测试模式)")
+            self.log.info("native: 已按要求跳过 moonlight.start_with_session (测试模式)")
             return
         if not host or not app:
             self.log.warning(

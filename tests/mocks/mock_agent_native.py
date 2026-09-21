@@ -160,8 +160,18 @@ class _MoonlightMock:
         self._error = ""
 
     # -- native 接口 --
-    def start(self, host: str, app: str, w: int, h: int, fps: int) -> bool:
-        self._owner.calls.append(("moonlight.start", host, app, w, h, fps))
+    def start_with_session(self, host: str, app: str, w: int, h: int, fps: int,
+                           app_version: str, gfe_version: str,
+                           codec_mode_support: int, session_url: str) -> bool:
+        """与 binding.cpp 的 moonlight.start_with_session 一一对应。
+
+        Phase 6 起 native 只有这一个连接入口 (握手在 Python 侧做完), 替身也只提供
+        它 —— 留着旧的 start() 只会让测试以为还有那条路。
+        """
+        self._owner.calls.append(
+            ("moonlight.start_with_session", host, app, w, h, fps,
+             app_version, gfe_version, codec_mode_support, session_url)
+        )
         if self._owner.start_result:
             self._state = "streaming"
             self._error = ""

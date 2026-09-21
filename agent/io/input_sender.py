@@ -216,6 +216,19 @@ class InputSender:
         codes = [resolve_key(k) for k in keys]
         await run_native(_SUBSYS, native.send_hotkey, codes)
 
+    async def show_desktop(self) -> None:
+        """让**主机**回到桌面 (WIN+D)。
+
+        这是"制止走神"那个动作的落点。原来计划的是锁屏 (WIN+L), 但 Windows 会过滤
+        掉**合成输入**的锁屏组合 —— 实测连主机本机 keybd_event 合成 Win+L 都锁不上
+        (与 Ctrl+Alt+Del 同属安全动作); 而 WIN+D 在真机上是通的 (桌面显示出来, 再按
+        一次字节级还原), 所以改用"回到桌面"。
+
+        @note 用 send_hotkey 而不是逐个 send_key: 组合键的按下/抬起顺序由 native
+              保证 (抬起走逆序), 这正是 WIN 组合键能被认出来的前提。
+        """
+        await self.send_hotkey(["meta", "d"])
+
     async def send_mouse(self, x: int, y: int, action: str) -> None:
         """把鼠标移到 ROI 坐标 (x, y) 并可选地按键。
 
