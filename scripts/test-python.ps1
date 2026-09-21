@@ -34,7 +34,8 @@ $tests = @(
     "tests\test_io.py",
     "tests\test_docs.py",
     "tests\test_config_source_guard.py",
-    "tests\test_schedule_parity.py"
+    "tests\test_schedule_parity.py",
+    "tests\test_cli.py"
 )
 
 $failed = @()
