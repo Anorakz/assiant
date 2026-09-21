@@ -1,8 +1,13 @@
 // ============================================================================
-//  gui/tests/test_config_sync.cpp — 配置同步器单测（方案 §5 映射表）
+//  gui/tests/test_config_sync.cpp — 配置派生单测（config.yaml → llm.env）
 //
-//  验证：gui.yaml 为真源 → llm.env / config.yaml 的映射、云端与本地的 api_key 差异、
-//        apply 后注释保住、缺失的 gui 键不同步。
+//  归一化 D 系列：配置真源只有 config/config.yaml，llm.env 是**派生文件**。
+//  这里验证：
+//    · 8 个键按映射表派生（含 local_api_key → LLM_API_KEY）
+//    · 云端参数**不进** llm.env
+//    · llm.env 自己的布局键（HOST / LOG_* / RUN_DIR / PID_FILE）不被碰
+//    · config.yaml 里没有的键就不同步（"有相同配置项才同步"）
+//    · apply 后注释与顺序保住、留 .bak、**不动 config.yaml**
 // ============================================================================
 #include <QFile>
 #include <QTemporaryDir>
@@ -13,7 +18,6 @@
 
 using core::ConfigStore;
 using core::ConfigSyncer;
-using core::Flavor;
 using core::LineChange;
 using core::SyncPlan;
 
@@ -50,6 +54,18 @@ QString newValueOf(const QVector<LineChange>& changes, const QString& key,
     return fallback;
 }
 
+/// llm.env 的行是 `KEY=value`（没有冒号），所以单独一个取值助手。
+QString envValueOf(const QVector<LineChange>& changes, const QString& key,
+                   const QString& fallback = QStringLiteral("<无>"))
+{
+    for (const LineChange& c : changes) {
+        if (c.key == key) {
+            return c.newLine.section(QLatin1Char('='), 1).trimmed();
+        }
+    }
+    return fallback;
+}
+
 bool hasKey(const QVector<LineChange>& changes, const QString& key)
 {
     for (const LineChange& c : changes) {
@@ -60,11 +76,13 @@ bool hasKey(const QVector<LineChange>& changes, const QString& key)
     return false;
 }
 
+/// 板端真实的 llm.env 形态（含 5 个不由映射表管的布局键）
 const char* const kEnv = "# ==================== 模型配置 ====================\n"
                          "LLM_MODEL_PATH=/old/model.gguf\n"
                          "LLM_MODEL_NAME=old-name\n"
                          "\n"
                          "# ==================== 服务配置 ====================\n"
+                         "LLM_HOST=127.0.0.1\n"
                          "LLM_PORT=9000\n"
                          "LLM_API_KEY=old-key\n"
                          "\n"
@@ -72,53 +90,35 @@ const char* const kEnv = "# ==================== 模型配置 ==================
                          "LLM_CTX_SIZE=1024\n"
                          "LLM_BATCH_SIZE=128\n"
                          "LLM_THREADS=2\n"
-                         "LLM_THREADS_BATCH=2\n";
+                         "LLM_THREADS_BATCH=2\n"
+                         "\n"
+                         "# ==================== 路径 ====================\n"
+                         "LLM_LOG_DIR=/tmp/llm/logs\n"
+                         "LLM_RUN_DIR=/tmp/llm/run\n"
+                         "LLM_PID_FILE=/tmp/llm/run/llama-server.pid\n"
+                         "LLM_LOG_FILE=/tmp/llm/logs/llama-server.log\n";
 
-const char* const kAgentConfig = "# 全局配置模板\n"
-                                 "llm:\n"
-                                 "  # 推理位置注释（必须保住）\n"
-                                 "  mode: disabled\n"
-                                 "  model_path: /old/path.rknn\n"
-                                 "  max_tokens: 512\n"
-                                 "  temperature: 0.7\n"
-                                 "  api_base: https://api.example.com/v1\n"
-                                 "  api_key: \"\"\n"
-                                 "  model: gpt-4o-mini\n"
-                                 "  timeout_s: 30\n";
-
-const char* const kGuiLocal = "llm:\n"
-                              "  mode: local\n"
-                              "  local_model: /home/kickpi/model/Qwen3-0.6B-Q4_K_M.gguf\n"
-                              "  model_name: qwen3-0.6b\n"
-                              "  port: 9000\n"
-                              "  ctx_size: 2048\n"
-                              "  batch_size: 256\n"
-                              "  threads: 4\n"
-                              "  threads_batch: 4\n"
-                              "  api_key: sk-local-secret\n"
-                              "  temperature: 0.7\n"
-                              "  cloud:\n"
-                              "    base: https://cloud.example.com/v1\n"
-                              "    model: gpt-4o\n"
-                              "    key: cloud-secret\n"
-                              "    timeout_s: 45\n";
-
-const char* const kGuiCloud = "llm:\n"
-                              "  mode: cloud\n"
-                              "  local_model: /home/kickpi/model/Qwen3-0.6B-Q4_K_M.gguf\n"
-                              "  model_name: qwen3-0.6b\n"
-                              "  port: 9000\n"
-                              "  ctx_size: 2048\n"
-                              "  batch_size: 256\n"
-                              "  threads: 4\n"
-                              "  threads_batch: 4\n"
-                              "  api_key: sk-local-secret\n"
-                              "  temperature: 0.7\n"
-                              "  cloud:\n"
-                              "    base: https://cloud.example.com/v1\n"
-                              "    model: gpt-4o\n"
-                              "    key: cloud-secret\n"
-                              "    timeout_s: 45\n";
+/// config.yaml：真源。llm 段带注释、带云端参数、带 llama-server 一组键。
+const char* const kConfig = "# 全局配置模板\n"
+                            "llm:\n"
+                            "  # 推理位置注释（必须保住）\n"
+                            "  mode: edge\n"
+                            "  model_path: /home/kickpi/model/Qwen3-0.6B-Q4_K_M.gguf\n"
+                            "  max_tokens: 512\n"
+                            "  temperature: 0.7\n"
+                            "  api_base: https://cloud.example.com/v1\n"
+                            "  api_key: cloud-secret\n"
+                            "  model: gpt-4o\n"
+                            "  timeout_s: 45\n"
+                            "  model_name: qwen3-0.6b\n"
+                            "  port: 9001\n"
+                            "  ctx_size: 2048\n"
+                            "  batch_size: 256\n"
+                            "  threads: 4\n"
+                            "  threads_batch: 5\n"
+                            "  local_api_key: sk-local-secret\n"
+                            "sunshine:\n"
+                            "  host: 192.168.137.1\n";
 
 } // namespace
 
@@ -126,127 +126,148 @@ class TestConfigSync : public QObject {
     Q_OBJECT
 
 private slots:
-    void localModeMapsAndKeepsAgentApiKeyUntouched();
-    void cloudModeWritesCloudKey();
-    void applyWritesBothAndKeepsComments();
-    void missingGuiKeyIsNotSynced();
+    void derivesAllMappedKeys();
+    void cloudKeysDoNotReachEnv();
+    void applyWritesEnvKeepsCommentsAndNeverTouchesConfig();
+    void missingKeyIsNotSynced();
+    void unknownTargetKeyIsNotFound();
 };
 
-void TestConfigSync::localModeMapsAndKeepsAgentApiKeyUntouched()
+void TestConfigSync::derivesAllMappedKeys()
 {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString envPath = dir.filePath(QStringLiteral("llm.env"));
     const QString cfgPath = dir.filePath(QStringLiteral("config.yaml"));
     QVERIFY(writeFile(envPath, QString::fromUtf8(kEnv)));
-    QVERIFY(writeFile(cfgPath, QString::fromUtf8(kAgentConfig)));
-    const QString guiPath = dir.filePath(QStringLiteral("gui.yaml"));
-    QVERIFY(writeFile(guiPath, QString::fromUtf8(kGuiLocal)));
+    QVERIFY(writeFile(cfgPath, QString::fromUtf8(kConfig)));
 
-    ConfigStore gui;
-    QVERIFY(gui.load(guiPath));
-    ConfigSyncer syncer(envPath, cfgPath);
-    const SyncPlan plan = syncer.plan(gui);
+    ConfigStore cfg;
+    QVERIFY(cfg.load(cfgPath));
+    ConfigSyncer syncer(envPath);
+    const SyncPlan plan = syncer.plan(cfg);
     QVERIFY2(plan.ok, qPrintable(plan.error));
 
-    // llm.env：模型与性能参数全部跟着 gui 走
-    QVERIFY(hasKey(plan.envChanges, QStringLiteral("LLM_MODEL_PATH")));
-    QVERIFY(hasKey(plan.envChanges, QStringLiteral("LLM_CTX_SIZE")));
-    QVERIFY(hasKey(plan.envChanges, QStringLiteral("LLM_THREADS_BATCH")));
+    // 映射表是 8 个键，这里全都该出现（值都与 llm.env 里的旧值不同）
+    QCOMPARE(plan.envChanges.size(), 8);
+    QCOMPARE(envValueOf(plan.envChanges, QStringLiteral("LLM_MODEL_PATH")),
+             QStringLiteral("/home/kickpi/model/Qwen3-0.6B-Q4_K_M.gguf"));
+    QCOMPARE(envValueOf(plan.envChanges, QStringLiteral("LLM_MODEL_NAME")),
+             QStringLiteral("qwen3-0.6b"));
+    QCOMPARE(envValueOf(plan.envChanges, QStringLiteral("LLM_PORT")), QStringLiteral("9001"));
+    QCOMPARE(envValueOf(plan.envChanges, QStringLiteral("LLM_CTX_SIZE")), QStringLiteral("2048"));
+    QCOMPARE(envValueOf(plan.envChanges, QStringLiteral("LLM_BATCH_SIZE")), QStringLiteral("256"));
+    QCOMPARE(envValueOf(plan.envChanges, QStringLiteral("LLM_THREADS")), QStringLiteral("4"));
+    QCOMPARE(envValueOf(plan.envChanges, QStringLiteral("LLM_THREADS_BATCH")), QStringLiteral("5"));
+    // 本地 llama-server 的 key 来自 llm.local_api_key（**不是** 云端的 llm.api_key）
+    QCOMPARE(envValueOf(plan.envChanges, QStringLiteral("LLM_API_KEY")),
+             QStringLiteral("sk-local-secret"));
     QVERIFY(plan.diff.contains(QStringLiteral("LLM_MODEL_PATH")));
 
-    // config.yaml：local -> edge；model_path 写 GGUF
-    QCOMPARE(newValueOf(plan.configChanges, QStringLiteral("llm.mode")), QStringLiteral("edge"));
-    QCOMPARE(newValueOf(plan.configChanges, QStringLiteral("llm.model_path")),
-             QStringLiteral("/home/kickpi/model/Qwen3-0.6B-Q4_K_M.gguf"));
-    // 关键：本地模式**不碰** Agent 的 api_key（那是云端的字段）
-    QVERIFY(!hasKey(plan.configChanges, QStringLiteral("llm.api_key")));
+    // 映射表本身
+    QCOMPARE(ConfigSyncer::envTargetKeys().size(), 8);
 }
 
-void TestConfigSync::cloudModeWritesCloudKey()
+void TestConfigSync::cloudKeysDoNotReachEnv()
 {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString envPath = dir.filePath(QStringLiteral("llm.env"));
     const QString cfgPath = dir.filePath(QStringLiteral("config.yaml"));
     QVERIFY(writeFile(envPath, QString::fromUtf8(kEnv)));
-    QVERIFY(writeFile(cfgPath, QString::fromUtf8(kAgentConfig)));
-    const QString guiPath = dir.filePath(QStringLiteral("gui.yaml"));
-    QVERIFY(writeFile(guiPath, QString::fromUtf8(kGuiCloud)));
+    QVERIFY(writeFile(cfgPath, QString::fromUtf8(kConfig)));
 
-    ConfigStore gui;
-    QVERIFY(gui.load(guiPath));
-    ConfigSyncer syncer(envPath, cfgPath);
-    const SyncPlan plan = syncer.plan(gui);
+    ConfigStore cfg;
+    QVERIFY(cfg.load(cfgPath));
+    const SyncPlan plan = ConfigSyncer(envPath).plan(cfg);
     QVERIFY2(plan.ok, qPrintable(plan.error));
 
-    QCOMPARE(newValueOf(plan.configChanges, QStringLiteral("llm.mode")), QStringLiteral("cloud"));
-    QCOMPARE(newValueOf(plan.configChanges, QStringLiteral("llm.api_key")),
-             QStringLiteral("cloud-secret"));
-    QCOMPARE(newValueOf(plan.configChanges, QStringLiteral("llm.api_base")),
-             QStringLiteral("https://cloud.example.com/v1"));
-    QCOMPARE(newValueOf(plan.configChanges, QStringLiteral("llm.timeout_s")), QStringLiteral("45"));
+    // 云端参数是给 Agent 的，不该出现在 llm.env 的改动里
+    const QString diffText = plan.diff;
+    QVERIFY(!diffText.contains(QStringLiteral("cloud-secret")));
+    QVERIFY(!diffText.contains(QStringLiteral("https://cloud.example.com/v1")));
+    QVERIFY(!diffText.contains(QStringLiteral("gpt-4o")));
+    // 布局键也不在映射表里 → 不在改动里
+    for (const QString& untouched : {QStringLiteral("LLM_HOST"), QStringLiteral("LLM_LOG_DIR"),
+                                     QStringLiteral("LLM_RUN_DIR"), QStringLiteral("LLM_PID_FILE"),
+                                     QStringLiteral("LLM_LOG_FILE")}) {
+        QVERIFY2(!hasKey(plan.envChanges, untouched), qPrintable(untouched));
+    }
 }
 
-void TestConfigSync::applyWritesBothAndKeepsComments()
+void TestConfigSync::applyWritesEnvKeepsCommentsAndNeverTouchesConfig()
 {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString envPath = dir.filePath(QStringLiteral("llm.env"));
     const QString cfgPath = dir.filePath(QStringLiteral("config.yaml"));
     QVERIFY(writeFile(envPath, QString::fromUtf8(kEnv)));
-    QVERIFY(writeFile(cfgPath, QString::fromUtf8(kAgentConfig)));
-    const QString guiPath = dir.filePath(QStringLiteral("gui.yaml"));
-    QVERIFY(writeFile(guiPath, QString::fromUtf8(kGuiLocal)));
+    QVERIFY(writeFile(cfgPath, QString::fromUtf8(kConfig)));
 
-    ConfigStore gui;
-    QVERIFY(gui.load(guiPath));
-    ConfigSyncer syncer(envPath, cfgPath);
+    ConfigStore cfg;
+    QVERIFY(cfg.load(cfgPath));
     QString error;
     QString diff;
-    QVERIFY2(syncer.apply(gui, &error, &diff), qPrintable(error));
+    QVERIFY2(ConfigSyncer(envPath).apply(cfg, &error, &diff), qPrintable(error));
     QVERIFY(!diff.isEmpty());
 
     const QString envText = readFile(envPath);
-    QVERIFY(envText.contains(QStringLiteral("LLM_MODEL_PATH=/home/kickpi/model/Qwen3-0.6B-Q4_K_M.gguf")));
+    QVERIFY(envText.contains(
+        QStringLiteral("LLM_MODEL_PATH=/home/kickpi/model/Qwen3-0.6B-Q4_K_M.gguf")));
     QVERIFY(envText.contains(QStringLiteral("LLM_CTX_SIZE=2048")));
+    QVERIFY(envText.contains(QStringLiteral("LLM_API_KEY=sk-local-secret")));
+    // 注释与顺序保住
     QVERIFY(envText.contains(QStringLiteral("# ==================== 上下文与性能 ====================")));
+    QVERIFY(envText.contains(QStringLiteral("# ==================== 路径 ====================")));
+    // 布局键原样
+    QVERIFY(envText.contains(QStringLiteral("LLM_HOST=127.0.0.1")));
+    QVERIFY(envText.contains(QStringLiteral("LLM_LOG_FILE=/tmp/llm/logs/llama-server.log")));
 
-    const QString cfgText = readFile(cfgPath);
-    QVERIFY(cfgText.contains(QStringLiteral("\n  mode: edge")));
-    QVERIFY(!cfgText.contains(QStringLiteral("llm.mode")));            // 全路径不许泄漏
-    QVERIFY(cfgText.contains(QStringLiteral("  # 推理位置注释（必须保住）")));
-    QVERIFY(cfgText.contains(QStringLiteral("  max_tokens: 512")));
-    QVERIFY(cfgText.contains(QStringLiteral("  api_key: \"\"")));     // 本地模式不动它
-
-    // 两边都留了 .bak，且是改动前的原文
+    // .bak 是改动前的原文
     QCOMPARE(readFile(envPath + QStringLiteral(".bak")), QString::fromUtf8(kEnv));
-    QCOMPARE(readFile(cfgPath + QStringLiteral(".bak")), QString::fromUtf8(kAgentConfig));
+
+    // ⚠ 关键：config.yaml **一个字节都没动**（它是真源，派生不该反写它）
+    QCOMPARE(readFile(cfgPath), QString::fromUtf8(kConfig));
+    QVERIFY(!QFile::exists(cfgPath + QStringLiteral(".bak")));
 }
 
-void TestConfigSync::missingGuiKeyIsNotSynced()
+void TestConfigSync::missingKeyIsNotSynced()
 {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString envPath = dir.filePath(QStringLiteral("llm.env"));
     const QString cfgPath = dir.filePath(QStringLiteral("config.yaml"));
     QVERIFY(writeFile(envPath, QString::fromUtf8(kEnv)));
-    QVERIFY(writeFile(cfgPath, QString::fromUtf8(kAgentConfig)));
-    const QString guiPath = dir.filePath(QStringLiteral("gui.yaml"));
-    // gui 里只给 local_model，其余键都不存在
-    QVERIFY(writeFile(guiPath, QStringLiteral("llm:\n  local_model: /only/model.gguf\n")));
+    // config.yaml 里只给 model_path，其余键都不存在
+    QVERIFY(writeFile(cfgPath,
+                      QStringLiteral("llm:\n  model_path: /only/model.gguf\n")));
 
-    ConfigStore gui;
-    QVERIFY(gui.load(guiPath));
-    ConfigSyncer syncer(envPath, cfgPath);
-    const SyncPlan plan = syncer.plan(gui);
+    ConfigStore cfg;
+    QVERIFY(cfg.load(cfgPath));
+    const SyncPlan plan = ConfigSyncer(envPath).plan(cfg);
     QVERIFY2(plan.ok, qPrintable(plan.error));
 
     QCOMPARE(plan.envChanges.size(), 1);                     // 只有 LLM_MODEL_PATH
     QCOMPARE(plan.envChanges.first().key, QStringLiteral("LLM_MODEL_PATH"));
-    QVERIFY(plan.configChanges.isEmpty() == false);           // llm.model_path 会同步
-    QCOMPARE(plan.configChanges.size(), 1);
-    QCOMPARE(plan.configChanges.first().key, QStringLiteral("llm.model_path"));
+    QCOMPARE(envValueOf(plan.envChanges, QStringLiteral("LLM_MODEL_PATH")),
+             QStringLiteral("/only/model.gguf"));
+}
+
+void TestConfigSync::unknownTargetKeyIsNotFound()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString cfgPath = dir.filePath(QStringLiteral("config.yaml"));
+    QVERIFY(writeFile(cfgPath, QString::fromUtf8(kConfig)));
+    ConfigStore cfg;
+    QVERIFY(cfg.load(cfgPath));
+
+    bool found = true;
+    ConfigSyncer::envValue(cfg, QStringLiteral("LLM_NOPE"), &found);
+    QVERIFY(!found);
+    // 云端的键也不能从这条通道取到（它压根不是 llm.env 的键）
+    ConfigSyncer::envValue(cfg, QStringLiteral("llm.api_key"), &found);
+    QVERIFY(!found);
 }
 
 QTEST_APPLESS_MAIN(TestConfigSync)

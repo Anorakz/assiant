@@ -1,15 +1,18 @@
 // ============================================================================
-//  gui/tools/gui_config_sync.cpp — 配置同步 CLI（T2 证据链 / T11 可复用）
+//  gui/tools/gui_config_sync.cpp — 配置派生 CLI（T2 证据链 / T11 可复用）
 //
-//  做一件事：按 gui.yaml（唯一真源）把改动同步到 llm.env 与 config.yaml。
+//  做一件事：按 config.yaml（唯一真源）派生 llm/config/llm.env。
 //
 //  默认 **dry-run**：只打印将要发生的 diff，**不写任何文件**。
-//  加 --apply 才真写（每个目标各自 .bak + 原子 rename）。
+//  加 --apply 才真写（llm.env 留 .bak + 原子 rename）。
+//
+//  归一化 D 系列之前这个 CLI 是"gui.yaml → llm.env + config.yaml"；
+//  现在配置真源只有 config.yaml，所以它只剩"派生 llm.env"一件事。
 //
 //  用法
 //  ---------------------------------------------------------------------------
-//      gui/build/gui_config_sync --gui gui/config/gui.yaml
-//      gui/build/gui_config_sync --gui /tmp/g/gui.yaml --env /tmp/g/llm.env --agent /tmp/g/config.yaml --apply
+//      gui/build/gui_config_sync --config config/config.yaml
+//      gui/build/gui_config_sync --config /tmp/g/config.yaml --env /tmp/g/llm.env --apply
 // ============================================================================
 #include <QCommandLineOption>
 #include <QCommandLineParser>
@@ -26,41 +29,33 @@ int main(int argc, char** argv)
 
     QCommandLineParser parser;
     parser.setApplicationDescription(
-        QStringLiteral("按 gui.yaml 同步 llm.env / config.yaml（默认只预览 diff）"));
+        QStringLiteral("按 config.yaml 派生 llm.env（默认只预览 diff）"));
     parser.addHelpOption();
 
-    const QCommandLineOption guiOpt({QStringLiteral("g"), QStringLiteral("gui")},
-                                    QStringLiteral("gui.yaml 路径（真源）"),
-                                    QStringLiteral("path"));
+    const QCommandLineOption cfgOpt({QStringLiteral("c"), QStringLiteral("config")},
+                                    QStringLiteral("config.yaml 路径（真源）"),
+                                    QStringLiteral("path"),
+                                    QStringLiteral("config/config.yaml"));
     const QCommandLineOption envOpt({QStringLiteral("e"), QStringLiteral("env")},
-                                    QStringLiteral("llm.env 路径"),
+                                    QStringLiteral("llm.env 路径（派生产物）"),
                                     QStringLiteral("path"),
                                     QStringLiteral("llm/config/llm.env"));
-    const QCommandLineOption agentOpt({QStringLiteral("a"), QStringLiteral("agent")},
-                                      QStringLiteral("config.yaml 路径"),
-                                      QStringLiteral("path"),
-                                      QStringLiteral("config/config.yaml"));
     const QCommandLineOption applyOpt(QStringLiteral("apply"),
                                       QStringLiteral("真的写入（默认只预览）"));
-    parser.addOptions({guiOpt, envOpt, agentOpt, applyOpt});
+    parser.addOptions({cfgOpt, envOpt, applyOpt});
     parser.process(app);
 
-    if (!parser.isSet(guiOpt)) {
-        qWarning().noquote() << "[sync] 必须给 --gui <gui.yaml>（用 --help 看用法）";
-        return 2;
-    }
-
-    core::ConfigStore gui;
+    core::ConfigStore cfg;
     QString error;
-    if (!gui.load(parser.value(guiOpt), &error)) {
+    if (!cfg.load(parser.value(cfgOpt), &error)) {
         qWarning().noquote() << "[sync]" << error;
         return 1;
     }
 
-    core::ConfigSyncer syncer(parser.value(envOpt), parser.value(agentOpt));
+    core::ConfigSyncer syncer(parser.value(envOpt));
 
     if (!parser.isSet(applyOpt)) {
-        const core::SyncPlan plan = syncer.plan(gui);
+        const core::SyncPlan plan = syncer.plan(cfg);
         if (!plan.ok) {
             qWarning().noquote() << "[sync]" << plan.error;
             return 1;
@@ -72,7 +67,7 @@ int main(int argc, char** argv)
     }
 
     QString diff;
-    if (!syncer.apply(gui, &error, &diff)) {
+    if (!syncer.apply(cfg, &error, &diff)) {
         qWarning().noquote() << "[sync]" << error;
         return 1;
     }

@@ -1,7 +1,7 @@
 // ============================================================================
 //  gui/tests/test_model_page.cpp — 模型测试页控件级测试（T11）
 //
-//  重点验"界面 → gui.yaml → 同步两个目标"这条链路，以及
+//  重点验"界面 → config.yaml → 派生 llm.env"这条链路，以及
 //  禁用/本地/云端的块显隐。服务脚本用假仓库（造几个假脚本）验调用。
 // ============================================================================
 #include <QComboBox>
@@ -25,7 +25,7 @@ class TestModelPage : public QObject {
 private slots:
     void modeSwitchesVisibleBlocks();
     void loadFromConfigFillsWidgets();
-    void saveWritesGuiYamlAndSyncsTargets();
+    void saveWritesConfigAndDerivesEnv();
     void siglipIsReadOnlyText();
     void missingPathsAreReportedNotCrash();
 };
@@ -41,29 +41,27 @@ void writeFile(const QString& path, const QString& text)
     file.close();
 }
 
-/// 造一个小仓库：gui/config/gui.yaml + llm/config/llm.env + config/config.yaml
+/// 造一个小仓库：config/config.yaml（唯一真源）+ llm/config/llm.env（派生目标）
 void makeRepo(const QString& root)
 {
-    writeFile(root + QStringLiteral("/gui/config/gui.yaml"),
+    writeFile(root + QStringLiteral("/config/config.yaml"),
               QStringLiteral("llm:\n"
                              "  mode: disabled\n"
-                             "  local_model: /tmp/models/a.gguf\n"
+                             "  model_path: /tmp/models/a.gguf\n"
                              "  ctx_size: 2048\n"
                              "  batch_size: 256\n"
                              "  threads: 4\n"
                              "  port: 9000\n"
                              "  temperature: 0.7\n"
                              "  api_key: sk-old\n"
-                             "  cloud:\n"
-                             "    base: https://old.example.com/v1\n"
-                             "    model: old-model\n"
-                             "wake:\n"
-                             "  idle_ms: 5000\n"));
+                             "  api_base: https://old.example.com/v1\n"
+                             "  model: old-model\n"
+                             "gui:\n"
+                             "  wake:\n"
+                             "    idle_ms: 5000\n"));
     writeFile(root + QStringLiteral("/llm/config/llm.env"),
               QStringLiteral("# llm.env\nLLM_MODE=disabled\nLLM_MODEL_PATH=/tmp/models/a.gguf\n"
                              "LLM_PORT=9000\nLLM_API_KEY=sk-old\n"));
-    writeFile(root + QStringLiteral("/config/config.yaml"),
-              QStringLiteral("llm:\n  mode: disabled\n  model_path: /tmp/models/a.gguf\n"));
 }
 
 } // namespace
@@ -77,7 +75,7 @@ void TestModelPage::modeSwitchesVisibleBlocks()
     QVERIFY(!page.cloudBlock()->isVisibleTo(&page));
     QCOMPARE(page.currentMode(), QStringLiteral("disabled"));
 
-    page.modeButton(QStringLiteral("local"))->setChecked(true);
+    page.modeButton(QStringLiteral("edge"))->setChecked(true);
     QVERIFY(page.localBlock()->isVisibleTo(&page));
     QVERIFY(!page.cloudBlock()->isVisibleTo(&page));
     QVERIFY(page.statusText().contains(QStringLiteral("llama-server")));
@@ -95,7 +93,7 @@ void TestModelPage::loadFromConfigFillsWidgets()
     makeRepo(tmp.path());
 
     ModelPage page;
-    page.setPaths(tmp.path() + QStringLiteral("/gui/config/gui.yaml"), tmp.path());
+    page.setPaths(tmp.path() + QStringLiteral("/config/config.yaml"), tmp.path());
     QCOMPARE(page.currentMode(), QStringLiteral("disabled"));
     QCOMPARE(page.modelBox()->currentText(), QStringLiteral("/tmp/models/a.gguf"));
     QCOMPARE(page.ctxSpin()->value(), 2048);
@@ -104,38 +102,38 @@ void TestModelPage::loadFromConfigFillsWidgets()
     QCOMPARE(page.cloudKeyEdit()->text(), QStringLiteral("sk-old"));
 }
 
-void TestModelPage::saveWritesGuiYamlAndSyncsTargets()
+void TestModelPage::saveWritesConfigAndDerivesEnv()
 {
     QTemporaryDir tmp;
     QVERIFY(tmp.isValid());
     makeRepo(tmp.path());
 
     ModelPage page;
-    page.setPaths(tmp.path() + QStringLiteral("/gui/config/gui.yaml"), tmp.path());
+    page.setPaths(tmp.path() + QStringLiteral("/config/config.yaml"), tmp.path());
 
     // 改成"本地 + 新参数"再保存
-    page.modeButton(QStringLiteral("local"))->setChecked(true);
+    page.modeButton(QStringLiteral("edge"))->setChecked(true);
     page.ctxSpin()->setValue(4096);
     page.threadsSpin()->setValue(3);
     QVERIFY(page.saveAndSync());
 
-    // gui.yaml 真的改了
+    // config.yaml（唯一真源）真的改了
     core::ConfigStore after;
     QString error;
-    QVERIFY(after.load(tmp.path() + QStringLiteral("/gui/config/gui.yaml"), &error));
-    QCOMPARE(after.value(QStringLiteral("llm.mode")), QStringLiteral("local"));
+    QVERIFY(after.load(tmp.path() + QStringLiteral("/config/config.yaml"), &error));
+    QCOMPARE(after.value(QStringLiteral("llm.mode")), QStringLiteral("edge"));
     QCOMPARE(after.value(QStringLiteral("llm.ctx_size")), QStringLiteral("4096"));
     QCOMPARE(after.value(QStringLiteral("llm.threads")), QStringLiteral("3"));
 
-    // llm.env：模式**不在** env 映射表里（模式同步到 config.yaml 的 llm.mode），
-    // 参数（ctx/线程等）才落 env；这里断言 ctx 落对了
+    // llm.env 是**派生**文件：只有映射表里的 8 个键会跟着走（模式不在其中 ——
+    // 模式是给 Agent 看的），这里断言 ctx / 线程落对了
     QFile env(tmp.path() + QStringLiteral("/llm/config/llm.env"));
     QVERIFY(env.open(QIODevice::ReadOnly));
     const QString envText = QString::fromUtf8(env.readAll());
     QVERIFY2(envText.contains(QStringLiteral("LLM_CTX_SIZE=4096")), qPrintable(envText));
     QVERIFY(envText.contains(QStringLiteral("LLM_THREADS=3")));
 
-    // config.yaml：mode 从 disabled 变成 edge（local 在 Agent 侧叫 edge）
+    // mode 用的是规范词汇 edge（界面、config.yaml、Agent 三处一致）
     QFile cfg(tmp.path() + QStringLiteral("/config/config.yaml"));
     QVERIFY(cfg.open(QIODevice::ReadOnly));
     const QString cfgText = QString::fromUtf8(cfg.readAll());
@@ -143,7 +141,7 @@ void TestModelPage::saveWritesGuiYamlAndSyncsTargets()
 
     // 日志里要留下"做过什么"
     QVERIFY(page.logView()->toPlainText().contains(QStringLiteral("config.yaml 已更新")));
-    QVERIFY(page.logView()->toPlainText().contains(QStringLiteral("已同步")));
+    QVERIFY(page.logView()->toPlainText().contains(QStringLiteral("已派生")));
 }
 
 void TestModelPage::siglipIsReadOnlyText()
@@ -162,8 +160,8 @@ void TestModelPage::missingPathsAreReportedNotCrash()
     QVERIFY(!page.saveAndSync());
     QVERIFY(page.logView()->toPlainText().contains(QStringLiteral("无法保存")));
 
-    // 指向不存在的 gui.yaml → 读失败提示
-    page.setPaths(QStringLiteral("/tmp/definitely-missing/gui.yaml"), QStringLiteral("/tmp"));
+    // 指向不存在的 config.yaml → 读失败提示
+    page.setPaths(QStringLiteral("/tmp/definitely-missing/config.yaml"), QStringLiteral("/tmp"));
     QVERIFY(page.logView()->toPlainText().contains(QStringLiteral("读配置失败")));
 
     // 点服务按钮（仓库根不存在）→ 只提示，不崩

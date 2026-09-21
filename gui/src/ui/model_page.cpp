@@ -28,6 +28,22 @@
 
 namespace {
 
+/// GUI 与 Agent 共用 config.yaml 之后，mode 只有一种规范词汇：
+/// edge（板端 llama.cpp）/ cloud / disabled。
+/// 旧配置里可能还写着 local / board（那是 Agent 也认的 edge 别名），这里统一归一，
+/// 这样界面、文件、Agent 三处看到的是同一个值。
+QString canonicalMode(const QString& mode)
+{
+    if (mode == QLatin1String("edge") || mode == QLatin1String("local")
+        || mode == QLatin1String("board")) {
+        return QStringLiteral("edge");
+    }
+    if (mode == QLatin1String("cloud")) {
+        return QStringLiteral("cloud");
+    }
+    return QStringLiteral("disabled");
+}
+
 QFrame* makeBlock(QWidget* parent, const QString& title, QVBoxLayout** innerOut)
 {
     auto* frame = new QFrame(parent);
@@ -102,13 +118,13 @@ void ModelPage::build()
     const auto wireMode = [this](QRadioButton* button, const QString& mode) {
         connect(button, &QRadioButton::toggled, this, [this, mode](bool on) {
             if (on) {
-                mode_ = mode;
-                applyModeToUi(mode);
+                applyModeToUi(mode);   // 内部会 mode_ = canonicalMode(mode)
             }
         });
     };
     wireMode(modeDisabled_, QStringLiteral("disabled"));
-    wireMode(modeLocal_, QStringLiteral("local"));
+    // GUI 直接用 Agent 的规范值 edge（旧配置里的 local/board 由 canonicalMode 归一）
+    wireMode(modeLocal_, QStringLiteral("edge"));
     wireMode(modeCloud_, QStringLiteral("cloud"));
 
     // ---------------- 本地块 ----------------
@@ -253,10 +269,11 @@ void ModelPage::build()
 
 QRadioButton* ModelPage::modeButton(const QString& mode) const
 {
-    if (mode == QLatin1String("local")) {
+    const QString canonical = canonicalMode(mode);
+    if (canonical == QLatin1String("edge")) {
         return modeLocal_;
     }
-    if (mode == QLatin1String("cloud")) {
+    if (canonical == QLatin1String("cloud")) {
         return modeCloud_;
     }
     return modeDisabled_;
@@ -264,9 +281,9 @@ QRadioButton* ModelPage::modeButton(const QString& mode) const
 
 void ModelPage::applyModeToUi(const QString& mode)
 {
-    mode_ = mode;
-    const bool isLocal = (mode == QLatin1String("local"));
-    const bool isCloud = (mode == QLatin1String("cloud"));
+    mode_ = canonicalMode(mode);
+    const bool isLocal = (mode_ == QLatin1String("edge"));
+    const bool isCloud = (mode_ == QLatin1String("cloud"));
     // 禁用时两块都不显示（参数还在配置里，只是不生效）
     localBlock_->setVisible(isLocal);
     cloudBlock_->setVisible(isCloud);
@@ -299,7 +316,7 @@ void ModelPage::scanModels()
         core::ConfigStore store;
         QString error;
         if (store.load(configPath_, &error)) {
-            const QString path = store.value(QStringLiteral("llm.local_model"));
+            const QString path = store.value(QStringLiteral("llm.model_path"));
             if (!path.isEmpty()) {
                 const QString dir = QFileInfo(path).absolutePath();
                 if (!dirs.contains(dir)) {
@@ -339,13 +356,13 @@ void ModelPage::loadFromConfig()
         appendLog(QStringLiteral("读配置失败：%1").arg(error));
         return;
     }
-    mode_ = store.value(QStringLiteral("llm.mode"), QStringLiteral("disabled"));
+    mode_ = canonicalMode(store.value(QStringLiteral("llm.mode"), QStringLiteral("disabled")));
     if (QRadioButton* button = modeButton(mode_)) {
         button->setChecked(true);
     }
     applyModeToUi(mode_);
 
-    const QString model = store.value(QStringLiteral("llm.local_model"));
+    const QString model = store.value(QStringLiteral("llm.model_path"));
     if (!model.isEmpty() && modelBox_->findText(model) < 0) {
         modelBox_->addItem(model);
     }
@@ -355,8 +372,8 @@ void ModelPage::loadFromConfig()
     threadsSpin_->setValue(store.intValue(QStringLiteral("llm.threads"), 4));
     portSpin_->setValue(store.intValue(QStringLiteral("llm.port"), 9000));
     temperatureSpin_->setValue(store.value(QStringLiteral("llm.temperature")).toDouble());
-    cloudBase_->setText(store.value(QStringLiteral("llm.cloud.base")));
-    cloudModel_->setText(store.value(QStringLiteral("llm.cloud.model")));
+    cloudBase_->setText(store.value(QStringLiteral("llm.api_base")));
+    cloudModel_->setText(store.value(QStringLiteral("llm.model")));
     cloudKey_->setText(store.value(QStringLiteral("llm.api_key")));
     appendLog(QStringLiteral("已载入配置：mode=%1").arg(mode_));
 }
@@ -375,15 +392,15 @@ bool ModelPage::saveAndSync()
     }
 
     store.set(QStringLiteral("llm.mode"), mode_);
-    store.set(QStringLiteral("llm.local_model"), modelBox_->currentText());
+    store.set(QStringLiteral("llm.model_path"), modelBox_->currentText());
     store.set(QStringLiteral("llm.ctx_size"), QString::number(ctxSpin_->value()));
     store.set(QStringLiteral("llm.batch_size"), QString::number(batchSpin_->value()));
     store.set(QStringLiteral("llm.threads"), QString::number(threadsSpin_->value()));
     store.set(QStringLiteral("llm.port"), QString::number(portSpin_->value()));
     store.set(QStringLiteral("llm.temperature"),
               QString::number(temperatureSpin_->value(), 'g', 4));
-    store.set(QStringLiteral("llm.cloud.base"), cloudBase_->text());
-    store.set(QStringLiteral("llm.cloud.model"), cloudModel_->text());
+    store.set(QStringLiteral("llm.api_base"), cloudBase_->text());
+    store.set(QStringLiteral("llm.model"), cloudModel_->text());
     store.set(QStringLiteral("llm.api_key"), cloudKey_->text());
 
     if (!store.save(&error)) {
@@ -393,17 +410,17 @@ bool ModelPage::saveAndSync()
     appendLog(QStringLiteral("config.yaml 已更新（mode=%1）").arg(mode_));
 
     if (repoRoot_.isEmpty()) {
-        appendLog(QStringLiteral("没设置仓库根，跳过同步 llm.env / config.yaml"));
+        appendLog(QStringLiteral("没设置仓库根，跳过派生 llm.env"));
         return true;
     }
-    core::ConfigSyncer syncer(repoRoot_ + QStringLiteral("/llm/config/llm.env"),
-                              repoRoot_ + QStringLiteral("/config/config.yaml"));
+    // config.yaml 已经由上面的 store.save() 落盘; 这里只派生 llm.env
+    core::ConfigSyncer syncer(repoRoot_ + QStringLiteral("/llm/config/llm.env"));
     QString diff;
     if (!syncer.apply(store, &error, &diff)) {
-        appendLog(QStringLiteral("同步失败：%1").arg(error));
+        appendLog(QStringLiteral("派生 llm.env 失败：%1").arg(error));
         return false;
     }
-    appendLog(QStringLiteral("已同步 llm.env / config.yaml：\n%1").arg(diff.trimmed()));
+    appendLog(QStringLiteral("已派生 llm.env：\n%1").arg(diff.trimmed()));
     return true;
 }
 

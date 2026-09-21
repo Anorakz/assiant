@@ -46,10 +46,10 @@ void writeFile(const QString& path, const QString& text, bool exec = false)
 QString TestBenchRunner::makeRepo(QTemporaryDir& tmp, const QString& benchBody)
 {
     const QString root = tmp.path();
-    writeFile(root + QStringLiteral("/gui/config/gui.yaml"),
-              QStringLiteral("llm:\n  mode: disabled\n  local_model: /tmp/a.gguf\n"));
+    // 归一化 D 系列: 配置真源只有 config/config.yaml（模型参数住在顶层 llm.*）
+    writeFile(root + QStringLiteral("/config/config.yaml"),
+              QStringLiteral("llm:\n  mode: disabled\n  model_path: /tmp/a.gguf\n"));
     writeFile(root + QStringLiteral("/llm/config/llm.env"), QStringLiteral("LLM_PORT=9000\n"));
-    writeFile(root + QStringLiteral("/config/config.yaml"), QStringLiteral("llm:\n  mode: disabled\n"));
     writeFile(root + QStringLiteral("/llm/bench_qwen35.py"), benchBody);
     writeFile(root + QStringLiteral("/llm/bench_multimodal.py"), benchBody);
     return root;
@@ -65,7 +65,7 @@ void TestBenchRunner::precheckRunsAndTakesOverServiceButtons()
                             "time.sleep(1.0)\n"
                             "print('[fake-qwen] 预检完成', flush=True)\n"));
     ModelPage page;
-    page.setPaths(root + QStringLiteral("/gui/config/gui.yaml"), root);
+    page.setPaths(root + QStringLiteral("/config/config.yaml"), root);
 
     QVERIFY(!page.benchRunning());
     QVERIFY(!page.benchBanner()->isVisibleTo(&page));
@@ -99,7 +99,7 @@ void TestBenchRunner::stopKillsRunningBenchmark()
                             "time.sleep(60)\n"
                             "print('不该看到这行', flush=True)\n"));
     ModelPage page;
-    page.setPaths(root + QStringLiteral("/gui/config/gui.yaml"), root);
+    page.setPaths(root + QStringLiteral("/config/config.yaml"), root);
 
     page.startBenchmark(QStringLiteral("qwen_full"));
     QVERIFY(page.benchRunning());
@@ -122,7 +122,7 @@ void TestBenchRunner::missingScriptIsReported()
     QFile::remove(tmp.path() + QStringLiteral("/llm/bench_multimodal.py"));
 
     ModelPage page;
-    page.setPaths(tmp.path() + QStringLiteral("/gui/config/gui.yaml"), tmp.path());
+    page.setPaths(tmp.path() + QStringLiteral("/config/config.yaml"), tmp.path());
     page.startBenchmark(QStringLiteral("multimodal"));
     QVERIFY(!page.benchRunning());                       // 没起来
     QVERIFY(page.logView()->toPlainText().contains(QStringLiteral("脚本不存在")));
@@ -145,7 +145,7 @@ void TestBenchRunner::latestReportIsShown()
               QStringLiteral("# 多模态对比\n更快\n"));
 
     ModelPage page;
-    page.setPaths(root + QStringLiteral("/gui/config/gui.yaml"), root);
+    page.setPaths(root + QStringLiteral("/config/config.yaml"), root);
     QVERIFY(page.showLatestReport());
     const QString text = page.logView()->toPlainText();
     QVERIFY(text.contains(QStringLiteral("最新报告")));
@@ -153,7 +153,7 @@ void TestBenchRunner::latestReportIsShown()
 
     // 没有报告时只提示，不崩
     ModelPage empty;
-    empty.setPaths(root + QStringLiteral("/gui/config/gui.yaml"), root);
+    empty.setPaths(root + QStringLiteral("/config/config.yaml"), root);
     // 删掉报告再试
     QFile::remove(root + QStringLiteral("/llm/qwen3.5_bench/Q4_K_M.md"));
     QFile::remove(root + QStringLiteral("/llm/multimodal_bench/compare.md"));
