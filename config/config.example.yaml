@@ -82,5 +82,14 @@ scheduler:
   window_min: 1
   # 迟到的容忍度(分钟): 设备休眠/重启后晚几分钟仍认这次触发
   late_grace_min: 0
-  # 快捷键映射: 组合键 -> 动作 (state 切状态 / prompt 发消息)
-  hotkeys: []
+  # 终端命令映射: 命令名 -> 动作 (state 切状态 / prompt 发消息 / reason 说明)
+  # 只认来自终端的那一行, 且要求**整行相等**(去首尾空白、大小写不敏感)。
+  # 例:
+  #   commands:
+  #     - command: "study"
+  #       action: {state: study, prompt: "开始学习"}
+  #     - command: "回桌面"
+  #       action: {state: idle}
+  # 也可以用 "命令名: 动作" 的 dict 写法。
+  # ⚠ 命中不会把事件从 bus 里拿走, 所以命令那行**同时也会进 LLM**(订阅式的固有行为)。
+  commands: []

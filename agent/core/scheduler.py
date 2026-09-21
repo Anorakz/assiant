@@ -1,11 +1,12 @@
 # ============================================================================
-#  agent/core/scheduler.py — 日程检查 + 定时触发 + 快捷键监听
+#  agent/core/scheduler.py — 日程检查 + 定时触发 + 终端命令监听
 #
 #  它在链路里的位置
 #  ---------------------------------------------------------------------------
 #      Scheduler.start()
 #        ├── 日程循环:   每 interval_min 分钟 check_schedule()  → 到点就触发
-#        └── 快捷键循环: 从 ChatInputBus 读事件 → 识别组合键 → 触发
+#        └── 命令循环:   从 ChatInputBus 旁观 source=="terminal" 的整行文本
+#                        → 与配置里的命令名比 → 命中就触发
 #
 #  触发动作只有两种 (按约定)
 #  ---------------------------------------------------------------------------
@@ -41,23 +42,22 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time as _time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .state_machine import State, StateMachine
 
 __all__ = [
     "Scheduler",
     "ScheduleEvent",
-    "HotkeyBinding",
-    "HotkeyEvent",
+    "CommandBinding",
     "SchedulerError",
+    "TERMINAL_SOURCE",
     "parse_clock",
-    "parse_hotkey_text",
-    "parse_hotkey_config",
+    "normalize_command",
+    "parse_command_config",
     "WEEKDAYS",
     "DEFAULT_INTERVAL_MIN",
     "DEFAULT_WINDOW_MIN",
@@ -71,31 +71,10 @@ DEFAULT_WINDOW_MIN = 1
 #: 允许的星期缩写 (与 schedule.example.yaml 一致)
 WEEKDAYS: Tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
-#: 修饰键名 -> Scheduler 内部用的位 (与 native MODIFIER_* 无关, 只是本模块的标记)
-_MOD_BITS: Dict[str, int] = {
-    "shift": 0x01,
-    "ctrl": 0x02,
-    "control": 0x02,
-    "alt": 0x04,
-    "menu": 0x04,
-    "meta": 0x08,
-    "win": 0x08,
-    "super": 0x08,
-    "cmd": 0x08,
-}
-
-#: 只看修饰键本身时用的反查表
-_MOD_KEY_NAMES: Dict[str, str] = {
-    "shift": "shift",
-    "ctrl": "ctrl",
-    "control": "ctrl",
-    "alt": "alt",
-    "menu": "alt",
-    "meta": "meta",
-    "win": "meta",
-    "super": "meta",
-    "cmd": "meta",
-}
+#: 命令只从这个来源认 —— 终端里敲的那一行 (见 normalize_command)。
+#: 为什么不认 gui: 匹配是"整行相等", 让界面里的聊天文本也能触发状态切换很难查,
+#: 而终端是唯一"敲一行再回车"的地方。
+TERMINAL_SOURCE = "terminal"
 
 
 class SchedulerError(ValueError):
@@ -311,245 +290,113 @@ class ScheduleEvent:
 
 
 # ---------------------------------------------------------------------------
-#  快捷键
+#  终端命令
 # ---------------------------------------------------------------------------
-@dataclass(frozen=True)
-class HotkeyBinding:
-    """一条快捷键绑定。
+def normalize_command(text: Any) -> str:
+    """把一行终端输入归一成用于比较的命令名。
 
-    @param keys   组合键, 已归一: ("ctrl","alt","s") —— 修饰键在前, 主键在后
-    @param action 触发动作 dict
-    @param label  配置里原本怎么写的 (回显用)
+    规则只有两条: **去掉首尾空白** + **大小写不敏感**。不做分词、不做前缀、
+    不做缩写 —— 匹配是"整行相等", 少一层规则就少一处两边理解不一致的地方
+    (这也是原来那套 `[key c modifier=6]` 文本解析被删掉的原因: 它要求生产端
+    按特定格式渲染, 而那个生产端根本不存在)。
+
+    非字符串 / 空串归一成 ""(调用方按"不匹配"处理)。
+    """
+    if not isinstance(text, str):
+        return ""
+    return text.strip().lower()
+
+
+@dataclass(frozen=True)
+class CommandBinding:
+    """一条终端命令绑定。
+
+    @param command 命令名, 已归一 (strip + lower): 终端里整行敲它就触发
+    @param action  触发动作 dict
+    @param label   配置里原本怎么写的 (回显用)
     """
 
-    keys: Tuple[str, ...]
+    command: str
     action: Dict[str, Any]
     label: str
 
-    @property
-    def main_key(self) -> str:
-        return self.keys[-1]
 
-    @property
-    def modifiers(self) -> frozenset:
-        return frozenset(self.keys[:-1])
-
-    def matches(self, main_key: str, modifiers: Set[str]) -> bool:
-        return self.main_key == main_key and self.modifiers == frozenset(modifiers)
-
-
-@dataclass
-class HotkeyEvent:
-    """从 bus 文本里解析出来的一条按键事件。
-
-    @param key      主键名 (已归一成小写)
-    @param modifiers 当前按住的修饰键集合
-    @param action   "press" | "release"
-    """
-
-    key: str
-    modifiers: Set[str]
-    action: str
-
-
-def parse_hotkey_text(text: Any) -> Optional[HotkeyEvent]:
-    """把 bus 里的一行文本解析成按键事件; 解析不了返回 None。
-
-    支持两种形态:
-      1. bus 里 "host_keyboard" 源的文本形态:
-             "[key ctrl]"             按下 Ctrl
-             "[key c modifier=6]"     按住 Ctrl+Alt 时按下 c
-             "[key c release]"        抬起 c
-             "[key space]"
-      2. 结构化 JSON (如果将来 bus 里投的是结构化事件):
-             '{"type":"key","key":"c","modifier":6,"action":"press"}'
-
-    ⚠ 注意: 已知的文本生产者 (agent/io/host_input_reader.py) 已在 Phase 6 收尾时
-    删除 —— native 侧没有"主机键盘回传"的 API, 那条路从来没有事件。这个解析器
-    因此目前**没有生产者**; 保留它 (和 HotkeyBinding / listen_hotkey) 是为了
-    将来把快捷键接到板子自己的键盘/GUI 上时不用重写解析。见 todo.md 决策记录。
-
-    解析不了就返回 None —— 调用方 (listen_hotkey) 跳过它。这让"从不认识的
-    文本里认出快捷键"变成"宁可漏识别, 不可误触发"。
-    """
-    if not isinstance(text, str):
-        return None
-
-    raw = text.strip()
-    if not raw:
-        return None
-
-    # --- 形态 2: JSON ---
-    if raw.startswith("{"):
-        try:
-            payload = json.loads(raw)
-        except ValueError:
-            return None
-        if not isinstance(payload, dict) or payload.get("type") != "key":
-            return None
-        key = _normalize_key(payload.get("key"))
-        if key is None:
-            return None
-        modifiers = _modifiers_from_mask(payload.get("modifier", 0))
-        action = str(payload.get("action", "press")).lower()
-        return HotkeyEvent(key=key, modifiers=modifiers, action=action)
-
-    # --- 形态 1: "[key X]" / "[key X modifier=N]" / "[key X release]" ---
-    if not (raw.startswith("[key ") and raw.endswith("]")):
-        return None
-
-    body = raw[len("[key "):-1].strip()
-    if not body:
-        return None
-
-    action = "press"          # 默认按下: 文本形态不区分按下/抬起时按"按下"算
-    modifier_mask = 0
-
-    if " modifier=" in body:
-        body, _, mask_text = body.partition(" modifier=")
-        try:
-            modifier_mask = int(mask_text.strip())
-        except ValueError:
-            modifier_mask = 0
-
-    # "ctrl release" / "c released" / "c up"
-    tokens = body.split()
-    if len(tokens) >= 2 and tokens[-1].lower() in ("release", "released", "up"):
-        action = "release"
-        tokens = tokens[:-1]
-    body = " ".join(tokens).strip()
-    if not body:
-        return None
-
-    key = _normalize_key(body)
-    if key is None:
-        return None
-
-    modifiers = _modifiers_from_mask(modifier_mask)
-    return HotkeyEvent(key=key, modifiers=modifiers, action=action)
-
-
-def _normalize_key(value: Any) -> Optional[str]:
-    """把键归一成小写名字。"""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        # VK 码 -> 可打印 ASCII 用字符, 其余给 "vk:N"
-        if 0x20 <= value < 0x7F:
-            return chr(value).lower()
-        return "vk:%d" % value
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if not text:
-            return None
-        # 单字符直接用; 具名键原样 (文本形态已把 VK 渲染成名字)
-        return text
-    return None
-
-
-def _modifiers_from_mask(mask: Any) -> Set[str]:
-    """位掩码 -> {'ctrl','alt',...}。"""
-    if isinstance(mask, bool) or not isinstance(mask, int):
-        try:
-            mask = int(mask)
-        except (TypeError, ValueError):
-            return set()
-    out = set()
-    for name, bit in (("shift", 0x01), ("ctrl", 0x02), ("alt", 0x04), ("meta", 0x08)):
-        if mask & bit:
-            out.add(name)
-    return out
-
-
-def parse_hotkey_config(config: Any) -> List[HotkeyBinding]:
-    """从 config 里读快捷键映射。
+def parse_command_config(config: Any) -> List[CommandBinding]:
+    """从 config 的 `commands` 段读命令映射。
 
     接受两种写法::
 
-        hotkeys:
-          - keys: ["ctrl", "alt", "s"]        # 列表
+        commands:
+          - command: "study"                  # 列表
             action: {state: study, prompt: "开始学习"}
 
-        hotkeys:
-          "ctrl+alt+s":                        # 也接受 "组合键字符串" 作 key
+        commands:
+          "study":                            # 也接受 "命令名" 作 key
             state: study
             prompt: "开始学习"
 
-    @raise SchedulerError 格式不对
+    动作 dict 与日程事件共用一套词汇: `state` / `reason` / `prompt`。
+
+    @raise SchedulerError 格式不对 (不是 list/dict、缺 command、命令名重复)
     """
     if config is None:
         return []
     if not isinstance(config, (list, tuple, dict)):
-        raise SchedulerError("hotkeys must be a list or an object, got %r" % type(config).__name__)
-
-    bindings: List[HotkeyBinding] = []
-
-    if isinstance(config, dict):
-        items = [(label, action) for label, action in config.items()]
-        for label, action in items:
-            keys = tuple(_split_combo(label))
-            bindings.append(HotkeyBinding(keys=keys, action=_as_action(action, label), label=str(label)))
-        return bindings
-
-    for index, entry in enumerate(config):
-        if not isinstance(entry, dict):
-            raise SchedulerError("hotkey entry #%d must be an object" % index)
-        raw_keys = entry.get("keys")
-        if raw_keys is None:
-            raise SchedulerError("hotkey entry #%d needs 'keys'" % index)
-        if isinstance(raw_keys, str):
-            keys = tuple(_split_combo(raw_keys))
-            label = raw_keys
-        elif isinstance(raw_keys, (list, tuple)):
-            keys = tuple(_normalize_key(k) for k in raw_keys)
-            label = "+".join(str(k) for k in raw_keys)
-            if any(k is None for k in keys):
-                raise SchedulerError("hotkey entry #%d has an unusable key" % index)
-        else:
-            raise SchedulerError(
-                "hotkey entry #%d: keys must be a list or 'a+b' string" % index
-            )
-        if not keys:
-            raise SchedulerError("hotkey entry #%d has empty keys" % index)
-
-        bindings.append(
-            HotkeyBinding(
-                keys=tuple(keys),
-                action=_as_action(entry.get("action", entry), label),
-                label=label,
-            )
+        raise SchedulerError(
+            "commands must be a list or an object, got %r" % type(config).__name__
         )
 
-    # 同一个组合键绑了两次: 报错而不是偷偷用最后一个
-    seen: Set[Tuple[str, ...]] = set()
+    bindings: List[CommandBinding] = []
+
+    if isinstance(config, dict):
+        for label, action in config.items():
+            command = normalize_command(label)
+            if not command:
+                raise SchedulerError("command name must be a non-empty string, got %r"
+                                     % (label,))
+            bindings.append(
+                CommandBinding(command=command,
+                               action=_as_action(action, label),
+                               label=str(label))
+            )
+    else:
+        for index, entry in enumerate(config):
+            if not isinstance(entry, dict):
+                raise SchedulerError("command entry #%d must be an object" % index)
+            raw = entry.get("command")
+            if raw is None:
+                raise SchedulerError("command entry #%d needs 'command'" % index)
+            if not isinstance(raw, str):
+                raise SchedulerError(
+                    "command entry #%d: command must be a string, got %r"
+                    % (index, type(raw).__name__)
+                )
+            command = normalize_command(raw)
+            if not command:
+                raise SchedulerError("command entry #%d has an empty command" % index)
+            bindings.append(
+                CommandBinding(
+                    command=command,
+                    action=_as_action(entry.get("action", entry), raw),
+                    label=raw,
+                )
+            )
+
+    # 同一条命令绑了两次: 报错而不是偷偷用最后一个
+    seen: Set[str] = set()
     for binding in bindings:
-        if binding.keys in seen:
-            raise SchedulerError("duplicate hotkey binding: %s" % binding.label)
-        seen.add(binding.keys)
+        if binding.command in seen:
+            raise SchedulerError("duplicate command binding: %s" % binding.label)
+        seen.add(binding.command)
 
     return bindings
-
-
-def _split_combo(text: str) -> List[str]:
-    """'ctrl+alt+s' -> ['ctrl','alt','s'], 修饰键排到前面。"""
-    if not isinstance(text, str) or not text.strip():
-        raise SchedulerError("hotkey combo must be a non-empty string, got %r" % (text,))
-    parts = [p.strip().lower() for p in text.replace(" ", "").split("+") if p.strip()]
-    if not parts:
-        raise SchedulerError("hotkey combo %r has no keys" % (text,))
-
-    mods = [p for p in parts if p in _MOD_KEY_NAMES]
-    rest = [p for p in parts if p not in _MOD_KEY_NAMES]
-    return [_MOD_KEY_NAMES[m] for m in mods] + rest
 
 
 def _as_action(value: Any, label: str) -> Dict[str, Any]:
     if value is None:
         return {}
     if not isinstance(value, dict):
-        raise SchedulerError("hotkey %r action must be an object, got %r" % (label, value))
+        raise SchedulerError("command %r action must be an object, got %r" % (label, value))
     action = dict(value)
     # 允许简写: 直接 {state: study} 而不是 {action: {state: study}}
     if "action" in action and isinstance(action["action"], dict):
@@ -563,7 +410,7 @@ def _as_action(value: Any, label: str) -> Dict[str, Any]:
 #  Scheduler
 # ---------------------------------------------------------------------------
 class Scheduler:
-    """日程检查 + 定时触发 + 快捷键监听。
+    """日程检查 + 定时触发 + 终端命令监听。
 
     典型用法::
 
@@ -587,7 +434,7 @@ class Scheduler:
     ) -> None:
         """
         @param state      状态机 (触发动作里可以切状态)
-        @param bus        ChatInputBus (触发动作里可以发消息; 快捷键从它读)
+        @param bus        ChatInputBus (触发动作里可以发消息; 终端命令从它读)
         @param config     配置 dict (可以是整个 config, 也可以只给 scheduler 段)
         @param clock      取当前时间 (测试注入)
         @param monotonic  取单调时钟 (测试注入, 用来做检查间隔)
@@ -618,23 +465,29 @@ class Scheduler:
         self.late_grace_min = self._non_negative_int(grace, "late_grace_min")
 
         self._events: List[ScheduleEvent] = self._load_events(section)
-        self._bindings: List[HotkeyBinding] = parse_hotkey_config(section.get("hotkeys"))
+        self._bindings: List[CommandBinding] = parse_command_config(section.get("commands"))
 
         # ---- 运行态 ----
         self._tasks: List[asyncio.Task] = []
         self._fired: Set[Tuple[date, str]] = set()
-        self._held_modifiers: Set[str] = set()
-        self._held_keys: Set[str] = set()
         self._last_check_at: Optional[float] = None
         self._checks = 0
         self._triggers = 0
-        self._hotkey_hits = 0
+        self._command_hits = 0
         self._warnings: List[str] = []
         self._running = False
-        #: listen_hotkey 建立的订阅句柄 (stop 时注销)
+        #: listen_commands 建立的订阅句柄 (stop 时注销)
         self._unsubscribe: Optional[Callable[[], bool]] = None
-        #: 最近一次命中的快捷键 (诊断用)
-        self._last_hotkey: Optional[Dict[str, Any]] = None
+        #: 最近一次命中的命令 (诊断用)
+        self._last_command: Optional[Dict[str, Any]] = None
+
+        # 旧键名 (hotkeys) 已改名为 commands。板端实盘配置里可能还留着它 ——
+        # 静默忽略会让"我配了命令却没生效"变成难查的问题, 所以记一条 warning。
+        if "hotkeys" in section:
+            self._warnings.append(
+                "配置里的 scheduler.hotkeys 已改名为 scheduler.commands, "
+                "本次被忽略 (见 docs/architecure.md 与 config.example.yaml)"
+            )
 
     # ------------------------------------------------------------ 配置 ---
     @staticmethod
@@ -688,7 +541,7 @@ class Scheduler:
         return list(self._events)
 
     @property
-    def bindings(self) -> List[HotkeyBinding]:
+    def bindings(self) -> List[CommandBinding]:
         return list(self._bindings)
 
     # ------------------------------------------------------------ 时钟 ---
@@ -730,7 +583,7 @@ class Scheduler:
         self.sync_time()
         self._tasks = [
             asyncio.create_task(self._schedule_loop(), name="scheduler-schedule"),
-            asyncio.create_task(self.listen_hotkey(), name="scheduler-hotkey"),
+            asyncio.create_task(self.listen_commands(), name="scheduler-commands"),
         ]
 
     async def stop(self) -> None:
@@ -890,19 +743,24 @@ class Scheduler:
             )
         return done
 
-    # ------------------------------------------------------------ 快捷键 ---
-    async def listen_hotkey(self) -> None:
-        """订阅 bus, 从主机键盘事件里识别快捷键, 命中就触发。
+    # -------------------------------------------------------- 终端命令 ---
+    async def listen_commands(self) -> None:
+        """订阅 bus, 把终端里的一行文本当成命令认, 命中就触发。
 
         ⚠ **不消费 bus 里的事件**: 用 bus.subscribe() 旁观, 而不是 get()。
         早期版本用 get() 循环读, 会把终端/GUI 的用户消息一起吃进调度器,
         下游再也看不到 (还会吃掉调度器自己 push 的触发消息)。订阅式只观察,
-        事件仍然留在队列里等真正的消费者。
+        事件仍然留在队列里等真正的消费者 —— 代价是**命令也会照常进 LLM**
+        (见下方 @note)。
 
-        @note 只认 source == "host_keyboard" 的事件 (原需求: Host Input RB 的 source)。
-              其它来源 (终端/GUI) 的文本即便长得像按键也不参与 —— 否则用户在
-              终端里打一句 "[key c]" 就能触发状态切换。
-              ⚠ 这个 source 目前**没有生产者** (见 parse_hotkey_text 的 @note)。
+        @note 只认 source == "terminal" 的事件, 且必须**整行等于**配置里的命令名
+              (去首尾空白、大小写不敏感)。其它来源 (gui) 不参与: 让界面里的
+              聊天文本也能触发状态切换会很难查。
+
+        @note ⚠ **命中不会把事件从 bus 里拿走**, 所以终端里敲 `study` 会有两个
+              效果: 状态切到 STUDY, 并且 "study" 这行文本照常被主循环送给 LLM。
+              这是订阅式监听的固有行为(要"只生效一次"就得让命令走一条不经过
+              LLM 的通道, 那是另一个改动)。
 
         @note 这个方法**不返回**, 一直等到被 stop() 取消 (或订阅被取消)。
               保留它作为公开接口是为了让"起一个监听任务"这件事显式可见。
@@ -926,7 +784,7 @@ class Scheduler:
         subscribe = getattr(self._bus, "subscribe", None)
         if not callable(subscribe):
             self._warnings.append(
-                "bus does not support subscribe(); hotkey listening is disabled "
+                "bus does not support subscribe(); command listening is disabled "
                 "(need ChatInputBus.subscribe)"
             )
 
@@ -941,7 +799,7 @@ class Scheduler:
             try:
                 self._dispatch_event_sync(event)
             except Exception as exc:  # noqa: BLE001
-                self._warnings.append("hotkey handling failed: %r" % (exc,))
+                self._warnings.append("command handling failed: %r" % (exc,))
 
         return subscribe(_on_event)
 
@@ -951,79 +809,55 @@ class Scheduler:
         为什么是"挂任务"而不是直接 await: 回调在 push() 的调用栈上执行,
         不能在那里 await (会让 push 的调用方等我们做完状态转换+发消息)。
         """
-        detail = self._check_event(event)
-        if detail is None:
+        binding = self._check_event(event)
+        if binding is None:
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            self._warnings.append("no running loop; hotkey action skipped")
+            self._warnings.append("no running loop; command action skipped")
             return
-        task = loop.create_task(self._run_hotkey_action(detail))
+        task = loop.create_task(self._run_command_action(binding))
         task.add_done_callback(_log_task_exception)
 
-    def _check_event(self, event: Any) -> Optional[Tuple[HotkeyBinding, HotkeyEvent, Set[str]]]:
-        """判断一条 bus 事件是否命中快捷键 (纯同步, 不做任何 IO)。"""
+    def _check_event(self, event: Any) -> Optional[CommandBinding]:
+        """判断一条 bus 事件是不是一条已注册的命令 (纯同步, 不做任何 IO)。
+
+        只看 source==TERMINAL_SOURCE 的事件, 并且必须**整行等于**命令名
+        (去首尾空白 + 大小写不敏感, 见 normalize_command)。认不出来就返回 None
+        —— 宁可漏识别, 不可误触发: 一句恰好像命令的聊天不该真的切模式。
+        """
         if not isinstance(event, dict):
             return None
-        if event.get("source") != "host_keyboard":
+        if event.get("source") != TERMINAL_SOURCE:
             return None
 
-        parsed = parse_hotkey_text(event.get("text"))
-        if parsed is None:
+        command = normalize_command(event.get("text"))
+        if not command:
             return None
-
-        # --- 维护"当前按住什么" ---
-        # 修饰键自己按下/抬起时更新按住集合, 并且**不**参与主键匹配
-        if parsed.key in _MOD_KEY_NAMES:
-            canonical = _MOD_KEY_NAMES[parsed.key]
-            if parsed.action == "release":
-                self._held_modifiers.discard(canonical)
-            else:
-                self._held_modifiers.add(canonical)
-            return None
-
-        if parsed.action == "release":
-            self._held_keys.discard(parsed.key)
-            return None
-
-        # 主键按住不放时会反复产生 press (主机端的按键重复)。只认第一次,
-        # 否则"按住 ctrl+alt+s"会触发几十次状态切换。
-        if parsed.key in self._held_keys:
-            return None
-        self._held_keys.add(parsed.key)
-
-        # 事件里报的修饰键位掩码, 与"我们自己跟踪到的按住集合"取并集:
-        # 前者是主机当时的状态, 后者能兜住"修饰键的 press 事件没被投递过来"
-        # (例如调度器晚于按键才开始监听)。
-        active = set(parsed.modifiers) | self._held_modifiers
 
         for binding in self._bindings:
-            if binding.matches(parsed.key, active):
-                self._hotkey_hits += 1
-                return (binding, parsed, active)
+            if binding.command == command:
+                self._command_hits += 1
+                return binding
         return None
 
-    async def _run_hotkey_action(
-        self, hit: Tuple[HotkeyBinding, HotkeyEvent, Set[str]]
-    ) -> None:
-        """执行命中快捷键后的动作 (状态转换 + 发消息)。"""
-        binding, parsed, active = hit
-        reason = binding.action.get("reason") or ("快捷键: %s" % binding.label)
+    async def _run_command_action(self, binding: CommandBinding) -> None:
+        """执行命中命令后的动作 (状态转换 + 发消息)。"""
+        reason = binding.action.get("reason") or ("命令: %s" % binding.label)
         await self._apply_action(binding.action, reason)
 
         text = binding.action.get("prompt")
         if not text:
-            text = "快捷键 %s" % binding.label
+            text = "命令 %s" % binding.label
         try:
             await self._bus.push("scheduler", text)
         except Exception as exc:  # noqa: BLE001
-            self._warnings.append("hotkey push failed: %r" % (exc,))
+            self._warnings.append("command push failed: %r" % (exc,))
         self._triggers += 1
-        self._last_hotkey = {
+        self._last_command = {
             "label": binding.label,
-            "key": parsed.key,
-            "modifiers": sorted(active),
+            "command": binding.command,
         }
 
     async def _on_bus_event(self, event: Any) -> Optional[Dict[str, Any]]:
@@ -1032,16 +866,14 @@ class Scheduler:
         保留这个方法是为了让测试与"手工喂一条事件"的用法简单直接 (订阅式的
         后台任务不好断言)。生产路径走 _dispatch_event_sync。
         """
-        hit = self._check_event(event)
-        if hit is None:
+        binding = self._check_event(event)
+        if binding is None:
             return None
-        binding, parsed, active = hit
-        reason = binding.action.get("reason") or ("快捷键: %s" % binding.label)
+        reason = binding.action.get("reason") or ("命令: %s" % binding.label)
         detail: Dict[str, Any] = {
-            "kind": "hotkey",
+            "kind": "command",
             "label": binding.label,
-            "key": parsed.key,
-            "modifiers": sorted(active),
+            "command": binding.command,
             "bus_timestamp": event.get("timestamp"),
             "actions": [],
         }
@@ -1049,7 +881,7 @@ class Scheduler:
 
         text = binding.action.get("prompt")
         if not text:
-            text = "快捷键 %s" % binding.label
+            text = "命令 %s" % binding.label
         pushed = await self._bus.push("scheduler", text)
         detail["actions"].append(
             {"type": "message", "text": text, "timestamp": pushed["timestamp"]}
@@ -1064,12 +896,11 @@ class Scheduler:
             "running": self._running,
             "checks": self._checks,
             "triggers": self._triggers,
-            "hotkey_hits": self._hotkey_hits,
+            "command_hits": self._command_hits,
             "events": len(self._events),
             "bindings": len(self._bindings),
             "fired_keys": len(self._fired),
-            "held_modifiers": sorted(self._held_modifiers),
-            "last_hotkey": dict(self._last_hotkey) if self._last_hotkey else None,
+            "last_command": dict(self._last_command) if self._last_command else None,
             "subscribed": self._unsubscribe is not None,
             "warnings": list(self._warnings),
         }

@@ -11,7 +11,7 @@
 #      6. StateMachine SLEEP/IDLE/STUDY/GAME
 #      7. ToolRouter   注册工具 (agent/tools/ 还没写 -> 空路由)
 #      8. LLMProvider  edge / cloud / disabled
-#      9. Scheduler    日程 + 快捷键 (订阅 bus, 只看不取)
+#      9. Scheduler    日程 + 终端命令 (订阅 bus, 只看不取)
 #     10. IPC          当前没实现 -> 跳过并记一条日志
 #     11. 终端输入     可选 (config: terminal.enabled)
 #
@@ -21,7 +21,7 @@
 #  异常处理: 单个组件失败不影响其他组件
 #  ---------------------------------------------------------------------------
 #  每个组件都用 _guarded() 单独 start/stop。失败只记 error 并继续 ——
-#  板子上的现实是"能跑起来比跑得全更重要": 摄像头没插不该让快捷键也失效。
+#  板子上的现实是"能跑起来比跑得全更重要": 摄像头没插不该让命令监听也失效。
 #  失败的组件记进 failures, 收尾时给一份汇总。
 #
 #  关于 IPC (第 10 步)
@@ -469,7 +469,7 @@ class Runtime:
 
             await run_native("input_sender", get_native().moonlight.stop)
 
-        # native 是"可选增强": 连不上照样跑本地规则与快捷键
+        # native 是"可选增强": 连不上照样跑本地规则与终端命令
         await self._guarded(
             _Component("native", _start, _stop),
             fatal=False,
@@ -566,7 +566,7 @@ class Runtime:
             self.scheduler = Scheduler(state=self.state, bus=self.bus, config=self.config)
             await self.scheduler.start()
             self.log.info(
-                "Scheduler 就绪 (%d 条日程, %d 个快捷键, 每 %g 分钟检查)",
+                "Scheduler 就绪 (%d 条日程, %d 条命令, 每 %g 分钟检查)",
                 len(self.scheduler.events),
                 len(self.scheduler.bindings),
                 self.scheduler.interval_min,
@@ -688,8 +688,9 @@ class Runtime:
     async def serve(self) -> None:
         """主循环: 从 bus 消费事件 → LLM 处理 → (工具由 LLMRouter 执行) → 回话。
 
-        @note 快捷键由 Scheduler 自己消费它需要的那部分 —— 它用 subscribe()
-              旁听 bus 上的按键事件, 不走这个循环 (见 scheduler 的注释)。
+        @note 终端命令由 Scheduler 自己旁观: 它用 subscribe() 看 bus 上的事件,
+              不走这个循环。⚠ 但订阅**不消费**事件 —— 所以命中命令的那行文本
+              仍然会到这里被送去 LLM (见 scheduler.listen_commands 的 @note)。
         """
         if self.bus is None:
             raise RuntimeError("bus 未就绪, 不能进入主循环")

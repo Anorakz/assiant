@@ -135,7 +135,7 @@ class TestLifecycle(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(rt.scheduler)
             self.assertIsNotNone(rt.image_reader)
             self.assertIsNotNone(rt.input_sender)
-            # scheduler 必须挂在同一个 bus 与 state 上, 否则快捷键/日程不生效
+            # scheduler 必须挂在同一个 bus 与 state 上, 否则命令/日程不生效
             self.assertIs(rt.scheduler._bus, rt.bus)
             self.assertIs(rt.scheduler._state, rt.state)
             self.assertIs(rt.tools._state_provider, rt.state)

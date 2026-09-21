@@ -12,9 +12,9 @@ tests/test_scheduler.py — Scheduler 单测
              提前量 (remind_before_min)、oneoff 只在指定日期、
              recurring 只看配置的星期、跨天的提前量
   触发动作   状态转换 (含非法转换被记下)、发消息到 bus (source="scheduler")
-  快捷键     "[key X]" 与 JSON 两种文本、modifier 位掩码、修饰键分开按、
-             按错键不触发、按住不放不重复触发、非 host_keyboard 来源忽略、
-             解析不了的文本跳过、配置两种写法 (list / dict)
+  终端命令   整行匹配 (去首尾空白 + 大小写不敏感)、中文命令、只认 source=="terminal"、
+             其它来源忽略、认不出来的文本跳过、敲两次生效两次、
+             配置两种写法 (list / dict)
   生命周期   start/stop 幂等、stop 后不再触发、start 会检查时钟
   sync_time 不修改系统时间、明显不对的时钟给 warning
 """
@@ -37,9 +37,9 @@ from agent.core import (  # noqa: E402
     SchedulerError,
     State,
     StateMachine,
+    normalize_command,
     parse_clock,
-    parse_hotkey_config,
-    parse_hotkey_text,
+    parse_command_config,
 )
 from agent.io import ChatInputBus  # noqa: E402
 
@@ -457,277 +457,224 @@ class TestCheckSchedule(unittest.IsolatedAsyncioTestCase):
 
 
 # ===========================================================================
-#  快捷键
+#  终端命令
 # ===========================================================================
-class TestParseHotkeyText(unittest.TestCase):
-    def test_plain_key(self):
-        event = parse_hotkey_text("[key A]")
-        self.assertEqual(event.key, "a")
-        self.assertEqual(event.modifiers, set())
-        self.assertEqual(event.action, "press")
+class TestNormalizeCommand(unittest.TestCase):
+    def test_strips_whitespace(self):
+        self.assertEqual(normalize_command("  study  "), "study")
+        self.assertEqual(normalize_command("\t回桌面\n"), "回桌面")
 
-    def test_key_with_modifier_mask(self):
-        event = parse_hotkey_text("[key C modifier=6]")
-        self.assertEqual(event.key, "c")
-        self.assertEqual(event.modifiers, {"ctrl", "alt"})
+    def test_case_insensitive(self):
+        self.assertEqual(normalize_command("Study"), "study")
+        self.assertEqual(normalize_command("STUDY"), normalize_command("study"))
 
-    def test_named_key(self):
-        self.assertEqual(parse_hotkey_text("[key space]").key, "space")
-        self.assertEqual(parse_hotkey_text("[key enter]").key, "enter")
-
-    def test_all_modifier_bits(self):
-        self.assertEqual(parse_hotkey_text("[key x modifier=1]").modifiers, {"shift"})
-        self.assertEqual(parse_hotkey_text("[key x modifier=2]").modifiers, {"ctrl"})
-        self.assertEqual(parse_hotkey_text("[key x modifier=4]").modifiers, {"alt"})
-        self.assertEqual(parse_hotkey_text("[key x modifier=8]").modifiers, {"meta"})
-        self.assertEqual(parse_hotkey_text("[key x modifier=15]").modifiers,
-                         {"shift", "ctrl", "alt", "meta"})
-
-    def test_unknown_modifier_bits_ignored(self):
-        self.assertEqual(parse_hotkey_text("[key x modifier=16]").modifiers, set())
-
-    def test_json_form(self):
-        text = json.dumps({"type": "key", "key": "c", "modifier": 6, "action": "press"})
-        event = parse_hotkey_text(text)
-        self.assertEqual(event.key, "c")
-        self.assertEqual(event.modifiers, {"ctrl", "alt"})
-
-    def test_json_vk_code(self):
-        text = json.dumps({"type": "key", "key": 65, "modifier": 0})
-        self.assertEqual(parse_hotkey_text(text).key, "a")
-
-    def test_json_non_key_type_ignored(self):
-        self.assertIsNone(parse_hotkey_text(json.dumps({"type": "mouse", "x": 1})))
-
-    def test_non_key_text_returns_none(self):
-        for bad in ("[mouse x=1 y=2 action=press]", "hello", "", "   ",
-                    "[key ]", "[key  ]", None, 123, "[]"):
+    def test_unusable_input_becomes_empty(self):
+        for bad in (None, 123, [], {}, True):
             with self.subTest(bad=bad):
-                self.assertIsNone(parse_hotkey_text(bad))
+                self.assertEqual(normalize_command(bad), "")
+        self.assertEqual(normalize_command("   "), "")
 
-    def test_bad_json_returns_none(self):
-        self.assertIsNone(parse_hotkey_text("{not json"))
+    def test_inner_text_is_not_touched(self):
+        # 只去首尾空白: 中间的空格/标点是命令名的一部分
+        self.assertEqual(normalize_command(" go home "), "go home")
 
 
-class TestParseHotkeyConfig(unittest.TestCase):
+class TestParseCommandConfig(unittest.TestCase):
     def test_list_form(self):
-        config = [{"keys": ["ctrl", "alt", "s"], "action": {"state": "study"}}]
-        bindings = parse_hotkey_config(config)
+        config = [{"command": "study", "action": {"state": "study", "prompt": "开始学习"}}]
+        bindings = parse_command_config(config)
         self.assertEqual(len(bindings), 1)
-        self.assertEqual(bindings[0].keys, ("ctrl", "alt", "s"))
-        self.assertEqual(bindings[0].main_key, "s")
-        self.assertEqual(bindings[0].modifiers, frozenset({"ctrl", "alt"}))
+        self.assertEqual(bindings[0].command, "study")
+        self.assertEqual(bindings[0].label, "study")
+        self.assertEqual(bindings[0].action["state"], "study")
+        self.assertEqual(bindings[0].action["prompt"], "开始学习")
 
-    def test_string_form_in_list(self):
-        bindings = parse_hotkey_config([{"keys": "ctrl+alt+s", "state": "study"}])
-        self.assertEqual(bindings[0].keys, ("ctrl", "alt", "s"))
-        # 直接写 state 也算 action
+    def test_split_action_is_merged(self):
+        # 允许 {action: {...}} 与直接写两种形态
+        bindings = parse_command_config(
+            [{"command": "study", "action": {"state": "study"}}])
         self.assertEqual(bindings[0].action["state"], "study")
 
     def test_dict_form(self):
-        bindings = parse_hotkey_config({"ctrl+alt+s": {"state": "study"}})
+        bindings = parse_command_config({"study": {"state": "study"}})
         self.assertEqual(len(bindings), 1)
-        self.assertEqual(bindings[0].keys, ("ctrl", "alt", "s"))
+        self.assertEqual(bindings[0].command, "study")
+        # 直接写 state 也算 action
+        self.assertEqual(bindings[0].action["state"], "study")
 
-    def test_modifier_order_normalized(self):
-        # 写 "s+ctrl" 也要归一成修饰键在前
-        bindings = parse_hotkey_config({"s+ctrl": {"state": "study"}})
-        self.assertEqual(bindings[0].keys, ("ctrl", "s"))
-
-    def test_aliases(self):
-        bindings = parse_hotkey_config({"control+menu+x": {}})
-        self.assertEqual(bindings[0].keys, ("ctrl", "alt", "x"))
+    def test_command_is_normalized(self):
+        bindings = parse_command_config({"  Study ": {}})
+        self.assertEqual(bindings[0].command, "study")
+        self.assertEqual(bindings[0].label, "  Study ", "label 保留原样以便回显")
 
     def test_empty_config(self):
-        self.assertEqual(parse_hotkey_config(None), [])
-        self.assertEqual(parse_hotkey_config([]), [])
-        self.assertEqual(parse_hotkey_config({}), [])
+        self.assertEqual(parse_command_config(None), [])
+        self.assertEqual(parse_command_config([]), [])
+        self.assertEqual(parse_command_config({}), [])
 
-    def test_duplicate_binding_rejected(self):
+    def test_duplicate_command_rejected(self):
         with self.assertRaises(SchedulerError):
-            parse_hotkey_config([
-                {"keys": ["ctrl", "s"], "state": "study"},
-                {"keys": ["ctrl", "s"], "state": "game"},
+            parse_command_config([
+                {"command": "study", "state": "study"},
+                {"command": "Study", "state": "game"},   # 归一后同名
             ])
 
-    def test_missing_keys_rejected(self):
+    def test_missing_command_rejected(self):
         with self.assertRaises(SchedulerError):
-            parse_hotkey_config([{"action": {"state": "study"}}])
+            parse_command_config([{"action": {"state": "study"}}])
 
-    def test_bad_keys_type_rejected(self):
+    def test_bad_command_type_rejected(self):
         with self.assertRaises(SchedulerError):
-            parse_hotkey_config([{"keys": 123}])
+            parse_command_config([{"command": 123}])
 
-    def test_empty_keys_rejected(self):
+    def test_empty_command_rejected(self):
         with self.assertRaises(SchedulerError):
-            parse_hotkey_config([{"keys": "+"}])
+            parse_command_config([{"command": "   "}])
 
     def test_bad_top_level_type(self):
         with self.assertRaises(SchedulerError):
-            parse_hotkey_config("ctrl+s")
+            parse_command_config("study")
 
 
-class TestListenHotkey(unittest.IsolatedAsyncioTestCase):
-    """快捷键识别: 直接驱动 _on_bus_event, 不依赖后台循环。"""
+class TestLegacyHotkeysKey(unittest.TestCase):
+    """旧键名不再生效, 但必须**说出来** —— 静默忽略最难查。"""
 
-    def _scheduler(self, hotkeys, **kwargs):
-        config = {"scheduler": {"hotkeys": hotkeys}}
+    def test_legacy_key_is_ignored_and_warned(self):
+        scheduler, _, _, _ = make_scheduler(
+            {"scheduler": {"hotkeys": [{"keys": ["ctrl", "s"], "state": "study"}]}}
+        )
+        self.assertEqual(scheduler.bindings, [], "旧键名不该再产生绑定")
+        self.assertTrue(
+            any("commands" in w for w in scheduler.warnings),
+            "应在 warnings 里指出 hotkeys 已改名为 commands: %r" % (scheduler.warnings,),
+        )
+
+    def test_command_key_does_not_warn(self):
+        scheduler, _, _, _ = make_scheduler(
+            {"scheduler": {"commands": [{"command": "study", "state": "study"}]}}
+        )
+        self.assertEqual(len(scheduler.bindings), 1)
+        self.assertFalse(any("hotkeys" in w for w in scheduler.warnings))
+
+
+class TestListenCommands(unittest.IsolatedAsyncioTestCase):
+    """命令识别: 直接驱动 _on_bus_event, 不依赖后台循环。"""
+
+    def _scheduler(self, commands, **kwargs):
+        config = {"scheduler": {"commands": commands}}
         bus = kwargs.pop("bus", None) or FakeBus()
         scheduler, state, _, _ = make_scheduler(config, bus=bus, **kwargs)
         return scheduler, state, bus
 
-    async def test_hotkey_fires(self):
+    async def test_command_fires(self):
         scheduler, state, bus = self._scheduler(
-            [{"keys": ["ctrl", "alt", "s"], "action": {"state": "study", "prompt": "开始学习"}}]
+            [{"command": "study", "action": {"state": "study", "prompt": "开始学习"}}]
         )
         await scheduler._on_bus_event(
-            {"source": "host_keyboard", "text": "[key s modifier=6]", "timestamp": 5.0}
+            {"source": "terminal", "text": "study", "timestamp": 5.0}
         )
         self.assertIs(state.current(), State.STUDY)
         self.assertEqual(bus.events[0]["source"], "scheduler")
         self.assertEqual(bus.events[0]["text"], "开始学习")
-        self.assertEqual(scheduler.stats["hotkey_hits"], 1)
+        self.assertEqual(scheduler.stats["command_hits"], 1)
 
-    async def test_hotkey_with_separately_pressed_modifiers(self):
-        # 修饰键的 press 事件没有 modifier 位时, 靠"跟踪按住状态"也能命中
+    async def test_whitespace_and_case_tolerated(self):
         scheduler, state, _ = self._scheduler(
-            [{"keys": ["ctrl", "s"], "action": {"state": "study"}}]
+            [{"command": "study", "action": {"state": "study"}}]
         )
-        await scheduler._on_bus_event({"source": "host_keyboard", "text": "[key ctrl]"})
-        await scheduler._on_bus_event({"source": "host_keyboard", "text": "[key s]"})
+        await scheduler._on_bus_event({"source": "terminal", "text": "  StUdY  "})
         self.assertIs(state.current(), State.STUDY)
 
-    async def test_modifier_release_clears_it(self):
+    async def test_chinese_command(self):
         scheduler, state, _ = self._scheduler(
-            [{"keys": ["ctrl", "s"], "action": {"state": "study"}}]
+            [{"command": "回桌面", "action": {"state": "idle"}}]
         )
-        await scheduler._on_bus_event({"source": "host_keyboard", "text": "[key ctrl]"})
-        await scheduler._on_bus_event({"source": "host_keyboard", "text": "[key ctrl release]"})
-        await scheduler._on_bus_event({"source": "host_keyboard", "text": "[key x]"})
-        self.assertIs(state.current(), State.IDLE, "修饰键已抬起, 不该命中")
-
-    async def test_release_is_parsed(self):
-        event = parse_hotkey_text("[key ctrl release]")
-        self.assertEqual(event.key, "ctrl")
-        self.assertEqual(event.action, "release")
-        # "up" / "released" 也认
-        self.assertEqual(parse_hotkey_text("[key c up]").action, "release")
-        self.assertEqual(parse_hotkey_text("[key c released]").action, "release")
-
-    async def test_wrong_modifiers_do_not_fire(self):
-        scheduler, state, _ = self._scheduler(
-            [{"keys": ["ctrl", "s"], "action": {"state": "study"}}]
-        )
-        await scheduler._on_bus_event(
-            {"source": "host_keyboard", "text": "[key s modifier=4]"}  # 只有 alt
-        )
+        await scheduler._on_bus_event({"source": "terminal", "text": " 回桌面 "})
         self.assertIs(state.current(), State.IDLE)
 
-    async def test_wrong_key_does_not_fire(self):
+    async def test_wrong_command_does_not_fire(self):
         scheduler, state, _ = self._scheduler(
-            [{"keys": ["ctrl", "s"], "action": {"state": "study"}}]
+            [{"command": "study", "action": {"state": "study"}}]
         )
-        await scheduler._on_bus_event(
-            {"source": "host_keyboard", "text": "[key x modifier=2]"}
-        )
-        self.assertIs(state.current(), State.IDLE)
-
-    async def test_key_repeat_does_not_refire(self):
-        # 按住不放时主机会反复发 press; 只能触发一次
-        scheduler, _, bus = self._scheduler(
-            [{"keys": ["ctrl", "s"], "action": {"prompt": "x"}}]
-        )
-        for _ in range(5):
-            await scheduler._on_bus_event(
-                {"source": "host_keyboard", "text": "[key s modifier=2]"}
-            )
-        self.assertEqual(len(bus.events), 1, "按住不放不该重复触发")
-        # 抬起后可以再次触发
-        await scheduler._on_bus_event({"source": "host_keyboard", "text": "[key s release]"})
-        await scheduler._on_bus_event(
-            {"source": "host_keyboard", "text": "[key s modifier=2]"}
-        )
-        self.assertEqual(len(bus.events), 2)
+        for text in ("stud", "study please", "studyx", "开始学习"):
+            with self.subTest(text=text):
+                await scheduler._on_bus_event({"source": "terminal", "text": text})
+        self.assertIs(state.current(), State.IDLE, "只有整行相等才算命中")
 
     async def test_other_sources_ignored(self):
-        # 终端里打一句像按键的文本, 不该触发状态切换
+        # 界面/别的来源打出一句像命令的文本, 不该触发状态切换
         scheduler, state, _ = self._scheduler(
-            [{"keys": ["ctrl", "s"], "action": {"state": "study"}}]
+            [{"command": "study", "action": {"state": "study"}}]
         )
-        for source in ("terminal", "gui", "scheduler"):
-            await scheduler._on_bus_event(
-                {"source": source, "text": "[key s modifier=2]"}
-            )
+        for source in ("gui", "scheduler", "host_keyboard"):
+            await scheduler._on_bus_event({"source": source, "text": "study"})
         self.assertIs(state.current(), State.IDLE)
+        self.assertEqual(scheduler.stats["command_hits"], 0)
 
-    async def test_unparsable_text_skipped(self):
+    async def test_unusable_text_skipped(self):
         scheduler, state, _ = self._scheduler(
-            [{"keys": ["ctrl", "s"], "action": {"state": "study"}}]
+            [{"command": "study", "action": {"state": "study"}}]
         )
-        for text in ("你好", "", "[mouse x=1 y=2 action=press]", "{bad json"):
-            await scheduler._on_bus_event({"source": "host_keyboard", "text": text})
+        for text in ("", "   ", None, 123, "[key s modifier=2]"):
+            await scheduler._on_bus_event({"source": "terminal", "text": text})
         self.assertIs(state.current(), State.IDLE)
-        self.assertEqual(scheduler.stats["hotkey_hits"], 0)
+        self.assertEqual(scheduler.stats["command_hits"], 0)
 
     async def test_non_dict_event_skipped(self):
-        scheduler, _, _ = self._scheduler([{"keys": ["ctrl", "s"], "action": {}}])
+        scheduler, _, _ = self._scheduler([{"command": "study", "action": {}}])
         for bad in (None, "text", 123, []):
             self.assertIsNone(await scheduler._on_bus_event(bad))
 
-    async def test_modifier_key_alone_does_not_fire(self):
-        scheduler, state, _ = self._scheduler(
-            [{"keys": ["ctrl"], "action": {"state": "study"}}]
+    async def test_repeated_command_fires_each_time(self):
+        # 终端是"敲一行回车", 没有按键重复那回事 —— 敲两次就该生效两次
+        scheduler, _, bus = self._scheduler(
+            [{"command": "study", "action": {"prompt": "x"}}]
         )
-        # 单独一个 ctrl 被当成"按住修饰键", 不参与主键匹配
-        await scheduler._on_bus_event({"source": "host_keyboard", "text": "[key ctrl]"})
-        self.assertIs(state.current(), State.IDLE)
-
-    async def test_json_form_fires(self):
-        scheduler, state, _ = self._scheduler(
-            [{"keys": ["ctrl", "alt", "s"], "action": {"state": "study"}}]
-        )
-        await scheduler._on_bus_event({
-            "source": "host_keyboard",
-            "text": json.dumps({"type": "key", "key": "s", "modifier": 6, "action": "press"}),
-        })
-        self.assertIs(state.current(), State.STUDY)
+        for _ in range(3):
+            await scheduler._on_bus_event({"source": "terminal", "text": "study"})
+        self.assertEqual(len(bus.events), 3)
+        self.assertEqual(scheduler.stats["command_hits"], 3)
 
     async def test_bus_timestamp_recorded(self):
         scheduler, _, _ = self._scheduler(
-            [{"keys": ["ctrl", "s"], "action": {"prompt": "x"}}]
+            [{"command": "study", "action": {"prompt": "x"}}]
         )
         detail = await scheduler._on_bus_event(
-            {"source": "host_keyboard", "text": "[key s modifier=2]", "timestamp": 42.5}
+            {"source": "terminal", "text": "study", "timestamp": 42.5}
         )
         self.assertEqual(detail["bus_timestamp"], 42.5)
-        self.assertEqual(detail["key"], "s")
-        self.assertEqual(detail["modifiers"], ["ctrl"])
+        self.assertEqual(detail["command"], "study")
+        self.assertEqual(detail["kind"], "command")
+
+    async def test_no_bindings_means_no_hit(self):
+        scheduler, state, _ = self._scheduler([])
+        self.assertIsNone(
+            await scheduler._on_bus_event({"source": "terminal", "text": "study"}))
+        self.assertIs(state.current(), State.IDLE)
 
 
-class TestListenHotkeyLoop(unittest.IsolatedAsyncioTestCase):
-    """走真实 bus 的订阅版本 (验证 listen_hotkey 与 ChatInputBus 配合)。"""
+class TestListenCommandsLoop(unittest.IsolatedAsyncioTestCase):
+    """走真实 bus 的订阅版本 (验证 listen_commands 与 ChatInputBus 配合)。"""
 
     async def test_subscription_fires_and_does_not_steal_events(self):
         bus = ChatInputBus()
-        config = {"scheduler": {"hotkeys": [
-            {"keys": ["ctrl", "alt", "g"], "action": {"state": "game"}}]}}
+        config = {"scheduler": {"commands": [
+            {"command": "game", "action": {"state": "game"}}]}}
         state = StateMachine()
         scheduler = Scheduler(state=state, bus=bus, config=config)
 
         await scheduler.start()
         await asyncio.sleep(0)
 
-        # 终端用户消息 + 一条快捷键 —— 两者都在同一条 bus 上
+        # 普通聊天 + 一条命令 —— 两者都在同一条 bus 上
         await bus.push("terminal", "帮我查一下天气")
-        await bus.push("host_keyboard", "[key ctrl]")
-        await bus.push("host_keyboard", "[key alt]")
-        await bus.push("host_keyboard", "[key g]")
+        await bus.push("terminal", "game")
         await asyncio.sleep(0.05)
 
-        self.assertIs(state.current(), State.GAME, "快捷键应当切到 GAME")
+        self.assertIs(state.current(), State.GAME, "命令应当切到 GAME")
         await scheduler.stop()
 
-        # 订阅者只看不取: 四条事件一条都不该被吃掉
+        # 订阅者只看不取: 两条事件一条都不该被吃掉
         remaining = []
         while True:
             event = bus.get_nowait()
@@ -736,19 +683,19 @@ class TestListenHotkeyLoop(unittest.IsolatedAsyncioTestCase):
             remaining.append((event["source"], event["text"]))
         self.assertIn(("terminal", "帮我查一下天气"), remaining,
                       "终端消息绝不能被调度器吃掉")
-        self.assertIn(("host_keyboard", "[key g]"), remaining,
-                      "按键事件也该留给下游")
+        self.assertIn(("terminal", "game"), remaining,
+                      "命令那行也留在队列里 —— 这是订阅式的固有行为, 见 listen_commands 的 @note")
         # 触发消息也在队列里 (不是被自己消费掉)
-        self.assertIn(("scheduler", "快捷键 ctrl+alt+g"), remaining)
+        self.assertIn(("scheduler", "命令 game"), remaining)
 
     async def test_stop_unsubscribes(self):
         bus = ChatInputBus()
         scheduler = Scheduler(
             state=StateMachine(), bus=bus,
-            config={"scheduler": {"hotkeys": [{"keys": ["ctrl", "g"], "action": {}}]}},
+            config={"scheduler": {"commands": [{"command": "game", "action": {}}]}},
         )
         await scheduler.start()
-        await asyncio.sleep(0)   # 让 listen_hotkey 协程真正跑起来并订阅
+        await asyncio.sleep(0)   # 让 listen_commands 协程真正跑起来并订阅
         self.assertEqual(bus.subscriber_count, 1)
         await scheduler.stop()
         self.assertEqual(bus.subscriber_count, 0, "stop 后必须注销订阅")
@@ -756,7 +703,7 @@ class TestListenHotkeyLoop(unittest.IsolatedAsyncioTestCase):
     async def test_fake_bus_without_subscribe_warns(self):
         # 只提供 get() 的替身: 监听退化, 但要有明确 warning (静默失效更难查)
         scheduler, state, _, _ = make_scheduler(
-            {"scheduler": {"hotkeys": [{"keys": ["ctrl", "g"], "action": {"state": "game"}}]}}
+            {"scheduler": {"commands": [{"command": "game", "action": {"state": "game"}}]}}
         )
         await scheduler.start()
         await asyncio.sleep(0)
