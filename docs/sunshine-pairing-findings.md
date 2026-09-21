@@ -167,8 +167,25 @@ step1 paired=1 → step2 OK → step3 OK (验签 PASS) → step4 paired=1
 * **为什么不在 C++ 里做 TLS**：得给交叉编译再引一个 OpenSSL，而 Python 的 `ssl` 本来就在。
   `native/moonlight_connection.cpp` 那条明文路径**保留**，留给无 TLS 的 GFE 主机。
 * **共存**：主机上已有应用时 `/launch` 的 400 不是失败（见上），`start_session()` 会自动退到
-  `/resume` 加入**同一个**会话，画面与对方一致；反向也安全 —— 我们 `stop()` 只断开自己的
-  RTSP 客户端，Sunshine 要等最后一个客户端断开才收应用，不会把对方踢下线。
+  `/resume`。**注意 `/resume` 的语义**：它不是"加入对方那一路流"，而是"别因为应用已在运行就
+  拒绝我，给我一路自己的会话"。实测（2026-09-21，板端连上时主机上另有一个 H.264 客户端在串流）：
+
+  ```
+  New streaming session started [active sessions: 2]
+  CLIENT CONNECTED
+  Creating encoder [hevc_nvenc]        ← 我们这一路：协商到 H.265 1280x720
+  （对方的 h264_nvenc / 1440x2160 / 30fps 全程在跑，未被改动）
+  ```
+
+  也就是**独立会话 + 独立编码器**，我们请求的 `mode` 只作用于自己这一路；画面看到的是
+  **同一个桌面**（同一个应用在被采集），但编码互不干扰。
+  反向也安全：我们 `stop()` 只断开自己那一会话（`CLIENT DISCONNECTED` + `Async encoder
+  teardown complete`），主机仍是 `SUNSHINE_SERVER_BUSY`，对方不受影响 —— Sunshine 要等最后
+  一个客户端断开才收应用。
+* 板端连通性（2026-09-21 实测，走的就是上面这条链路）：`start_with_session()` 返回 `True`，
+  日志 `decoder ready: rkmpp [硬件] codec=H.265 1280x720`，`status()` 给出
+  `state=streaming / connected=True / error=''`；从发起握手到连上共 0.22 s（0.15 + 0.07）。
+  即 **TLS 在 Python、会话在 C++** 这条分层在板端是通的，而且用的是 MPP 硬解。
 * 绑定是否真的通向库，由 `tests/test_native_integration.py` 在**板端**验（它按架构自跳，
   PC/WSL 上是 skip）—— 因为 moonlight 只集成在交叉编译产物里，host 那份根本没有该符号。
 

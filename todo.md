@@ -112,8 +112,17 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
        私钥只差一个 `git add -A` 就会入库。已在板端 .gitignore 补上 creds/ + *.pem + *.key，
        main 的 .gitignore 也补了 creds/（PC 的 creds 目录还有 client.der/clientcert.hex，
        那两类不在 *.pem/*.key 覆盖内）。
-□ B3 Moonlight 连接验证：板端 moonlight.start → Sunshine 主机
-□ B4 moonlight.status() 返回 connected
+■ B3 Moonlight 连接验证：板端 moonlight.start → Sunshine 主机
+     两段式实测（2026-09-21，与 agent/main.py::_start_native 同一调用顺序）：
+     握手 /resume 0.15s → start_with_session **True** 0.07s；
+     日志 `decoder ready: rkmpp [硬件] codec=H.265 1280x720`；
+     主机侧 `New streaming session started [active sessions: 2]` + 单独一条 `hevc_nvenc`
+     —— 与另一台 Moonlight 客户端**各自独立会话/编码器**并存，对方那路未被改动。
+     另一重要更正：/resume 不是"加入对方那一路流"，而是"给我一路自己的会话"，
+     已改 docs/sunshine-pairing-findings.md §5.1。
+■ B4 moonlight.status() 返回 connected
+     同一探针：status() → state=streaming / connected=True / error=''；
+     stop() 后干净回到 state=idle（主机侧对方仍是 SUNSHINE_SERVER_BUSY）。
 □ B5 Image RB 实流验证：板端读到真实解码帧
 
 -- C 输入方向 --
