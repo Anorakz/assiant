@@ -300,13 +300,42 @@ color_1280x720_8bit.h264   6/6 帧, 同上                     PASS
 
 连跑 3 轮结果一致、无段错误。
 
-### 8.4 还没验到的部分
+### 8.4 板上实流（2026-09-21 已验，Phase 6 B5）
 
-`MoonlightAdapter::on_decoder_setup()` 的**板上**行为还没跑到 ——
-板端 `creds/` 不存在且 `pair_status=0`（Sunshine 那边还没配对），
-`/launch` 直接失败，连接建立不起来，所以走不到协商那一步。
-这一段目前由宿主机单测覆盖（`classify_video_format` + `on_decoder_setup`
-的返回值与错误信息），**配对完成后应当在板上复跑一次实流验证**。
+上面 §8.4 原先写的是"`on_decoder_setup()` 的板上行为还没跑到（板端没有 creds、
+没配对，连接起不来）—— **配对完成后应当在板上复跑一次实流验证**"。这一步已经做了，
+走的是 Phase 6 B1 搭好的链路：`agent/net/sunshine_client.py`（HTTPS 47984 + 客户端证书）
+→ `moonlight.start_with_session()` → `LiStartConnection`
+（分层见 `docs/sunshine-pairing-findings.md` §5.1）。
+
+```
+[moonlight] decoder ready: rkmpp [硬件] codec=H.265 1280x720
+
+8 秒采样（每 0.5s）：
+  frames_pushed        5 -> 148
+  video_units_received 始终比 frames_pushed 领先 2~3（硬解流水线延迟，非丢帧）
+  image_rb.size()      与 frames_pushed 同步增长，容量 300 未触顶
+  overruns = 0        image_frames_dropped = 0
+帧内容: (256,256,3) uint8，单帧约 1000 种颜色；存成 PNG 后肉眼确认是主机桌面
+        （主机桌面 1440x2160 竖屏，按我们的 720p 请求做了 pillarbox —— 画面中间
+         约 37% 宽的内容带正对应 720×1440/2160÷1280）
+```
+
+* 这次协商到的是 **H.265 8bit**（主机上另一个 Moonlight 客户端用 H.264，Sunshine 为我们
+  **单独开了 `hevc_nvenc`**），所以 `on_decoder_setup()` 的 H.265 分支已在板上实流覆盖。
+* 帧率约 18 fps 而不是请求的 60：主机桌面近乎静止（相隔 4.5s 的两帧只有 6.9% 像素不同），
+  编码侧按"内容有变化才发"工作。**这不是解码问题**，但"持续 60fps"没验，属 Phase 8 性能基线。
+* 连接全程 0.29s（含握手），`stop()` 后干净回到 idle，主机上对方那一路不受影响。
+
+### 8.5 仍然没验到的部分
+
+* **10bit / 4:4:4 / AV1 的拒绝路径**：只有宿主单测覆盖；实流里 Sunshine 只给 H.265 8bit，
+  没有机会触发。
+* **H.264 实流**：离线夹具（`color_1280x720_8bit.h264`）与单测覆盖，但实流没走到 ——
+  服务端挑了 H.265。想验可以在 Sunshine 侧关掉 HEVC。
+* **帧时间戳**：`on_video_frame()` 目前把 `timestamp_ns` 写成 0（代码里标了 TODO），
+  所以 `image_rb.read_by_timestamp()` 在实流下没有实际意义；要用它得先把 moonlight 的
+  `presentationTimeUs` 接进来。
 
 ---
 

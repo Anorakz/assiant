@@ -123,7 +123,16 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
 ■ B4 moonlight.status() 返回 connected
      同一探针：status() → state=streaming / connected=True / error=''；
      stop() 后干净回到 state=idle（主机侧对方仍是 SUNSHINE_SERVER_BUSY）。
-□ B5 Image RB 实流验证：板端读到真实解码帧
+■ B5 Image RB 实流验证：板端读到真实解码帧
+     8s 采样（每 0.5s）：frames_pushed 5→148，image_rb.size() 同步增长，overruns=0，
+     image_frames_dropped=0；帧为 (256,256,3) uint8、单帧约 1000 种颜色；
+     存成 PNG 后**肉眼确认是主机桌面**（主机桌面 1440x2160 竖屏，按我们的 720p 请求
+     pillarbox —— 中间约 37% 宽的内容带与 720×1440/2160÷1280 吻合）。
+     解码器：`rkmpp [硬件] codec=H.265 1280x720`（Sunshine 为我们单独开了 hevc_nvenc）。
+     帧率约 18fps 而非请求的 60：桌面近乎静止（相隔 4.5s 两帧仅 6.9% 像素不同），
+     编码侧按"内容有变化才发"工作 —— 非解码问题；"持续 60fps"归 Phase 8 性能基线。
+     docs/decoder-mpp.md §8.4 已由"还没验到"改写为实测结果，并新增 §8.5 列出仍未验的部分
+     （10bit/4:4:4/AV1 的拒绝路径、H.264 实流、`timestamp_ns` 仍写 0 导致 read_by_timestamp 无意义）。
 
 -- C 输入方向 --
 □ C1 send_key 端到端验证：板端调用 → Windows 主机动作
