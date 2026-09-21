@@ -6,12 +6,13 @@
 #      Client: local_client.py   Python 测试客户端 (**不是**生产 GUI, 那个是 C++)
 #      本文件: build_ipc()       main.py 的接入点 —— 把 server 和 bus 接起来
 #
-#  ⚠ 本层目前只做**收发**。Agent 主动推送 status/llm/wallpaper/music 还需要拿到
-#    状态机与回复路径, 而 main.py 的约定是 factory(bus, config) —— 只给了 bus。
-#    所以 build_ipc() 现在只接线 GUI -> Agent 这一个方向, 出方向留给下一步
-#    (见 build_ipc 的注释)。没有假装推送, 也没有偷偷改 main.py 的接口约定。
+#  ⚠ 出方向 (Agent -> GUI 的 status/llm/wallpaper/music) 需要知道状态机与回复,
+#    所以 build_ipc() 收一个可选的 runtime (Phase 6 D4):
+#        build_ipc(bus, config)              只接入方向 (命令) —— 兼容旧签名
+#        build_ipc(bus, config, runtime=rt)  再推 status (状态变化) 与 llm (回复)
 # ============================================================================
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -125,23 +126,28 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 #  build_ipc: agent/main.py 的接入点
 # ---------------------------------------------------------------------------
-def build_ipc(bus: Any = None, config: Optional[Dict[str, Any]] = None) -> Any:
-    """建好并接上 IPC server (main.py 约定: factory(bus, config))。
+def build_ipc(bus: Any = None,
+              config: Optional[Dict[str, Any]] = None,
+              runtime: Any = None) -> Any:
+    """建好并接上 IPC server (main.py 约定: factory(bus, config[, runtime]))。
 
-    @param bus    ChatInputBus; GUI 发来的 chat_input 会变成 bus 事件
-                  (source="gui"), 和终端/主机键盘走完全相同的处理路径
-    @param config 整个配置 dict; 读 ipc.socket_path
+    @param bus     ChatInputBus; GUI 发来的 chat_input 会变成 bus 事件
+                   (source="gui"), 和终端/主机键盘走完全相同的处理路径
+    @param config  整个配置 dict; 读 ipc.socket_path
+    @param runtime Runtime (可选)。给了就接上**出方向**推送 (Phase 6 D4):
+                     · runtime.state.on_change  -> push status{mode, connected}
+                     · runtime.on_reply        -> push llm{text}
+                   不给就只有入方向 (命令), 与 D4 之前完全一样。
     @return LocalServer (不支持 AF_UNIX 的平台返回 NullServer)
-
-    @note **出方向还没接线**: Agent -> GUI 的 status/llm/wallpaper/music 推送
-          需要状态机与回复, 而这里只拿得到 bus。要做的话得让 main.py 把
-          runtime 交出来 (或注册回调), 那是下一步的事 —— 这里不猜。
     """
     if not UNIX_SOCKET_SUPPORTED:
-        return NullServer(
+        server = NullServer(
             reason="当前平台没有 AF_UNIX (Windows 的 CPython 不支持), "
                    "IPC 只能在板端 Linux 上运行"
         )
+        if runtime is not None:
+            _wire_outbound(server, runtime)
+        return server
 
     section = config.get("ipc") if isinstance(config, dict) else None
     section = section if isinstance(section, dict) else {}
@@ -151,7 +157,75 @@ def build_ipc(bus: Any = None, config: Optional[Dict[str, Any]] = None) -> Any:
 
     server = LocalServer(path=path, queue_size=queue_size)
     server.on_command(_make_command_handler(bus))
+    if runtime is not None:
+        _wire_outbound(server, runtime)
     return server
+
+
+def _wire_outbound(server: Any, runtime: Any) -> None:
+    """把 Agent 的状态与回复推给 GUI (Phase 6 D4)。
+
+    这是 D4 之前缺的那一半: 只有入方向 (命令), 出方向一个字都推不出去 ——
+    `handle_event()` 算出来的回复被主循环直接丢掉, 状态变化也没人告诉 GUI。
+
+    · mode 变化   -> ``status{mode, connected}``
+    · 每条 LLM 回复 -> ``llm{text}``
+
+    @note 状态变化回调是**同步**的, 而且可能从非事件循环线程进来 (调度器/原生回调),
+          而 `push()` 是协程 —— 所以建好时抓住 loop, 用
+          ``run_coroutine_threadsafe`` 投回去。
+    @note 回调在 server 没跑或没有 GUI 连着时静默跳过: `push()` 返回 0 本来就不是
+          错误 ("当前没 GUI 连着")。
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    def _dispatch(topic: str, data: Dict[str, Any]) -> None:
+        if not getattr(server, "is_running", False):
+            return
+        coro = server.push(topic, data)
+        if loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(coro, loop)
+            return
+        try:
+            asyncio.get_running_loop().create_task(coro)
+        except RuntimeError:
+            # 连事件循环都没有 (同步脚本里直接调 build_ipc) —— 关掉协程免得
+            # 报 "coroutine was never awaited"
+            coro.close()
+            _log.debug("ipc: 没有事件循环, 推送 %s 被丢弃", topic)
+
+    state = getattr(runtime, "state", None)
+    on_change = getattr(state, "on_change", None)
+    if callable(on_change):
+        def _status_on_change(old: Any, new: Any) -> None:
+            mode = getattr(new, "value", new)
+            try:
+                wire_mode = mode_to_wire(mode)
+            except IpcProtocolError:
+                # 状态机的取值域变了而这里没跟上时, 别把推送整个搞崩
+                wire_mode = str(mode)
+                _log.warning("ipc: 状态 %r 无法转成线上取值, 原样推送", mode)
+            connected = False
+            is_connected = getattr(state, "is_connected", None)
+            if callable(is_connected):
+                try:
+                    connected = bool(is_connected())
+                except Exception as exc:        # noqa: BLE001
+                    _log.debug("ipc: is_connected() 失败 (%r), 按未连接推送", exc)
+            _dispatch(TOPIC_STATUS, {"mode": wire_mode, "connected": connected})
+
+        on_change(_status_on_change)
+        _log.debug("ipc: 已接上状态推送 (state.on_change -> status)")
+
+    if hasattr(runtime, "on_reply"):
+        def _on_reply(text: str) -> None:
+            _dispatch(TOPIC_LLM, {"text": text})
+
+        runtime.on_reply = _on_reply
+        _log.debug("ipc: 已接上回复推送 (runtime.on_reply -> llm)")
 
 
 def _make_command_handler(bus: Any):

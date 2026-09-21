@@ -29,6 +29,8 @@ asyncio.start_unix_server 都不导出):
 """
 
 import asyncio
+import atexit
+import contextlib
 import json
 import logging
 import os
@@ -44,7 +46,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from agent.core.state_machine import State  # noqa: E402
+from agent.core.state_machine import State, StateMachine  # noqa: E402
 from agent.ipc import build_ipc  # noqa: E402
 from agent.ipc.local_server import (  # noqa: E402
     DEFAULT_QUEUE_SIZE,
@@ -62,6 +64,7 @@ from agent.ipc.protocol import (  # noqa: E402
     COMMAND_SWITCH_MODE,
     MAX_LINE_BYTES,
     SOCKET_PATH,
+    TOPIC_LLM,
     TOPIC_STATUS,
     IpcProtocolError,
     decode,
@@ -138,6 +141,18 @@ async def _wait_until(predicate, timeout: float = 3.0, what: str = "条件") -> 
 def _command(action: str = COMMAND_CHAT_INPUT, **payload) -> bytes:
     """一条完整的 GUI 命令线: {"action", "payload"} (命令方向**没有** timestamp)。"""
     return encode_command(action, payload or {"text": "hi"})
+
+
+#: build_ipc 的出方向用例各自要一个独立 socket 路径。
+#: **绝不碰 /tmp/agent.sock** —— 板端跑测试时真 Agent 可能正占着它。
+_BUILD_TMP = tempfile.mkdtemp(prefix="ipc-build-")
+atexit.register(shutil.rmtree, _BUILD_TMP, ignore_errors=True)
+_BUILD_SEQ = [0]
+
+
+def _tmp_socket_path() -> str:
+    _BUILD_SEQ[0] += 1
+    return os.path.join(_BUILD_TMP, "agent-%d.sock" % _BUILD_SEQ[0])
 
 
 # ===========================================================================
@@ -443,6 +458,106 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         joined = "\n".join(caught.output)
         self.assertIn("缺少 value 字段", joined, "老键 mode 必须被明确拒掉")
         self.assertNotIn("收到 switch_mode", joined)
+
+    # ---- Phase 6 D4: 出方向推送 (status / llm) ----
+
+    class _StubRuntime:
+        """只带 build_ipc 需要的那两样东西: state 与 on_reply。
+
+        状态机注入 connected_check, 免得 is_connected() 去碰 native。
+        """
+
+        def __init__(self, connected=True):
+            self.state = StateMachine(connected_check=lambda: connected)
+            self.on_reply = None
+
+    def test_without_runtime_only_inbound_is_wired(self):
+        # 向后兼容: 老签名 (bus, config) 行为不变 —— 不注册回调、不碰 on_reply
+        runtime = self._StubRuntime()
+        server = build_ipc(None, {"ipc": {"socket_path": "/tmp/legacy.sock"}})
+        self.assertEqual(runtime.state.callback_count, 0)
+        self.assertIsNone(runtime.on_reply)
+
+    async def test_runtime_wires_both_directions(self):
+        runtime = self._StubRuntime()
+        server = build_ipc(None, {"ipc": {"socket_path": "/tmp/wired.sock"}}, runtime=runtime)
+        try:
+            self.assertEqual(runtime.state.callback_count, 1, "status 推送要挂到 on_change")
+            self.assertTrue(callable(runtime.on_reply), "llm 推送要挂到 on_reply")
+        finally:
+            await server.stop()
+
+    async def test_null_server_still_wires_without_crashing(self):
+        # Windows (没有 AF_UNIX) 走 NullServer 分支: 接线不能炸 (push 是空实现)
+        from agent.ipc import _wire_outbound
+        from agent.ipc.local_server import NullServer
+
+        runtime = self._StubRuntime()
+        server = NullServer(reason="test")
+        _wire_outbound(server, runtime)
+
+        self.assertEqual(runtime.state.callback_count, 1)
+        runtime.state.transition(State.STUDY, "test")   # 不该抛
+        runtime.on_reply("x")
+        await asyncio.sleep(0)
+
+    async def test_mode_change_reaches_a_connected_gui(self):
+        if not UNIX_SOCKET_SUPPORTED:
+            self.skipTest("需要 AF_UNIX")
+        runtime = self._StubRuntime(connected=True)
+        server = build_ipc(None, {"ipc": {"socket_path": _tmp_socket_path()}}, runtime=runtime)
+        await server.start()
+        writer = None
+        try:
+            reader, writer = await asyncio.open_unix_connection(server.path)
+            await _wait_until(lambda: server.client_count == 1, what="GUI 连上")
+
+            self.assertTrue(runtime.state.transition(State.STUDY, "test"))
+
+            topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+            self.assertEqual(topic, TOPIC_STATUS)
+            self.assertEqual(data["mode"], "STUDY", "线上取值必须是大写")
+            self.assertIs(data["connected"], True)
+        finally:
+            if writer is not None:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+            await server.stop()
+
+    async def test_reply_reaches_a_connected_gui(self):
+        if not UNIX_SOCKET_SUPPORTED:
+            self.skipTest("需要 AF_UNIX")
+        runtime = self._StubRuntime()
+        server = build_ipc(None, {"ipc": {"socket_path": _tmp_socket_path()}}, runtime=runtime)
+        await server.start()
+        writer = None
+        try:
+            reader, writer = await asyncio.open_unix_connection(server.path)
+            await _wait_until(lambda: server.client_count == 1, what="GUI 连上")
+
+            runtime.on_reply("已经切换到学习模式。")
+
+            topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+            self.assertEqual(topic, TOPIC_LLM)
+            self.assertEqual(data, {"text": "已经切换到学习模式。"})
+        finally:
+            if writer is not None:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+            await server.stop()
+
+    async def test_push_after_stop_is_ignored(self):
+        # server 停了之后状态还会变 (调度器/其它组件), 不该抛也不该刷屏
+        runtime = self._StubRuntime()
+        server = build_ipc(None, {"ipc": {"socket_path": _tmp_socket_path()}}, runtime=runtime)
+        await server.start()
+        await server.stop()
+
+        runtime.state.transition(State.STUDY, "after-stop")   # 不该抛
+        runtime.on_reply("x")
+        await asyncio.sleep(0)
 
 
 # ===========================================================================

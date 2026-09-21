@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib
+import inspect
 import logging
 import logging.handlers
 import os
@@ -147,6 +148,32 @@ def _silence_noisy_libraries() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
+def _call_ipc_factory(factory: Callable[..., Any],
+                      bus: Any,
+                      config: Any,
+                      runtime: Any) -> Any:
+    """调 IPC factory, 兼容只收 ``(bus, config)`` 的旧签名。
+
+    Phase 6 D4 把约定扩成 ``(bus, config, runtime=None)``: runtime 是出方向推送
+    (status / llm) 唯一的来源 —— 状态机与回复都在它身上。但**不强制**:
+    只认旧签名的 factory 照旧能用, 只是没有出方向。
+
+    @note 用签名探测而不是 try/except TypeError: 后者会把 factory **内部**真正的
+          TypeError 也当成"签名不对", 然后再调一次 —— 那是重复副作用。
+    """
+    try:
+        params = inspect.signature(factory).parameters
+    except (TypeError, ValueError):        # 内建/奇怪的可调用对象: 按旧签名试
+        params = {}
+
+    accepts_runtime = "runtime" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    if accepts_runtime:
+        return factory(bus, config, runtime=runtime)
+    return factory(bus, config)
+
+
 # ---------------------------------------------------------------------------
 #  组件基类: 只记 start/stop, 失败不致命
 # ---------------------------------------------------------------------------
@@ -233,6 +260,11 @@ class Runtime:
         self.host_input_reader: Optional[HostInputReader] = None
         self.input_sender: Optional[InputSender] = None
         self.ipc: Any = None
+
+        #: 回复钩子: 每产生一条 LLM 回复就调一次 (IPC 层用它推 llm 消息)。
+        #: 默认 None —— 没有 IPC 时行为与以前完全一样。
+        #: Phase 6 D4: 之前 handle_event() 的回复被主循环直接丢掉, 推不出去。
+        self.on_reply: Optional[Callable[[str], Any]] = None
 
         self._components: List[_Component] = []
         self._terminal_task: Optional[asyncio.Task] = None
@@ -580,7 +612,7 @@ class Runtime:
             return
 
         async def _start() -> None:
-            self.ipc = factory(self.bus, self.config)
+            self.ipc = _call_ipc_factory(factory, self.bus, self.config, self)
             start = getattr(self.ipc, "start", None)
             if start is None:
                 raise RuntimeError("ipc 对象没有 start()")
@@ -752,6 +784,19 @@ class Runtime:
         reply = result.get("text") or ""
         self.stats["replies"] += 1
         self.log.info("回复: %s", reply)
+
+        # Phase 6 D4: 把回复交给 IPC (推 llm{text} 给 GUI)。
+        # 钩子是"没人接就什么都不做" —— 没有 IPC / 没注册时行为与以前一致。
+        # 钩子本身出错不能影响这条回复已经算成功这件事, 所以只记 warning。
+        if reply and self.on_reply is not None:
+            try:
+                hooked = self.on_reply(reply)
+                if inspect.isawaitable(hooked):
+                    await hooked
+            except Exception as exc:        # noqa: BLE001
+                self.log.warning("回复钩子出错 (已忽略): %r", exc)
+                self.log.debug("回复钩子 traceback", exc_info=True)
+
         return reply
 
     # ------------------------------------------------------------ 停止 ---

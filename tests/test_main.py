@@ -469,6 +469,68 @@ class TestHandleEvent(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rt.stats["replies"], 2)
         self.assertEqual(self.rt.stats["llm_errors"], 0)
 
+    # ---- Phase 6 D4: 回复要能推出去 (IPC 用 on_reply 钩子接) ----
+
+    async def test_reply_reaches_the_hook(self):
+        seen = []
+
+        def hook(text):
+            seen.append(text)
+
+        self.rt.on_reply = hook
+        reply = await self.rt.handle_event(
+            {"source": "gui", "text": "你好", "timestamp": 1.0}
+        )
+        self.assertEqual(seen, [reply], "算出来的回复必须原样交给钩子")
+
+    async def test_async_reply_hook_is_awaited(self):
+        seen = []
+
+        async def hook(text):
+            await asyncio.sleep(0)
+            seen.append(text)
+
+        self.rt.on_reply = hook
+        await self.rt.handle_event({"source": "gui", "text": "你好", "timestamp": 1.0})
+        self.assertEqual(len(seen), 1, "异步钩子要被 await, 而不是丢掉协程")
+
+    async def test_broken_reply_hook_does_not_break_the_reply(self):
+        def hook(text):
+            raise RuntimeError("推送炸了")
+
+        self.rt.on_reply = hook
+        reply = await self.rt.handle_event(
+            {"source": "gui", "text": "你好", "timestamp": 1.0}
+        )
+        self.assertIsInstance(reply, str, "钩子出错不该影响这条回复已经算成功")
+        self.assertEqual(self.rt.stats["llm_errors"], 0)
+
+    async def test_reply_hook_is_none_before_ipc_wires_it(self):
+        # 默认 None: 没有 IPC 接线时行为与 D4 之前完全一样
+        rt = make_runtime()
+        self.assertIsNone(rt.on_reply, "IPC 还没接线, 不该有钩子")
+
+    async def test_ipc_wires_the_reply_hook_on_start(self):
+        # D4: rt.start() 会走到 _start_ipc(), 由 build_ipc(..., runtime=rt) 接上钩子
+        # (Windows 上是 NullServer, 同样会接线 —— 只是 push 是空实现)
+        self.assertTrue(callable(self.rt.on_reply),
+                        "IPC 起来之后回复钩子必须有人接")
+
+    async def test_failed_llm_does_not_fire_the_hook(self):
+        seen = []
+
+        class _FailingLLM:
+            def __init__(self):
+                self.tools = None
+
+            async def chat_with_tools(self, text, context):
+                return {"ok": False, "error": "模型炸了", "text": ""}
+
+        self.rt.llm = _FailingLLM()
+        self.rt.on_reply = seen.append
+        await self.rt.handle_event({"source": "gui", "text": "x", "timestamp": 1.0})
+        self.assertEqual(seen, [], "失败没有回复, 就不该推一条空的 llm 给 GUI")
+
     async def test_llm_failure_does_not_raise(self):
         class _BrokenLLM:
             def __init__(self):

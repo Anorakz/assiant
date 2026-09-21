@@ -232,8 +232,33 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
      验证：test_ipc_protocol 67 OK；PC 整套 exit 0；板端 GUI 重新编译 **BUILD_OK**、
      `ctest -R local_client` **1/1 passed (9.21s)**（这个 C++ 用例正是拿真 server 核对
      action/payload 字段的那个）。
-□ D4 build_ipc(bus, config, runtime=None) 接线出方向推送（status / llm）
-     （现在只拿得到 bus，handle_event() 的回复又被主循环丢弃，推不出去）
+■ D4 build_ipc(bus, config, runtime=None) 接线出方向推送（status / llm）
+     原来的缺口：出方向**根本不存在** —— `handle_event()` 算出来的回复被主循环直接丢掉，
+     状态变化也没人告诉 GUI（build_ipc 只有入方向）。
+     改动：
+       agent/ipc/__init__.py: build_ipc 收可选 runtime；给了就 `_wire_outbound()`：
+         · `state.on_change` -> push `status{mode(大写), connected}`
+         · `runtime.on_reply` -> push `llm{text}`
+         状态回调是**同步**的、可能来自别的线程，而 push() 是协程 —— 所以建好时抓住
+         loop，用 `run_coroutine_threadsafe` 投回去；server 没跑就静默跳过
+         （`push()` 返回 0 本来就不是错误）。**不给 runtime 时行为与 D4 之前完全一样。**
+       agent/main.py: 新增 `on_reply` 钩子（默认 None，无 IPC 时行为不变），
+         `handle_event()` 在有非空回复时调它（支持 async 钩子；钩子自己出错只记 warning，
+         不影响"这条回复已经算成功"）；`_call_ipc_factory()` 只在 factory **签名接受**
+         runtime 时才传 —— 用签名探测而不是 try/except TypeError，后者会把 factory
+         内部真正的 TypeError 也当成签名不符、再调一次（重复副作用）。
+     测试 +12：IPC 层 6 条（两个方向都接上了 / 不给 runtime 就只接入方向 / NullServer
+     接线不炸 / 状态变化真的推到连着的 GUI / 回复真的推到连着的 GUI / stop 之后再推被忽略）、
+     runtime 层 6 条（钩子拿到回复 / async 钩子被 await / 钩子抛错不影响回复 /
+     接线前是 None / start 后有人接 / LLM 失败不推空 llm）。
+     ⚠ 其中一条**我自己写错了**：断言 `rt.start()` 之后 `on_reply is None` —— 但 D4 的接线
+       正是在 IPC 启动时发生的（Windows 上 NullServer 也接）。已改成两条如实的：
+       接线前是 None、start 之后 callable。
+     三方验证：PC（test_main 53 OK / test_ipc_local_server 84 OK，整套 exit 0）；
+     WSL（84 **0 skipped** —— 那几条"真的推到连着的 GUI"是走真 socket 的）；
+     板端（84 OK / 53 OK）。
+     本次**没做**：`switch_mode` 还没驱动状态机（处理器仍是"状态机还没接进来，已忽略"），
+     所以状态推送目前只能由直接 transition 触发。命令 -> 状态机那一步放 D5/D6。
 □ D5 Agent 状态推送到 GUI 验证
 □ D6 GUI 命令到 Agent 验证（switch_mode 往返 / chat_input 往返）
 □ D7 未接线的命令（next_wallpaper / next_bilibili）回推一条 llm 说明「功能未接入」
