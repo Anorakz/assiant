@@ -132,7 +132,7 @@ bool ConfigStore::load(const QString& path, QString* error)
     if (!exists_) {
         // ⚠ 不能对不存在的路径"假装加载成功"：调用方（例如输入源切换）会 set + save，
         //   于是凭空造出一个只有个别键的残桩配置文件（T9 出图时踩到：
-        //   --gui-config 指了个不存在的路径 → 生成了只有 input_source 一行的 gui.yaml）。
+        //   --config 指了个不存在的路径 → 生成了只有 gui.input_source 一行的 config.yaml）。
         if (error) {
             *error = QStringLiteral("文件不存在: %1").arg(path);
         }

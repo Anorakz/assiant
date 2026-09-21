@@ -129,7 +129,7 @@ ChatPanel::ChatPanel(QWidget* parent)
     inputBox->addWidget(send_);
     root->addWidget(inputRow);
 
-    setInputType(inputType_);     // 初始按 gui.yaml 的默认值显示
+    setInputType(inputType_);     // 初始按配置里的默认值显示
     setLinkUp(false);
     setInputEnabled(true);
 }
@@ -207,7 +207,7 @@ void ChatPanel::scrollToBottom()
 void ChatPanel::setInputType(const QString& type)
 {
     // 不认识的取值回落到默认, 而不是在按钮上显示一个**没有对应菜单项**的幽灵标签。
-    // 典型场景: 旧 gui.yaml 里还写着已经删掉的 "pc" (宿主机键盘)。
+    // 典型场景: 旧配置里还写着已经删掉的 "pc" (宿主机键盘)。
     QString wanted = type;
     bool known = false;
     const QList<QAction*> actions = typeMenu_->actions();

@@ -175,7 +175,7 @@ GUI **不是** PC 上的 Python 程序：它是 `gui/` 下的 Qt5 C++ 程序，*
 
 ```
 gui/src/
-├── main.cpp / main_window.*     入口与主窗口（--socket / --windowed / --gui-config / --page …）
+├── main.cpp / main_window.*     入口与主窗口（--socket / --windowed / --config / --page …）
 ├── core/    config_store / config_sync / view_state / idle_watcher /
 │            image_fit / system_stats / lyrics
 ├── services/ local_client（Unix socket 客户端）/ onboard_ctl（屏幕键盘）

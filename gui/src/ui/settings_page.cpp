@@ -152,7 +152,7 @@ void SettingsPage::build()
     overlayIdle_->setSuffix(QStringLiteral(" ms"));
     overlayForm->addRow(QStringLiteral("休眠时间"), overlayIdle_);
     auto* note = new QLabel(QStringLiteral("与四区域的休眠时间互不影响（分开设置），"
-                                           "写进 gui.yaml 的 video_overlay.idle_ms"), overlay);
+                                           "写进 config.yaml 的 gui.video_overlay.idle_ms"), overlay);
     note->setObjectName(QStringLiteral("ChatSystem"));
     note->setWordWrap(true);
     overlayBox->addWidget(note);
@@ -252,23 +252,23 @@ void SettingsPage::loadFromConfig(const QString& configPath)
         qWarning().noquote() << "[settings] 读配置失败:" << error;
         return;
     }
-    debug_->setChecked(store.boolValue(QStringLiteral("debug"), false));
+    debug_->setChecked(store.boolValue(QStringLiteral("gui.debug"), false));
     for (const QString& region : {QStringLiteral("top"), QStringLiteral("bottom"),
                                   QStringLiteral("left"), QStringLiteral("right")}) {
         if (QComboBox* box = regionMode(region)) {
-            const QString value = store.value(QStringLiteral("wake.") + region,
+            const QString value = store.value(QStringLiteral("gui.wake.") + region,
                                               QStringLiteral("locked"));
             selectByData(box, value);
         }
     }
-    regionIdle_->setValue(store.intValue(QStringLiteral("wake.idle_ms"), 5000));
+    regionIdle_->setValue(store.intValue(QStringLiteral("gui.wake.idle_ms"), 5000));
     selectByData(overlayMode_,
-                 store.value(QStringLiteral("video_overlay.mode"), QStringLiteral("active")));
-    overlayIdle_->setValue(store.intValue(QStringLiteral("video_overlay.idle_ms"), 3000));
-    fullscreen_->setCurrentIndex(store.boolValue(QStringLiteral("fullscreen"), true) ? 0 : 1);
-    selectByData(startPage_, store.value(QStringLiteral("start_page"), QStringLiteral("home")));
+                 store.value(QStringLiteral("gui.video_overlay.mode"), QStringLiteral("active")));
+    overlayIdle_->setValue(store.intValue(QStringLiteral("gui.video_overlay.idle_ms"), 3000));
+    fullscreen_->setCurrentIndex(store.boolValue(QStringLiteral("gui.fullscreen"), true) ? 0 : 1);
+    selectByData(startPage_, store.value(QStringLiteral("gui.start_page"), QStringLiteral("home")));
     selectByData(inputSource_,
-                 store.value(QStringLiteral("input_source"), QStringLiteral("keyboard")));
+                 store.value(QStringLiteral("gui.input_source"), QStringLiteral("keyboard")));
     if (scroll_ != nullptr && scroll_->verticalScrollBar() != nullptr) {
         // 焦点落在第一个控件上会把它"滚进视野"，首个卡片标题就被裁了 → 拉回顶部
         scroll_->verticalScrollBar()->setValue(0);
@@ -287,19 +287,19 @@ bool SettingsPage::saveToConfig(QString* error)
     if (!store.load(configPath_, error)) {
         return false;
     }
-    store.setBool(QStringLiteral("debug"), debug_->isChecked());
+    store.setBool(QStringLiteral("gui.debug"), debug_->isChecked());
     for (const QString& region : {QStringLiteral("top"), QStringLiteral("bottom"),
                                   QStringLiteral("left"), QStringLiteral("right")}) {
         if (QComboBox* box = regionMode(region)) {
-            store.set(QStringLiteral("wake.") + region, box->currentData().toString());
+            store.set(QStringLiteral("gui.wake.") + region, box->currentData().toString());
         }
     }
-    store.set(QStringLiteral("wake.idle_ms"), QString::number(regionIdle_->value()));
-    store.set(QStringLiteral("video_overlay.mode"), overlayMode_->currentData().toString());
-    store.set(QStringLiteral("video_overlay.idle_ms"), QString::number(overlayIdle_->value()));
-    store.setBool(QStringLiteral("fullscreen"), fullscreen_->currentIndex() == 0);
-    store.set(QStringLiteral("start_page"), startPage_->currentData().toString());
-    store.set(QStringLiteral("input_source"), inputSource_->currentData().toString());
+    store.set(QStringLiteral("gui.wake.idle_ms"), QString::number(regionIdle_->value()));
+    store.set(QStringLiteral("gui.video_overlay.mode"), overlayMode_->currentData().toString());
+    store.set(QStringLiteral("gui.video_overlay.idle_ms"), QString::number(overlayIdle_->value()));
+    store.setBool(QStringLiteral("gui.fullscreen"), fullscreen_->currentIndex() == 0);
+    store.set(QStringLiteral("gui.start_page"), startPage_->currentData().toString());
+    store.set(QStringLiteral("gui.input_source"), inputSource_->currentData().toString());
     return store.save(error);
 }
 

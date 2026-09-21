@@ -142,7 +142,7 @@ void TestModelPage::saveWritesGuiYamlAndSyncsTargets()
     QVERIFY2(cfgText.contains(QStringLiteral("mode: edge")), qPrintable(cfgText));
 
     // 日志里要留下"做过什么"
-    QVERIFY(page.logView()->toPlainText().contains(QStringLiteral("gui.yaml 已更新")));
+    QVERIFY(page.logView()->toPlainText().contains(QStringLiteral("config.yaml 已更新")));
     QVERIFY(page.logView()->toPlainText().contains(QStringLiteral("已同步")));
 }
 

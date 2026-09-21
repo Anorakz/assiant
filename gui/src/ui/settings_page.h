@@ -9,7 +9,7 @@
 //    · 启动形态（全屏/窗口）、默认页、默认输入类型
 //    · 配置路径 / 恢复默认 / 关于（版本、各路径）
 //
-//  写入仍是"gui.yaml 是唯一真源"：保存后由 MainWindow 重新 applyConfig()，
+//  写入目标仍是唯一的 config.yaml：保存后由 MainWindow 重新 applyConfig()，
 //  界面效果（四区域折叠策略/休眠时间/输入源）立即生效。
 // ============================================================================
 #pragma once
@@ -30,9 +30,9 @@ class SettingsPage : public QWidget {
 public:
     explicit SettingsPage(QWidget* parent = nullptr);
 
-    /// 从 gui.yaml 载入界面（configPath 为空则只显示不可用）
+    /// 从 config.yaml 的 gui: 段载入界面（configPath 为空则只显示不可用）
     void loadFromConfig(const QString& configPath);
-    /// 写回 gui.yaml；返回是否成功
+    /// 写回 config.yaml 的 gui: 段；返回是否成功
     bool saveToConfig(QString* error = nullptr);
     /// 把界面恢复成本页的默认值（不写文件，等用户点保存）
     void restoreDefaults();

@@ -277,9 +277,9 @@ void ModelPage::applyModeToUi(const QString& mode)
     }
 }
 
-void ModelPage::setPaths(const QString& guiConfigPath, const QString& repoRoot)
+void ModelPage::setPaths(const QString& configPath, const QString& repoRoot)
 {
-    guiConfigPath_ = guiConfigPath;
+    configPath_ = configPath;
     repoRoot_ = repoRoot;
     scanModels();
     loadFromConfig();
@@ -294,11 +294,11 @@ void ModelPage::scanModels()
     modelBox_->clear();
 
     QStringList dirs;
-    if (!guiConfigPath_.isEmpty()) {
-        // 从 gui.yaml 读当前模型路径，扫它所在目录
+    if (!configPath_.isEmpty()) {
+        // 从配置里读当前模型路径，扫它所在目录
         core::ConfigStore store;
         QString error;
-        if (store.load(guiConfigPath_, &error)) {
+        if (store.load(configPath_, &error)) {
             const QString path = store.value(QStringLiteral("llm.local_model"));
             if (!path.isEmpty()) {
                 const QString dir = QFileInfo(path).absolutePath();
@@ -330,12 +330,12 @@ void ModelPage::scanModels()
 
 void ModelPage::loadFromConfig()
 {
-    if (guiConfigPath_.isEmpty()) {
+    if (configPath_.isEmpty()) {
         return;
     }
     core::ConfigStore store;
     QString error;
-    if (!store.load(guiConfigPath_, &error)) {
+    if (!store.load(configPath_, &error)) {
         appendLog(QStringLiteral("读配置失败：%1").arg(error));
         return;
     }
@@ -363,13 +363,13 @@ void ModelPage::loadFromConfig()
 
 bool ModelPage::saveAndSync()
 {
-    if (guiConfigPath_.isEmpty()) {
-        appendLog(QStringLiteral("没设置 gui.yaml 路径，无法保存"));
+    if (configPath_.isEmpty()) {
+        appendLog(QStringLiteral("没设置 config.yaml 路径，无法保存"));
         return false;
     }
     core::ConfigStore store;
     QString error;
-    if (!store.load(guiConfigPath_, &error)) {
+    if (!store.load(configPath_, &error)) {
         appendLog(QStringLiteral("读配置失败：%1").arg(error));
         return false;
     }
@@ -387,10 +387,10 @@ bool ModelPage::saveAndSync()
     store.set(QStringLiteral("llm.api_key"), cloudKey_->text());
 
     if (!store.save(&error)) {
-        appendLog(QStringLiteral("写 gui.yaml 失败：%1").arg(error));
+        appendLog(QStringLiteral("写 config.yaml 失败：%1").arg(error));
         return false;
     }
-    appendLog(QStringLiteral("gui.yaml 已更新（mode=%1）").arg(mode_));
+    appendLog(QStringLiteral("config.yaml 已更新（mode=%1）").arg(mode_));
 
     if (repoRoot_.isEmpty()) {
         appendLog(QStringLiteral("没设置仓库根，跳过同步 llm.env / config.yaml"));

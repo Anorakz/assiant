@@ -55,7 +55,7 @@ public:
     /// 当前页 key。
     QString currentPage() const;
 
-    /// 按 gui.yaml 应用界面配置：wake.*（四区域/统一休眠）+ debug（[D] 指示）。
+    /// 按配置应用界面：gui.wake.*（四区域/统一休眠）+ gui.debug（[D] 指示）。
     void applyConfig(const core::ConfigStore& gui);
 
     /// 开始连接 Agent（非阻塞，断线由 LocalClient 自己重连）。
@@ -64,9 +64,9 @@ public:
     /// 验收辅助：走**真实控件**（输入框 + 发送按钮）发一条消息，而不是直接调协议。
     void demoSend(const QString& text);
 
-    /// gui.yaml 路径（切换输入源时要写回它）。空 = 不持久化。
+    /// config.yaml 路径（切换输入源时要写回它的 gui: 段）。空 = 不持久化。
     void setConfigPath(const QString& path);
-    /// 处理输入源变化：按 onboard_auto 弹/收软键盘，并把选择写回 gui.yaml。
+    /// 处理输入源变化：按 gui.onboard_auto 弹/收软键盘，并把选择写回 config.yaml。
     void applyInputType(const QString& type);
 
     /// 验收辅助：触发音乐条某个占位块的说明（歌词/歌手/专辑/进度）。

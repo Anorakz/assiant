@@ -7,7 +7,7 @@
 //       云端块：base / model / api_key
 //    3) SigLIP 固定块：**只读**（siglip_full.rknn 是固定的，方案 D2/§7 明确不给开关）
 //
-//  写入链路：界面 → gui.yaml（唯一真源）→ ConfigSyncer 同步到 llm/config/llm.env
+//  写入链路：界面 → config.yaml（唯一真源）→ ConfigSyncer 同步到 llm/config/llm.env
 //  与 config/config.yaml（T2 已实现，这里复用）。
 //  服务控制：直接驱动仓库里现成的 llm/scripts/{start,stop,restart,status}.sh，
 //  输出实时显示在下方日志区（不自己另写一套启停逻辑）。
@@ -36,10 +36,10 @@ public:
     explicit ModelPage(QWidget* parent = nullptr);
     ~ModelPage() override;
 
-    /// gui.yaml 路径 + 仓库根（用来找 llm/scripts 与另两个配置文件）
-    void setPaths(const QString& guiConfigPath, const QString& repoRoot);
+    /// config.yaml 路径 + 仓库根（用来找 llm/scripts 与 llm.env）
+    void setPaths(const QString& configPath, const QString& repoRoot);
 
-    /// 按 gui.yaml 把界面刷成当前配置
+    /// 按配置把界面刷成当前配置
     void loadFromConfig();
 
     /// 落盘 + 同步（返回是否全部成功；错误写进日志区与状态行）
@@ -84,7 +84,7 @@ private:
     void runScript(const QString& script);
     void appendLog(const QString& text);
 
-    QString guiConfigPath_;
+    QString configPath_;
     QString repoRoot_;
     QString mode_ = QStringLiteral("disabled");
 

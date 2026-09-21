@@ -315,7 +315,7 @@ MainWindow::MainWindow(QWidget* parent)
                     client_->sendCommand(QStringLiteral("chat_input"),
                                          QJsonObject{{QStringLiteral("text"), text}});
                 });
-        // T6：输入源切换（小按钮三选）→ 弹/收 onboard + 写回 gui.yaml
+        // T6：输入源切换（小按钮三选）→ 弹/收 onboard + 写回 config.yaml 的 gui: 段
         connect(mainPage_->chatPanel(), &ChatPanel::inputTypeChanged, this,
                 [this](const QString& type) { applyInputType(type); });
     }
@@ -369,7 +369,7 @@ MainWindow::MainWindow(QWidget* parent)
     });
     overlayWatcher_->setEnabled(true);
 
-    // T10：系统页按 gui.yaml 的 monitor_interval_ms 定时刷新（不看时才不刷）
+    // T10：系统页按配置的 gui.monitor_interval_ms 定时刷新（不看时才不刷）
     monitorTimer_ = new QTimer(this);
     connect(monitorTimer_, &QTimer::timeout, this, [this]() {
         if (sysPage_ != nullptr && stack_ != nullptr && stack_->currentWidget() == sysPage_) {
@@ -607,7 +607,7 @@ void MainWindow::applyInputType(const QString& type)
         }
     }
 
-    // 2) 写回 gui.yaml（值没变就不写，免得每次启动都重写一遍）
+    // 2) 写回 config.yaml 的 gui: 段（值没变就不写，免得每次启动都重写一遍）
     if (configPath_.isEmpty()) {
         return;
     }
@@ -617,10 +617,10 @@ void MainWindow::applyInputType(const QString& type)
         qWarning().noquote() << "[ui] 读配置失败，输入源未保存:" << error;
         return;
     }
-    if (store.value(QStringLiteral("input_source")) == type) {
+    if (store.value(QStringLiteral("gui.input_source")) == type) {
         return;
     }
-    store.set(QStringLiteral("input_source"), type);
+    store.set(QStringLiteral("gui.input_source"), type);
     if (store.save(&error)) {
         qInfo().noquote() << "[ui] 输入源已保存到" << configPath_ << ":" << type;
     } else {
@@ -789,13 +789,13 @@ QVector<RegionHost*> MainWindow::regions() const
 void MainWindow::applyConfig(const core::ConfigStore& gui)
 {
     // debug 现在**只控制日志详细程度**（界面不再显示 [D]，见 T4 验收意见）
-    debug_ = gui.boolValue(QStringLiteral("debug"), false);
+    debug_ = gui.boolValue(QStringLiteral("gui.debug"), false);
     refreshLinkState();
 
     // T6：输入源（pc / terminal / keyboard）+ 是否真去弹软键盘
-    onboardAuto_ = gui.boolValue(QStringLiteral("onboard_auto"), true);
+    onboardAuto_ = gui.boolValue(QStringLiteral("gui.onboard_auto"), true);
     const QString inputSource =
-        gui.value(QStringLiteral("input_source"), QStringLiteral("keyboard"));
+        gui.value(QStringLiteral("gui.input_source"), QStringLiteral("keyboard"));
     if (mainPage_ != nullptr && mainPage_->chatPanel() != nullptr) {
         // 会让面板发 inputTypeChanged → 走到 applyInputType()，启动时顺带把软键盘同步到配置状态
         mainPage_->chatPanel()->setInputType(inputSource);
@@ -815,7 +815,7 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
     }
 
     const auto isActive = [&gui](const QString& key, bool fallback) {
-        const QString value = gui.value(QStringLiteral("wake.") + key);
+        const QString value = gui.value(QStringLiteral("gui.wake.") + key);
         if (value.isEmpty()) {
             return fallback;
         }
@@ -823,11 +823,11 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
     };
 
     // 统一休眠时间：四个活动区域共用这一个值（方案 §4）
-    watcher_->setIdleMs(gui.intValue(QStringLiteral("wake.idle_ms"), 5000));
+    watcher_->setIdleMs(gui.intValue(QStringLiteral("gui.wake.idle_ms"), 5000));
 
     // T10：系统页刷新间隔（GUI 私有项，不同步到其它配置）
     if (monitorTimer_ != nullptr) {
-        const int intervalMs = gui.intValue(QStringLiteral("monitor_interval_ms"), 1000);
+        const int intervalMs = gui.intValue(QStringLiteral("gui.monitor_interval_ms"), 1000);
         monitorTimer_->setInterval(intervalMs > 200 ? intervalMs : 200);
         qInfo().noquote() << QStringLiteral("[gui] 系统页刷新间隔: %1ms").arg(intervalMs);
     }
@@ -849,10 +849,10 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
 
     // T9：内嵌控制条的 活动/锁定 + **自己的**休眠时间（不与 wake.idle_ms 共享）
     if (overlayWatcher_ != nullptr) {
-        const QString overlayMode = gui.value(QStringLiteral("video_overlay.mode"),
+        const QString overlayMode = gui.value(QStringLiteral("gui.video_overlay.mode"),
                                               QStringLiteral("active"));
         overlayAutoHide_ = overlayMode.compare(QLatin1String("active"), Qt::CaseInsensitive) == 0;
-        overlayWatcher_->setIdleMs(gui.intValue(QStringLiteral("video_overlay.idle_ms"), 3000));
+        overlayWatcher_->setIdleMs(gui.intValue(QStringLiteral("gui.video_overlay.idle_ms"), 3000));
         overlayWatcher_->setEnabled(overlayAutoHide_);
         if (!overlayAutoHide_ && mainPage_ != nullptr && mainPage_->videoPanel() != nullptr) {
             mainPage_->videoPanel()->setOverlayVisible(true);   // 锁定 = 常显
@@ -860,7 +860,7 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
         qInfo().noquote() << QStringLiteral("[gui] 视频控制条: %1 (idle_ms=%2，独立于 wake.idle_ms)")
                                  .arg(overlayAutoHide_ ? QStringLiteral("活动") 
                                                        : QStringLiteral("锁定"))
-                                 .arg(gui.intValue(QStringLiteral("video_overlay.idle_ms"), 3000));
+                                 .arg(gui.intValue(QStringLiteral("gui.video_overlay.idle_ms"), 3000));
     }
 }
 

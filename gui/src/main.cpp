@@ -69,9 +69,9 @@ struct Options {
     QString screenshot;            ///< 非空 = 渲染后自截图并退出
     int screenshotDelayMs = 1500;
     QString screenshotSeq;         ///< 非空 = 产出"可见/折叠/唤醒"三连图并退出（验收用）
-    QString guiConfig;             ///< gui.yaml 路径（空 = 自动找）
+    QString configPath;            ///< config/config.yaml 路径（空 = 自动找）
     int idleMs = -1;               ///< >=0 时覆盖 wake.idle_ms
-    bool debug = false;            ///< 强制打开 debug（覆盖 gui.yaml，只改内存）
+    bool debug = false;            ///< 强制打开 debug（覆盖配置，只改内存）
     QString chatDemo;              ///< 非空 = 启动后走真实控件发这条消息（验收用）
     QString inputTypeDemo;         ///< 非空 = 启动后切到这个输入源（验收用）
     bool inputMenuDemo = false;    ///< 启动后展开输入源菜单（配合 scrot 抓图）
@@ -106,7 +106,7 @@ void printUsage()
         "  --screenshot-delay <ms>  截图前等待毫秒数（默认 1500）\n"
         "  --screenshot-seq <dir>   产出 01_visible/02_idle/03_woke 三连图并退出（T3 验收用）\n"
         "  --idle-ms <ms>       覆盖 wake.idle_ms（验收时把 5s 缩短）\n"
-        "  --debug              强制打开 debug（覆盖 gui.yaml，只改内存）\n"
+        "  --debug              强制打开 debug（覆盖配置，只改内存）\n"
         "  --chat-demo <文本>   启动后走真实输入框+发送按钮发一条（验收用）\n"
         "  --input-type-demo <terminal|keyboard>  启动后切到该输入源（验收用）\n"
         "  --input-menu-demo    启动后展开输入源菜单（配 --scrot 抓图）\n"
@@ -124,7 +124,7 @@ void printUsage()
         "  --bench-stop-demo   启动后点「停止测试」（验收用）\n"
         "  --report-demo       启动后点「查看最新报告」（验收用）\n"
         "  --settings-save-demo 启动后改两个休眠时间并保存（验收用）\n"
-        "  --gui-config <path>  指定 gui.yaml（默认自动在仓库里找）\n"
+        "  --config <path>      指定 config/config.yaml（默认自动在仓库里找）\n"
         "  --socket <path>      Agent 的 unix socket 路径（默认 /tmp/agent.sock）\n"
         "  -h, --help           显示本帮助\n";
     qInfo().noquote() << QString::fromUtf8(text);
@@ -167,9 +167,9 @@ Options parseArgs(int argc, char** argv)
                    || arg.startsWith(QLatin1String("--screenshot-seq="))) {
             opt.screenshotSeq = optionValue(arg, QStringLiteral("--screenshot-seq"), i, argc, argv,
                                             opt);
-        } else if (arg == QLatin1String("--gui-config")
-                   || arg.startsWith(QLatin1String("--gui-config="))) {
-            opt.guiConfig = optionValue(arg, QStringLiteral("--gui-config"), i, argc, argv, opt);
+        } else if (arg == QLatin1String("--config")
+                   || arg.startsWith(QLatin1String("--config="))) {
+            opt.configPath = optionValue(arg, QStringLiteral("--config"), i, argc, argv, opt);
         } else if (arg == QLatin1String("--debug")) {
             opt.debug = true;
         } else if (arg == QLatin1String("--chat-demo")
@@ -349,19 +349,19 @@ int runStdioMode(const Options& opt, int argc, char** argv)
     return app.exec();
 }
 
-/// 找 gui.yaml：从可执行文件所在目录往上找两层常见位置。
-/// 板端布局是 <repo>/gui/build/agent_gui + <repo>/gui/config/gui.yaml。
-QString resolveGuiConfig()
+/// 找 config/config.yaml：从可执行文件所在目录往上找。
+/// 板端布局是 <repo>/gui/build/agent_gui + <repo>/config/config.yaml。
+///
+/// ⚠ 归一化 D 系列之前这里找的是 gui/config/gui.yaml（GUI 自己的配置）。
+///    现在配置真源只有一份 config/config.yaml —— GUI 读写它的 `gui:` 段，
+///    模型页读写顶层 `llm:` 段。
+QString resolveConfig()
 {
     QDir dir(QCoreApplication::applicationDirPath());
     for (int depth = 0; depth < 4; ++depth) {
-        const QString direct = dir.absoluteFilePath(QStringLiteral("config/gui.yaml"));
-        if (QFile::exists(direct)) {
-            return direct;
-        }
-        const QString nested = dir.absoluteFilePath(QStringLiteral("gui/config/gui.yaml"));
-        if (QFile::exists(nested)) {
-            return nested;
+        const QString candidate = dir.absoluteFilePath(QStringLiteral("config/config.yaml"));
+        if (QFile::exists(candidate)) {
+            return candidate;
         }
         if (!dir.cdUp()) {
             break;
@@ -432,8 +432,8 @@ int runGuiMode(const Options& opt, int argc, char** argv)
     wirePrinters(client);
     new StdinBridge(client, &app);
 
-    // ---- 配置：gui.yaml 的 wake.*（四区域/统一休眠）+ debug（[D] 指示）----
-    const QString cfgPath = opt.guiConfig.isEmpty() ? resolveGuiConfig() : opt.guiConfig;
+    // ---- 配置：config/config.yaml 的 gui.*（四区域/统一休眠/输入源/…）+ debug ----
+    const QString cfgPath = opt.configPath.isEmpty() ? resolveConfig() : opt.configPath;
     core::ConfigStore gui;
     if (!cfgPath.isEmpty()) {
         QString cfgError;
@@ -443,15 +443,16 @@ int runGuiMode(const Options& opt, int argc, char** argv)
             qWarning().noquote() << "[gui] 配置读取失败:" << cfgError << "→ 用默认值";
         }
     } else {
-        qWarning().noquote() << "[gui] 没找到 gui.yaml → 用默认配置";
+        qWarning().noquote() << "[gui] 没找到 config/config.yaml → 用默认配置";
     }
     if (opt.debug) {
-        gui.setBool(QStringLiteral("debug"), true);     // 命令行强制打开（只改内存，不落盘）
+        // 命令行强制打开（只改内存，不落盘）
+        gui.setBool(QStringLiteral("gui.debug"), true);
     }
     window.setConfigPath(cfgPath);                      // 输入源切换要写回它
-    // T11：仓库根 = <root>/gui/config/gui.yaml 往上三层（配置同步与 llm/scripts 相对它定位）
+    // T11：仓库根 = config/config.yaml 的上一级（配置同步与 llm/scripts 相对它定位）
     if (!cfgPath.isEmpty()) {
-        const QString root = QFileInfo(cfgPath).absolutePath() + QStringLiteral("/../..");
+        const QString root = QFileInfo(cfgPath).absolutePath() + QStringLiteral("/..");
         window.setRepoRoot(QDir(root).absolutePath());
     }
     window.applyConfig(gui);
