@@ -411,6 +411,9 @@ Phase 6 决策记录（已评审）
        写 .git/info/exclude。**板端 git status 首次完全干净**（59 项脏 → 0），
        并顺带补齐了 main 有而板端一直没有的 native/ 源码、根 CMakeLists.txt、.gitmodules
      待做：F4 把"git pull 负责什么、deploy.ps1 负责什么、板端哪些不入库"写成 docs/deploy.md
+     · F4 **已完成**：新增 `docs/deploy.md`（三条同步路径各管什么 / 清单与落后判定 /
+       板端不入库清单 / 常见操作 / 踩过的坑），`docs/architecure.md` §2 §8.2 §9.2 同步，
+       Readme 的 docs 目录树补成实际 8 个文件。文档守卫（相对链接 + 过时说法）通过。
 ☑ 文档去重：**已完成**（B1 `a364269`）。gui-agent-integration.md §2/§3 的两张字段表降级为指针
      （字段定义只在 ipc-protocol.md），该文档只管"GUI 在哪儿发、收到后界面怎么变"；
      §6 里指向 temp/（clone 后不存在）的假 Agent 换成了仓库内真实脚本。

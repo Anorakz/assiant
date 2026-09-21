@@ -51,13 +51,20 @@
 
 规则：
 
-- **PC 是唯一提交方**：板端仓库只作运行环境，不在板端 `commit`。
+- **PC 是唯一提交方**：板端仓库只作运行环境，**不提交、不手改代码**；板端挂在
+  `main` 上并 tracking `origin/main`（`git status` 保持干净）。
 - **部署只送已提交的内容**（`deploy.ps1` 用 `git archive HEAD`），所以"板端在跑的东西"
   永远可追溯到某个 commit。
 - **板端本地、不入库**：`config/config.yaml`、`gui/config/gui.yaml`、`llm/`、`sig/`、
-  `net/`、`creds/`、`logs/`、`model/`、`runtimes/`、`temp/`。
-- **解包是增量的**（`tar -x` 无 `--delete`）：删除类改动**不会**自动从板端消失。
-  归一化 F 系列会给 `deploy.ps1` 加部署清单、落后判决与 `-Prune`。
+  `net/`、`creds/`、`logs/`、`model/`、`runtimes/`、`temp/`。其中 `main` 的
+  `.gitignore` 覆盖不了的那几个（`llm/ sig/ net/ runtimes/ …`）写在板端的
+  `.git/info/exclude` 里 —— 那是**本机**规则，不该进仓库。
+- **解包是增量的**（`tar -x` 无 `--delete`）：仓库里删掉的文件不会自动从板端消失。
+  所以 `deploy.ps1` 会写一份逐文件 sha256 的**部署清单**，`health_check.sh` 据此报
+  "落后 N 个文件"与"多余文件"，`-Prune` 负责清。
+
+> 部署与同步的完整规则（三条路径各管什么、清单/落后判定、板端不入库清单、常见操作）
+> 见 [`docs/deploy.md`](deploy.md)。
 
 ---
 
@@ -236,17 +243,21 @@ gui/src/
 ### 8.2 板端（运行环境）
 
 ```
-/home/kickpi/myproject/assitant/
+/home/kickpi/myproject/assitant/          branch main (tracking origin/main)
 ├── agent_native.cpython-38-aarch64-linux-gnu.so   # deploy 送来的
 ├── libmoonlight-common-c.so                       # 与上面同目录 (rpath $ORIGIN)
-├── agent/          部署覆盖
+├── agent/ tests/ docs/ scripts/ native/           # = 某个已部署的提交
 ├── gui/            源码由 sync-gui 送, 二进制在 gui/build/agent_gui
-├── tests/          部署覆盖 + 板端专有 (test_llm_integration.py)
-├── config/config.yaml       板端本地（不入库）
-├── llm/ sig/ net/           板端本地子系统（不入库）
-├── creds/                   配对证书（不入库）
-└── logs/ model/ runtimes/ temp/
+├── logs/           agent.log + deployed-manifest / deployed-rev (后者是部署清单)
+├── config/config.yaml                 板端本地（.gitignore 覆盖）
+├── llm/ sig/ net/                     板端本地子系统（.git/info/exclude）
+├── runtimes/ temp/ creds/ model/      板端本地（同上 / .gitignore）
+├── docs/gui-qt5-*.md                  板端 GUI 迭代文档（.git/info/exclude）
+├── tests/test_llm_integration.py      板端专有测试（.git/info/exclude）
+└── todo                               板端旧清单（.git/info/exclude）
 ```
+
+> 切换方式与"哪些该留着"的完整说明见 [`docs/deploy.md`](deploy.md) §6。
 
 ---
 
@@ -270,10 +281,16 @@ gui/src/
 build.ps1（交叉编译, 校验 ELF aarch64 与 GLIBC 上限）
 → git archive HEAD 打包 agent/ tests/ docs/ scripts/ config/config.example.yaml
    （-c core.autocrlf=false -c core.eol=lf，防止 CRLF 进 tar）
-→ scp .so + libmoonlight + tarball
+→ 建部署清单（逐文件 sha256 → logs/deployed-manifest + deployed-rev）
+→ scp .so + libmoonlight + tarball + 清单
 → 板端增量解包（不删任何东西）
-→ scripts/health_check.sh（必需项: .so 可 import、config 在位、--check-config 通过、IPC 文件在位）
+→ 可选 -Prune：清掉"仓库里已删、板端还在"的残留
+→ scripts/health_check.sh（必需项 + 落后判定 + 多余文件）
 ```
+
+**落后判定**：清单里有而板端缺失/内容不同的文件数 —— 刚部署完就该是 0，不是就
+FAIL 并点名。**多余文件**：板端有而清单没有的（只报告，用 `-Prune` 清）。
+详细规则见 [`docs/deploy.md`](deploy.md)。
 
 ### 9.3 GUI 单独一条路（`scripts/sync-gui.ps1`）
 

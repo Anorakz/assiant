@@ -75,7 +75,14 @@ agent/
 │   ├── mocks/                   # mock_agent_native: native 替身
 │   ├── host/                    # 需要 numpy 的绑定层测试 (按需手动跑)
 │   └── board/                   # 板端真机验收脚本
-├── docs/                        # 文档
+├── docs/                        # 文档 (入口: docs/architecure.md)
+│   ├── architecure.md           # 架构与拓扑、板端布局
+│   ├── deploy.md                # 部署与双机同步规则
+│   ├── ipc-protocol.md          # Agent ⇄ GUI 协议 (线上格式唯一真源)
+│   ├── gui.md                   # GUI 构建与使用
+│   ├── gui-agent-integration.md # GUI 那一端实际收/发什么
+│   ├── cross-build-rk3568.md    # 交叉编译与 sysroot
+│   ├── decoder-mpp.md           # MPP 硬解
 │   └── sunshine-pairing-findings.md
 ├── build-host/                  # 宿主机构建产物 (不入 git)
 ├── build-rk3568/                # 交叉编译产物 (不入 git)
