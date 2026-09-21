@@ -7,12 +7,12 @@
 #      1) 收到 GUI 发来的命令 -> 打印原始行 + action/payload
 #      2) 可选地回推一条 llm 消息 (用 protocol.encode), 证明双向都通
 #
-#  命令的线格式 (重要)
+#  命令的线格式
 #  ---------------------------------------------------------------------------
-#  本脚本按**阶段 2 任务约定**解析 GUI 发来的 {"action": ..., "payload": ...}。
-#  ⚠ 这与真 Agent 的 agent/ipc/protocol.py 不同 —— 那边 decode_full() 要求
-#    {topic, data, timestamp} 信封。所以这里**不能**直接调 protocol.decode(),
-#    只能自己 json.loads。将来两边统一后, 这里应换成 protocol.decode()。
+#  GUI 发来的是命令信封 {"action": ..., "payload": ...} (没有 timestamp)。
+#  这里直接用 agent/ipc/protocol.py 的 decode_command() 解 —— 与真 Agent
+#  收命令走的是**同一份实现**, 所以本脚本不会"照文档手写一份解析"。
+#  (回推用 protocol.encode(), 与真 Agent 推 state 也同一份。)
 #
 #  与 ipc_test_server.py 的区别
 #  ---------------------------------------------------------------------------
@@ -27,7 +27,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import socket
 import sys
@@ -48,17 +47,11 @@ def handle_line(conn: socket.socket, line: bytes, echo: bool) -> None:
     print("[server] 收到: %s" % raw, flush=True)
 
     try:
-        msg = json.loads(raw)
-    except ValueError as exc:
-        print("[server]   (不是合法 JSON, 忽略: %s)" % exc, flush=True)
+        action, payload = protocol.decode_command(line)
+    except protocol.IpcProtocolError as exc:
+        print("[server]   (非法命令, 忽略: %s)" % exc, flush=True)
         return
 
-    if not isinstance(msg, dict):
-        print("[server]   (不是 JSON object, 忽略)", flush=True)
-        return
-
-    action = msg.get("action")
-    payload = msg.get("payload")
     print("[server]   action=%r payload=%r  (收到于 %.3f)"
           % (action, payload, time.time()), flush=True)
 

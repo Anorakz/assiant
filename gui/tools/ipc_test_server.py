@@ -3,14 +3,16 @@
 # ============================================================================
 #  gui/tools/ipc_test_server.py — 验收用的"假 Agent"
 #
-#  只 push, 不处理 command。它的存在是为了在真正的 Agent IPC server 写出来
-#  之前, 能端到端验证 gui/src/services/local_client.*:
+#  只 push, 不处理 command。真的 Agent IPC server 已经有了
+#  (agent/ipc/local_server.py, 由 agent/ipc/__init__.py 的 build_ipc() 接入
+#  agent/main.py); 这个脚本仍然有用, 因为它的用例是**故意构造的边界**:
 #
 #      · 4 个已知 topic 都能收到并 emit 对应信号
 #      · 一条消息被拆成两次 send 也能正确拼回来 (按 \n 切分, 不按字节数)
 #      · 坏消息 (非法 JSON / 非 object / data 不是 object / 缺 timestamp)
 #        被丢弃并 qWarning, **连接不断**
 #      · 不认识的 topic 被忽略而不是报错
+#      · 坏消息之后再发一条合法消息, 证明连接没被搞坏
 #
 #  编码全部走 agent/ipc/protocol.py —— 与真 Agent 用同一套实现, 不会"两边
 #  各自照文档手写导致字段名不一致"。

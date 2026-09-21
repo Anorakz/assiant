@@ -180,31 +180,39 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
 
 ## IPC 协议（Agent ⇄ GUI）
 
-协议已定，**实现未做**（server/client 在 `todo.md` 里）。完整规范见
-[`docs/ipc-protocol.md`](docs/ipc-protocol.md)，常量与编解码在 `agent/ipc/protocol.py`。
+完整规范见 [`docs/ipc-protocol.md`](docs/ipc-protocol.md)（**唯一真源**）。常量与编解码在
+`agent/ipc/protocol.py`，Agent 侧接入点是 `agent/ipc/__init__.py` 的 `build_ipc()`，
+GUI 侧实现在 `gui/src/services/local_client.cpp`。
 
 | 项 | 值 |
 | --- | --- |
-| 传输 | Unix domain socket `/tmp/agent.sock` |
+| 传输 | Unix domain socket `/tmp/agent.sock`（Agent 监听，GUI 作客户端连接） |
 | 分隔 | 换行 `\n`（NDJSON，每条消息一行） |
 | 编码 | UTF-8 |
-| 信封 | `{"topic": str, "data": object, "timestamp": float}` |
+| Agent → GUI（推送） | `{"topic": str, "data": object, "timestamp": float}` |
+| GUI → Agent（命令） | `{"action": str, "payload": object}` —— **没有 `timestamp`** |
 | 时间戳 | Unix epoch **秒**（浮点，C++ 侧必须用 `double`，`float` 在 epoch 尺度只有约 128 秒分辨率） |
 
 ```python
-from agent.ipc import encode, decode, decode_full, TOPIC_STATUS, MODE_STUDY
+from agent.ipc import encode, decode_command, TOPIC_STATUS, MODE_STUDY
 
-sock.sendall(encode(TOPIC_STATUS, {"mode": MODE_STUDY, "connected": True}))
-topic, data = decode(line)          # 需要时间戳用 decode_full()
+sock.sendall(encode(TOPIC_STATUS, {"mode": MODE_STUDY, "connected": True}))  # 推状态
+action, payload = decode_command(line)    # 收命令 -> ("chat_input", {"text": "..."})
 ```
+
+**两个方向的信封不一样，这不是笔误**（Phase 6 决策 1：命令格式以 GUI 的实际实现为准）。
+推送用 `topic`/`data`/`timestamp`，命令用 `action`/`payload`；**混用会被丢弃并记 warning**，
+不做"两种都认"的兼容。两端各自只收一个方向：Agent 只解命令、只发推送，GUI 反过来。
 
 约定：
 
-- **`data` 必须是 object**，数组/标量判为非法；没有参数也要写 `{}`。
-- **未知字段忽略、未知 topic 忽略** —— 这是没有版本号时唯一的向前兼容手段。
+- **`data` / `payload` 必须是 object**，数组/标量判为非法；没有参数也要写 `{}`。
+- **未知字段忽略、未知 topic / action 忽略** —— 这是没有版本号时唯一的向前兼容手段。
 - **一条坏消息只影响它自己**：非法 JSON / 结构不对 → 丢弃 + 记日志，**不断开连接**。
 - `status.mode` 用**大写**（`SLEEP`/`IDLE`/`STUDY`/`GAME`），而 `StateMachine` 内部是
   小写；转换只在 ipc server 那层做，不要混着传。
+- `switch_mode` 的参数键是 **`value`**（不是 `mode` —— 那是 `status` 推送里的字段）。
+
 
 ---
 

@@ -1,7 +1,23 @@
 # Agent ⇄ GUI IPC 协议
 
 Agent（Python）与 GUI（C++ / Qt5）都跑在 RK3568 板端，通过 Unix domain socket 通信。
-本文是该协议的**唯一事实来源**；常量与编解码实现在 `agent/ipc/protocol.py`。
+
+## 0. 本文负责什么（真源边界）
+
+**唯一真源：线上格式。** 具体包括 —— 信封字段、topic / action 取值、错误处理约定、
+常量表。本文与代码的分工是：格式以本文为准，**代码侧的唯一实现**是
+`agent/ipc/protocol.py`（C++ 侧照 §8 的字面值实现，不另立一份）。
+
+本文**不**负责下面这些 —— 它们各有自己的真源，**不要在这里复制一份**：
+
+| 不负责的内容 | 去哪看 |
+| --- | --- |
+| GUI 界面行为：哪个控件发什么、收到 topic 后界面怎么变、哪些位置还是占位 | `docs/gui-agent-integration.md` |
+| 模式的实际语义（SLEEP/STUDY/GAME 各自做什么）、LLM 调用与降级 | `docs/architecure.md`、`agent/core/`、`agent/llm/` |
+| Agent 侧 server 的接入点与装配 | `agent/ipc/__init__.py` 的 `build_ipc()`、`agent/main.py` |
+| 配置项从哪来、谁能改 | `config/config.example.yaml` 的注释 + `Readme.md` 的配置相关小节 |
+
+判断标准很简单：**"线上一个字节长什么样"归本文；"谁为什么发它 / 收到后界面怎么动"不归本文。**
 
 ---
 

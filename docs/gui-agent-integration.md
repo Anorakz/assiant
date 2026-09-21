@@ -26,18 +26,15 @@ GUI 侧日志（排查用）：连上打 `[ipc] 已连接`；每条收到的报�
 
 ## 2. Agent → GUI：推送（topic）
 
-信封（字段名固定）：
+**信封与每个 topic 的 data 字段/类型以 [`ipc-protocol.md` §2/§3](ipc-protocol.md) 为准**
+（那是唯一真源）。本节只讲**收不到协议细节的那一半**：GUI 收到之后做了什么。
 
-```json
-{"topic": "status", "data": { ... }, "timestamp": 1730000000.123}
-```
-
-| topic | data 字段 | GUI 反应 |
-|---|---|---|
-| `status` | `mode`: `"SLEEP"｜"IDLE"｜"STUDY"｜"GAME"`（**必须大写**）；`connected`: bool | 顶栏三态结论 + 模式徽标；`mode=GAME` → 主区切**视频区**、下区域切**B站封面**；其它模式 → 主区还给壁纸、下区域切**音乐条**；右区域按钮组按模式变化（见 §4） |
-| `llm` | `text`: string | 追加一条助手气泡；并收起"思考中…"。**只在你回过 `chat_input` 之后才有意义** |
-| `wallpaper` | `path`: string（本地路径）；`index`: int | 设为全局壁纸（等比铺满 + 居中裁切，200ms 淡入）。同一个 `path` 重复推会被忽略；**文件读不到** → 兜底底色 + 主区橙色提示，程序不崩 |
-| `music` | `title`: string；`playing`: bool | 音乐条曲目名 + 播放/暂停图标。`title` 为空 → 显示"未播放" |
+| topic | GUI 反应 |
+|---|---|
+| `status` | 顶栏三态结论 + 模式徽标；`mode=GAME` → 主区切**视频区**、下区域切**B站封面**；其它模式 → 主区还给壁纸、下区域切**音乐条**；右区域按钮组按模式变化（见 §4） |
+| `llm` | 追加一条助手气泡；并收起"思考中…"。**只在你回过 `chat_input` 之后才有意义** |
+| `wallpaper` | 设为全局壁纸（等比铺满 + 居中裁切，200ms 淡入）。同一个 `path` 重复推会被忽略；**文件读不到** → 兜底底色 + 主区橙色提示，程序不崩 |
+| `music` | 音乐条曲目名 + 播放/暂停图标。`title` 为空 → 显示"未播放" |
 
 **兼容性要点**
 
@@ -50,27 +47,26 @@ GUI 侧日志（排查用）：连上打 `[ipc] 已连接`；每条收到的报�
 
 ## 3. GUI → Agent：命令（action）
 
-信封（字段名固定）：
+信封（`{"action","payload"}`，无 `timestamp`）与 action / payload 的定义见
+[`ipc-protocol.md` §4](ipc-protocol.md)。本节只讲 **GUI 在哪儿发、期望你做什么**。
 
-```json
-{"action": "chat_input", "payload": {"text": "现在几点了"}}
-```
-
-| action | payload | GUI 里何处触发 | 期望 Agent 做什么 |
-|---|---|---|---|
-| `switch_mode` | `{"value": "SLEEP｜IDLE｜STUDY｜GAME"}` | 右区域模式按钮。当前是 IDLE/未知/非法值时给三个入口（睡眠/学习/游戏）；非空闲时只给「退出当前模式」，点它发 `IDLE` | 切模式（真正行为在你这边），然后**回推 `status{mode}`** 让界面同步 |
-| `chat_input` | `{"text": "..."}` | 对话区输入行 + 发送按钮（**仅"已连接"时可发**；断连时按钮禁用并提示） | 跑 LLM，然后推 `llm{text}`（若模式有变再推 `status`） |
-| `next_wallpaper` | `{}` | 主区右下角「下一张」 | 挑下一张壁纸并推 `wallpaper{path,index}` |
-| `next_bilibili` | `{}` | 视频控制条「下一集」 | 切下一集，并推你有的状态（`status`/封面等） |
+| action | GUI 里何处触发 | 期望 Agent 做什么 |
+|---|---|---|
+| `switch_mode` | 右区域模式按钮。当前是 IDLE/未知/非法值时给三个入口（睡眠/学习/游戏）；非空闲时只给「退出当前模式」，点它发 `IDLE` | 切模式（真正行为在你这边），然后**回推 `status{mode}`** 让界面同步 |
+| `chat_input` | 对话区输入行 + 发送按钮（**仅"已连接"时可发**；断连时按钮禁用并提示） | 跑 LLM，然后推 `llm{text}`（若模式有变再推 `status`） |
+| `next_wallpaper` | 主区右下角「下一张」 | 挑下一张壁纸并推 `wallpaper{path,index}` |
+| `next_bilibili` | 视频控制条「下一集」 | 切下一集，并推你有的状态（`status`/封面等） |
 
 ⚠ 注意 `switch_mode` 的键是 **`value`**（不是 `mode`）—— `mode` 是 §2 里 `status` **推送**
-的字段，方向不同，别混。
+的字段，方向不同，别混。这条以及"没有参数的 command 也必须带 `payload: {}`"等细节
+都在 `ipc-protocol.md` §4，**改动请改那边**。
 
 上面这个信封（`{"action","payload"}`，无 `timestamp`）已与 `docs/ipc-protocol.md` §4 对齐。
 历史提醒（Phase 6 D1/D2 之前，勿再退回）：Agent 侧当时收的是 `{"topic","data","timestamp"}`
 **并且**读 `payload["mode"]` —— 两个不一致叠加的结果是 **GUI 发的每一条命令都被整条丢掉**，
 而测试全绿（测试客户端发的是 topic 形态）。现在 Agent 侧由 `decode_command()` 收这个信封、
 `switch_mode` 读 `value`，有专门的用例钉住这两点。
+
 
 GUI 在**未连接 / 主机未就绪**时不会发这些命令（会先在界面上提示"没发出去：与 Agent 未连接"）。
 
@@ -125,17 +121,23 @@ LLM 调用与降级。GUI 的"模型测试页"会把配置写进 `gui/config/gui
 
 ## 6. 没有真 Agent 时怎么测
 
-仓里留了假 Agent 脚本（`temp/gui/tools/`，`temp/` 不入库）：
+仓里已有三个假 Agent，**都在版本库里**（不需要 `temp/` 下的临时脚本）：
+
+| 脚本 | 能力 | 用来验证 |
+|---|---|---|
+| `gui/tools/ipc_test_server.py` | 只 push：4 个已知 topic + "一条消息拆成两次 send" + 5 种坏消息 + 坏消息之后的合法消息 | GUI 的**收** |
+| `gui/tools/ipc_echo_server.py` | 收命令（打印 `action`/`payload`）+ 可选回推 `llm` | GUI 的**发**、重连（可 kill 后重启） |
+| `gui/tests/local_server.py` | 连上即按 `--push` 推，逐行打印 `RECV <原始行>` | GUI 的 QTest（`test_local_client` 的真对端，不是 mock） |
 
 ```bash
-# 推一条 status + 一条 music，并打印收到的命令
-python3 temp/gui/tools/t8_agent.py --socket /tmp/a.sock --mode IDLE --connected true \
-        --wallpaper /path/w.png --index 3 --hold 30 &
+# 终端 A：假 Agent（推 4 个 topic，并把收到的命令打印出来）
+python3 gui/tools/ipc_test_server.py --path /tmp/a.sock
+# 终端 B：GUI
 ./gui/build/agent_gui --windowed --socket /tmp/a.sock
 ```
 
-`t7_agent.py`（推 music）、`t8_agent.py`（推 status/wallpaper + 打印 `RECV`）覆盖了主要 topic。
-验收脚本 `temp/gui/tools/t*_evidence.sh` 里能查到每类消息怎么造。
+三者的编码都走 `agent/ipc/protocol.py`，与真 Agent 同一套实现 —— 所以不会出现
+"两边各自照文档手写、字段名不一致"（那正是 Phase 6 D1 那次 GUI 命令被整条丢掉的成因）。
 
 ---
 
