@@ -1,5 +1,0 @@
-if(EXISTS "E:/rk3568/project/myproject/assitant/build-host/tests/test_host_input_rb[1]_tests.cmake")
-  include("E:/rk3568/project/myproject/assitant/build-host/tests/test_host_input_rb[1]_tests.cmake")
-else()
-  add_test(test_host_input_rb_NOT_BUILT test_host_input_rb_NOT_BUILT)
-endif()
