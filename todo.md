@@ -400,9 +400,17 @@ Phase 6 决策记录（已评审）
      现在生产侧只有 agent/ipc/local_server.py 一份（收命令信封），e2e_ipc.py 改用现成的 gui/tests/local_server.py 当真对端。
      判据: agent/ipc/ 只剩 4 个文件; 全仓 `def decode_command` 只有 1 处; 板端 ctest e2e_ipc 全绿。
      顺带（C2 `4dcd42e`）把 gui/tools 两个只差一点的假 Agent 合成 fake_agent.py。
-□ 板端 ⇄ PC 同步机制固化：明确 git pull 与 deploy.ps1 各自负责什么，杜绝"板端落后好几个提交却没人发现"
-     （归一化 F 系列做。F1 已完成：main 的 30 个提交推到 GitHub，板端 fetch 后能看到 `59779c2`；
-      待做 F2 部署清单+落后判决+`-Prune`、F3 板端切到 main、F4 规则成文）
+☑ 板端 ⇄ PC 同步机制固化：**已完成**（F1/F2/F3）
+     · F1 `4f23a19` 之前的提交推到 GitHub，板端 fetch 后能看到 main
+     · F2 `f78d273` deploy.ps1 生成 logs/deployed-manifest（逐文件 sha256）+ deployed-rev；
+       health_check.sh 加"落后判定"（说得清落后几个、是哪几个）与"多余文件"，并加了
+       `--list-extra` 供 `deploy.ps1 -Prune` 复用（规则只有一处）；-PruneDryRun 可先看
+     · F3 板端从 `gui` 分支切到 `main`：备份/恢复板端本地路径 →
+       `git checkout -f -B main origin/main` → 从旧提交恢复 llm/ sig/ net/
+       config/config.yaml docs/gui-qt5-*.md tests/test_llm_integration.py todo →
+       写 .git/info/exclude。**板端 git status 首次完全干净**（59 项脏 → 0），
+       并顺带补齐了 main 有而板端一直没有的 native/ 源码、根 CMakeLists.txt、.gitmodules
+     待做：F4 把"git pull 负责什么、deploy.ps1 负责什么、板端哪些不入库"写成 docs/deploy.md
 ☑ 文档去重：**已完成**（B1 `a364269`）。gui-agent-integration.md §2/§3 的两张字段表降级为指针
      （字段定义只在 ipc-protocol.md），该文档只管"GUI 在哪儿发、收到后界面怎么变"；
      §6 里指向 temp/（clone 后不存在）的假 Agent 换成了仓库内真实脚本。
