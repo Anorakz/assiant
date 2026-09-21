@@ -135,6 +135,7 @@ tests/board/mpp_decode_smoke
 | 回退板端 | 板端 `git checkout -f gui`（旧 `gui` 分支仍在本地，指向旧提交）；或 PC 切到旧提交后重新部署 |
 | 板端本地文件（`llm/` 等）被删了 | 它们的内容在旧提交里：`git checkout 982ac65 -- <路径>` |
 | 板端 GUI 起不来 | `sync-gui.ps1 -Test` 会重编并跑 ctest；二进制在 `gui/build/agent_gui` |
+| 想在 WSL 里跑测试 | `sh scripts/test-python.sh` 可以；但**别在那里看 `git status`**（见 §8 第 7 条） |
 
 ---
 
@@ -150,6 +151,14 @@ tests/board/mpp_decode_smoke
 4. **ssh 参数里不要嵌引号**：会被剥掉，远端拿到的是残缺命令。
 5. **板端不提交、不手改代码**：改动一律回 PC，走部署流程。
 6. **部署前必须 commit**：`deploy.ps1` 只送 committed content。
+7. **同一份 checkout 别在 WSL 里跑 `git status`**：PC 侧是 `core.autocrlf=true`，WSL 的 git
+   默认 `false`，于是同一棵工作树在 WSL 会**假报约 100 个文件被改**（G1 实测：
+   `git status` 一片红，`git -c core.autocrlf=true status` 立刻干净）。**状态以 PC 为准**
+   —— PC 是唯一提交方。要看漂移就回 PC 看，别被 WSL 的视图带偏。
+8. **别用整树 `scp`/`cp -r` 部署**：早期整树拷贝把 PC/WSL 版本的 `__pycache__`
+   （`cpython-312` / `313` / `314`）带到了板端，而板端只有 python3.8，那些缓存
+   **永远不可能被加载**（G1 清掉 65 个）。`deploy.ps1` 用 `git archive` 只送已跟踪文件，
+   所以正常流程不会再发生 —— 手工补文件时也别整树拷。
 
 ---
 
