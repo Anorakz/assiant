@@ -59,6 +59,12 @@ STALE_CLAIMS = [
      "板端套件由 scripts/run-board-tests.ps1 驱动 (它跑的是共享的 test-python.sh)"),
     (r"实现未做",
      "IPC 的 server/client 都已经实现并在跑"),
+    (r"gui\.yaml|gui/config/",
+     "GUI 已经没有自己的配置文件了: 界面参数并进 config/config.yaml 的 gui: 段, "
+     "gui/config/ 目录连同模板一起删除 (归一化 D 系列)"),
+    (r"同步到[^\n]{0,40}llm\.env",
+     "llm/config/llm.env 是**派生**文件, 不是被同步的真源 —— "
+     "方向只有 config.yaml → llm.env 一个"),
 ]
 
 
@@ -132,7 +138,7 @@ class TestNoStaleClaims(unittest.TestCase):
         paths = _doc_paths()
         self.assertGreaterEqual(len(paths), 5, "扫描到的 md 太少: %r" % (paths,))
         names = {p.name for p in paths}
-        for must in ("Readme.md", "ipc-protocol.md", "architecure.md"):
+        for must in ("Readme.md", "ipc-protocol.md", "architecure.md", "config-sources.md"):
             self.assertIn(must, names, "扫描范围漏了 %s" % must)
 
 

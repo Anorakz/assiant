@@ -55,7 +55,7 @@
   `main` 上并 tracking `origin/main`（`git status` 保持干净）。
 - **部署只送已提交的内容**（`deploy.ps1` 用 `git archive HEAD`），所以"板端在跑的东西"
   永远可追溯到某个 commit。
-- **板端本地、不入库**：`config/config.yaml`、`gui/config/gui.yaml`、`llm/`、`sig/`、
+- **板端本地、不入库**：`config/config.yaml`、`llm/`、`sig/`、
   `net/`、`creds/`、`logs/`、`model/`、`runtimes/`、`temp/`。其中 `main` 的
   `.gitignore` 覆盖不了的那几个（`llm/ sig/ net/ runtimes/ …`）写在板端的
   `.git/info/exclude` 里 —— 那是**本机**规则，不该进仓库。

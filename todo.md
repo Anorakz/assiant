@@ -392,10 +392,18 @@ Phase 6 决策记录（已评审）
      Readme 删掉"实现未做"并补上命令信封。另加 tests/test_docs.py 文档守卫（相对链接 + 过时说法黑名单），
      已注册进三端共享的套件清单 —— 以后漂移会直接让测试变红。
      还发现并修掉：Readme 的 ZeroMQ 约定、architecure.md 整篇旧设计（ZeroMQ + PC 侧 GUI）。
-□ 配置入口收敛：只有 config/config.yaml 是 Agent 的运行时配置；
-     gui/config/gui.yaml 与 llm/config/llm.env 不再被 Agent 读取 —— 需明确「谁写、谁读」，
-     否则 GUI 模型测试页写三份、Agent 只认一份，改了不生效
-     （归一化 D 系列做：D1 决定把 gui.yaml 整个并进 config.yaml 的 gui: 段）
+☑ 配置入口收敛：**已完成**（归一化 D 系列 D1–D4）
+     · D1 `56d1ff9` config.yaml 成为唯一真源：原 GUI 专用配置的 17 个键整体并进它的 `gui:` 段，
+       同时修正 `llm:` 段漂移（edge = llama.cpp GGUF + 本机 llama-server）并补齐 llama-server 参数
+     · D2 `da1ae85` GUI 改读写 config.yaml：11 + 16 个键改到 `gui.*`，`--gui-config` → `--config`
+     · D3 `b6d5276` llm/config/llm.env 降级为**派生**文件：ConfigSyncer 只做
+       config.yaml → llm.env 的 8 个 LLM_* 键单向映射，不再读写 GUI 专用配置、不再自己存一份
+     · D4 删掉 gui/config/（模板连同 .gitignore 规则）；新增 docs/config-sources.md 讲清
+       「谁写 / 谁读 / 谁派生」；新增 tests/test_config_source_guard.py（agent/ 里出现
+       gui.yaml 或 llm.env 字面量即失败）；docs 的过时说法黑名单加两条
+     判据: 归一化后全仓只剩历史注释提到 GUI 专用配置；板端模型页改 mode → 只有 config.yaml 变、
+     llm.env 被重新派生（且派生结果与板端在用的那份逐字节相同）；Agent `--check-config`
+     对含 `gui:` 段的配置仍退出 0
 ☑ 清理并存实现：agent/ipc/server.py **已删除**（归一化 C1 `8608438`）——它是第二份 server 实现，自带第二份 decode_command()，只被 gui/tests/e2e_ipc.py 当联调对端用
      现在生产侧只有 agent/ipc/local_server.py 一份（收命令信封），e2e_ipc.py 改用现成的 gui/tests/local_server.py 当真对端。
      判据: agent/ipc/ 只剩 4 个文件; 全仓 `def decode_command` 只有 1 处; 板端 ctest e2e_ipc 全绿。

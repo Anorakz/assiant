@@ -43,6 +43,7 @@ tests/test_native_integration.py
 tests/test_chat_bus.py
 tests/test_io.py
 tests/test_docs.py
+tests/test_config_source_guard.py
 "
 
 pytest_file=tests/test_ipc.py

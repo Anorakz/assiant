@@ -5,16 +5,16 @@
 
 ## 1. 跑起来
 
-首次运行：仓库只带 `gui/config/gui.yaml.example`，先把模板复制成实际配置
-（运行期页面会写这份文件，所以它不入库）：
-
-```bash
-cp gui/config/gui.yaml.example gui/config/gui.yaml
-```
+配置只有一份 —— 仓库根目录的 `config/config.yaml`（模板见
+[`config/config.example.yaml`](../config/config.example.yaml)，约定见
+[`config-sources.md`](config-sources.md)）。GUI **没有**自己的配置文件，启动前不需要
+复制任何 GUI 专用模板；只有当 `config/config.yaml` 还不存在时才要
+`cp config/config.example.yaml config/config.yaml`。
 
 ```bash
 cd gui && cmake -S . -B build && cmake --build build -j4
-./build/agent_gui                       # 读 gui/config/gui.yaml，全屏 kiosk
+./build/agent_gui                       # 自动向上找 config/config.yaml，全屏 kiosk
+./build/agent_gui --config /tmp/g/config.yaml   # 显式指定配置（验收/沙箱用）
 ./build/agent_gui --windowed --page system
 ./build/agent_gui --socket /tmp/agent.sock
 ./build/agent_gui --stdio               # 纯终端模式（e2e_ipc 测试依赖）
@@ -41,21 +41,43 @@ cd gui && cmake -S . -B build && cmake --build build -j4
   任一区域的点击都会唤醒全部；隐藏区域设 `WA_TransparentForMouseEvents`，150ms 滑动。
 - **视频内嵌控制条**有自己的 `active/locked` 与**独立的** `idle_ms`（不与区域共享）。
 
-## 3. 配置（`gui/config/gui.yaml` 是唯一真源）
+## 3. 配置（`config/config.yaml` 是唯一真源）
 
-| 键 | 含义 |
-|---|---|
-| `theme` | 高级灰（当前仅一档） |
-| `fullscreen` / `start_page` / `debug` | 启动形态 / 默认页 / Debug 日志 |
-| `wake.top/bottom/left/right` | 四区域 `active` 或 `locked` |
-| `wake.idle_ms` | **四区域共用**的休眠时间 |
-| `video_overlay.mode` / `video_overlay.idle_ms` | 视频内嵌控制条的活动/锁定与**独立**休眠时间 |
-| `chat_channel` / `input_source` / `onboard_auto` | 对话通道 / 输入源（`keyboard`｜`terminal`）/ 是否真控 onboard |
-| `monitor_interval_ms` | 系统页刷新间隔 |
-| `llm.*` | 推理位置（local/cloud/disabled）与参数；由模型测试页写入并同步 |
+GUI 读写 `config/config.yaml` 的两个段：
 
-同步链路：模型测试页 → `gui.yaml` → `ConfigSyncer` → `llm/config/llm.env` 与 `config/config.yaml`
-（文本级键替换，保留注释与顺序）。设置页/输入源只写 `gui.yaml`。
+| 键（都在 `config/config.yaml` 里） | 谁读 | 含义 |
+|---|---|---|
+| `gui.theme` | GUI | 高级灰（当前仅一档） |
+| `gui.fullscreen` / `gui.start_page` / `gui.debug` | GUI | 启动形态 / 默认页 / Debug 日志 |
+| `gui.wake.top/bottom/left/right` | GUI | 四区域 `active` 或 `locked` |
+| `gui.wake.idle_ms` | GUI | **四区域共用**的休眠时间 |
+| `gui.video_overlay.mode` / `gui.video_overlay.idle_ms` | GUI | 视频内嵌控制条的活动/锁定与**独立**休眠时间 |
+| `gui.chat_channel` / `gui.input_source` / `gui.onboard_auto` | GUI | 对话通道 / 输入源（`keyboard`｜`terminal`）/ 是否真控 onboard |
+| `gui.monitor_interval_ms` | GUI | 系统页刷新间隔 |
+| `llm.*` | GUI 写、Agent 读 | 推理位置（`edge`／`cloud`／`disabled`）与参数 |
+
+写回规则：只替换**已存在的键**，保留注释与顺序；文件里没有的键追加到该段末尾。
+保存前 ConfigStore 会在原文件旁留一份 `.bak`（`*.bak` 已在 `.gitignore`）。
+
+派生链路是**单向**的：
+
+```
+config/config.yaml  ──ConfigSyncer──▶  llm/config/llm.env      （喂 llama-server）
+   （唯一真源）                         （派生文件，不是真源）
+```
+
+`llm.env` 里只有 8 个键可推导：`LLM_MODEL_PATH`、`LLM_MODEL_NAME`、`LLM_PORT`、
+`LLM_CTX_SIZE`、`LLM_BATCH_SIZE`、`LLM_THREADS`、`LLM_THREADS_BATCH`、`LLM_API_KEY`。
+其余布局类键（`LLM_HOST`、`LLM_LOG_DIR`、`LLM_RUN_DIR`、`LLM_PID_FILE`、`LLM_LOG_FILE`）
+由板端自己维护，派生**不碰**。手动跑一次：
+
+```bash
+./build/gui_config_sync                # 只打印将要发生的 diff（默认 dry-run）
+./build/gui_config_sync --apply        # 真写 llm/config/llm.env（留 .bak + 原子 rename）
+```
+
+⚠ 反向不成立：手改 `llm.env` 会在下一次「保存并同步」时被 `config.yaml` 覆盖。
+完整约定见 [`config-sources.md`](config-sources.md)。
 
 ## 4. 各页现状（含占位，方案 §7 一律"可见地不能当真"）
 

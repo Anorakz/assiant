@@ -21,7 +21,9 @@
 #                            additive, so the configured build tree survives
 #                            (re-running cmake -S gui -B gui/build with no -D
 #                            args reuses CMakeCache.txt).
-#    gui/config/gui.yaml  -- live GUI config, gitignored, board-owned.
+#    config/config.yaml   -- the single source of config truth, board-owned and
+#                            gitignored. It lives OUTSIDE gui/, so shipping gui/
+#                            cannot reach it; step 5 still checks it survived.
 #
 #  Source of truth: this repo's HEAD (via `git archive`), not the working tree.
 #  That matches deploy.ps1: only committed content is ever shipped, so what runs
@@ -198,7 +200,7 @@ if ($LASTEXITCODE -ne 0) { Fail "remote extract failed" }
 # the way through PowerShell 5.1 (a bare "(" then reaches bash and is a syntax
 # error). Plain tokens avoid the whole class of problem.
 Write-Host "  --- board-owned things must survive ---"
-& ssh $Target ('test -f ' + $remoteRoot + '/gui/config/gui.yaml && echo gui-live-config-present || echo gui-live-config-MISSING')
+& ssh $Target ('test -f ' + $remoteRoot + '/config/config.yaml && echo config-truth-present || echo config-truth-MISSING')
 & ssh $Target ('test -f ' + $remoteRoot + '/gui/build/CMakeCache.txt && echo gui-build-configured || echo gui-build-NOT-configured')
 
 $changed = (& ssh $Target ('cd ' + $remoteRoot + ' && git status --porcelain -- gui/ | wc -l')).Trim()

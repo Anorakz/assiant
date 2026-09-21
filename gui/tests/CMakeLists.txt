@@ -37,7 +37,7 @@ endif()
 add_test(NAME test_local_client COMMAND test_local_client)
 
 # --------------------------------------------------- T2: core 层单测 ---
-# 配置读写（文本级键路径替换）/ 配置同步（gui.yaml → llm.env + config.yaml）/
+# 配置读写（文本级键路径替换）/ 配置同步（config.yaml → 派生的 llm.env）/
 # 协议→显示状态。都不需要 Widgets，也不碰仓库里的真实配置文件。
 foreach(core_test test_config_store test_config_sync test_view_state test_idle_watcher test_onboard_ctl test_image_fit test_system_stats)
     add_executable(${core_test} ${core_test}.cpp)

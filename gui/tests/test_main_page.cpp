@@ -145,7 +145,7 @@ void TestMainPage::inputTypeButtonSwitchesThroughSamePath()
 {
     ChatPanel panel;
     QVERIFY(panel.inputTypeButton() != nullptr);
-    // 菜单里应该有**两个**输入源（keyboard / terminal），默认选中 gui.yaml 的默认值（keyboard）
+    // 菜单里应该有**两个**输入源（keyboard / terminal），默认选中 config.yaml 的默认值（keyboard）
     // 原第三个 "PC"（宿主机键盘）已随主机输入方向一起移除 (Phase 6 C4)
     QMenu* menu = panel.inputTypeButton()->menu();
     QVERIFY(menu != nullptr);

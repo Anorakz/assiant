@@ -118,5 +118,8 @@ creds/
 *.key
 # ---- GUI 运行期产物 / 验收证据 ----
 temp/
-gui/config/gui.yaml
+# 注: GUI 已经**没有**自己的配置文件了（归一化 D 系列把界面参数并进 config/config.yaml
+# 的 gui: 段，gui/config/ 目录连同 gui.yaml.example 一起删除）。这里不再需要 gui 配置规则。
+# GUI 的 ConfigStore 保存时会在原文件旁留一份 .bak（config/config.yaml.bak、
+# llm/config/llm.env.bak），那是运行期产物，不入库。
 *.bak

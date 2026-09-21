@@ -36,7 +36,9 @@ agent/
 │   │   ├── provider.py          # edge / cloud / disabled 分发
 │   │   └── rule_engine.py       # 无 LLM 时的正则规则兜底
 │   ├── ipc/                     # Agent ⇄ GUI 通信
-│   │   └── protocol.py          # IPC 协议: topic/command 常量 + 编解码 (无 server)
+│   │   ├── protocol.py          # IPC 协议: topic/command 常量 + 编解码
+│   │   ├── local_server.py      # 唯一的生产 server (Unix socket, 收命令信封)
+│   │   └── local_client.py      # 客户端 (板端脚本 / 活体验证用)
 │   ├── vision/                  # 视觉层
 │   │   ├── roi.py               # ROI 字符串解析 ("x,y,w,h")
 │   │   └── siglip_encoder.py    # SigLIP 图像编码 (⚠ 当前 mock)
@@ -45,11 +47,11 @@ agent/
 │       ├── image_reader.py      # ImageReader: image_rb → numpy 帧
 │       ├── input_sender.py      # InputSender: send_key / send_hotkey / send_mouse
 │       └── _native.py           # native 解析 + 专属单线程执行器 (SPSC)
-│   (main.py / scheduler.py / router.py / llm.py / vision.py / ipc.py /
-│    tools/ —— 待实现)
-├── gui/                         # Qt5 C++ GUI (在板端编译: src/ tests/ tools/ config/)
+│   └── net/                     # 对外服务客户端
+│       └── sunshine_client.py   # Sunshine 串流主机 API
+├── gui/                         # Qt5 C++ GUI (在板端编译: src/ tests/ tools/)
 ├── config/                      # 配置模板 (真实配置不入 git)
-│   ├── config.example.yaml      # 全局: llm.mode, sunshine.*, ipc.*
+│   ├── config.example.yaml      # 唯一真源模板: llm.* / gui.* / sunshine.* / ipc.*
 │   ├── user_profile.example.yaml# 用户画像
 │   └── schedule.example.yaml    # 日程
 ├── scripts/                     # 构建 / 部署 / 测试 / 配对工具
@@ -72,12 +74,15 @@ agent/
 │   ├── test_scheduler.py        # 日程触发 / 去重 / 终端命令识别
 │   ├── test_chat_bus.py         # ChatInputBus 单测
 │   ├── test_io.py               # image_reader / input_sender
+│   ├── test_docs.py             # 文档守卫: 链接有效 + 过时说法黑名单
+│   ├── test_config_source_guard.py  # 配置真源守卫: agent/ 只认 config/config.yaml
 │   ├── mocks/                   # mock_agent_native: native 替身
 │   ├── host/                    # 需要 numpy 的绑定层测试 (按需手动跑)
 │   └── board/                   # 板端真机验收脚本
 ├── docs/                        # 文档 (入口: docs/architecure.md)
 │   ├── architecure.md           # 架构与拓扑、板端布局
 │   ├── deploy.md                # 部署与双机同步规则
+│   ├── config-sources.md        # 配置来源: 谁写 / 谁读 / 谁派生
 │   ├── ipc-protocol.md          # Agent ⇄ GUI 协议 (线上格式唯一真源)
 │   ├── gui.md                   # GUI 构建与使用
 │   ├── gui-agent-integration.md # GUI 那一端实际收/发什么

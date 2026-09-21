@@ -206,7 +206,7 @@ void TestConfigStore::inMemorySetIsVisibleBeforeSave()
 {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
-    const QString path = dir.filePath(QStringLiteral("gui.yaml"));
+    const QString path = dir.filePath(QStringLiteral("config.yaml"));
     QVERIFY(writeFile(path, QStringLiteral("debug: false\nwake:\n  idle_ms: 5000\n")));
 
     ConfigStore store;
@@ -265,8 +265,8 @@ void TestConfigStore::envFlavorRoundTrip()
 void TestConfigStore::loadMissingFileFails()
 {
     // 不存在的路径必须**失败**：否则调用方 set+save 会造出只有个别键的残桩配置，
-    // 把真正的 gui.yaml 顶掉（T9 出图时真的发生过）。
-    const QString path = QDir::tempPath() + QStringLiteral("/gui_missing_%1.yaml")
+    // 把真正的 config/config.yaml 顶掉（T9 出图时真的发生过）。
+    const QString path = QDir::tempPath() + QStringLiteral("/config_missing_%1.yaml")
                                              .arg(QCoreApplication::applicationPid());
     QFile::remove(path);
     core::ConfigStore store;
