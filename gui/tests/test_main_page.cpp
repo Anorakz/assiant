@@ -4,6 +4,7 @@
 //  这是**真的点控件**：找到真实的输入框/按钮，setText + click，断言信号与副作用。
 //  需要 QApplication（Widgets），所以 ctest 里用 QT_QPA_PLATFORM=offscreen 跑。
 // ============================================================================
+#include <QBoxLayout>
 #include <QLineEdit>
 #include <QMenu>
 #include <QPushButton>
@@ -12,6 +13,9 @@
 
 #include "ui/chat_panel.h"
 #include "ui/mode_panel.h"
+#include "ui/pages.h"
+#include "ui/region_host.h"     // rightRegion() 返回它（pages.h 里只有前置声明）
+#include "ui/schedule_panel.h"
 
 namespace {
 
@@ -52,6 +56,7 @@ private slots:
     void chatSendBlockedWhenLinkDown();
     void chatCapsMessageCount();
     void inputTypeButtonSwitchesThroughSamePath();
+    void rightRegionHasChatAndScheduleAtThreeToTwo();
 };
 
 void TestMainPage::modePanelOffersThreeWhenIdleOrUnknown()
@@ -199,6 +204,46 @@ void TestMainPage::inputTypeButtonSwitchesThroughSamePath()
     QCOMPARE(panel.inputTypeButton()->text(), QStringLiteral("键盘 ▾"));
     QCOMPARE(spy.count(), 3);
     QCOMPARE(spy.last().at(0).toString(), QStringLiteral("keyboard"));
+}
+
+/// S5：右区域的三块结构与比例。这里断言的是**几何与布局**，不是像素：
+///   · 对话区 / 日程区都在 rightRegion_ 里，日程区在对话区下面
+///   · 两者的伸缩因子是 3 : 2
+void TestMainPage::rightRegionHasChatAndScheduleAtThreeToTwo()
+{
+    MainPage page;
+    page.resize(800, 1200);
+    page.show();
+
+    QWidget* chat = page.chatFrame();
+    QWidget* schedule = page.scheduleFrame();
+    QVERIFY(chat != nullptr);
+    QVERIFY(schedule != nullptr);
+    QVERIFY(page.schedulePanel() != nullptr);
+
+    // 同一列（同一个父控件），且都属于右区域
+    QCOMPARE(schedule->parentWidget(), chat->parentWidget());
+    QVERIFY(page.rightRegion()->isAncestorOf(chat));
+    QVERIFY(page.rightRegion()->isAncestorOf(schedule));
+    QVERIFY(page.rightRegion()->isAncestorOf(page.schedulePanel()));
+
+    // 日程区在对话区下面（同一个竖直布局，y 更大）
+    QVERIFY2(schedule->y() > chat->y(),
+             qPrintable(QStringLiteral("chat.y=%1 schedule.y=%2")
+                            .arg(chat->y()).arg(schedule->y())));
+
+    // 3 : 2
+    auto* box = qobject_cast<QBoxLayout*>(chat->parentWidget()->layout());
+    QVERIFY(box != nullptr);
+    QCOMPARE(box->stretch(box->indexOf(chat)), 3);
+    QCOMPARE(box->stretch(box->indexOf(schedule)), 2);
+
+    // 高度大致按 3:2 分（布局做完之后；给一点容差，别把字体/边距算得太死）
+    QVERIFY2(chat->height() > schedule->height(),
+             qPrintable(QStringLiteral("chat.h=%1 schedule.h=%2")
+                            .arg(chat->height()).arg(schedule->height())));
+
+    page.hide();
 }
 
 QTEST_MAIN(TestMainPage)

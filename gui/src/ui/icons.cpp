@@ -13,12 +13,14 @@ namespace ui {
 
 namespace {
 
-/// 图标名清单（与 resources/icons/*.svg 一一对应；测试会核对数量）
+/// 图标名清单（与 resources/icons/*.svg 一一对应）。
+/// ⚠ 它的守卫在 gui/tests/test_icons.cpp：每个名字都必须能取到非空 QIcon，
+///   而且数量要和 resources/icons/*.svg 对得上 —— 加图标时两边一起改。
 const char* const kNames[] = {
     "home",      "model",   "system",  "settings", "prev",   "next",
     "play",      "pause",   "fullscreen", "speed", "wallpaper", "watchdog",
     "music",     "chat",    "link",    "power",    "stop",   "report",
-    "clock",     "cpu",     "memory",  "sdcard",
+    "clock",     "cpu",     "memory",  "sdcard",   "schedule",
 };
 
 } // namespace

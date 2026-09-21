@@ -58,6 +58,11 @@ public:
     /// 按配置应用界面：gui.wake.*（四区域/统一休眠）+ gui.debug（[D] 指示）。
     void applyConfig(const core::ConfigStore& gui);
 
+    /// 重新读一遍日程并灌进右区域的日程区（S5）。
+    /// 触发时机：启动（applyConfig 末尾）、设置页保存后、每 60 秒一次
+    /// （60 秒是为了跨零点时"今天/明天"能翻页、"已过"的变暗跟着时间走）。
+    void reloadSchedule();
+
     /// 开始连接 Agent（非阻塞，断线由 LocalClient 自己重连）。
     void startIpc(const QString& path);
 
@@ -152,5 +157,6 @@ private:
     SettingsPage* settingsPage_ = nullptr;
     QString repoRoot_;
     QTimer* monitorTimer_ = nullptr;
+    QTimer* scheduleTimer_ = nullptr;    ///< 日程区的定时刷新（S5，60 秒）
     TopBar::LinkState lastLinkState_ = TopBar::LinkState::Disconnected;
 };

@@ -63,7 +63,7 @@ target_compile_definitions(test_schedule_model PRIVATE
 # ------------------------------------------------- T5/T7: 控件级测试 ---
 # 真的点控件（输入框 / 发送按钮 / 模式按钮 / 音乐条占位块），所以需要
 # QApplication + Widgets，跑的时候用 offscreen 平台插件。
-foreach(gui_test test_main_page test_bottom_bar test_video_panel test_sys_page test_model_page test_bench_runner test_settings_page test_schedule_panel)
+foreach(gui_test test_main_page test_bottom_bar test_video_panel test_sys_page test_model_page test_bench_runner test_settings_page test_schedule_panel test_icons)
     add_executable(${gui_test} ${gui_test}.cpp)
     # 控件测试里用到图标（VideoPanel/MusicBar）→ 把资源一起编进来
     target_sources(${gui_test} PRIVATE ../resources/icons.qrc)
@@ -84,6 +84,12 @@ foreach(gui_test test_main_page test_bottom_bar test_video_panel test_sys_page t
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 endforeach()
+
+# S5: 图标守卫要核对源码目录里的 *.svg 清单（qrc 是编译进二进制的，运行期列不出来）。
+# ⚠ 必须放在创建 test_icons 的 foreach **之后** —— 否则 CMake 会报
+#   "Cannot specify compile definitions for target ... which is not built by this project"。
+target_compile_definitions(test_icons PRIVATE
+    ICONS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../resources/icons")
 
 # ---------------------------------------------------------------- 双向联调 ---
 # 任务4: 起 Python IPC server + C++ GUI (headless), push status 再发 switch_mode。

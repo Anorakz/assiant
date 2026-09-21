@@ -20,6 +20,7 @@
 #include "ui/mode_panel.h"
 #include "ui/model_page.h"
 #include "ui/region_host.h"
+#include "ui/schedule_panel.h"
 #include "ui/settings_page.h"
 #include "ui/sys_page.h"
 #include "ui/video_panel.h"
@@ -169,13 +170,29 @@ MainPage::MainPage(QWidget* parent)
     modeFrame->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     rightBox->addWidget(modeFrame);
 
-    auto* chatFrame = new QFrame(rightContent);
-    chatFrame->setObjectName(QStringLiteral("AreaFrame"));
-    auto* chatBox = new QVBoxLayout(chatFrame);
+    chatFrame_ = new QFrame(rightContent);
+    // ⚠ 三块都用 "AreaFrame"：卡片背景/边框由 QSS `QFrame#AreaFrame` 提供，
+    //   改名就等于把卡片样式丢了。要区分它们用 MainPage 的访问器。
+    chatFrame_->setObjectName(QStringLiteral("AreaFrame"));
+    auto* chatBox = new QVBoxLayout(chatFrame_);
     chatBox->setContentsMargins(16, 14, 16, 14);
-    chatPanel_ = new ChatPanel(chatFrame);
+    chatPanel_ = new ChatPanel(chatFrame_);
     chatBox->addWidget(chatPanel_);
-    rightBox->addWidget(chatFrame, 1);
+
+    // ---- 日程区（S5）：数据由 MainWindow::reloadSchedule() 灌进来 ----
+    //  它自己**不读配置**（解析在 core::ScheduleModel，装配在 MainWindow），
+    //  这样控件级单测不需要任何配置文件。
+    scheduleFrame_ = new QFrame(rightContent);
+    scheduleFrame_->setObjectName(QStringLiteral("AreaFrame"));
+    auto* scheduleBox = new QVBoxLayout(scheduleFrame_);
+    scheduleBox->setContentsMargins(16, 14, 16, 14);
+    schedulePanel_ = new SchedulePanel(scheduleFrame_);
+    scheduleBox->addWidget(schedulePanel_);
+
+    // 对话区 : 日程区 = 3 : 2（方案 S5）。不用可拖拽分隔条：触摸屏上抓手难按，
+    // 而且会和 RegionHost 的折叠动画/固定几何互相干扰。
+    rightBox->addWidget(chatFrame_, 3);
+    rightBox->addWidget(scheduleFrame_, 2);
 
     rightRegion_ = new RegionHost(RegionHost::Edge::Right, rightContent, this);
 

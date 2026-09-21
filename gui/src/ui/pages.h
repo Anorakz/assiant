@@ -21,6 +21,7 @@ class QVBoxLayout;
 class RegionHost;
 class ModePanel;
 class ChatPanel;
+class SchedulePanel;
 class BottomBar;
 class VideoPanel;
 class QStackedWidget;
@@ -60,9 +61,14 @@ public:
     RegionHost* bottomRegion() const { return bottomRegion_; }
     RegionHost* rightRegion() const { return rightRegion_; }
 
-    /// 右区域的两块（T5）：上=模式切换按钮区，下=对话区
+    /// 右区域的三块：上=模式切换按钮区，中=对话区，下=日程区（S5 加）
     ModePanel* modePanel() const { return modePanel_; }
     ChatPanel* chatPanel() const { return chatPanel_; }
+    SchedulePanel* schedulePanel() const { return schedulePanel_; }
+
+    /// 对话区 / 日程区的容器（几何断言用；两者 objectName 都是 AreaFrame —— 卡片样式）
+    QWidget* chatFrame() const { return chatFrame_; }
+    QWidget* scheduleFrame() const { return scheduleFrame_; }
 
     /// 下区域（T7）：非游戏=音乐条，游戏=B站封面（互斥）
     BottomBar* bottomBar() const { return bottomBar_; }
@@ -83,6 +89,9 @@ private:
     RegionHost* rightRegion_ = nullptr;
     ModePanel* modePanel_ = nullptr;
     ChatPanel* chatPanel_ = nullptr;
+    SchedulePanel* schedulePanel_ = nullptr;
+    QWidget* chatFrame_ = nullptr;
+    QWidget* scheduleFrame_ = nullptr;
     BottomBar* bottomBar_ = nullptr;
     QPushButton* nextWallpaper_ = nullptr;
     QLabel* mainHint_ = nullptr;

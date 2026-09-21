@@ -10,6 +10,7 @@
 #include "core/config_store.h"
 #include "core/idle_watcher.h"
 #include "core/image_fit.h"
+#include "core/schedule_model.h"
 #include "services/local_client.h"
 #include "services/onboard_ctl.h"
 #include "ui/bottom_bar.h"
@@ -20,12 +21,14 @@
 #include "ui/region_host.h"
 #include "ui/icons.h"
 #include "ui/model_page.h"
+#include "ui/schedule_panel.h"
 #include "ui/settings_page.h"
 #include "ui/sys_page.h"
 #include "ui/top_bar.h"
 #include "ui/video_panel.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QJsonDocument>
@@ -42,6 +45,12 @@
 #include <QVBoxLayout>
 
 namespace {
+
+/// 日程区默认最多显示几行（配置键 gui.schedule.max_rows；两段合计上限）
+constexpr int kDefaultScheduleRows = 6;
+
+/// 日程区刷新间隔（S5）：跨零点翻页 + "已过"的变暗跟着时间走
+constexpr int kScheduleRefreshMs = 60 * 1000;
 
 /// 方案 §8 配色：底 #1E1F22 / 面板 #2B2D31 / 分隔 #3A3D42 / 主文字 #E6E6E6 /
 /// 次文字 #9AA0A6 / 强调 #7AA2F7。
@@ -60,6 +69,10 @@ QFrame#AreaFrame { background: rgba(43, 45, 49, 0.90); border: 1px solid #3A3D42
 QFrame#AreaFrameBare { background: transparent; border: none; }
 QLabel#AreaTitle { color: #9AA0A6; font-size: 20px; font-weight: bold; background: transparent; }
 QLabel#AreaHint { color: #6F757C; font-size: 15px; background: transparent; }
+/* S5：日程区。时间列等宽一点（用同一档字号 + 固定最小宽度，见 SchedulePanel），
+   标题比提示亮一档 —— 和对话区气泡的层次保持一致。 */
+QLabel#ScheduleTime { color: #9AA0A6; font-size: 16px; background: transparent; }
+QLabel#ScheduleTitle { color: #E6E6E6; font-size: 17px; background: transparent; }
 /* 主区占位文字（T8/T9 落地后删除），做得很淡以免干扰壁纸 */
 QLabel#AreaTitleBare { color: #4A4E54; font-size: 18px; background: transparent; }
 QLabel#AreaHintBare { color: #3A3D42; font-size: 14px; background: transparent; }
@@ -378,6 +391,13 @@ MainWindow::MainWindow(QWidget* parent)
     });
     monitorTimer_->setInterval(1000);   // applyConfig() 里会按配置改写
     monitorTimer_->start();
+
+    // S5：日程区每 60 秒重读一次（跨零点翻页 / 已过的行变暗跟着走）。
+    // 启动时的那一次在 applyConfig() 末尾（main.cpp 会调它）。
+    scheduleTimer_ = new QTimer(this);
+    connect(scheduleTimer_, &QTimer::timeout, this, [this]() { reloadSchedule(); });
+    scheduleTimer_->setInterval(kScheduleRefreshMs);
+    scheduleTimer_->start();
 
     // T9：视频区点了占位控制项 → 说明挂到右侧对话区的提示行
     //（控制条里放文字会被 QVideoWidget 的原生窗口盖住，实测真机看不到）
@@ -862,6 +882,42 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
                                                        : QStringLiteral("锁定"))
                                  .arg(gui.intValue(QStringLiteral("gui.video_overlay.idle_ms"), 3000));
     }
+
+    // S5：日程区跟着配置一起刷新（gui.schedule.max_rows 在这里生效）
+    reloadSchedule();
+}
+
+void MainWindow::reloadSchedule()
+{
+    if (mainPage_ == nullptr || mainPage_->schedulePanel() == nullptr) {
+        return;
+    }
+    if (configPath_.isEmpty()) {
+        core::ScheduleResult missing;
+        missing.ok = false;
+        missing.error = QStringLiteral("还没找到 config/config.yaml");
+        mainPage_->schedulePanel()->setSchedule(missing, kDefaultScheduleRows);
+        return;
+    }
+
+    int maxRows = kDefaultScheduleRows;
+    core::ConfigStore store;
+    QString error;
+    if (store.load(configPath_, &error)) {
+        maxRows = store.intValue(QStringLiteral("gui.schedule.max_rows"), kDefaultScheduleRows);
+    }
+
+    const core::ScheduleResult result =
+        core::ScheduleModel::loadFromConfig(configPath_, QDateTime::currentDateTime());
+    mainPage_->schedulePanel()->setSchedule(result, maxRows);
+    qInfo().noquote() << QStringLiteral("[gui] 日程: %1 行（配置 %2 条，最多显示 %3 行）%4")
+                             .arg(result.totalRows())
+                             .arg(result.totalInConfig)
+                             .arg(maxRows)
+                             .arg(result.problems.isEmpty()
+                                      ? QString()
+                                      : QStringLiteral("，%1 条读不出来")
+                                            .arg(result.problems.size()));
 }
 
 QString MainWindow::wakeStateText() const
