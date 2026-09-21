@@ -1,0 +1,431 @@
+// ============================================================================
+//  gui/tests/test_schedule_model.cpp — 日程解析/展开单测（core 层，不需要界面）
+//
+//  固定"现在" = 2026-09-21 15:00（**周一**），所以：
+//    · days 用 mon / 0  -> 今天；tue / 1 -> 明天
+//    · start 09:30 已过（past=true）；18:00 未到（past=false）
+//  注入 now 是为了确定性：不注入就得让测试跟着系统时间跑，那种用例没法断言。
+//
+//  覆盖：位置(逐键回落) / 三种时间写法+全角 / 星期各种写法 / date 互斥 /
+//        end 区间 / 排序 / past 只作用于今天 / 坏条目只坏它自己 / 整份失败
+// ============================================================================
+#include <QDate>
+#include <QDateTime>
+#include <QFile>
+#include <QTemporaryDir>
+#include <QTime>
+#include <QtTest/QtTest>
+
+#include "core/schedule_model.h"
+
+using core::ScheduleModel;
+using core::ScheduleResult;
+using core::ScheduleRow;
+
+namespace {
+
+/// 2026-09-21 是周一（dayOfWeek()==1）；下面有断言守着这个前提，
+/// 谁改了它，测试会直接说清为什么后面的用例会跟着错。
+const QDate kToday(2026, 9, 21);
+const QDateTime kNow(kToday, QTime(15, 0));
+
+ScheduleResult parseIt(const QString& yaml)
+{
+    return ScheduleModel::parse(yaml, kNow);
+}
+
+/// 取某一段的行数（0 = 今天，1 = 明天）。
+int rowsOn(const ScheduleResult& result, int index)
+{
+    if (index < 0 || index >= result.days.size()) {
+        return -1;
+    }
+    return result.days.at(index).rows.size();
+}
+
+QString titleOn(const ScheduleResult& result, int dayIndex, int rowIndex)
+{
+    return result.days.at(dayIndex).rows.at(rowIndex).title;
+}
+
+} // namespace
+
+class TestScheduleModel : public QObject {
+    Q_OBJECT
+
+private slots:
+    // ---------------------------------------------------------------- 前提 ---
+    void fixtureIsMonday()
+    {
+        QCOMPARE(kToday.dayOfWeek(), 1);                 // 周一
+        QCOMPARE(kToday.addDays(1).dayOfWeek(), 2);      // 明天周二
+        QCOMPARE(kNow.time(), QTime(15, 0));
+    }
+
+    // ---------------------------------------------------------------- 基本 ---
+    void emptyConfigIsOkWithTwoEmptyDays()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral("llm:\n  mode: disabled\n"));
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QVERIFY(result.error.isEmpty());
+        QCOMPARE(result.days.size(), 2);
+        QCOMPARE(result.days.at(0).label, QStringLiteral("今天"));
+        QCOMPARE(result.days.at(1).label, QStringLiteral("明天"));
+        QCOMPARE(result.totalRows(), 0);
+        QCOMPARE(result.totalInConfig, 0);
+        QCOMPARE(result.problems.size(), 0);
+    }
+
+    void recurringWithoutDaysHappensEveryDay()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 喝水
+      start: "10:00"
+)"));
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(rowsOn(result, 0), 1);
+        QCOMPARE(rowsOn(result, 1), 1);
+        QCOMPARE(titleOn(result, 0, 0), QStringLiteral("喝水"));
+    }
+
+    void recurringOnlyOnItsWeekdays()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 周一学习
+      days: [mon]
+      start: "09:30"
+    - title: 周二站会
+      days: [tue]
+      start: "09:30"
+)"));
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(rowsOn(result, 0), 1);
+        QCOMPARE(titleOn(result, 0, 0), QStringLiteral("周一学习"));
+        QCOMPARE(rowsOn(result, 1), 1);
+        QCOMPARE(titleOn(result, 1, 0), QStringLiteral("周二站会"));
+    }
+
+    void weekdayAcceptsIntShortFullAndCase()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 整数0
+      days: [0]
+      start: "08:00"
+    - title: 大写MON
+      days: [MON]
+      start: "08:01"
+    - title: 全名monday
+      days: [monday]
+      start: "08:02"
+    - title: 整数1是周二
+      days: [1]
+      start: "08:03"
+    - title: 中文周一不认
+      days: [周一]
+      start: "08:04"
+)"));
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(rowsOn(result, 0), 3);          // 整数0 / MON / monday 都在今天
+        QCOMPARE(rowsOn(result, 1), 1);          // 1 = 周二
+        QCOMPARE(result.problems.size(), 1);     // 中文星期按 Python 的规则要报错
+        QVERIFY(result.problems.at(0).contains(QStringLiteral("不认识的星期")));
+    }
+
+    void weekdayEmptyListMeansEveryDay()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 每天
+      days: []
+      start: "10:00"
+)"));
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(rowsOn(result, 0), 1);
+        QCOMPARE(rowsOn(result, 1), 1);
+    }
+
+    void oneoffOnlyOnItsDate()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  oneoff:
+    - title: 今天评审
+      date: 2026-09-21
+      start: "14:00"
+    - title: 明天体检
+      date: 2026-09-22
+      start: "08:00"
+    - title: 昨天的事
+      date: 2026-09-20
+      start: "09:00"
+    - title: 下周的事
+      date: 2026-09-28
+      start: "09:00"
+)"));
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(rowsOn(result, 0), 1);
+        QCOMPARE(titleOn(result, 0, 0), QStringLiteral("今天评审"));
+        QCOMPARE(rowsOn(result, 1), 1);
+        QCOMPARE(titleOn(result, 1, 0), QStringLiteral("明天体检"));
+        QCOMPARE(result.totalInConfig, 4);       // 过去的/下周的也算解析成功
+    }
+
+    // ---------------------------------------------------------------- 时间 ---
+    void clockFormsAreAllAccepted()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 一位小时
+      start: "9:30"
+    - title: 两位小时
+      start: "09:30"
+    - title: 紧凑写法
+      start: "0930"
+    - title: 未加引号的紧凑写法
+      start: 0930
+    - title: 全角冒号
+      start: "09：30"
+)"));
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(result.problems.size(), 0);
+        QCOMPARE(rowsOn(result, 0), 5);
+        for (const ScheduleRow& row : result.days.at(0).rows) {
+            QCOMPARE(row.time, QStringLiteral("09:30"));   // 统一规范化成两位
+        }
+    }
+
+    void endIsShownAsRangeAndChecked()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 有区间
+      start: "14:00"
+      end: "15:30"
+    - title: 没区间
+      start: "16:00"
+)"));
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(rowsOn(result, 0), 2);
+        QCOMPARE(result.days.at(0).rows.at(0).end, QStringLiteral("15:30"));
+        QCOMPARE(result.days.at(0).rows.at(1).end, QString());
+    }
+
+    void endBeforeStartIsAProblem()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 反了
+      start: "15:00"
+      end: "14:00"
+)"));
+        QVERIFY2(result.ok, qPrintable(result.error));                      // 逐条坏 ≠ 整份失败
+        QCOMPARE(rowsOn(result, 0), 0);
+        QCOMPARE(result.problems.size(), 1);
+        QVERIFY(result.problems.at(0).contains(QStringLiteral("end 早于 start")));
+    }
+
+    // ---------------------------------------------------------------- 展示 ---
+    void rowsAreSortedByStartThenTitle()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 晚上
+      start: "21:00"
+    - title: 早上B
+      start: "09:00"
+    - title: 早上A
+      start: "09:00"
+)"));
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(rowsOn(result, 0), 3);
+        QCOMPARE(titleOn(result, 0, 0), QStringLiteral("早上A"));
+        QCOMPARE(titleOn(result, 0, 1), QStringLiteral("早上B"));
+        QCOMPARE(titleOn(result, 0, 2), QStringLiteral("晚上"));
+    }
+
+    void pastOnlyAppliesToToday()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 上午的
+      start: "09:30"
+    - title: 晚上的
+      start: "18:00"
+)"));
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(result.days.at(0).rows.at(0).past, true);    // 09:30 < 15:00
+        QCOMPARE(result.days.at(0).rows.at(1).past, false);   // 18:00 > 15:00
+        QCOMPARE(result.days.at(1).rows.at(0).past, false);   // 明天永远不是"已过"
+        QCOMPARE(result.days.at(1).rows.at(1).past, false);
+    }
+
+    void exactlyNowIsNotPast()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 正好现在
+      start: "15:00"
+)"));
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(result.days.at(0).rows.at(0).past, false);
+    }
+
+    // ---------------------------------------------------------------- 坏数据 ---
+    void oneBadEntryDoesNotKillTheOthers()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 好的
+      start: "09:00"
+    - title: 坏的
+      start: "99:99"
+    - title: 也好的
+      start: "10:00"
+)"));
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(rowsOn(result, 0), 2);
+        QCOMPARE(result.problems.size(), 1);
+        QVERIFY(result.problems.at(0).contains(QStringLiteral("recurring #2")));
+        QCOMPARE(result.totalInConfig, 2);
+    }
+
+    void badShapesAreEachReported_data()
+    {
+        QTest::addColumn<QString>("name");
+        QTest::addColumn<QString>("body");
+
+        QTest::newRow("缺 title")        << "no-title"   << "    - start: \"09:00\"\n";
+        QTest::newRow("空 title")        << "empty-title" << "    - title: \"  \"\n      start: \"09:00\"\n";
+        QTest::newRow("title 不是字符串") << "num-title"  << "    - title: 5\n      start: \"09:00\"\n";
+        QTest::newRow("title 是 bool")   << "bool-title" << "    - title: true\n      start: \"09:00\"\n";
+        QTest::newRow("start 未加引号的 9:30")
+            << "start-sexagesimal" << "    - title: x\n      start: 9:30\n";
+        QTest::newRow("缺 start")        << "no-start"   << "    - title: x\n";
+        QTest::newRow("小时越界")        << "bad-hour"   << "    - title: x\n      start: \"25:00\"\n";
+        QTest::newRow("分钟越界")        << "bad-min"    << "    - title: x\n      start: \"09:61\"\n";
+        QTest::newRow("时间不是字符串")  << "time-num"   << "    - title: x\n      start: 930\n";
+        QTest::newRow("date 与 days 同给") << "both"     << "    - title: x\n      date: 2026-09-21\n      days: [mon]\n      start: \"09:00\"\n";
+        QTest::newRow("date 格式错")     << "bad-date"   << "    - title: x\n      date: 2026/09/21\n      start: \"09:00\"\n";
+        QTest::newRow("日期不存在")      << "no-date"    << "    - title: x\n      date: 2026-02-30\n      start: \"09:00\"\n";
+        QTest::newRow("days 不是列表")   << "days-scalar" << "    - title: x\n      days: mon\n      start: \"09:00\"\n";
+        QTest::newRow("days 项不是星期") << "days-map"   << "    - title: x\n      days: [{a: 1}]\n      start: \"09:00\"\n";
+        QTest::newRow("星期数字越界")    << "day-range"  << "    - title: x\n      days: [9]\n      start: \"09:00\"\n";
+        QTest::newRow("星期加了引号")    << "day-quoted" << "    - title: x\n      days: [\"1\"]\n      start: \"09:00\"\n";
+        QTest::newRow("remind 是负的")   << "remind-neg" << "    - title: x\n      start: \"09:00\"\n      remind_before_min: -1\n";
+        QTest::newRow("remind 是字符串") << "remind-str" << "    - title: x\n      start: \"09:00\"\n      remind_before_min: \"5\"\n";
+        QTest::newRow("action 是列表")   << "action-list" << "    - title: x\n      start: \"09:00\"\n      action: [1]\n";
+        QTest::newRow("条目不是映射")    << "entry-num"  << "    - 5\n";
+    }
+
+    void badShapesAreEachReported()
+    {
+        QFETCH(QString, name);
+        QFETCH(QString, body);
+        Q_UNUSED(name);
+
+        const ScheduleResult result = parseIt(QStringLiteral("scheduler:\n  recurring:\n") + body);
+        QVERIFY2(result.ok, qPrintable(result.error.isEmpty() ? body : result.error));
+        QCOMPARE(result.totalInConfig, 0);
+        QVERIFY2(!result.problems.isEmpty(), qPrintable(body));
+    }
+
+    void sectionNotAListIsReported()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  recurring: 5
+)"));
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(result.totalInConfig, 0);
+        QCOMPARE(result.problems.size(), 1);
+        QVERIFY(result.problems.at(0).contains(QStringLiteral("不是列表")));
+    }
+
+    void emptyActionIsAccepted()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 空 action
+      start: "09:00"
+      action:
+    - title: 空映射 action
+      start: "10:00"
+      action: {}
+)"));
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(result.problems.size(), 0);
+        QCOMPARE(rowsOn(result, 0), 2);
+    }
+
+    // ---------------------------------------------------------------- 位置 ---
+    void topLevelFallbackWorksPerKey()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  interval_min: 1
+  oneoff:
+    - title: 段里的
+      date: 2026-09-21
+      start: "09:00"
+recurring:
+  - title: 顶层的
+    start: "08:00"
+)"));
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(rowsOn(result, 0), 2);
+        QCOMPARE(titleOn(result, 0, 0), QStringLiteral("顶层的"));   // 08:00 排在前面
+        QCOMPARE(titleOn(result, 0, 1), QStringLiteral("段里的"));
+    }
+
+    // ---------------------------------------------------------------- 整体 ---
+    void badYamlFailsTheWholeThing()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral("scheduler: [1, 2\n"));
+        QVERIFY(!result.ok);
+        QVERIFY(!result.error.isEmpty());
+        QCOMPARE(result.days.size(), 0);
+        QCOMPARE(result.totalRows(), 0);
+    }
+
+    void topLevelNotAMappingFails()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral("- 1\n- 2\n"));
+        QVERIFY(!result.ok);
+        QVERIFY(result.error.contains(QStringLiteral("顶层")));
+    }
+
+    void missingFileIsReported()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const ScheduleResult result =
+            ScheduleModel::loadFromConfig(dir.filePath(QStringLiteral("nope.yaml")), kNow);
+        QVERIFY(!result.ok);
+        QVERIFY(result.error.contains(QStringLiteral("读不到配置文件")));
+    }
+
+    void loadFromConfigReadsRealFile()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("config.yaml"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        const QByteArray text = QByteArray(R"(scheduler:
+  recurring:
+    - title: 文件里的
+      start: "11:00"
+)");
+        QCOMPARE(file.write(text), static_cast<qint64>(text.size()));
+        file.close();
+
+        const ScheduleResult result = ScheduleModel::loadFromConfig(path, kNow);
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(rowsOn(result, 0), 1);
+        QCOMPARE(titleOn(result, 0, 0), QStringLiteral("文件里的"));
+    }
+};
+
+QTEST_APPLESS_MAIN(TestScheduleModel)
+
+#include "test_schedule_model.moc"

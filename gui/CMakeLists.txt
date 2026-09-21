@@ -35,6 +35,20 @@ set(CMAKE_AUTORCC ON)
 # 而不是编译到一半找不到符号。
 find_package(Qt5 5.12 REQUIRED COMPONENTS Core Network Widgets Multimedia MultimediaWidgets)
 
+# yaml-cpp: 只给 core/schedule_model.cpp **读** config.yaml 的 scheduler 段用
+#   (日程区)。写路径仍然只有 ConfigStore 的文本级替换 —— yaml-cpp 会重排+丢注释,
+#   绝不参与写回。板端安装: apt-get install -y libyaml-cpp-dev (0.6.2)
+find_package(yaml-cpp REQUIRED)
+# 0.6.x 的 imported target 是 `yaml-cpp`; 0.7+ 才是 `yaml-cpp::yaml-cpp`
+if(TARGET yaml-cpp::yaml-cpp)
+    set(YAMLCPP_TARGET yaml-cpp::yaml-cpp)
+elseif(TARGET yaml-cpp)
+    set(YAMLCPP_TARGET yaml-cpp)
+else()
+    message(FATAL_ERROR "找到了 yaml-cpp 但拿不到可用的 imported target")
+endif()
+message(STATUS "yaml-cpp: ${yaml-cpp_VERSION} -> ${YAMLCPP_TARGET}")
+
 # ------------------------------------------------------------------ 服务层 ---
 # 非 Widgets 的逻辑层：IPC 客户端 + 配置读写/同步 + 协议→显示状态。
 # 只依赖 QtCore / QtNetwork，因此能被单测直接链接（不需要起界面）。
@@ -57,9 +71,13 @@ add_library(gui_services STATIC
     src/core/image_fit.cpp
     src/core/system_stats.h
     src/core/system_stats.cpp
+    src/core/schedule_model.h
+    src/core/schedule_model.cpp
 )
 target_include_directories(gui_services PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gui_services PUBLIC Qt5::Core Qt5::Network)
+# PRIVATE: schedule_model.h 只暴露 Qt 类型, yaml-cpp 不外泄到使用方
+target_link_libraries(gui_services PRIVATE ${YAMLCPP_TARGET})
 
 # ------------------------------------------------------------------ 界面层 ---
 # 可复用控件做成静态库：主程序与「控件级单测」都能链接（单测要真的点按钮）。
