@@ -1,11 +1,13 @@
 # ============================================================================
-#  agent/io/chat_bus.py — Chat Input Bus: 三个输入源汇合到一条事件流
+#  agent/io/chat_bus.py — Chat Input Bus: 多个输入源汇合到一条事件流
 #
-#  三个数据源
+#  数据源
 #  ---------------------------------------------------------------------------
 #      terminal     : 终端里敲的一行字
 #      gui          : PySide6 界面输入框
-#      host_keyboard: 主机(被控端)键盘回传的事件  ← host_input_reader 投递
+#      host_keyboard: 预留 —— 曾经设计给"主机(被控端)键盘回传", 但
+#                     moonlight-common-c 没有这个 API, 生产者已删除
+#                     (Phase 6 收尾)。bus 本身与来源无关, 名字留着不碍事。
 #
 #  统一成同一种事件, 下游只看 bus, 不关心来源:
 #
@@ -14,7 +16,7 @@
 #  设计要点
 #  ---------------------------------------------------------------------------
 #  · 事件格式固定三个字段, **不做**内容解析: text 里放什么由投递方决定
-#    (主机键盘事件如何变成 text 是 host_input_reader 的事, 不是 bus 的事)
+#    (按键事件如何变成 text 是投递方的事, 不是 bus 的事)
 #  · 每条事件独立取值, 不合并、不去重、不改写
 #  · timestamp 用 time.time() (墙上时间, 不是 monotonic) —— 下游可能要拿它
 #    和用户看到的日志时间对齐, monotonic 没有可比性
@@ -31,7 +33,7 @@
 #  等下游取。订阅者只观察, 不消费。
 #
 #  ⚠ 订阅回调绝不能阻塞: 它是在 push() 的调用栈上被调用的, 而 push() 又可能
-#    被 host_input_reader 的轮询协程调用。所以回调里有 await 的部分不会在这里
+#    被后台轮询协程调用。所以回调里有 await 的部分不会在这里
 #    等待, 而是挂一个后台任务 (见 _notify_subscribers)。
 #
 #  事件循环
@@ -98,7 +100,8 @@ class ChatInputBus:
     async def push(self, source: str, text: str) -> Dict[str, Any]:
         """投递一条事件。
 
-        @param source 来源标记, 约定用 "terminal" / "gui" / "host_keyboard"
+        @param source 来源标记, 约定用 "terminal" / "gui"
+                      ("host_keyboard" 是预留名字, 当前无生产者)
         @param text   事件内容原样存放, bus 不做解析
         @return 实际入队的事件 dict (便于调用方拿 timestamp)
 

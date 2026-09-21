@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tests/test_io.py — ImageReader / HostInputReader / InputSender 单测
+tests/test_io.py — ImageReader / InputSender / ChatInputBus 单测
 
 运行:
     python tests/test_io.py
@@ -13,13 +13,6 @@ tests/test_io.py — ImageReader / HostInputReader / InputSender 单测
     · 没有帧时返回 None (不是异常、不是空数组)
     · size / capacity / overruns
     · native 调用发生在**同一个**线程 (SPSC 约束)
-  HostInputReader
-    · 轮询把事件投递到 bus, source == "host_keyboard"
-    · 不丢事件: read_all 一次取走多条, 全部投递且保序
-    · start_polling 幂等; stop 可重复调用
-    · 停止后不再投递
-    · 单次轮询抛异常不会让轮询整体停掉
-    · 事件文本渲染 (key / mouse / 未知类型 / 修饰键)
   InputSender
     · send_key 的字符串 -> VK 归一 (单字符 ord, 整数透传)
     · modifier 归一 ("ctrl" / ["ctrl","alt"] / int / None)
@@ -40,10 +33,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from agent.io import (  # noqa: E402
     ChatInputBus,
-    HostInputReader,
     ImageReader,
     InputSender,
-    event_to_text,
     resolve_key,
     resolve_modifier,
 )
@@ -165,170 +156,6 @@ class TestImageReader(_IoTestBase):
 
         await asyncio.gather(ticker(), reader.read_latest())
         self.assertGreater(len(ticks), 0, "读帧期间事件循环应当还能跑别的协程")
-
-
-# ===========================================================================
-#  HostInputReader
-# ===========================================================================
-class TestHostInputReader(_IoTestBase):
-    async def asyncSetUp(self):
-        self.bus = ChatInputBus()
-
-    async def test_no_events_means_no_bus_events(self):
-        reader = HostInputReader(native=self.native)
-        await reader.start_polling(self.bus, interval_ms=1)
-        await asyncio.sleep(0.05)
-        await reader.stop()
-        self.assertIsNone(self.bus.get_nowait())
-
-    async def test_delivers_host_events_to_bus(self):
-        self.native.push_host_event(key=ord("A"))
-        reader = HostInputReader(native=self.native)
-        await reader.start_polling(self.bus, interval_ms=1)
-
-        event = await asyncio.wait_for(self.bus.get(), timeout=1.0)
-        await reader.stop()
-
-        self.assertEqual(event["source"], "host_keyboard")
-        self.assertEqual(event["text"], "[key A]")
-        self.assertIsInstance(event["timestamp"], float)
-
-    async def test_delivers_all_events_in_order(self):
-        for ch in ("h", "i"):
-            self.native.push_host_event(key=ord(ch))
-        reader = HostInputReader(native=self.native)
-        await reader.start_polling(self.bus, interval_ms=1)
-
-        texts = []
-        for _ in range(2):
-            texts.append((await asyncio.wait_for(self.bus.get(), timeout=1.0))["text"])
-        await reader.stop()
-
-        self.assertEqual(texts, ["[key h]", "[key i]"], "不丢事件且保持顺序")
-
-    async def test_multiple_events_delivered_in_one_poll(self):
-        for i in range(5):
-            self.native.push_host_event(key=ord("a") + i)
-        reader = HostInputReader(native=self.native)
-        await reader.start_polling(self.bus, interval_ms=50)
-
-        texts = []
-        for _ in range(5):
-            texts.append((await asyncio.wait_for(self.bus.get(), timeout=1.0))["text"])
-        await reader.stop()
-        self.assertEqual(len(texts), 5)
-
-    async def test_start_polling_is_idempotent(self):
-        reader = HostInputReader(native=self.native)
-        await reader.start_polling(self.bus, interval_ms=1)
-        first_task = reader._task
-        await reader.start_polling(self.bus, interval_ms=1)
-        self.assertIs(reader._task, first_task, "重复启动不该起第二个任务")
-        await reader.stop()
-
-    async def test_is_running_reflects_state(self):
-        reader = HostInputReader(native=self.native)
-        self.assertFalse(reader.is_running())
-        await reader.start_polling(self.bus, interval_ms=1)
-        self.assertTrue(reader.is_running())
-        await reader.stop()
-        self.assertFalse(reader.is_running())
-
-    async def test_stop_is_idempotent(self):
-        reader = HostInputReader(native=self.native)
-        await reader.stop()  # 没启动过
-        await reader.start_polling(self.bus, interval_ms=1)
-        await reader.stop()
-        await reader.stop()  # 重复停
-
-    async def test_stop_halts_delivery(self):
-        reader = HostInputReader(native=self.native)
-        await reader.start_polling(self.bus, interval_ms=1)
-        await reader.stop()
-
-        self.native.push_host_event(key=ord("Z"))
-        await asyncio.sleep(0.05)
-        self.assertIsNone(self.bus.get_nowait(), "停止后不该再投递")
-
-    async def test_poll_error_does_not_kill_the_loop(self):
-        calls = {"n": 0}
-        original = self.native.host_input_rb.read_all
-
-        def flaky():
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise RuntimeError("boom")
-            return original()
-
-        self.native.host_input_rb.read_all = flaky
-        reader = HostInputReader(native=self.native)
-        await reader.start_polling(self.bus, interval_ms=1)
-
-        self.native.push_host_event(key=ord("K"))
-        event = await asyncio.wait_for(self.bus.get(), timeout=1.0)
-        await reader.stop()
-
-        self.assertEqual(event["text"], "[key K]", "一次轮询失败后应继续轮询")
-        self.assertGreater(calls["n"], 1)
-
-    async def test_poll_counter(self):
-        reader = HostInputReader(native=self.native)
-        await reader.start_polling(self.bus, interval_ms=1)
-        await asyncio.sleep(0.05)
-        await reader.stop()
-        self.assertGreater(reader.polls, 0)
-
-    async def test_native_poll_runs_off_event_loop_thread(self):
-        loop_thread = threading.get_ident()
-        seen = []
-        original = self.native.host_input_rb.read_all
-
-        def spy():
-            seen.append(threading.get_ident())
-            return original()
-
-        self.native.host_input_rb.read_all = spy
-        reader = HostInputReader(native=self.native)
-        await reader.start_polling(self.bus, interval_ms=1)
-        await asyncio.sleep(0.05)
-        await reader.stop()
-
-        self.assertTrue(seen)
-        self.assertTrue(all(t != loop_thread for t in seen))
-
-
-class TestEventToText(unittest.TestCase):
-    """事件 -> bus text 的渲染 (纯函数, 不需要事件循环)。"""
-
-    def test_key_printable(self):
-        self.assertEqual(
-            event_to_text({"type": "key", "key": ord("A"), "modifier": 0}), "[key A]"
-        )
-
-    def test_key_named(self):
-        self.assertEqual(event_to_text({"type": "key", "key": 0x0D}), "[key enter]")
-        self.assertEqual(event_to_text({"type": "key", "key": 0x20}), "[key space]")
-
-    def test_key_unknown_vk(self):
-        self.assertEqual(event_to_text({"type": "key", "key": 0xFE}), "[key vk:254]")
-
-    def test_key_with_modifier(self):
-        text = event_to_text({"type": "key", "key": ord("C"), "modifier": 2})
-        self.assertEqual(text, "[key C modifier=2]")
-
-    def test_mouse(self):
-        text = event_to_text(
-            {"type": "mouse", "x": 10, "y": 20, "action": "release"}
-        )
-        self.assertEqual(text, "[mouse x=10 y=20 action=release]")
-
-    def test_unknown_type_is_not_dropped(self):
-        text = event_to_text({"type": "gamepad", "button": 3})
-        self.assertIn("gamepad", text)
-
-    def test_unicode_key_label(self):
-        # 可打印范围外的键码不该抛异常
-        self.assertTrue(event_to_text({"type": "key", "key": 0x4E2D}).startswith("[key"))
 
 
 # ===========================================================================
@@ -523,53 +350,42 @@ class TestInputSender(_IoTestBase):
 
 
 # ===========================================================================
-#  端到端: 三源 -> bus -> 消费者 -> 回发输入
+#  端到端: 两源 -> bus -> 消费者 -> 回发输入
 # ===========================================================================
 class TestPipelineEndToEnd(_IoTestBase):
-    """把四个组件串起来跑一遍, 确认它们能协同工作。"""
+    """把组件串起来跑一遍, 确认它们能协同工作。"""
 
-    async def test_three_sources_to_bus_to_sender(self):
+    async def test_two_sources_to_bus_to_sender(self):
         bus = ChatInputBus()
-        reader = HostInputReader(native=self.native)
         sender = InputSender(native=self.native)
-
-        # 主机键盘侧: 预先塞两条, 由轮询投递
-        self.native.push_host_event(key=ord("h"))
-        self.native.push_host_event(key=ord("i"))
-        await reader.start_polling(bus, interval_ms=1)
 
         # 终端 + GUI 侧: 直接投递
         await bus.push("terminal", "go home")
         await bus.push("gui", "看一下截图")
 
-        # 消费者: 收满 4 条
+        # 消费者: 收满 2 条
         consumed = []
-        for _ in range(4):
+        for _ in range(2):
             consumed.append(await asyncio.wait_for(bus.get(), timeout=2.0))
-        await reader.stop()
 
         sources = sorted(e["source"] for e in consumed)
-        self.assertEqual(
-            sources, ["gui", "host_keyboard", "host_keyboard", "terminal"]
-        )
+        self.assertEqual(sources, ["gui", "terminal"])
         self.assertTrue(all(isinstance(e["timestamp"], float) for e in consumed))
 
         # 消费者把结果回发给主机
         for event in consumed:
             await sender.send_key("ctrl", "A", "down")
             await sender.send_key("ctrl", "A", "up")
-        self.assertEqual(len(self.native.calls_named("send_key")), 8)
+        self.assertEqual(len(self.native.calls_named("send_key")), 4)
         self.assertEqual(
             self.native.calls_named("send_key")[0], ("send_key", 0x02, 65, "down")
         )
 
-    async def test_image_and_input_run_concurrently_without_blocking(self):
-        """图像读取与输入轮询同时跑, 事件循环不被阻塞。"""
-        bus = ChatInputBus()
+    async def test_image_read_and_input_send_do_not_block_each_other(self):
+        """图像读取与输入发送同时跑, 事件循环不被阻塞。"""
         image = ImageReader(native=self.native)
-        reader = HostInputReader(native=self.native)
+        sender = InputSender(native=self.native)
         self.native.push_image(ts=1)
-        self.native.push_host_event(key=ord("x"))
 
         ticks = []
 
@@ -578,18 +394,13 @@ class TestPipelineEndToEnd(_IoTestBase):
                 ticks.append(1)
                 await asyncio.sleep(0.001)
 
-        await reader.start_polling(bus, interval_ms=1)
-        try:
-            frame, event, _ = await asyncio.gather(
-                image.read_latest(),
-                asyncio.wait_for(bus.get(), timeout=2.0),
-                ticker(),
-            )
-        finally:
-            await reader.stop()
+        frame, _, _ = await asyncio.gather(
+            image.read_latest(),
+            sender.send_key("ctrl", "C", "down"),
+            ticker(),
+        )
 
         self.assertIsNotNone(frame)
-        self.assertEqual(event["text"], "[key x]")
         self.assertGreater(len(ticks), 0, "并发期间事件循环应当仍在跑")
 
 
@@ -624,7 +435,7 @@ class TestNativeResolution(unittest.TestCase):
         import importlib
 
         for name in ("agent.io", "agent.io.chat_bus", "agent.io.image_reader",
-                     "agent.io.input_sender", "agent.io.host_input_reader"):
+                     "agent.io.input_sender"):
             with self.subTest(module=name):
                 importlib.import_module(name)
         self.assertIsNotNone(native_mod)

@@ -7,7 +7,7 @@ tests/test_chat_bus.py — ChatInputBus 单测
 
 覆盖:
   · 事件格式固定为 {source, text, timestamp} 三字段
-  · FIFO 顺序; 三源混投仍按到达顺序
+  · FIFO 顺序; 多源混投仍按到达顺序
   · get() 空队列阻塞; 有事件立刻返回
   · get_nowait() 空队列返回 None; 有事件返回
   · timestamp 是墙上时间 (time.time 量级)
@@ -91,11 +91,13 @@ class TestChatBus(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(got, ["m0", "m1", "m2", "m3", "m4"])
 
     async def test_three_sources_share_one_order(self):
+        # 第三个来源名是随便取的: bus 对 source 完全不解释 (曾经这里是
+        # "host_keyboard", 那条生产者已在 Phase 6 收尾时删除)。
         await self.bus.push("terminal", "t")
         await self.bus.push("gui", "g")
-        await self.bus.push("host_keyboard", "h")
+        await self.bus.push("ipc", "h")
         got = [(await self.bus.get())["source"] for _ in range(3)]
-        self.assertEqual(got, ["terminal", "gui", "host_keyboard"])
+        self.assertEqual(got, ["terminal", "gui", "ipc"])
 
     # ----------------------------------------------------------- 阻塞 ---
     async def test_get_blocks_until_push(self):

@@ -82,7 +82,5 @@ scheduler:
   window_min: 1
   # 迟到的容忍度(分钟): 设备休眠/重启后晚几分钟仍认这次触发
   late_grace_min: 0
-  # 主机输入轮询间隔(毫秒)
-  host_input_interval_ms: 50
   # 快捷键映射: 组合键 -> 动作 (state 切状态 / prompt 发消息)
   hotkeys: []

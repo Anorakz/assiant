@@ -7,13 +7,11 @@ tests/board/test_binding_api.py — 在板端验证 agent_native 暴露的完整
     LD_LIBRARY_PATH=. python3 test_binding_api.py
 
 覆盖用户要求的全部入口:
-    moonlight.start/stop/status
+    moonlight.start_with_session/stop/status
     image_rb.read_latest / read_by_timestamp / size
-    host_input_rb.read_latest / read_all
     send_key / send_mouse / send_hotkey
 以及约束:
     · read_latest 返回 numpy (256,256,3) uint8
-    · host_input_rb.read_latest 返回 dict (无事件时 None)
     · send_* 不得阻塞事件循环 (本脚本用信号量验证 GIL 确实被释放)
 """
 import os
@@ -45,16 +43,18 @@ def main():
 
     # ---------------------------------------------------------------- 结构 --
     print("== 模块结构 ==")
-    for name in ("moonlight", "image_rb", "host_input_rb"):
+    for name in ("moonlight", "image_rb"):
         check(hasattr(an, name), "有子模块 %s" % name)
     for name in ("send_key", "send_mouse", "send_hotkey"):
         check(callable(getattr(an, name, None)), "有函数 %s" % name)
-    for name in ("start", "stop", "status"):
+    for name in ("start_with_session", "stop", "status"):
         check(callable(getattr(an.moonlight, name, None)), "moonlight.%s" % name)
     for name in ("read_latest", "read_by_timestamp", "size"):
         check(callable(getattr(an.image_rb, name, None)), "image_rb.%s" % name)
-    for name in ("read_latest", "read_all"):
-        check(callable(getattr(an.host_input_rb, name, None)), "host_input_rb.%s" % name)
+    # Phase 6 收尾: host_input_rb 子模块已删除 (native 侧从来没有生产者),
+    # 这里反过来断言它**不存在** —— 免得哪次改动又把它带回来。
+    check(not hasattr(an, "host_input_rb"),
+          "host_input_rb 子模块已删除 (死代码, 没有生产者)")
 
     # ------------------------------------------------------------ image_rb --
     print("\n== image_rb ==")
@@ -75,21 +75,15 @@ def main():
     ts = an.image_rb.read_by_timestamp(0)
     check(ts is None, "read_by_timestamp(0) 无满足帧时返回 None")
 
-    # ------------------------------------------------------- host_input_rb --
-    print("\n== host_input_rb ==")
-    check(an.host_input_rb.size() >= 0, "size() 可调用")
-    check(an.host_input_rb.read_latest() is None, "read_latest() 无事件时返回 None")
-    allv = an.host_input_rb.read_all()
-    check(isinstance(allv, list), "read_all() 返回 list (实际 %s)" % type(allv).__name__)
-
     # ------------------------------------------------------------ status ----
     print("\n== moonlight.status() ==")
     st = an.moonlight.status()
     check(isinstance(st, dict), "返回 dict")
     for k in ("state", "connected", "error", "frames_pushed", "video_units_received",
-              "image_frames_available", "image_frames_dropped",
-              "host_input_available", "host_input_dropped"):
+              "image_frames_available", "image_frames_dropped"):
         check(k in st, "含字段 %s" % k)
+    for k in ("host_input_available", "host_input_dropped"):
+        check(k not in st, "不含已删除字段 %s" % k)
     check(st["state"] in ("idle", "connecting", "streaming", "stopping"),
           "state 取值合法 (%r)" % st["state"])
     print("     %r" % (st,))

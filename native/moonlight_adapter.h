@@ -1,5 +1,5 @@
 // ============================================================================
-//  moonlight_adapter.h — 连接管理 + 两条接收线程
+//  moonlight_adapter.h — 连接管理 + 视频接收线程
 //
 //  架构位置 (docs/architecure.md §3.1)
 //  ---------------------------------------------------------------------------
@@ -12,8 +12,9 @@
 //        ├── 视频接收线程 (moonlight 内部): decoderSetup (协商结果)
 //        │     → Decoder(MPP 硬解) → submitDecodeUnit (Annex-B 帧)
 //        │     → preprocess_frame → image_rb_ (256×256 RGB888)
-//        └── host_input_rb_ 目前只有读取侧 —— moonlight-common-c 没有"主机→
-//              客户端"的输入 API, 原设计的接收线程已删除 (todo.md 决策 2)
+//        └── 只有**一条**接收通路 —— 原来那个"主机→客户端"的输入回传环形缓冲
+//              (HostInputRingBuffer) 已删除: moonlight-common-c 根本没有这个 API,
+//              它从来没有生产者 (todo.md 决策记录)。
 //
 //  ⚠ 线程归属 (很重要, 决定了能不能加锁)
 //  ---------------------------------------------------------------------------
@@ -44,7 +45,6 @@
 #include <string>
 
 #include "decoder.h"
-#include "host_input_rb.h"
 #include "image_rb.h"
 
 namespace agent {
@@ -124,7 +124,6 @@ public:
     std::string last_error() const;
 
     ImageRingBuffer& image_rb();
-    HostInputRingBuffer& host_input_rb();
 
     // ------------------------------------------------------------- 诊断 ---
     /// 视频线程已收到的解码单元数 (含解码失败的)

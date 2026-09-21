@@ -356,7 +356,7 @@ def parse_hotkey_text(text: Any) -> Optional[HotkeyEvent]:
     """把 bus 里的一行文本解析成按键事件; 解析不了返回 None。
 
     支持两种形态:
-      1. host_input_reader 的渲染格式:
+      1. bus 里 "host_keyboard" 源的文本形态:
              "[key ctrl]"             按下 Ctrl
              "[key c modifier=6]"     按住 Ctrl+Alt 时按下 c
              "[key c release]"        抬起 c
@@ -364,10 +364,10 @@ def parse_hotkey_text(text: Any) -> Optional[HotkeyEvent]:
       2. 结构化 JSON (如果将来 bus 里投的是结构化事件):
              '{"type":"key","key":"c","modifier":6,"action":"press"}'
 
-    ⚠ 注意: 真实实现里 host_input_reader 只投递**按下**事件 (native 的 read_all
-    只回事件列表, 而 event_to_text 不区分按下/抬起时都渲染成 "[key X]")。
-    这里仍然支持 "release" 是为了 (a) 结构化 JSON 形态下能正确跟踪修饰键抬起,
-    (b) 将来 native 侧开始投递 release 时不用改解析器。
+    ⚠ 注意: 已知的文本生产者 (agent/io/host_input_reader.py) 已在 Phase 6 收尾时
+    删除 —— native 侧没有"主机键盘回传"的 API, 那条路从来没有事件。这个解析器
+    因此目前**没有生产者**; 保留它 (和 HotkeyBinding / listen_hotkey) 是为了
+    将来把快捷键接到板子自己的键盘/GUI 上时不用重写解析。见 todo.md 决策记录。
 
     解析不了就返回 None —— 调用方 (listen_hotkey) 跳过它。这让"从不认识的
     文本里认出快捷键"变成"宁可漏识别, 不可误触发"。
@@ -402,7 +402,7 @@ def parse_hotkey_text(text: Any) -> Optional[HotkeyEvent]:
     if not body:
         return None
 
-    action = "press"          # 默认按下: host_input_reader 只渲染按下
+    action = "press"          # 默认按下: 文本形态不区分按下/抬起时按"按下"算
     modifier_mask = 0
 
     if " modifier=" in body:
@@ -444,7 +444,7 @@ def _normalize_key(value: Any) -> Optional[str]:
         text = value.strip().lower()
         if not text:
             return None
-        # 单字符直接用; 具名键原样 (host_input_reader 已把 VK 渲染成名字)
+        # 单字符直接用; 具名键原样 (文本形态已把 VK 渲染成名字)
         return text
     return None
 
@@ -899,9 +899,10 @@ class Scheduler:
         下游再也看不到 (还会吃掉调度器自己 push 的触发消息)。订阅式只观察,
         事件仍然留在队列里等真正的消费者。
 
-        @note 只认 source == "host_keyboard" 的事件 (需求: Host Input RB 的 source)。
+        @note 只认 source == "host_keyboard" 的事件 (原需求: Host Input RB 的 source)。
               其它来源 (终端/GUI) 的文本即便长得像按键也不参与 —— 否则用户在
               终端里打一句 "[key c]" 就能触发状态切换。
+              ⚠ 这个 source 目前**没有生产者** (见 parse_hotkey_text 的 @note)。
 
         @note 这个方法**不返回**, 一直等到被 stop() 取消 (或订阅被取消)。
               保留它作为公开接口是为了让"起一个监听任务"这件事显式可见。

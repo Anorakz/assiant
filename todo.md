@@ -364,6 +364,23 @@ Phase 6 决策记录（已评审）
 6. 不清理 Sunshine 侧历史遗留（重复证书条目 / min_log_level=debug）
 7. next_wallpaper / next_bilibili 本期只做「收到 + 回推说明」
 8. **Agent 只读 config/config.yaml**：不读 gui/config/gui.yaml，也不读 llm/config/llm.env
+9. 【待定】快捷键监听（`scheduler.parse_hotkey_text` / `HotkeyBinding` / `listen_hotkey`）现在
+   **没有生产者** —— 它唯一认的输入是 `source == "host_keyboard"`，而那条路已随决策 2 删除。
+   Phase 6 收尾只清了 host-input 管道、**没有动这个功能**：要么将来把快捷键接到板子自己的
+   键盘/GUI，要么一并删除。见 parse_hotkey_text 的 @note。
+
+决策 2 的落地（Phase 6 收尾，已验收）：
+   Host Input 侧代码**全部删除**，不只是"不清理"：
+     · native/host_input_rb.h / .cpp（含 InputEvent、HostInputRingBuffer、kHostInputCapacity）
+     · binding.cpp 的 host_input_rb 子模块、status() 的 host_input_* 字段、
+       HOST_INPUT_CAPACITY 常量；binding_utils.h 的 event_to_dict()
+     · MoonlightAdapter::host_input_rb() 与 Impl::input_rb
+     · agent/io/host_input_reader.py 及其在 agent/io/__init__.py、agent/main.py 的装配
+     · config/config.example.yaml 的 scheduler.host_input_interval_ms
+     · tests/test_host_input_rb.cpp、tests/mocks/mock_agent_native.py 的替身子模块、
+       tests/test_io.py 的 TestHostInputReader / TestEventToText 用例
+     · docs/architecure.md、Readme.md 里声称"主机键盘 → Host Input RB → pybind11"的图与表
+   板端 test_binding_api.py 反过来断言 host_input_rb **不存在**，防止它被带回来。
 
 项目归一化处理（新增，与 Phase 6 并行）
 □ 唯一真源收敛：命令信封以实际实现为准后，docs/ipc-protocol.md 必须同步改，避免"文档说 A、代码做 B"

@@ -39,12 +39,6 @@ agent_add_host_test(test_image_rb
     ../native/image_rb.cpp
 )
 
-# host_input_rb
-agent_add_host_test(test_host_input_rb
-    test_host_input_rb.cpp
-    ../native/host_input_rb.cpp
-)
-
 # preprocess: YUV420P → 256×256 RGB888
 agent_add_host_test(test_preprocess
     test_preprocess.cpp
@@ -78,7 +72,6 @@ agent_add_host_test(test_moonlight_adapter
     ../native/decoder.cpp
     ../native/decoder_mpp.cpp
     ../native/image_rb.cpp
-    ../native/host_input_rb.cpp
     ../native/preprocess.cpp
 )
 if(WIN32)

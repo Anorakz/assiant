@@ -133,10 +133,10 @@ public:
 
     /// 告诉生产者"绝对序号 < seq 的条目我都已经处理掉了" (单调, 传小值不会倒退)
     ///
-    /// 给 **自带游标** 的封装层用: 例如 HostInputRingBuffer::read_all() 走
-    /// peek() 取数据, 完全不碰 RingBuffer 的 pop/read 游标, 于是生产者看不到
-    /// 消费进度, 会把已经读走的事件继续算成 overrun。那一批取完之后调一次
-    /// 这个函数, 丢事件统计才是准的。
+    /// 给 **自带游标** 的封装层用: 例如某个封装类用 peek() 取数据、完全不碰
+    /// RingBuffer 的 pop/read 游标, 于是生产者看不到
+    /// 消费进度, 会把已经读走的数据继续算成 overrun。那一批取完之后调一次
+    /// 这个函数, 丢数据统计才是准的。
     ///
     /// @note 只应由消费者线程调用
     void consumed_up_to(std::size_t seq) noexcept;

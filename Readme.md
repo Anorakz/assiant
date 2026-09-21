@@ -15,11 +15,10 @@ agent/
 ├── native/                      # C++ / pybind11
 │   ├── ring_buffer.h            # SPSC 无锁环形缓冲 (模板)
 │   ├── image_rb.cpp/.h          # 256×256 RGB888 视频帧环形缓冲 (容量 300)
-│   ├── host_input_rb.cpp/.h     # 主机输入事件环形缓冲 (容量 128)
 │   ├── preprocess.cpp/.h        # YUV420P → 256×256 RGB888
 │   ├── decoder.cpp/.h           # H.265 硬解 (板端 V4L2/FFmpeg)
 │   ├── input_sender.cpp/.h      # send_key / send_mouse / send_hotkey
-│   ├── moonlight_adapter.cpp/.h # 连接状态机 + 两条接收线程 (握手在 Python 侧, 见 agent/net/)
+│   ├── moonlight_adapter.cpp/.h # 连接状态机 + 视频接收线程 (握手在 Python 侧, 见 agent/net/)
 │   ├── binding_utils.h          # binding 与测试共用的转换工具 (Frame→numpy 等)
 │   ├── binding.cpp              # pybind11 模块 agent_native
 │   └── third_party/             # 子模块: moonlight-common-c, pybind11, googletest
@@ -40,9 +39,8 @@ agent/
 │   │   ├── roi.py               # ROI 字符串解析 ("x,y,w,h")
 │   │   └── siglip_encoder.py    # SigLIP 图像编码 (⚠ 当前 mock)
 │   └── io/                      # native 的 asyncio 包装 + 输入汇聚
-│       ├── chat_bus.py          # ChatInputBus: 终端/GUI/主机键盘 三源统一事件流
+│       ├── chat_bus.py          # ChatInputBus: 终端/GUI 统一事件流
 │       ├── image_reader.py      # ImageReader: image_rb → numpy 帧
-│       ├── host_input_reader.py # HostInputReader: 轮询 host_input_rb → bus
 │       ├── input_sender.py      # InputSender: send_key / send_hotkey / send_mouse
 │       └── _native.py           # native 解析 + 专属单线程执行器 (SPSC)
 │   (main.py / scheduler.py / router.py / llm.py / vision.py / ipc.py /
@@ -71,7 +69,7 @@ agent/
 │   ├── test_ipc_protocol.py     # IPC 线格式契约 (字节级)
 │   ├── test_scheduler.py        # 日程触发 / 去重 / 快捷键识别
 │   ├── test_chat_bus.py         # ChatInputBus 单测
-│   ├── test_io.py               # image_reader / host_input_reader / input_sender
+│   ├── test_io.py               # image_reader / input_sender
 │   ├── mocks/                   # mock_agent_native: native 替身
 │   ├── host/                    # 需要 numpy 的绑定层测试 (按需手动跑)
 │   └── board/                   # 板端真机验收脚本
@@ -109,24 +107,20 @@ scripts/deploy.ps1
 
 ## I/O 层
 `agent/io/` 把 native (`agent_native`) 的阻塞接口包成 asyncio 友好的 awaitable，
-并把三个输入源汇成一条事件流：
+并把输入源汇成一条事件流：
 
 ```
 终端 ─────┐
-GUI ──────┼─→ ChatInputBus ─→ 下游 (scheduler / agent core)
-主机键盘 ─┘        ▲
-                   └── HostInputReader (轮询 host_input_rb)
+GUI ──────┴─→ ChatInputBus ─→ 下游 (scheduler / agent core)
 
 ImageReader   → numpy (256,256,3) 帧
 InputSender   → send_key / send_hotkey / send_mouse
 ```
 
 ```python
-from agent.io import ChatInputBus, HostInputReader, ImageReader, InputSender
+from agent.io import ChatInputBus, ImageReader, InputSender
 
 bus = ChatInputBus()
-reader = HostInputReader()
-await reader.start_polling(bus, interval_ms=50)   # 主机键盘 → bus
 
 event = await bus.get()          # {"source", "text", "timestamp"}
 frame = await ImageReader().read_latest()
@@ -139,12 +133,10 @@ await sender.send_hotkey(["ctrl", "alt", "S"])
 约定：
 
 - **所有 native 调用都跑在专属的单线程执行器上**，不阻塞事件循环。这不只是性能：
-  `image_rb` / `host_input_rb` 是 SPSC 无锁结构，消费者必须**始终是同一个线程**，
+  `image_rb` 是 SPSC 无锁结构，消费者必须**始终是同一个线程**，
   所以不能用 asyncio 默认的共享线程池。
 - `agent/io` **不在 import 时加载 native 扩展**（宿主机没有 `.so`）。缺 `.so` 只在真正
   调用时报错；测试用 `agent.io.set_native(mock)` 注入替身。
-- `HostInputReader` 是轮询模式（默认 50ms），读到事件后渲染成文本投递到 bus。
-  它**不做**键盘事件解析、不做快捷键识别，也不做输入合法性校验。
 
 ---
 

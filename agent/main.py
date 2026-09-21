@@ -6,8 +6,8 @@
 #      1. 日志         logs/agent.log — 最早, 后面出错才有地方看
 #      2. config       读 config.yaml; 读不到就用模板, 都不行就退出
 #      3. native       moonlight.start_with_session() —— **失败不致命**, 只记 warning
-#      4. ChatInputBus 三源汇合点, 后面所有组件都挂在它上面
-#      5. io 层        host_input_reader(轮询→bus)
+#      4. ChatInputBus 多源汇合点, 后面所有组件都挂在它上面
+#      5. io 层        image_reader / input_sender
 #      6. StateMachine SLEEP/IDLE/STUDY/GAME
 #      7. ToolRouter   注册工具 (agent/tools/ 还没写 -> 空路由)
 #      8. LLMProvider  edge / cloud / disabled
@@ -61,10 +61,8 @@ from agent.config import ConfigError, ConfigNotFoundError, config_path, load_con
 from agent.core import Scheduler, State, StateMachine, ToolRouter
 from agent.io import (
     ChatInputBus,
-    HostInputReader,
     ImageReader,
     InputSender,
-    event_to_text,
 )
 from agent.llm import DEFAULT_MODE, LLMProvider, RuleEngine
 
@@ -257,7 +255,6 @@ class Runtime:
         self.llm: Optional[LLMProvider] = None
         self.scheduler: Optional[Scheduler] = None
         self.image_reader: Optional[ImageReader] = None
-        self.host_input_reader: Optional[HostInputReader] = None
         self.input_sender: Optional[InputSender] = None
         self.ipc: Any = None
 
@@ -482,26 +479,17 @@ class Runtime:
     async def _start_bus_and_io(self) -> None:
         async def _start_bus() -> None:
             self.bus = ChatInputBus()
-            self.log.info("ChatInputBus 就绪 (三源: 终端 / GUI / 主机键盘)")
+            self.log.info("ChatInputBus 就绪 (终端 / GUI)")
 
         await self._guarded(_Component("chat_bus", _start_bus))
 
         async def _start_io() -> None:
-            # 三个 IO 组件共用同一个 native, 但各自有专属执行器 (见 io/_native.py)
+            # IO 组件各自有专属执行器 (见 io/_native.py)
             self.image_reader = ImageReader()
             self.input_sender = InputSender()
-            self.host_input_reader = HostInputReader()
-            await self.host_input_reader.start_polling(
-                self.bus,
-                interval_ms=int(self._cfg("scheduler", "host_input_interval_ms", default=50)),
-            )
-            self.log.info("io 层就绪 (image_reader / input_sender / host_input_reader 轮询中)")
+            self.log.info("io 层就绪 (image_reader / input_sender)")
 
-        async def _stop_io() -> None:
-            if self.host_input_reader is not None:
-                await self.host_input_reader.stop()
-
-        await self._guarded(_Component("io", _start_io, _stop_io))
+        await self._guarded(_Component("io", _start_io))
 
     # ---- 3) state + tools ----
     async def _start_state_and_tools(self) -> None:
@@ -702,7 +690,7 @@ class Runtime:
         """主循环: 从 bus 消费事件 → LLM 处理 → (工具由 LLMRouter 执行) → 回话。
 
         @note 快捷键由 Scheduler 自己消费它需要的那部分 —— 它用 subscribe()
-              旁听 host_keyboard, 不走这个循环 (见 scheduler 的注释)。
+              旁听 bus 上的按键事件, 不走这个循环 (见 scheduler 的注释)。
         """
         if self.bus is None:
             raise RuntimeError("bus 未就绪, 不能进入主循环")

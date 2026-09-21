@@ -18,7 +18,6 @@
 │  agent_native.so  ←  pybind11 绑定                    │
 │  Python Agent Core (asyncio)                         │
 │  · Image RingBuffer   ← 视频帧                        │
-│  · Host Input RB      ← 主机原生键盘                  │
 │  · send_key/send_mouse → moonlight-common-c 直调      │
 │  · Chat Input Bus (asyncio.Queue)                    │
 │  · ZeroMQ PUB 0.0.0.0:5555                           │
@@ -40,7 +39,7 @@
 
 ## 3. 底层 C++ / pybind11 层
 
-### 3.1 读取侧：两个 RingBuffer
+### 3.1 读取侧：视频帧 RingBuffer
 
 ```
 Sunshine 视频流
@@ -49,12 +48,13 @@ Sunshine 视频流
   → ROI 裁剪 + 256×256 + RGB888
   → Image RingBuffer (lock-free, 300 帧)
   → pybind11: image_rb.read_latest()
-
-Sunshine 回传主机键盘
-  → moonlight-common-c 接收
-  → Host Input RingBuffer (lock-free, 128 事件)
-  → pybind11: host_input_rb.read_latest() / read_all()
 ```
+
+> **已删除（Phase 6 收尾）**：曾经设计过一条 `Sunshine 回传主机键盘 → Host Input
+> RingBuffer (128 事件) → pybind11` 的读取通路。moonlight-common-c 没有"主机 →
+> 客户端"的输入 API，所以那个环形缓冲从来没有生产者，属于死代码：native 的
+> `HostInputRingBuffer` / `binding.host_input_rb`、Python 的 `HostInputReader`
+> 及 `scheduler.host_input_interval_ms` 配置都已删除。
 
 ### 3.2 输出侧：直接调用 API，无 RingBuffer
 
@@ -82,8 +82,7 @@ agent_native.moonlight.stop()
 agent_native.moonlight.status()
 
 # 读取侧 RB
-frame  = agent_native.image_rb.read_latest(timeout_ms=0)   # numpy (256,256,3)
-events = agent_native.host_input_rb.read_all()
+frame = agent_native.image_rb.read_latest(timeout_ms=0)   # numpy (256,256,3)
 
 # 输出侧直调
 agent_native.send_key(modifier="META", key="L", action="press")
@@ -100,7 +99,7 @@ agent_native.send_mouse(x=100, y=200, action="move")
 | 文件 | 职责 |
 |---|---|
 | `main.py` | 装配所有组件，启动 asyncio 事件循环 |
-| `io.py` | 包装 image_rb / host_input_rb；Chat Input Bus（三源合一） |
+| `io.py` | 包装 image_rb；Chat Input Bus（多源合一） |
 | `state.py` | 状态机 SLEEP ⇄ IDLE ⇄ STUDY ⇄ GAME |
 | `scheduler.py` | 日程检查、定时触发、快捷键监听 |
 | `router.py` | 工具注册、权限控制、执行调度 |
@@ -110,10 +109,10 @@ agent_native.send_mouse(x=100, y=200, action="move")
 | `config.py` | YAML 加载与校验 |
 | `tools/` | lockscreen / netease / bilibili / wallpaper |
 
-**Chat Input Bus**：终端 stdin、GUI 键盘、Host Input RB 统一进 `asyncio.Queue`，事件格式：
+**Chat Input Bus**：终端 stdin、GUI 键盘统一进 `asyncio.Queue`，事件格式：
 
 ```python
-{"source": "terminal" | "gui" | "host_keyboard",
+{"source": "terminal" | "gui",
  "text": "...", "timestamp": 1234567890.123}
 ```
 
@@ -134,11 +133,9 @@ Agent Core 与 GUI 通过 ZeroMQ 跨机通信，PUB 端绑定 `0.0.0.0`。
 | 方向 | 通道 | 机制 |
 |---|---|---|
 | Sunshine → Python（图像） | 视频流 | 接收 → 解码 → 预处理 → **Image RB** → pybind11 |
-| Sunshine → Python（主机键盘） | 主机输入回传 | 接收 → **Host Input RB** → pybind11 |
 | Python → Sunshine（输入） | 输入通道 | pybind11 **直调** LiSendKeyboardEvent，释放 GIL |
 | 终端 → Agent | stdin | asyncio reader → **Chat Input Bus** |
 | GUI → Agent | PySide6 signal | Qt signal → **Chat Input Bus** |
-| Host Input RB → Agent | pybind11 读取 | read_latest → **Chat Input Bus** |
 | Agent → GUI | ZeroMQ PUB/SUB | 状态变更、LLM 输出、壁纸序列 |
 
 ---
@@ -157,7 +154,6 @@ D:\projects\agent\
 │   ├── CMakeLists.txt
 │   ├── ring_buffer.h
 │   ├── image_rb.cpp/.h
-│   ├── host_input_rb.cpp/.h
 │   ├── moonlight_adapter.cpp/.h
 │   ├── decoder.cpp/.h          ← 解码器对外接口 + 后端分发 + FFmpeg 软解
 │   ├── decoder_mpp.cpp         ← MPP 硬解后端 (RK3568 上真正用的那条路)

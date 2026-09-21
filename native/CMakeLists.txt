@@ -13,7 +13,6 @@ pybind11_add_module(agent_native
     decoder.cpp
     decoder_mpp.cpp
     image_rb.cpp
-    host_input_rb.cpp
     preprocess.cpp
     input_sender.cpp
     moonlight_adapter.cpp

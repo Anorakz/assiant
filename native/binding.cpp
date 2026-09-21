@@ -13,16 +13,13 @@
 //      agent_native.image_rb.read_by_timestamp(ts)        -> numpy (256,256,3) uint8 | None
 //      agent_native.image_rb.size()                       -> int
 //
-//      agent_native.host_input_rb.read_latest()           -> dict | None
-//      agent_native.host_input_rb.read_all()              -> list[dict]
-//
 //      agent_native.send_key(modifier, key, action)
 //      agent_native.send_mouse(x, y, action)
 //      agent_native.send_hotkey(keys)
 //
 //  设计要点
 //  ---------------------------------------------------------------------------
-//  · **单一适配器实例**: MoonlightAdapter 内部持有 image_rb / host_input_rb,
+//  · **单一适配器实例**: MoonlightAdapter 内部持有 image_rb,
 //    所以绑定层不能再各建一个环形缓冲 —— 否则 moonlight 写一个、Python 读另一个,
 //    永远读不到数据。这里用一个进程级单例, 子模块都引用它的成员。
 //
@@ -31,7 +28,7 @@
 //    asyncio 事件循环。注意 numpy 数组的**分配**必须在持有 GIL 时进行, 所以
 //    read_latest 是"先释放 GIL 读进本地缓冲, 再持 GIL 建数组"。
 //
-//  · **SPSC 语义**: image_rb / host_input_rb 是单生产者单消费者无锁结构。
+//  · **SPSC 语义**: image_rb 是单生产者单消费者无锁结构。
 //    生产者是 moonlight 内部线程; 消费者**必须是同一个 Python 线程**。
 //    从多个 Python 线程并发调用 read_* 是未定义行为, docstring 里已写明。
 //
@@ -50,7 +47,6 @@
 #include <vector>
 
 #include "binding_utils.h"
-#include "host_input_rb.h"
 #include "image_rb.h"
 #include "input_sender.h"
 #include "moonlight_adapter.h"
@@ -63,13 +59,10 @@
 
 namespace py = pybind11;
 using agent::AdapterState;
-using agent::HostInputRingBuffer;
 using agent::ImageRingBuffer;
-using agent::InputEvent;
 using agent::MoonlightAdapter;
-// 转换/解析工具 (Frame->numpy, InputEvent->dict, action 解析) 在 binding_utils.h,
+// 转换/解析工具 (Frame->numpy, action 解析) 在 binding_utils.h,
 // 与 tests/host/test_binding_numpy.cpp 共用同一份实现。
-using agent::binding::event_to_dict;
 using agent::binding::frame_to_numpy;
 using agent::binding::parse_button;
 using agent::binding::parse_press;
@@ -116,7 +109,7 @@ const char* state_name(AdapterState s) {
 //  模块
 // ===========================================================================
 PYBIND11_MODULE(agent_native, m) {
-    m.doc() = "agent native extension (moonlight / image_rb / host_input_rb / input)";
+    m.doc() = "agent native extension (moonlight / image_rb / input)";
     m.attr("__version__") = "0.2.0";
 
     // 保留原有自检入口 (scripts/deploy.ps1 用它做部署校验)
@@ -189,8 +182,6 @@ PYBIND11_MODULE(agent_native, m) {
             d["video_units_received"] = a.video_units_received();
             d["image_frames_available"] = a.image_rb().size();
             d["image_frames_dropped"] = a.image_rb().overruns();
-            d["host_input_available"] = a.host_input_rb().size();
-            d["host_input_dropped"] = a.host_input_rb().overruns();
             return d;
         },
         "返回当前状态快照 (dict)。");
@@ -229,47 +220,10 @@ PYBIND11_MODULE(agent_native, m) {
         "因覆盖而丢掉的未读帧数累计值。");
 
     // --------------------------------------------------------- host_input_rb --
-    py::module_ hrb = m.def_submodule("host_input_rb", "主机输入事件环形缓冲");
-
-    hrb.def(
-        "read_latest",
-        []() -> py::object {
-            InputEvent e{};
-            if (!adapter().host_input_rb().read_latest(e)) {
-                return py::none();
-            }
-            return event_to_dict(e);
-        },
-        "取最新一条事件 (并丢弃比它更旧的未读事件), 返回 dict; 没有未读事件返回 None。\n"
-        "⚠ 会推进消费游标: 调用后 size() 变 0。");
-
-    hrb.def(
-        "read_all",
-        []() {
-            // 事件条数上限 128、每条几十字节, 花不了多少时间, 没必要放开 GIL
-            std::vector<InputEvent> evs = adapter().host_input_rb().read_all();
-            py::list out;
-            for (const InputEvent& e : evs) {
-                out.append(event_to_dict(e));
-            }
-            return out;
-        },
-        "取走当前全部未读事件 (FIFO), 返回 list[dict]; 空则返回 []。");
-
-    hrb.def(
-        "size",
-        []() { return adapter().host_input_rb().size(); },
-        "还有多少条事件没被读过。");
-
-    hrb.def(
-        "capacity",
-        []() { return adapter().host_input_rb().capacity(); },
-        "固定容量 (kHostInputCapacity)。");
-
-    hrb.def(
-        "overruns",
-        []() { return adapter().host_input_rb().overruns(); },
-        "因覆盖而丢掉的事件数累计值。");
+    // 已删除 (Phase 6 收尾): 原来这里导出 host_input_rb.read_latest/read_all/size/
+    // capacity/overruns。那整条路是死代码 —— moonlight-common-c 没有"主机→客户端"
+    // 的输入 API, 所以 HostInputRingBuffer 从来没有生产者, Python 侧读到的永远是空。
+    // 留着只会让人以为"主机键盘回传"这条路是通的。详见 todo.md 决策记录。
 
     // ------------------------------------------------------------------ 输入 --
     m.def(
@@ -347,5 +301,4 @@ PYBIND11_MODULE(agent_native, m) {
     m.attr("FRAME_HEIGHT") = 256;
     m.attr("FRAME_CHANNELS") = 3;
     m.attr("IMAGE_RING_CAPACITY") = agent::kImageRingCapacity;
-    m.attr("HOST_INPUT_CAPACITY") = agent::kHostInputCapacity;
 }

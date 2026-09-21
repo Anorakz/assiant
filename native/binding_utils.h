@@ -3,7 +3,7 @@
 //
 //  为什么单独放一个头
 //  ---------------------------------------------------------------------------
-//  这些函数 (Frame -> numpy、InputEvent -> dict、action 解析) 都需要**在持有
+//  这些函数 (Frame -> numpy、action 解析) 都需要**在持有
 //  GIL 的前提下**运行, 且必须能脱离 MoonlightAdapter 单独测试:
 //  环形缓冲在还没收到帧时读出来是空的, 所以"能 import、能调用"证明不了 numpy
 //  那条路径的正确性 (形状/dtype/布局/像素值)。抽到头文件里, 测试就可以直接
@@ -24,7 +24,6 @@
 #include <cstring>
 #include <string>
 
-#include "host_input_rb.h"
 #include "image_rb.h"
 #include "input_sender.h"
 
@@ -139,22 +138,6 @@ inline pybind11::object read_by_timestamp_numpy(ImageRingBuffer& rb, std::int64_
         return pybind11::none();
     }
     return frame_to_numpy(frame);
-}
-
-// ---------------------------------------------------------------------------
-//  InputEvent -> dict
-// ---------------------------------------------------------------------------
-inline pybind11::dict event_to_dict(const InputEvent& e) {
-    pybind11::dict d;
-    d["type"] = (e.type == InputEvent::KEY) ? "key" : "mouse";
-    d["modifier"] = e.modifier;
-    d["key"] = e.key;
-    d["x"] = e.x;
-    d["y"] = e.y;
-    d["action"] = (e.action == InputEvent::PRESS) ? "press" : "release";
-    d["pressed"] = (e.action == InputEvent::PRESS);
-    d["timestamp_ns"] = e.timestamp_ns;
-    return d;
 }
 
 }  // namespace binding

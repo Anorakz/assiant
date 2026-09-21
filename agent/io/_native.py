@@ -10,7 +10,7 @@
 #       · 只 import agent.io 的模块不会因为缺 .so 而失败
 #
 #  2) **所有 native 调用都要跑在同一个线程上**
-#     这不是性能问题, 是**正确性**问题。image_rb / host_input_rb 是 SPSC
+#     这不是性能问题, 是**正确性**问题。image_rb 是 SPSC
 #     (单生产者单消费者)无锁环形缓冲, 约定"消费者永远是同一个线程"
 #     (见 native/ring_buffer.h 的并发约定)。而 asyncio 默认的
 #     loop.run_in_executor(None, ...) 用的是共享线程池 —— 同一个 reader 的两次
@@ -122,7 +122,7 @@ atexit.register(_shutdown_executors)
 def executor_for(name: str) -> ThreadPoolExecutor:
     """取 (必要时创建) 名为 name 的专属单线程执行器。
 
-    @param name 子系统名, 例如 "image_rb" / "host_input_rb" / "input_sender"
+    @param name 子系统名, 例如 "image_rb" / "input_sender"
     """
     with _EXECUTORS_LOCK:
         ex = _EXECUTORS.get(name)

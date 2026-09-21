@@ -9,7 +9,7 @@
 //
 //    · 状态机: Idle → Connecting → (失败回 Idle), stop() 幂等
 //    · 参数校验: 空 host / 空 app / 非法尺寸都快速失败且给出原因
-//    · 环形缓冲可访问且初始为空, 且 image_rb / host_input_rb 跨调用稳定
+//    · 环形缓冲可访问且初始为空, 且 image_rb 跨调用稳定
 //    · on_video_frame() 的守卫: 未连接时不写 RB
 //    · 重复 start / start-stop-start 不会崩
 //
@@ -66,18 +66,12 @@ TEST(MoonlightAdapterTest, RingBuffersAreAccessibleBeforeStart) {
     ImageRingBuffer& img = a.image_rb();
     EXPECT_EQ(img.size(), 0u);
     EXPECT_EQ(img.capacity(), 300u);
-
-    EXPECT_EQ(a.host_input_rb().size(), 0u);
-    EXPECT_EQ(a.host_input_rb().capacity(), 128u);
 }
 
 TEST(MoonlightAdapterTest, RingBufferReferencesAreStable) {
     MoonlightAdapter a;
     // 多次取应当拿到同一个对象 (不能每次返回临时)
     EXPECT_EQ(&a.image_rb(), &a.image_rb());
-    EXPECT_EQ(&a.host_input_rb(), &a.host_input_rb());
-    EXPECT_NE(static_cast<const void*>(&a.image_rb()),
-              static_cast<const void*>(&a.host_input_rb()));
 }
 
 // ===========================================================================

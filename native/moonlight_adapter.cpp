@@ -1,5 +1,5 @@
 // ============================================================================
-//  moonlight_adapter.cpp — 连接管理 + 两条接收线程实现
+//  moonlight_adapter.cpp — 连接管理 + 视频接收线程实现
 //
 //  两种构建模式
 //  ---------------------------------------------------------------------------
@@ -7,10 +7,11 @@
 //      真正调用 LiStartConnection / LiStopConnection, 并注册 C 回调。
 //
 //  未定义 (host 构建):
-//      不引用 moonlight 符号。start() 会做完整参数校验 + HTTP 握手,
+//      不引用 moonlight 符号。start_with_session() 会做完整参数校验,
 //      然后在"要调 LiStartConnection"那一步返回 false 并说明原因。
-//      这样 host 上仍能验证: 状态机、参数校验、HTTP/XML 解析、
+//      这样 host 上仍能验证: 状态机、参数校验、
 //      以及 on_video_frame() 的"Annex-B → 解码 → 预处理 → 写 RB"通路。
+//      (握手全在 Python 侧 —— 原来的 HTTP 分支已在 Phase 6 删除。)
 //
 //  回调是 C 风格的静态函数, 通过单例指针找回实例 —— moonlight 的 API
 //  没有 user context 交给 submitDecodeUnit, 只能用文件级单例。
@@ -115,7 +116,6 @@ VideoFormatCheck classify_video_format(int video_format, VideoCodec* out_codec) 
 
 struct MoonlightAdapter::Impl {
     ImageRingBuffer image_rb;
-    HostInputRingBuffer input_rb;
     Decoder decoder;
 
     std::atomic<int> state{static_cast<int>(AdapterState::kIdle)};
@@ -335,7 +335,6 @@ std::string MoonlightAdapter::last_error() const {
 }
 
 ImageRingBuffer& MoonlightAdapter::image_rb() { return impl_->image_rb; }
-HostInputRingBuffer& MoonlightAdapter::host_input_rb() { return impl_->input_rb; }
 
 std::size_t MoonlightAdapter::video_units_received() const {
     return impl_->video_units.load();
