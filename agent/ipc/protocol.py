@@ -48,6 +48,9 @@ __all__ = [
     "COMMAND_CHAT_INPUT",
     "COMMAND_NEXT_BILIBILI",
     "COMMANDS",
+    # 命令方向的信封字段名 (GUI 实际实现为准)
+    "ACTION_FIELD",
+    "PAYLOAD_FIELD",
     # 取值域
     "MODE_SLEEP",
     "MODE_IDLE",
@@ -58,6 +61,8 @@ __all__ = [
     "encode",
     "decode",
     "decode_full",
+    "encode_command",
+    "decode_command",
     # 错误
     "IpcProtocolError",
     "MalformedJsonError",
@@ -109,6 +114,16 @@ COMMANDS = (
     COMMAND_CHAT_INPUT,
     COMMAND_NEXT_BILIBILI,
 )
+
+# 命令方向的信封字段名。**以 GUI 的实际实现为准** (Phase 6 决策 1):
+#     gui/src/services/local_client.cpp 的 sendCommand() 发的是
+#         {"action": "chat_input", "payload": {"text": "..."}} + '\n'
+# 而 Agent -> GUI 的推送仍是 {"topic", "data", "timestamp"} (GUI 也是按那个解的)。
+# 两个方向字段名不同, 是照实实现的现状, 不是笔误 —— 见 docs/ipc-protocol.md §2/§4。
+#: 命令名所在的字段
+ACTION_FIELD = "action"
+#: 命令参数所在的字段 (必须是 JSON object; 没有参数就给 {})
+PAYLOAD_FIELD = "payload"
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +217,37 @@ def encode(
     return text.encode(ENCODING) + MESSAGE_SEPARATOR
 
 
+def encode_command(action: str, payload: Optional[Dict[str, Any]] = None) -> bytes:
+    """把一条 GUI -> Agent 的命令编码成**可以直接写进 socket 的完整字节**。
+
+    信封就是 GUI 那一种: ``{"action": ..., "payload": {...}}`` —— **没有 timestamp**,
+    因为 GUI 不发它。这里不"顺手"补一个: 多一个字段就多一处两边可能不一致的地方,
+    而这一层的意义正是让两侧发的东西一模一样。
+
+    @param action  命令名 (COMMAND_*); 非空字符串
+    @param payload JSON object (dict); None 视为 {}
+    @return UTF-8 字节, 以 b"\\n" 结尾
+    @raise InvalidMessageError action/payload 不合法, 或 payload 无法 JSON 序列化
+    """
+    if not isinstance(action, str) or not action.strip():
+        raise InvalidMessageError("action must be a non-empty string, got %r" % (action,))
+
+    body = {} if payload is None else payload
+    if not isinstance(body, dict):
+        raise InvalidMessageError(
+            "payload must be a JSON object (dict), got %s" % type(body).__name__
+        )
+
+    envelope = {ACTION_FIELD: action, PAYLOAD_FIELD: body}
+
+    try:
+        text = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise InvalidMessageError("payload is not JSON-serializable: %r" % (exc,)) from exc
+
+    return text.encode(ENCODING) + MESSAGE_SEPARATOR
+
+
 # ---------------------------------------------------------------------------
 #  解码: 线 -> Python
 # ---------------------------------------------------------------------------
@@ -228,6 +274,77 @@ def decode_full(
     """同 decode(), 但把 timestamp 也返回。
 
     @return (topic, data, timestamp)
+    """
+    payload = _parse_object(line)
+
+    # 未知字段直接忽略 (没有版本号时唯一的向前兼容手段)
+    topic = payload.get("topic")
+    if not isinstance(topic, str) or not topic.strip():
+        raise InvalidMessageError("missing or invalid 'topic' field: %r" % (topic,))
+
+    if "data" not in payload:
+        # 即使没有参数也必须给 {} —— 明确比"缺了就当空"更好查
+        raise InvalidMessageError("missing 'data' field (use {} for no arguments)")
+
+    data = payload["data"]
+    if not isinstance(data, dict):
+        raise InvalidMessageError(
+            "'data' must be a JSON object, got %s" % type(data).__name__
+        )
+
+    timestamp = payload.get("timestamp")
+    if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+        raise InvalidMessageError(
+            "missing or invalid 'timestamp' (Unix epoch seconds): %r" % (timestamp,)
+        )
+
+    return topic, data, float(timestamp)
+
+
+def decode_command(
+    line: Union[bytes, bytearray, memoryview, str],
+) -> Tuple[str, dict]:
+    """解一条 GUI -> Agent 的命令, 返回 (action, payload)。
+
+    与 decode_full() 的区别就是信封: 命令方向是 ``{"action", "payload"}``,
+    **没有 timestamp** —— 以 GUI 的实际实现为准 (Phase 6 决策 1)。
+
+    @raise MalformedJsonError   不是合法 JSON / 不是 UTF-8
+    @raise InvalidMessageError  缺 action/payload, 或 payload 不是 object
+    @raise IpcProtocolError     超过 MAX_LINE_BYTES
+
+    @note 收到 topic 形态的命令 (老格式 / 发错了方向) 会在这里报"缺 action",
+          接收方的标准动作是 log + 丢弃该行, 连接继续用 —— 不会静默当成成功。
+    """
+    payload = _parse_object(line)
+
+    action = payload.get(ACTION_FIELD)
+    if not isinstance(action, str) or not action.strip():
+        raise InvalidMessageError("missing or invalid 'action' field: %r" % (action,))
+
+    if PAYLOAD_FIELD not in payload:
+        # 与 'data' 同样的取舍: 没有参数也必须显式给 {}, 缺字段要吵出来
+        raise InvalidMessageError(
+            "missing 'payload' field (use {} for no arguments)"
+        )
+
+    body = payload[PAYLOAD_FIELD]
+    if not isinstance(body, dict):
+        raise InvalidMessageError(
+            "'payload' must be a JSON object, got %s" % type(body).__name__
+        )
+
+    return action, body
+
+
+# ---------------------------------------------------------------------------
+#  内部
+# ---------------------------------------------------------------------------
+def _parse_object(line: Union[bytes, bytearray, memoryview, str]) -> dict:
+    """线 -> JSON object (dict)。推送与命令共用的前半段 (长度/UTF-8/JSON/object)。
+
+    两种信封的差别只在字段名与必填项, 所以校验前半段只有这一份 —— 两处各写一遍
+    迟早会漂移。
     """
     raw = _to_bytes(line)
 
@@ -259,33 +376,9 @@ def decode_full(
             "message must be a JSON object, got %s" % type(payload).__name__
         )
 
-    # 未知字段直接忽略 (没有版本号时唯一的向前兼容手段)
-    topic = payload.get("topic")
-    if not isinstance(topic, str) or not topic.strip():
-        raise InvalidMessageError("missing or invalid 'topic' field: %r" % (topic,))
-
-    if "data" not in payload:
-        # 即使没有参数也必须给 {} —— 明确比"缺了就当空"更好查
-        raise InvalidMessageError("missing 'data' field (use {} for no arguments)")
-
-    data = payload["data"]
-    if not isinstance(data, dict):
-        raise InvalidMessageError(
-            "'data' must be a JSON object, got %s" % type(data).__name__
-        )
-
-    timestamp = payload.get("timestamp")
-    if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
-        raise InvalidMessageError(
-            "missing or invalid 'timestamp' (Unix epoch seconds): %r" % (timestamp,)
-        )
-
-    return topic, data, float(timestamp)
+    return payload
 
 
-# ---------------------------------------------------------------------------
-#  内部
-# ---------------------------------------------------------------------------
 def _to_bytes(line: Union[bytes, bytearray, memoryview, str]) -> bytes:
     """归一成 bytes。str 按 UTF-8 编码 (方便测试里直接写字符串)。"""
     if isinstance(line, bytes):

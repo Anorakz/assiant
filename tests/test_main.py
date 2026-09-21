@@ -37,7 +37,7 @@ from agent.ipc import (  # noqa: E402
     UNIX_SOCKET_SUPPORTED,
     LocalServer,
     NullServer,
-    encode,
+    encode_command,
 )
 from agent.main import Runtime, run, setup_logging  # noqa: E402
 from agent.net import LaunchResult, ServerInfo, SessionStart, SunshineError  # noqa: E402
@@ -349,7 +349,7 @@ class TestFailureIsolation(unittest.IsolatedAsyncioTestCase):
         try:
             reader, writer = await asyncio.open_unix_connection(rt.ipc.path)
             try:
-                writer.write(encode(COMMAND_CHAT_INPUT, {"text": "给我讲个故事"}))
+                writer.write(encode_command(COMMAND_CHAT_INPUT, {"text": "给我讲个故事"}))
                 await writer.drain()
 
                 for _ in range(200):

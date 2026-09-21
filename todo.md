@@ -181,8 +181,20 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
      UI 入口 / 命令 / 文案一并移除）—— 改动在 GUI，需与 GUI 侧同步
 
 -- D 状态与命令 --
-□ D1 IPC 命令格式统一为 GUI 实际实现：{"action": str, "payload": object}，一行一条
-     （docs/ipc-protocol.md §4 现写的是命令也放 topic 字段，与 GUI 不一致）
+■ D1 IPC 命令格式统一为 GUI 实际实现：{"action": str, "payload": object}，一行一条
+     改动：protocol.py 新增 ACTION_FIELD/PAYLOAD_FIELD + encode_command/decode_command
+     （两种信封共用的前半段抽成 _parse_object，免得两处各写一遍后漂移）；
+     local_server 的入方向改用 decode_command；local_client 改发 GUI **逐字节同款**信封；
+     测试新增 15 条命令信封用例（字节级断言 / 字段顺序 / 无 timestamp / 拒收老格式 / 各种坏形状）。
+     ⚠ 修之前的实况：server 只认 {"topic","data","timestamp"}，而 GUI 发 {"action","payload"}
+       —— **GUI 的每一条命令都会被当坏行丢掉**（这正是 D5/D6 的拦路石）。
+     刻意的取舍：**只认一种格式**。topic 形态的命令明确拒收，并有用例钉住
+     （test_topic_shaped_command_is_dropped）—— 双格式兼容就等于"文档说 A、代码也收 B"。
+     验证三方：PC 整套 exit 0（protocol 66 OK）；WSL 14 文件 OK（pytest 23 passed）；
+     板端 protocol 66 / local_server 77 / main 47 / pytest 23 全 OK。
+     （第一次板端验证**无效**：deploy 走 HEAD 而 D1 当时未提交，板端跑的是旧代码 ——
+       靠"test_ipc_protocol 只跑 51 条 vs PC 66 条"看出来，单独送文件重跑才是上面这份。）
+     文档仍写 topic 形态 —— 属 D3，本次没有跳步去改。
 □ D2 修 switch_mode 的键：payload 里是 value（不是 mode）
 □ D3 三份文档同步：ipc-protocol.md §4 / gui-agent-integration.md §3（那句「与 protocol §4 一致」是错的）/
      gui/src/services/local_client.cpp 的注释

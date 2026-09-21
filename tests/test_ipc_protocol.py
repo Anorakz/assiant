@@ -14,6 +14,8 @@ tests/test_ipc_protocol.py — agent/ipc/protocol.py 单测
   encode      信封字段、紧凑分隔符、结尾换行、UTF-8、data 必须是 object、
               timestamp 自动/显式/非法
   decode      结尾 \n 可有可无、容忍 \r\n、str/bytes 输入
+  命令信封    encode_command/decode_command: {"action","payload"} **无 timestamp**,
+              字段顺序与 GUI 一致, 拒收 topic 形态的老格式 (Phase 6 D1)
   字节级契约  与文档 §5 的 hex 逐字节一致
   错误        JSON 非法 / 非 UTF-8 / 顶层非 object / 缺字段 / data 非 object /
               timestamp 非法 / 超长
@@ -374,6 +376,106 @@ class TestWireContract(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertEqual(p.decode(lines[0])[0], "llm")
         self.assertEqual(p.decode(lines[1])[0], "music")
+
+
+# ===========================================================================
+#  命令方向的信封 (Phase 6 D1: 以 GUI 的实际实现为准)
+# ===========================================================================
+class TestCommandEnvelope(unittest.TestCase):
+    """GUI -> Agent 的命令是 {"action","payload"}, **没有 timestamp**。
+
+    C++ 侧 (gui/src/services/local_client.cpp 的 sendCommand) 就是这么发的, 所以这里
+    同样断言**确切的字节** —— 两侧必须逐字节一致, 否则联调时"测试全绿、真 GUI 一来
+    就哑"。D1 之前 Agent 只认 {"topic","data","timestamp"}, 真 GUI 的命令会被当坏行丢掉。
+    """
+
+    def test_field_name_constants(self):
+        self.assertEqual(p.ACTION_FIELD, "action")
+        self.assertEqual(p.PAYLOAD_FIELD, "payload")
+
+    def test_exact_bytes_match_the_gui(self):
+        raw = p.encode_command(p.COMMAND_CHAT_INPUT, {"text": "hi"})
+        self.assertEqual(raw, b'{"action":"chat_input","payload":{"text":"hi"}}\n')
+
+    def test_field_order_is_action_then_payload(self):
+        # Qt 的 QJsonObject 按插入顺序序列化, GUI 先插 action 再插 payload
+        text = p.encode_command(p.COMMAND_CHAT_INPUT, {"text": "x"}).decode()
+        self.assertLess(text.index('"action"'), text.index('"payload"'))
+
+    def test_there_is_no_timestamp_field(self):
+        payload = json.loads(p.encode_command(p.COMMAND_CHAT_INPUT, {}).decode())
+        self.assertEqual(set(payload), {"action", "payload"})
+
+    def test_none_payload_becomes_empty_object(self):
+        self.assertEqual(p.encode_command(p.COMMAND_NEXT_WALLPAPER),
+                         b'{"action":"next_wallpaper","payload":{}}\n')
+
+    def test_round_trip_every_documented_command(self):
+        for action in p.COMMANDS:
+            with self.subTest(action=action):
+                payload = {} if action == p.COMMAND_NEXT_WALLPAPER else {"text": "你好"}
+                self.assertEqual(p.decode_command(p.encode_command(action, payload)),
+                                 (action, payload))
+
+    def test_unicode_and_newlines_are_escaped(self):
+        raw = p.encode_command(p.COMMAND_CHAT_INPUT, {"text": "你好\n换行"})
+        self.assertEqual(raw.count(b"\n"), 1, "换行必须转义, 只留结尾分隔符")
+        self.assertIn("你好".encode("utf-8"), raw)
+        self.assertEqual(p.decode_command(raw)[1]["text"], "你好\n换行")
+
+    def test_decode_tolerates_separator_crlf_and_str_input(self):
+        body = '{"action":"chat_input","payload":{"text":"x"}}'
+        for line in (body, body + "\n", body + "\r\n"):
+            with self.subTest(line=repr(line)):
+                self.assertEqual(p.decode_command(line), ("chat_input", {"text": "x"}))
+
+    def test_topic_shaped_command_is_rejected(self):
+        # D1 的分水岭: 命令方向只认一种格式。两种都收 = "文档说 A、代码也收 B",
+        # 正是归一化要收敛掉的东西。
+        raw = p.encode(p.COMMAND_CHAT_INPUT, {"text": "x"}, timestamp=1.0)
+        with self.assertRaises(p.InvalidMessageError) as ctx:
+            p.decode_command(raw)
+        self.assertIn("action", str(ctx.exception))
+
+    def test_decode_rejects_bad_shapes(self):
+        for bad in (b'{"payload":{}}',                        # 缺 action
+                    b'{"action":"","payload":{}}',             # action 为空
+                    b'{"action":"   ","payload":{}}',          # action 全空白
+                    b'{"action":123,"payload":{}}',            # action 非字符串
+                    b'{"action":"chat_input"}',                # 缺 payload
+                    b'{"action":"chat_input","payload":[]}',   # payload 非 object
+                    b'{"action":"chat_input","payload":null}'):
+            with self.subTest(bad=bad):
+                with self.assertRaises(p.InvalidMessageError):
+                    p.decode_command(bad)
+
+    def test_decode_rejects_malformed_json_and_non_object(self):
+        for bad in (b"{not json", b"", b"null", b"[1,2]"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(p.IpcProtocolError):
+                    p.decode_command(bad)
+
+    def test_encode_rejects_bad_action(self):
+        for action in ("", "   ", None, 123):
+            with self.subTest(action=repr(action)):
+                with self.assertRaises(p.InvalidMessageError):
+                    p.encode_command(action, {})
+
+    def test_encode_rejects_non_object_payload(self):
+        for payload in ([], "x", 1, True):
+            with self.subTest(payload=repr(payload)):
+                with self.assertRaises(p.InvalidMessageError):
+                    p.encode_command(p.COMMAND_CHAT_INPUT, payload)
+
+    def test_encode_rejects_unserializable_payload(self):
+        with self.assertRaises(p.InvalidMessageError):
+            p.encode_command(p.COMMAND_CHAT_INPUT, {"bad": {1, 2, 3}})
+
+    def test_encode_rejects_oversize_line(self):
+        raw = p.encode_command(p.COMMAND_CHAT_INPUT,
+                               {"text": "x" * (p.MAX_LINE_BYTES + 10)})
+        with self.assertRaises(p.IpcProtocolError):
+            p.decode_command(raw)
 
 
 if __name__ == "__main__":

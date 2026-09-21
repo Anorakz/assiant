@@ -44,7 +44,7 @@ from .protocol import (
     SOCKET_PATH,
     IpcProtocolError,
     decode,
-    encode,
+    encode_command,
 )
 
 __all__ = [
@@ -222,11 +222,15 @@ class LocalClient:
 
     # ---- 发命令 ----
     async def send_command(self, action: str, payload: Optional[dict] = None) -> None:
-        """发一条命令给 Agent: {"topic": action, "data": payload}。
+        """发一条命令给 Agent: {"action": action, "payload": payload}。
+
+        信封与真实 GUI (gui/src/services/local_client.cpp 的 sendCommand) **逐字节一致** ——
+        这一层存在的意义就是"测试客户端发的东西 == GUI 发的东西", 否则联调时测试全绿、
+        真 GUI 一来就哑 (Phase 6 D1 之前就是这个状态)。
 
         @param action  命令名 (COMMAND_*; 不做白名单校验 —— 这是测试工具,
                        发个未知命令去看看 Agent 怎么处理也是常见需求)
-        @param payload 参数; None 当成 {} (协议要求 data 必须是 object)
+        @param payload 参数; None 当成 {} (协议要求 payload 必须是 object)
         @raise IpcClientError  还没 connect() (或已经断了)
         @raise IpcProtocolError action/payload 不合法 (调用方的 bug, 立刻报)
 
@@ -237,7 +241,7 @@ class LocalClient:
                 "还没 connect() 就 send_command() (本 client 不做自动重连)"
             )
 
-        line = encode(action, {} if payload is None else payload)
+        line = encode_command(action, {} if payload is None else payload)
         self._writer.write(line)
         await self._writer.drain()
         self.sent += 1

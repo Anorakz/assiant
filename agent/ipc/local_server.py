@@ -63,6 +63,7 @@ from .protocol import (
     SOCKET_PATH,
     IpcProtocolError,
     decode,
+    decode_command,
     encode,
 )
 
@@ -365,29 +366,34 @@ class _ClientSession:
                 return False
 
     async def _handle_line(self, raw: bytes) -> None:
-        """解一条消息并交给上层; 不合法就丢弃 (不断连接)。"""
+        """解一条**命令**并交给上层; 不合法就丢弃 (不断连接)。
+
+        命令方向的信封是 {"action", "payload"} —— 以 GUI 的实际实现为准
+        (Phase 6 决策 1)。Agent 发出去的是 {"topic","data","timestamp"},
+        两个方向字段名不同是现状, 不是笔误。
+        """
         try:
-            topic, data = decode(raw)
+            action, payload = decode_command(raw)
         except IpcProtocolError as exc:
             self.dropped += 1
             self._note_drop(str(exc))
-            self.log.warning("ipc: 丢弃一条非法消息: %s", exc)
+            self.log.warning("ipc: 丢弃一条非法命令: %s", exc)
             return
 
         self.received += 1
-        await self._deliver(topic, data)
+        await self._deliver(action, payload)
 
-    async def _deliver(self, topic: str, data: dict) -> None:
+    async def _deliver(self, action: str, payload: dict) -> None:
         """调上层回调。异常只记日志 —— 一条消息处理失败不该断连接。"""
         try:
-            result = self._on_message(topic, data)
+            result = self._on_message(action, payload)
             if inspect.isawaitable(result):
                 await result
         except asyncio.CancelledError:
             raise
         except Exception as exc:        # noqa: BLE001
-            self.log.warning("ipc: 处理消息 %s 出错 (已忽略): %r", topic, exc)
-            self.log.debug("ipc: 处理消息 traceback", exc_info=True)
+            self.log.warning("ipc: 处理命令 %s 出错 (已忽略): %r", action, exc)
+            self.log.debug("ipc: 处理命令 traceback", exc_info=True)
 
     def _note_drop(self, reason: str) -> None:
         if self._on_drop is not None:

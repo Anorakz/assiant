@@ -33,6 +33,7 @@ from .local_server import (
     mode_to_wire,
 )
 from .protocol import (
+    ACTION_FIELD,
     COMMAND_CHAT_INPUT,
     COMMAND_NEXT_BILIBILI,
     COMMAND_NEXT_WALLPAPER,
@@ -46,6 +47,7 @@ from .protocol import (
     MODE_SLEEP,
     MODE_STUDY,
     MODES,
+    PAYLOAD_FIELD,
     SOCKET_PATH,
     TOPIC_LLM,
     TOPIC_MUSIC,
@@ -56,8 +58,10 @@ from .protocol import (
     IpcProtocolError,
     MalformedJsonError,
     decode,
+    decode_command,
     decode_full,
     encode,
+    encode_command,
 )
 
 __all__ = [
@@ -78,6 +82,8 @@ __all__ = [
     "COMMAND_CHAT_INPUT",
     "COMMAND_NEXT_BILIBILI",
     "COMMANDS",
+    "ACTION_FIELD",
+    "PAYLOAD_FIELD",
     # 取值域
     "MODE_SLEEP",
     "MODE_IDLE",
@@ -88,6 +94,8 @@ __all__ = [
     "encode",
     "decode",
     "decode_full",
+    "encode_command",
+    "decode_command",
     # 错误
     "IpcProtocolError",
     "MalformedJsonError",

@@ -66,6 +66,7 @@ from agent.ipc.protocol import (  # noqa: E402
     IpcProtocolError,
     decode,
     encode,
+    encode_command,
 )
 
 # 测试里不关心日志内容, 但会**故意**制造一堆 WARNING (坏消息/超长行/慢客户端)
@@ -114,13 +115,13 @@ class _RecordingWriter:
 
 
 def _short() -> bytes:
-    """一条**很短**的合法消息 (约 42 字节)。
+    """一条**很短**的合法命令 (约 45 字节)。
 
     超长行用例把上限压到 64~96 字节, 而一条真的 chat_input 光信封就 70+ 字节
     —— 用它当"超长行后面的好消息"会连带被丢, 那是用例自己的错。所以这里用
-    空的 data + 短 topic。
+    空的 payload + 短 action。
     """
-    return encode("ping", {}, timestamp=1000000000.0)
+    return encode_command("ping", {})
 
 
 async def _wait_until(predicate, timeout: float = 3.0, what: str = "条件") -> None:
@@ -134,13 +135,9 @@ async def _wait_until(predicate, timeout: float = 3.0, what: str = "条件") -> 
     raise AssertionError("%s 在 %.1fs 内没有成立" % (what, timeout))
 
 
-def _command(topic: str = COMMAND_CHAT_INPUT, timestamp: float = None, **data) -> bytes:
-    """一条完整的 GUI 命令线。
-
-    @param timestamp None = 用当前时间; 显式给一个固定值可以让**行长可复现**
-                     (算"刚好卡在上限"的用例需要它)。
-    """
-    return encode(topic, data or {"text": "hi"}, timestamp=timestamp)
+def _command(action: str = COMMAND_CHAT_INPUT, **payload) -> bytes:
+    """一条完整的 GUI 命令线: {"action", "payload"} (命令方向**没有** timestamp)。"""
+    return encode_command(action, payload or {"text": "hi"})
 
 
 # ===========================================================================
@@ -503,23 +500,29 @@ class TestClientSessionFraming(_SessionTestCase):
         self.assertEqual(self.messages, [(COMMAND_CHAT_INPUT, {"text": "ok"})])
 
     async def test_non_object_message_is_dropped(self):
-        session, _, _ = await self.run_session(b'{"topic":"x","data":1}\n')
+        # JSON 合法但不是 object
+        session, _, _ = await self.run_session(b'[1,2,3]\n')
         self.assertEqual(session.dropped, 1)
         self.assertEqual(self.messages, [])
 
-    async def test_missing_timestamp_is_dropped(self):
-        line = json.dumps({"topic": COMMAND_CHAT_INPUT, "data": {"text": "x"}})
+    async def test_topic_shaped_command_is_dropped(self):
+        # 老格式 ({"topic","data","timestamp"}) 发到命令方向 -> 缺 action, 明确丢弃。
+        # 这条是 D1 的分水岭: 命令方向只认 {"action","payload"}, 不做两种格式的兼容
+        # —— 兼容就等于"文档说 A、代码也收 B", 正是要收敛掉的东西。
+        line = json.dumps({"topic": COMMAND_CHAT_INPUT, "data": {"text": "x"},
+                           "timestamp": 1.0})
         session, _, _ = await self.run_session(line.encode() + b"\n")
-        self.assertEqual(session.dropped, 1, "timestamp 是协议必填字段")
+        self.assertEqual(session.dropped, 1, "topic 形态的命令必须被拒")
+        self.assertEqual(self.messages, [])
 
     async def test_invalid_utf8_is_dropped(self):
         session, _, _ = await self.run_session(b"\xff\xfe\xfd\n" + _command(text="ok"))
         self.assertEqual(session.dropped, 1)
         self.assertEqual(len(self.messages), 1)
 
-    async def test_unknown_topic_reaches_upper_layer(self):
-        # 会话层只切帧, 不认识 topic —— 过滤是 LocalServer._dispatch 的事
-        await self.run_session(_command(topic="brand_new_thing", text="x"))
+    async def test_unknown_action_reaches_upper_layer(self):
+        # 会话层只切帧, 不认识 action —— 过滤是 LocalServer._dispatch 的事
+        await self.run_session(_command(action="brand_new_thing", text="x"))
         self.assertEqual(self.messages, [("brand_new_thing", {"text": "x"})])
 
     async def test_many_bad_lines_do_not_close_connection(self):
@@ -529,7 +532,7 @@ class TestClientSessionFraming(_SessionTestCase):
         self.assertEqual(self.messages, [(COMMAND_CHAT_INPUT, {"text": "最后一条"})])
 
     async def test_eof_with_partial_message_is_dropped(self):
-        session, _, _ = await self.run_session(b'{"topic":"chat_input","data":{')
+        session, _, _ = await self.run_session(b'{"action":"chat_input","payload":{')
         self.assertEqual(session.dropped, 1)
         self.assertEqual(self.messages, [])
         self.assertEqual(self.drops, ["truncated at EOF"])
@@ -565,12 +568,12 @@ class TestClientSessionOversize(_SessionTestCase):
         self.assertEqual(self.drops, ["oversize without newline"])
 
     async def test_line_exactly_at_limit_is_ok(self):
-        # 上限内的消息不许被误杀。用固定 timestamp 让行长可复现:
-        # 先量出空消息有多长, 再补字段到"正好等于上限"。
-        base = _command(text="", timestamp=1700000000.5)
+        # 上限内的消息不许被误杀。命令方向没有 timestamp, 行长完全由文本决定:
+        # 先量出空文本有多长, 再补字符到"正好等于上限"。
+        base = _command(text="")
         pad = 5
         limit = len(base) - 1 + pad
-        raw = _command(text="a" * pad, timestamp=1700000000.5)
+        raw = _command(text="a" * pad)
         self.assertEqual(len(raw) - 1, limit, "用例构造错了")
 
         session, _, _ = await self.run_session(raw, max_line_bytes=limit)
@@ -896,7 +899,7 @@ class TestLocalServerSocket(unittest.IsolatedAsyncioTestCase):
         await server.start()
 
         _, writer = await self.connect()
-        writer.write(encode(COMMAND_CHAT_INPUT, {"text": "开灯"}))
+        writer.write(encode_command(COMMAND_CHAT_INPUT, {"text": "开灯"}))
         await writer.drain()
 
         await _wait_until(lambda: seen, what="命令回调")
@@ -915,7 +918,7 @@ class TestLocalServerSocket(unittest.IsolatedAsyncioTestCase):
         await server.start()
 
         _, writer = await self.connect()
-        writer.write(encode(COMMAND_SWITCH_MODE, {"mode": "STUDY"}))
+        writer.write(encode_command(COMMAND_SWITCH_MODE, {"mode": "STUDY"}))
         await writer.drain()
         await _wait_until(lambda: seen, what="异步命令回调")
         self.assertEqual(seen, [(COMMAND_SWITCH_MODE, {"mode": "STUDY"})])
@@ -930,7 +933,7 @@ class TestLocalServerSocket(unittest.IsolatedAsyncioTestCase):
         writer.write(b"{not json}\n")
         writer.write(b"[]\n")
         writer.write("\n".encode())
-        writer.write(encode(COMMAND_CHAT_INPUT, {"text": "还在"}))
+        writer.write(encode_command(COMMAND_CHAT_INPUT, {"text": "还在"}))
         await writer.drain()
 
         await _wait_until(lambda: seen, what="坏消息之后的好消息")
