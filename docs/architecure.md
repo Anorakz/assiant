@@ -1,45 +1,69 @@
-# Agent 双机开发架构文档
+# 架构：双机开发（Windows PC ⇄ RK3568 板端）
+
+> 本文描述**当前的真实实现**，不是最初的设计稿。
+> 判断可信度的标准：与代码冲突时以代码为准，并回来改本文。
+> 归一化进行中的条目见 `todo.md` 的「项目归一化处理」。
+
+---
 
 ## 1. 总体拓扑
 
 ```
-┌──────────────── Windows PC (开发机) ────────────────┐
-│  DSH (pc-dev 工作区)                                 │
-│  · C++ / pybind11 源码                                │
-│  · 交叉编译工具链 + sysroot                           │
-│  · PySide6 GUI                                       │
-│                                                       │
-│  DSH (rk3568-dev 工作区, SSH)                        │
-│  · 透明访问板端文件与终端                             │
-└──────────────────────┬───────────────────────────────┘
-                       │ SSH / ZeroMQ / Moonlight
-┌──────────────────────▼───────────────────────────────┐
-│              RK3568 (Ubuntu 20.04 / aarch64)          │
-│  agent_native.so  ←  pybind11 绑定                    │
-│  Python Agent Core (asyncio)                         │
-│  · Image RingBuffer   ← 视频帧                        │
-│  · send_key/send_mouse → moonlight-common-c 直调      │
-│  · Chat Input Bus (asyncio.Queue)                    │
-│  · ZeroMQ PUB 0.0.0.0:5555                           │
-└───────────────────────────────────────────────────────┘
+┌────────────────── Windows PC（开发机）───────────────────┐
+│  DSH 工作区（pc-dev；rk3568-dev 经 SSH 透明访问板端）      │
+│  · native/   C++ / pybind11 源码                          │
+│  · agent/    Python Agent Core 源码                       │
+│  · gui/      Qt5 GUI 源码（在板端编译，见 §5）             │
+│  · cmake/toolchain.cmake + sysroot → aarch64 交叉编译      │
+│  · 跑 host 单测（ctest）与 Python 单测（PC / WSL）         │
+│  ★ 唯一提交方：commit / push / deploy 都在这里             │
+└──────────────────────────┬────────────────────────────────┘
+                           │ ① SSH + scp    部署与远程执行
+                           │ ② Moonlight    视频流下行 + 输入上行
+┌──────────────────────────▼────────────────────────────────┐
+│                RK3568（Ubuntu 20.04.6 / aarch64）          │
+│  agent_native.cpython-38-aarch64-linux-gnu.so ← pybind11   │
+│  Python Agent Core（asyncio）                              │
+│   · Image RingBuffer  ← 视频帧（唯一一条接收通路）          │
+│   · send_key / send_mouse → moonlight-common-c 直调        │
+│   · Chat Input Bus（asyncio.Queue）                        │
+│  Qt5 C++ GUI（**在板端编译**，经 Unix socket 连 Agent）     │
+│   · Agent ⇄ GUI 都在这台机器上，走 /tmp/agent.sock         │
+└────────────────────────────────────────────────────────────┘
 ```
+
+三条通道各自独立，别混：
+
+| 通道 | 谁到谁 | 传什么 |
+| --- | --- | --- |
+| SSH / scp | PC → 板端 | 部署产物、跑远程测试、看日志 |
+| Moonlight / Sunshine | 板端（客户端）⇄ Windows 主机（服务端） | 视频流下行；键鼠输入上行 |
+| Unix domain socket | 板端 Agent ⇄ 板端 GUI | 状态推送与命令（§6） |
 
 ---
 
 ## 2. 工作区划分
 
 | 工作区 | 位置 | 职责 |
-|---|---|---|
-| `pc-dev` | Windows 本地目录 | 编写 C++ / Python / GUI，交叉编译，跑 host 单测 |
-| `rk3568-dev` | RK3568 `/opt/agent` | 部署产物，运行 Agent，板端调试与测试 |
+| --- | --- | --- |
+| PC | Windows 本地仓库 | 源码真源；交叉编译；host / PC / WSL 测试；提交与部署 |
+| 板端 | `root@192.168.137.30:/home/kickpi/myproject/assitant` | 运行 Agent 与 GUI；板端测试；板端本地状态 |
 
-**规则**：`agent/`、`.so`、`VERSION` 由 PC 部署覆盖，板端不手改；`config/`、`logs/`、`models/` 为板端本地状态，部署不覆盖。
+规则：
+
+- **PC 是唯一提交方**：板端仓库只作运行环境，不在板端 `commit`。
+- **部署只送已提交的内容**（`deploy.ps1` 用 `git archive HEAD`），所以"板端在跑的东西"
+  永远可追溯到某个 commit。
+- **板端本地、不入库**：`config/config.yaml`、`gui/config/gui.yaml`、`llm/`、`sig/`、
+  `net/`、`creds/`、`logs/`、`model/`、`runtimes/`、`temp/`。
+- **解包是增量的**（`tar -x` 无 `--delete`）：删除类改动**不会**自动从板端消失。
+  归一化 F 系列会给 `deploy.ps1` 加部署清单、落后判决与 `-Prune`。
 
 ---
 
 ## 3. 底层 C++ / pybind11 层
 
-### 3.1 读取侧：视频帧 RingBuffer
+### 3.1 读取侧：视频帧 RingBuffer（唯一一条接收通路）
 
 ```
 Sunshine 视频流
@@ -53,8 +77,9 @@ Sunshine 视频流
 > **已删除（Phase 6 收尾）**：曾经设计过一条 `Sunshine 回传主机键盘 → Host Input
 > RingBuffer (128 事件) → pybind11` 的读取通路。moonlight-common-c 没有"主机 →
 > 客户端"的输入 API，所以那个环形缓冲从来没有生产者，属于死代码：native 的
-> `HostInputRingBuffer` / `binding.host_input_rb`、Python 的 `HostInputReader`
-> 及 `scheduler.host_input_interval_ms` 配置都已删除。
+> `HostInputRingBuffer`、`binding` 的 `host_input_rb` 子模块、Python 的
+> `HostInputReader` 及 `scheduler.host_input_interval_ms` 配置都已删除。
+> （上面这段是**删除说明**，不是现状。）
 
 ### 3.2 输出侧：直接调用 API，无 RingBuffer
 
@@ -68,196 +93,223 @@ Python Agent
 
 **原因**：输入事件稀疏（每秒几次到几十次），无需缓冲；直调延迟最低，不阻塞 asyncio。
 
-### 3.3 pybind11 接口
+### 3.3 连接：native 不发任何 HTTP
+
+握手（`/serverinfo`、`/applist`、`/launch`、`/resume`）走 HTTPS 47984 + 已配对的客户端
+证书，由 Python 侧 `agent/net/sunshine_client.py` 负责；native 只把握手结果交给
+moonlight，**只有这一个连接入口**：
 
 ```python
 import agent_native
 
-# 连接: 握手已经在 Python 侧做完 (HTTPS 47984 + 客户端证书, 见 agent/net/sunshine_client.py),
-# 这里只把 app_version 与 sessionUrl0 交给 moonlight —— native 一次 HTTP 都不发。
 agent_native.moonlight.start_with_session(host, app, w, h, fps,
                                           app_version, gfe_version,
                                           codec_mode_support, session_url)
 agent_native.moonlight.stop()
 agent_native.moonlight.status()
 
-# 读取侧 RB
-frame = agent_native.image_rb.read_latest(timeout_ms=0)   # numpy (256,256,3)
-
-# 输出侧直调
-agent_native.send_key(modifier="META", key="L", action="press")
-agent_native.send_hotkey(["CTRL", "ALT", "S"])
-agent_native.send_mouse(x=100, y=200, action="move")
+frame = agent_native.image_rb.read_latest()          # numpy (256,256,3) uint8 | None
+agent_native.send_key(modifier, key, action)         # action: True/"down" / False/"up"
+agent_native.send_hotkey([0x11, 0x12, ord("S")])     # 自带修饰键的 VK
+agent_native.send_mouse(x, y, action)                # 0..255 参考平面, 越界夹住
 ```
+
+> 原来那个手写裸 socket 的 C++ 明文 HTTP 层（`moonlight_connection.*`）已在 Phase 6
+> 删除：它只能拿到 `PairStatus=0` 与 404，留着只会让人以为还有一条能用的路。
 
 ---
 
 ## 4. Python Agent Core
 
-精简模块，全部拍平到 `agent/` 一层：
+```
+agent/
+├── main.py            进程入口：装配全部组件、按序起停、asyncio 主循环
+├── config.py          配置加载（白名单 + 不做 schema 校验）
+├── core/              state_machine.py / tool_router.py / scheduler.py
+├── io/                chat_bus.py / image_reader.py / input_sender.py / _native.py
+├── llm/               provider.py（edge / cloud / disabled）/ rule_engine.py
+├── vision/            roi.py / siglip_encoder.py（当前 mock）
+├── ipc/               protocol.py / local_server.py / local_client.py
+├── net/               sunshine_client.py（HTTPS 47984 握手）
+└── tools/             尚未实现（Phase 7）
+```
 
-| 文件 | 职责 |
-|---|---|
-| `main.py` | 装配所有组件，启动 asyncio 事件循环 |
-| `io.py` | 包装 image_rb；Chat Input Bus（多源合一） |
-| `state.py` | 状态机 SLEEP ⇄ IDLE ⇄ STUDY ⇄ GAME |
-| `scheduler.py` | 日程检查、定时触发、快捷键监听 |
-| `router.py` | 工具注册、权限控制、执行调度 |
-| `llm.py` | edge(NPU) / cloud(API) / disabled(规则引擎) |
-| `vision.py` | SigLIP 推理（RKNN-Toolkit-Lite2） |
-| `ipc.py` | ZeroMQ PUB 绑 `0.0.0.0:5555`，SUB 连 PC `:5556` |
-| `config.py` | YAML 加载与校验 |
-| `tools/` | lockscreen / netease / bilibili / wallpaper |
+| 模块 | 职责 |
+| --- | --- |
+| `core/state_machine.py` | 状态机 `SLEEP ⇄ IDLE ⇄ STUDY ⇄ GAME`（内部**小写**；IPC 上用大写，转换只在 ipc 层做） |
+| `core/tool_router.py` | 工具注册、权限控制、执行调度（JSON Schema 子集校验） |
+| `core/scheduler.py` | 日程检查、定时触发、触发监听 |
+| `io/chat_bus.py` | Chat Input Bus：把多个输入源汇成一条 `asyncio.Queue`（单消费者 + `subscribe()` 旁观） |
+| `io/_native.py` | native 解析 + **每个子系统一个专属单线程执行器**（SPSC 要求，见 §11） |
+| `ipc/` | Unix socket server 与协议；接入点是 `ipc/__init__.py` 的 `build_ipc()` |
 
-**Chat Input Bus**：终端 stdin、GUI 键盘统一进 `asyncio.Queue`，事件格式：
+**启动顺序**（`main.py`，停止时**严格反向**）：
+
+```
+日志 → config → native → ChatInputBus → io 层 → StateMachine
+     → ToolRouter → LLMProvider → Scheduler → IPC → 终端输入
+```
+
+**单组件失败不影响其他组件**：每个组件单独 start/stop，失败记进 `failures` 并在收尾汇总。
+
+**Chat Input Bus 事件格式**：
 
 ```python
-{"source": "terminal" | "gui",
- "text": "...", "timestamp": 1234567890.123}
+{"source": "terminal" | "gui", "text": "...", "timestamp": 1234567890.123}
 ```
 
 ---
 
-## 5. GUI（PySide6，PC 侧运行）
+## 5. GUI（Qt5 C++，跑在板端）
 
-- `main.py`：主窗口
-- `panels.py`：壁纸面板、对话/状态面板、控制面板
-- `zmq_client.py`：SUB 板端 5555，PUB 本机 5556
+GUI **不是** PC 上的 Python 程序：它是 `gui/` 下的 Qt5 C++ 程序，**在板端本机编译**
+（板端装了 Qt 5.12 aarch64；PC 上没有 Qt），由 `scripts/sync-gui.ps1` 送源码过去
+后 `cmake -S gui -B gui/build && cmake --build`。
 
-Agent Core 与 GUI 通过 ZeroMQ 跨机通信，PUB 端绑定 `0.0.0.0`。
+```
+gui/src/
+├── main.cpp / main_window.*     入口与主窗口（--socket / --windowed / --gui-config / --page …）
+├── core/    config_store / config_sync / view_state / idle_watcher /
+│            image_fit / system_stats / lyrics
+├── services/ local_client（Unix socket 客户端）/ onboard_ctl（屏幕键盘）
+└── ui/       top_bar / bottom_bar / mode_panel / chat_panel / music_bar /
+             video_panel / sys_page / model_page / settings_page / region_host
+```
+
+- **配置**：GUI 自己有配置（界面/唤醒/视频/LLM 参数），与 Agent 的配置关系见
+  `config/config.example.yaml` 的注释与 `Readme.md` 的配置小节。
+- **测试**：`gui/tests/`（Qt Test），只能**在板端**跑（`sync-gui.ps1 -Test` 会顺手
+  重建并 ctest）。其中 `test_local_client` 的对端是真 Python 脚本
+  `gui/tests/local_server.py`，不是 mock。
 
 ---
 
-## 6. 数据流总览
+## 6. IPC（Agent ⇄ GUI，同机 Unix domain socket）
+
+| 项 | 值 |
+| --- | --- |
+| 通道 | Unix domain socket `/tmp/agent.sock`（**同机**，不跨机） |
+| 角色 | Agent 监听并 `accept`；GUI 作客户端连接，断线 1s 重试 |
+| 分隔 | 换行 `\n`（NDJSON，每条消息一行） |
+| Agent → GUI | `{"topic": str, "data": object, "timestamp": float}` |
+| GUI → Agent | `{"action": str, "payload": object}`（**没有 timestamp**） |
+
+**两个方向的信封不一样** —— 照 GUI 的实际实现定的（Phase 6 决策 1），不是笔误；
+混用会被丢弃并记 warning。完整规范与错误处理约定见
+[`docs/ipc-protocol.md`](ipc-protocol.md)（线上格式唯一真源）；GUI 侧的界面行为见
+[`docs/gui-agent-integration.md`](gui-agent-integration.md)。
+
+---
+
+## 7. 数据流总览
 
 | 方向 | 通道 | 机制 |
-|---|---|---|
-| Sunshine → Python（图像） | 视频流 | 接收 → 解码 → 预处理 → **Image RB** → pybind11 |
-| Python → Sunshine（输入） | 输入通道 | pybind11 **直调** LiSendKeyboardEvent，释放 GIL |
+| --- | --- | --- |
+| Sunshine → Python（图像） | Moonlight 视频流 | 接收 → MPP 解码 → 预处理 → **Image RB** → pybind11 |
+| Python → Sunshine（输入） | Moonlight 输入通道 | pybind11 **直调** `LiSendKeyboardEvent`，释放 GIL |
 | 终端 → Agent | stdin | asyncio reader → **Chat Input Bus** |
-| GUI → Agent | PySide6 signal | Qt signal → **Chat Input Bus** |
-| Agent → GUI | ZeroMQ PUB/SUB | 状态变更、LLM 输出、壁纸序列 |
+| GUI → Agent | Unix socket | 命令信封 → **Chat Input Bus** / 命令处理器 |
+| Agent → GUI | Unix socket | topic 推送（状态、LLM 输出、壁纸、音乐） |
+| PC → 板端 | SSH / scp | `deploy.ps1`（Agent + `.so`）、`sync-gui.ps1`（GUI 源码） |
 
 ---
 
-## 7. 精简文件树
+## 8. 关键文件树（不是穷举）
 
-### 7.1 pc-dev
-
-```
-D:\projects\agent\
-├── .gitignore
-├── README.md
-├── cmake/
-│   └── toolchain.cmake
-├── native/
-│   ├── CMakeLists.txt
-│   ├── ring_buffer.h
-│   ├── image_rb.cpp/.h
-│   ├── moonlight_adapter.cpp/.h
-│   ├── decoder.cpp/.h          ← 解码器对外接口 + 后端分发 + FFmpeg 软解
-│   ├── decoder_mpp.cpp         ← MPP 硬解后端 (RK3568 上真正用的那条路)
-│   ├── decoder_backend.h       ← 后端内部接口 (不属于对外 API)
-│   ├── input_sender.cpp/.h
-│   ├── binding.cpp
-│   └── third_party/
-│       ├── moonlight-common-c/
-│       └── pybind11/
-├── agent/
-│   ├── main.py
-│   ├── io.py
-│   ├── state.py
-│   ├── scheduler.py
-│   ├── router.py
-│   ├── llm.py
-│   ├── vision.py
-│   ├── ipc.py
-│   ├── config.py
-│   └── tools/
-├── gui/
-│   ├── main.py
-│   ├── panels.py
-│   └── zmq_client.py
-├── config/
-│   ├── config.example.yaml
-│   └── schedule.example.yaml
-├── scripts/
-│   ├── build.ps1
-│   ├── deploy.ps1
-│   ├── test-host.ps1
-│   └── test-board.ps1
-└── tests/
-    ├── test_native.py
-    ├── test_agent.py
-    └── test_gui.py
-```
-
-### 7.2 rk3568-dev
+### 8.1 PC 仓库
 
 ```
-/opt/agent/
-├── agent_native.cpython-38-aarch64-linux-gnu.so
-├── VERSION
-├── agent/
-├── config/
-├── models/
-├── venv/
-├── logs/
-├── tests/
-└── start.sh
+├── CMakeLists.txt / cmake/toolchain.cmake   # host 构建 + aarch64 交叉编译
+├── native/            ring_buffer.h, image_rb, preprocess, decoder(+mpp),
+│                      input_sender, moonlight_adapter, binding(_utils), third_party/
+├── agent/             §4 的包结构
+├── gui/               CMakeLists.txt, src/, tests/, tools/, config/, resources/
+├── config/            config.example.yaml / user_profile.example.yaml / schedule.example.yaml
+├── tests/             C++ 单测 + Python 单测 + mocks/ + host/ + board/ + data/
+├── scripts/           build / deploy / sync-gui / test-host / test-python(.ps1|.sh) /
+│                      run-board-tests / health_check.sh / setup-sysroot-deps / pair_* / authorize_client
+├── docs/              本文件与 ipc-protocol / gui / gui-agent-integration / decoder-mpp /
+│                      cross-build-rk3568 / sunshine-pairing-findings
+└── Readme.md / todo.md
+```
+
+### 8.2 板端（运行环境）
+
+```
+/home/kickpi/myproject/assitant/
+├── agent_native.cpython-38-aarch64-linux-gnu.so   # deploy 送来的
+├── libmoonlight-common-c.so                       # 与上面同目录 (rpath $ORIGIN)
+├── agent/          部署覆盖
+├── gui/            源码由 sync-gui 送, 二进制在 gui/build/agent_gui
+├── tests/          部署覆盖 + 板端专有 (test_llm_integration.py)
+├── config/config.yaml       板端本地（不入库）
+├── llm/ sig/ net/           板端本地子系统（不入库）
+├── creds/                   配对证书（不入库）
+└── logs/ model/ runtimes/ temp/
 ```
 
 ---
 
-## 8. 开发流程
+## 9. 开发与部署流程
 
-### 8.1 日常循环
+### 9.1 日常循环
 
 ```
-1. git checkout -b feat/xxx
-2. 在 pc-dev 改代码
-3. scripts/build.ps1          # 交叉编译
-4. scripts/test-host.ps1      # PC 侧单测
-5. git commit + push
-6. scripts/deploy.ps1         # 部署到板端
-7. 在 rk3568-dev 跑 test-board.ps1 + 看日志
-8. 通过 → 合 main
+1. PC 上改代码
+2. scripts/test-host.ps1      # C++ host 单测 (ctest)
+3. scripts/test-python.ps1    # Python 单测 (PC; WSL 用 sh scripts/test-python.sh)
+4. git commit                 # 部署只送已提交内容, 所以必须先提交
+5. scripts/deploy.ps1         # 交叉编译 → git archive → scp → 解包 → 健康检查
+6. scripts/run-board-tests.ps1    # 板端 Python 套件
+7. scripts/sync-gui.ps1 -Test     # 改过 gui/ 时: 送源码 + 板端重建 + ctest
 ```
 
-### 8.2 提交规范
+### 9.2 部署（`scripts/deploy.ps1`）
 
-Conventional Commits，scope 仅 6 个：`native` / `binding` / `agent` / `gui` / `tools` / `ipc`。
+```
+build.ps1（交叉编译, 校验 ELF aarch64 与 GLIBC 上限）
+→ git archive HEAD 打包 agent/ tests/ docs/ scripts/ config/config.example.yaml
+   （-c core.autocrlf=false -c core.eol=lf，防止 CRLF 进 tar）
+→ scp .so + libmoonlight + tarball
+→ 板端增量解包（不删任何东西）
+→ scripts/health_check.sh（必需项: .so 可 import、config 在位、--check-config 通过、IPC 文件在位）
+```
 
-### 8.3 测试分层
+### 9.3 GUI 单独一条路（`scripts/sync-gui.ps1`）
 
-| 层 | 位置 | 触发 |
-|---|---|---|
-| L1 host 单测 | PC | 每次 commit |
-| L2 交叉编译 | PC | 每次 PR |
-| L3 板端冒烟 | RK3568 | 每次 deploy |
-
-端到端（Moonlight 连接、工具链）手动跑，不进 CI。
+GUI 在板端编译，所以它**不**跟 `deploy.ps1` 走：`sync-gui.ps1` 只送 `gui/` 源码，
+带三方冲突守卫（base = 板端 HEAD，ours = PC HEAD），然后可选在板端重建并 ctest。
 
 ---
 
-## 9. 部署流程
+## 10. 测试分层
 
-```
-scripts/deploy.ps1
-├── build.ps1（交叉编译）
-├── 校验 .so 是 ELF aarch64
-├── scp .so + agent/ + VERSION 到板端
-├── ssh 板端跑 test-board.ps1
-└── 失败 → 从 dist/ 取上一版回滚
-```
+| 层 | 在哪跑 | 入口 | 说明 |
+| --- | --- | --- | --- |
+| C++ host 单测 | PC | `scripts/test-host.ps1` | gtest + ctest（不链接 moonlight / MPP / FFmpeg，测状态机、参数校验、纯函数、环形缓冲） |
+| Python 单测 | PC / WSL / 板端 | `scripts/test-python.ps1`、`sh scripts/test-python.sh` | 三端跑**同一份文件清单**（`test-python.sh`），避免两边漂移 |
+| GUI 单测 | 板端 | `scripts/sync-gui.ps1 -Test` | Qt Test；需要 Qt5，PC 上跑不了 |
+| 板端真机验收 | 板端 | `tests/board/test_binding_api.py`、`mpp_decode_smoke` | 验 pybind11 的 numpy 形状/dtype、GIL 释放、MPP 通路 |
+
+用例数量会变，**以实际跑出来的为准**，本文不写死数字。
 
 ---
 
-## 10. 关键原则与坑
+## 11. 关键原则与坑
 
 1. **板端不改代码**：改动一律回 PC，走部署流程。
-2. **固件升级后重拉 sysroot + 重编译**，否则 glibc 版本不匹配。
-3. **pybind11 交叉编译**：`PYBIND11_PYTHON_VERSION=3.8`，`PYTHON_INCLUDE_DIRS` / `PYTHON_LIBRARIES` 指向 sysroot。
-4. **ZeroMQ PUB 绑 `0.0.0.0`**，否则 Windows GUI 连不上。
-5. **send_\* 必须释放 GIL**，否则阻塞板端 asyncio。
-6. **先跑通，再正规化**：Phase 1+2 打通后立刻做 Phase 5 双机联调，再补 GUI 和工具。
+2. **固件升级后重拉 sysroot 并重新交叉编译** —— 否则 glibc 不匹配。产品要求编译产物
+   最高只吃 `GLIBC_2.17`（板端 glibc 是 2.31）。
+3. **pybind11 交叉编译**：`Python.h` 必须来自 sysroot；`.so` 带 `$ORIGIN` rpath，
+   与 `libmoonlight-common-c.so` 放同目录即可 `import`，不需要 `LD_LIBRARY_PATH`。
+4. **`send_*` 必须释放 GIL**，否则阻塞板端 asyncio。
+5. **native 的读接口是 SPSC**（单生产者单消费者）：同一个 reader 的所有 native 调用
+   必须落在**同一个线程**上 —— 所以 `agent/io/_native.py` 给每个子系统一个专属单线程
+   执行器，而不是用 asyncio 默认的共享线程池。
+6. **IPC 是同机 Unix socket**，不跨机；两个方向的信封不同（§6），不要"两种都认"。
+7. **PowerShell 5.1 的坑**（脚本头注释里都有）：`.ps1` 必须 ASCII-only（无 BOM 时按
+   ANSI 解码）；不要对原生命令用 `2>&1`（`$ErrorActionPreference=Stop` 下会把 stderr
+   变成终止错误）；ssh 参数里不要嵌引号（会被剥掉）；`git archive` 要显式
+   `-c core.autocrlf=false -c core.eol=lf`，否则 CRLF 进 tarball，板端 shell 脚本报
+   `$'\r': command not found`。
+8. **先跑通，再正规化**：Phase 1+2 打通后立刻做双机联调，再补 GUI 和工具层。

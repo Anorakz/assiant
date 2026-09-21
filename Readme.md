@@ -1,6 +1,8 @@
 # Agent
 
-开发机上的源码工作区。负责 C++/pybind11 底层、Python Agent Core、PySide6 GUI 的开发、交叉编译与部署。
+开发机（Windows PC）上的源码工作区，也是**唯一提交方**。负责 C++/pybind11 底层、
+Python Agent Core、Qt5 C++ GUI 的开发、交叉编译与部署；GUI 的**编译在板端**进行
+（板端装了 Qt5，PC 上没有），见 [`docs/architecure.md`](docs/architecure.md)。
 
 目标板：RK3568 / Ubuntu 20.04 / aarch64 / glibc 2.31
 
@@ -45,7 +47,7 @@ agent/
 │       └── _native.py           # native 解析 + 专属单线程执行器 (SPSC)
 │   (main.py / scheduler.py / router.py / llm.py / vision.py / ipc.py /
 │    tools/ —— 待实现)
-├── gui/                         # PySide6 GUI (待实现: main.py / panels.py / zmq_client.py)
+├── gui/                         # Qt5 C++ GUI (在板端编译: src/ tests/ tools/ config/)
 ├── config/                      # 配置模板 (真实配置不入 git)
 │   ├── config.example.yaml      # 全局: llm.mode, sunshine.*, ipc.*
 │   ├── user_profile.example.yaml# 用户画像
@@ -434,7 +436,7 @@ config.save_config("config", {...})    # 写 config.yaml 并同步刷新缓存
 
 - 板端不手改代码，`agent/`、`.so`、`VERSION` 由 `deploy.ps1` 覆盖。
 - `send_key` / `send_mouse` / `send_hotkey` 必须释放 GIL，不阻塞 asyncio。
-- ZeroMQ PUB 绑定 `0.0.0.0:5555`，SUB 连板端 `:5556`。
+- Agent ⇄ GUI 走**同机 Unix domain socket**（`/tmp/agent.sock`），两个方向的信封不同 —— 见 [`docs/ipc-protocol.md`](docs/ipc-protocol.md)。
 - 固件升级后重拉 sysroot 并重新交叉编译，否则 glibc 不匹配。
 - GameStream 的 `/applist`、`/launch`、`/resume` **只在 HTTPS 47984** 上，且需要已配对的客户端证书。
 
