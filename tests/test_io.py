@@ -337,8 +337,19 @@ class TestEventToText(unittest.TestCase):
 class TestResolveHelpers(unittest.TestCase):
     def test_resolve_key_single_char(self):
         self.assertEqual(resolve_key("A"), 65)
-        self.assertEqual(resolve_key("a"), 97)
+        self.assertEqual(resolve_key("a"), 65)   # 小写字母 -> 大写 VK (见下)
         self.assertEqual(resolve_key(" "), 32)
+
+    def test_resolve_key_lowercase_letters_map_to_the_uppercase_vk(self):
+        # Windows 的字母 VK 是大写 ASCII。这里以前断言的是 ord("a") == 97,
+        # 而 0x61 其实是 VK_NUMPAD1 —— 于是 send_key("ctrl","c") 会发成
+        # Ctrl+数字键盘3。2026-09-21 查 C2(锁屏)时发现, 一并修正断言。
+        for lower, upper in (("a", "A"), ("c", "C"), ("l", "L"), ("s", "S"), ("z", "Z")):
+            self.assertEqual(resolve_key(lower), ord(upper), "小写 %r" % lower)
+            self.assertEqual(resolve_key(lower), resolve_key(upper))
+        # 数字与标点不受影响 (它们本来就不是大写问题)
+        self.assertEqual(resolve_key("7"), 0x37)
+        self.assertEqual(resolve_key("/"), 0x2F)
 
     def test_resolve_key_int_passthrough(self):
         self.assertEqual(resolve_key(65), 65)
@@ -392,6 +403,12 @@ class TestInputSender(_IoTestBase):
         sender = InputSender(native=self.native)
         await sender.send_key("ctrl", "C", "down")
         # "ctrl" -> 修饰键位掩码 0x02; "C" -> VK 67
+        self.assertEqual(self.native.last_call("send_key"), ("send_key", 0x02, 67, "down"))
+
+    async def test_send_key_lowercase_letter_reaches_native_as_the_uppercase_vk(self):
+        # 生产里 LLM/工具层更可能给小写, 这条守住"到 native 手上必须是大写 VK"
+        sender = InputSender(native=self.native)
+        await sender.send_key("ctrl", "c", "down")
         self.assertEqual(self.native.last_call("send_key"), ("send_key", 0x02, 67, "down"))
 
     async def test_send_key_never_passes_a_string_modifier_to_native(self):

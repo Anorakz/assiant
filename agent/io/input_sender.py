@@ -108,7 +108,7 @@ def resolve_key(key: KeyLike) -> int:
     """把 key 归一成 VK 码。
 
     · 整数       -> 原样 (已经是 VK)
-    · 单字符     -> ord()                "A" -> 65
+    · 单字符     -> 大写后 ord()          "A" / "a" -> 65
     · 具名键     -> KEY_CODES             "enter" -> 13 (大小写/空格无关)
     · 查不到的名字 -> 原样透传, 交给 native 报错 (不做校验)
     """
@@ -116,7 +116,11 @@ def resolve_key(key: KeyLike) -> int:
         return key
     if isinstance(key, str):
         if len(key) == 1:
-            return ord(key)
+            # ⚠ 必须大写化: Windows 的字母 VK 就是**大写** ASCII ('A'=0x41)。
+            #   直接 ord('a') 会得到 0x61, 而 0x61 是 VK_NUMPAD1 —— 于是
+            #   send_key("ctrl", "c") 会变成 Ctrl+数字键盘3, 而不是 Ctrl+C。
+            #   (数字与标点本来就没这个问题: '7'=0x37, '/'=0x2F。)
+            return ord(key.upper())
         code = KEY_CODES.get(key.strip().lower())
         if code is not None:
             return code
