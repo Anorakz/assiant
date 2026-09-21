@@ -452,6 +452,56 @@ Phase 6 决策记录（已评审）
      （字段定义只在 ipc-protocol.md），该文档只管"GUI 在哪儿发、收到后界面怎么变"；
      §6 里指向 temp/（clone 后不存在）的假 Agent 换成了仓库内真实脚本。
 
+GUI 日程区（S 系列：右区域切成"对话区 + 日程区"，已全部验收）
+☑ S1 板端依赖 + 探针：`apt install libyaml-cpp-dev`（0.6.2-4ubuntu1，2 个包、0 删除；
+     回滚 `apt remove`）。探针问清四件事：`find_package(yaml-cpp)` 可用、**0.6.x 的 imported
+     target 是不带命名空间的 `yaml-cpp`**（0.7+ 才是 `yaml-cpp::yaml-cpp`）；行内 flow 序列 /
+     中文 UTF-8 / 未加引号的 `2026-09-20`（普通标量字符串）都能读；**坏转换与语法错一律抛
+     `YAML::Exception`**（所以解析要先查 IsDefined/IsSequence/IsScalar 再转换）。
+     顺手删掉 D3 遗留的 dead function（`test_config_sync.cpp` 的 newValueOf，一直在产生
+     `-Wunused-function`）—— 也因此发现我 D3/D4 说的"零警告"是在**增量**日志上数的，不成立；
+     从那以后一律用 `--clean-first` 全量重建来证明零警告。
+☑ S2 核心解析 `gui/src/core/schedule_model.{h,cpp}`：yaml-cpp **只读**解析 config.yaml 的
+     `scheduler.recurring/oneoff`（逐键回落顶层，与 `_load_events` 一致），镜像 Python 语义，
+     展开成今天/明天两段。头文件只暴露 Qt 类型，yaml-cpp PRIVATE 链接。41 个单测。
+     踩到并写进注释的 0.6.2 三个坑：① 默认构造的 `YAML::Node()` 是 `IsDefined()==true` 但
+     `IsNull()==true`（判空必须两个都看）；② **从 const `YAML::Node` 取出的节点没有 memory
+     holder**，对它调 `IsNull()` 会抛 `invalid node`（凡是要索引的句柄一律非 const）；
+     ③ PyYAML 会把某些 plain 标量解析成 int/float/bool/null（含 YAML 1.1 六十进制 `9:30`），
+     所以 title/start/end 要按"在 Python 眼里是不是 str"判断。
+☑ S3 跨实现一致性守卫：`tests/data/schedule_parity/`（8 份手写夹具 + 8 份**由板端 python3.8
+     生成**的期望）+ `tests/test_schedule_parity.py`（Python 语义变了就红，带反空转与 --write）
+     + `test_schedule_model.cpp::parityWithPythonFixtures`（C++ 镜像变了也红，失败时打印两边
+     行的全文差异）。**反证**：把 `occursOn` 改坏 → C++ 侧 FAIL 并打印多出来的行；改夹具不重新
+     生成 → Python 侧 FAIL 并打印字段差异；还原后都变绿。跨版本稳定：3.8/3.12/3.14 都通过。
+☑ S4 显示层 `SchedulePanel`（纯显示，不读文件）：两段标题总在、空段显示"无"、`HH:MM[-HH:MM]`
+     + 标题、今天已过的时间变暗、`max_rows` 两段合计截断 + "还有 N 项"、逐条坏日程与整份失败
+     各一行琥珀提示；副标题"今天 · N 项 · 下一条 HH:MM"（今天都过完了落回明天第一条）。16 个单测。
+     自身修掉两处：控件与文本同名 `subtitle_`（编译期重复声明）、三个访问器只声明未定义。
+☑ S5 装配 + 图标 + 几何守卫：右区域加第三块并 `setStretchFactor` 3:2（**只是伸缩因子**，
+     窗口矮时最小高度会占超过 2/5）；`reloadSchedule()` 在启动/设置页保存后/每 60 秒各刷一次；
+     自绘 `schedule.svg` 成第 23 个图标；**新增 `test_icons` 守卫**（kNames 必须与源码 `*.svg`
+     清单逐个对上、每个名字都要能取到非空 QIcon —— 之前 `iconNames()` 全仓没人用，icons.cpp
+     那句"测试会核对数量"是假的）；`test_main_page` 加几何断言。CMake 坑：
+     `target_compile_definitions(test_icons ...)` 必须放在创建该 target 的 foreach 之后。
+☑ S6 文档与模板：`config.example.yaml` 加 `gui.schedule.max_rows: 6`；`docs/gui.md`（依赖 /
+     三段布局图 / 新键 / 现状表 / 图标 23）；`docs/config-sources.md` 新增"GUI 也读 scheduler 段"
+     （Agent 触发 vs GUI 展示、两条互为表里的守卫、**保证边界只到夹具覆盖的写法**、重新生成期望
+     要在板端跑），并记下 `config/schedule.example.yaml` 全仓没人读这处已知漂移；
+     `architecure.md` 同步。
+☑ S7 板端 live 配置：加 `gui.schedule.max_rows: 6` + 4 条**样例**日程（晨间计划 08:30 每天 /
+     午休 13:00-13:30 每天 / 周会 10:00 周一三五 / 项目评审 2026-09-22 14:00 一次性）。
+     先给目标文件、授权后落盘（指纹 `931d83c4…` → `789b14b7…`，`llm.env` 未动）。
+     ⚠ 样例**不是只给界面看的**：`Scheduler._fire()` 对没有 action 的事件仍会推
+     「日程提醒：<标题>」，会出现在对话区并进 LLM。
+☑ S8 取证：新增 `agent_gui --dump-schedule`（走完整装配路径后打印 SchedulePanel 真实渲染的
+     SUBTITLE/ROW/HIDDEN/NOTE），让"GUI 显示 vs Agent 展开"成为机器逐行比对 —— 实测 **6 行 +
+     副标题 + 截断计数完全一致**。真机 scrot 三张（有日程 / 空状态 / 坏条目"配置里有 1 条读不出来"）。
+     **更正**：真机**应用逻辑屏幕是 1280×800**（面板 DRM 模式 800x1280，xrandr 旋转 left），
+     不是我在 S6 写的"800×1280 竖屏" —— `fb0` 的 `virtual_size` 不能拿来推布局。
+☑ S9 四端回归：PC 宿主机 ctest 172/172；PC python exit 0；WSL python exit 0；
+     板端 python 17 文件 ALL OK + 板端 GUI ctest 19/19；deploy 清单 115 文件全匹配
+     （`config.yaml`/`llm.env` 指纹未变，板端 git status 归零）。
 Phase 7 — 工具层
 □ tools/base.py：工具基类（name、schema、execute、权限、allowed_states）
 □ tools/init.py：工具注册入口
