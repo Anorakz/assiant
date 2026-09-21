@@ -168,10 +168,19 @@ def _make_command_handler(bus: Any):
             return
 
         if action == COMMAND_SWITCH_MODE:
+            # ⚠ 键是 **value** 不是 mode (Phase 6 D2): GUI 与 docs/ipc-protocol.md §4
+            #   都是 {"value": "STUDY"}; 而 status 推送里那个 "mode" 是**另一个方向**
+            #   的字段, 别把两者混起来。
+            if "value" not in payload:
+                _log.warning(
+                    "ipc: switch_mode 的 payload 缺少 value 字段 (得到 %r), 已忽略",
+                    payload,
+                )
+                return
             try:
-                mode = mode_from_wire(payload.get("mode"))
+                mode = mode_from_wire(payload.get("value"))
             except IpcProtocolError as exc:
-                _log.warning("ipc: switch_mode 的 mode 不合法, 已忽略: %s", exc)
+                _log.warning("ipc: switch_mode 的 value 不合法, 已忽略: %s", exc)
                 return
             _log.warning(
                 "ipc: 收到 switch_mode(%s), 但状态机还没接进来 (下一步), 已忽略", mode

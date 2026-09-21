@@ -263,7 +263,7 @@ class TestServerSkeleton(unittest.IsolatedAsyncioTestCase):
 
     async def test_dispatch_without_callback_is_ignored(self):
         server = LocalServer("/tmp/nope.sock")
-        await server._dispatch(COMMAND_SWITCH_MODE, {"mode": "STUDY"})
+        await server._dispatch(COMMAND_SWITCH_MODE, {"value": "STUDY"})
         self.assertEqual(server.received, 1)
 
     async def test_dispatch_calls_sync_callbacks_in_order(self):
@@ -410,13 +410,39 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         bus = ChatInputBus()
         handler = _make_command_handler(bus)
 
-        await handler(COMMAND_SWITCH_MODE, {"mode": "STUDY"})      # 还没接线
-        await handler(COMMAND_SWITCH_MODE, {"mode": "banana"})     # 非法模式
+        await handler(COMMAND_SWITCH_MODE, {"value": "STUDY"})     # 还没接线
+        await handler(COMMAND_SWITCH_MODE, {"value": "banana"})    # 非法模式
         await handler(COMMAND_SWITCH_MODE, {})
         await handler(COMMAND_NEXT_WALLPAPER, {})
         await handler("something_new", {})
 
         self.assertEqual(bus.qsize(), 0, "未接线的命令不能变成聊天输入")
+
+    async def test_switch_mode_reads_the_value_key(self):
+        """D2: switch_mode 的 payload 键是 **value**。
+
+        GUI 发的是 {"value": "STUDY"}（docs/ipc-protocol.md §4 与 gui-agent-integration.md §4
+        都这么写）; 而 status **推送**里的 "mode" 是反方向的另一个字段, 别混。
+        用日志把两条路分开断言: 认了 value 才会走到"收到 switch_mode(...)",
+        给了老键 mode 只应得到"缺少 value 字段"。
+        """
+        from agent.ipc import _make_command_handler
+
+        handler = _make_command_handler(None)
+
+        with self.assertLogs("agent.ipc", level="WARNING") as caught:
+            await handler(COMMAND_SWITCH_MODE, {"value": "STUDY"})
+        joined = "\n".join(caught.output)
+        # 日志里打的是**内部**模式名 (mode_from_wire("STUDY") -> "study"),
+        # 所以这里只断言走到了"收到 switch_mode"这条支路
+        self.assertIn("收到 switch_mode", joined)
+        self.assertNotIn("缺少 value", joined)
+
+        with self.assertLogs("agent.ipc", level="WARNING") as caught:
+            await handler(COMMAND_SWITCH_MODE, {"mode": "STUDY"})
+        joined = "\n".join(caught.output)
+        self.assertIn("缺少 value 字段", joined, "老键 mode 必须被明确拒掉")
+        self.assertNotIn("收到 switch_mode", joined)
 
 
 # ===========================================================================
@@ -918,10 +944,10 @@ class TestLocalServerSocket(unittest.IsolatedAsyncioTestCase):
         await server.start()
 
         _, writer = await self.connect()
-        writer.write(encode_command(COMMAND_SWITCH_MODE, {"mode": "STUDY"}))
+        writer.write(encode_command(COMMAND_SWITCH_MODE, {"value": "STUDY"}))
         await writer.drain()
         await _wait_until(lambda: seen, what="异步命令回调")
-        self.assertEqual(seen, [(COMMAND_SWITCH_MODE, {"mode": "STUDY"})])
+        self.assertEqual(seen, [(COMMAND_SWITCH_MODE, {"value": "STUDY"})])
 
     async def test_bad_line_does_not_break_connection(self):
         server = self.make_server()

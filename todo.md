@@ -195,7 +195,18 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
      （第一次板端验证**无效**：deploy 走 HEAD 而 D1 当时未提交，板端跑的是旧代码 ——
        靠"test_ipc_protocol 只跑 51 条 vs PC 66 条"看出来，单独送文件重跑才是上面这份。）
      文档仍写 topic 形态 —— 属 D3，本次没有跳步去改。
-□ D2 修 switch_mode 的键：payload 里是 value（不是 mode）
+■ D2 修 switch_mode 的键：payload 里是 value（不是 mode）
+     处理器原来读 `payload["mode"]`，而 GUI 与 docs 给的都是 `{"value": ...}`
+     —— 也就是 D1 把信封修对之后，switch_mode 仍然一个都认不出来。
+     改动：`agent/ipc/__init__.py` 改读 `value`，且缺 `value` 时给一条**点名字段**的警告
+     （不静默读不到就算了）；顺带把几条测试里的 `{"mode": ...}` 命令 payload 改成 `value`。
+     新增 `test_switch_mode_reads_the_value_key`：用日志把两条路分开 ——
+     给 `value` 会走到「收到 switch_mode」，给老键 `mode` 只会得到「缺少 value 字段」。
+     （踩过一次坑：日志里打的是**内部**模式名，`mode_from_wire("STUDY") -> "study"`，
+       第一版断言写了大写所以红了。）
+     三方验证：PC 整套 exit 0；WSL 14 文件 OK（pytest 23 passed）；
+     板端 test_ipc_local_server 78 OK / pytest 23 passed。
+     注意：status **推送**里的 `mode` 是反方向的另一个字段（本来就该叫 mode），没有动它。
 □ D3 三份文档同步：ipc-protocol.md §4 / gui-agent-integration.md §3（那句「与 protocol §4 一致」是错的）/
      gui/src/services/local_client.cpp 的注释
 □ D4 build_ipc(bus, config, runtime=None) 接线出方向推送（status / llm）

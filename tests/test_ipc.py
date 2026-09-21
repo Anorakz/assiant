@@ -290,7 +290,7 @@ async def test_async_command_callback(server, sock_path):
 
     server.on_command(handler)
     async with connected(sock_path, server, 1) as client:
-        await client.send_command("switch_mode", {"mode": "STUDY"})
+        await client.send_command("switch_mode", {"value": "STUDY"})
         await wait_for(lambda: seen, what="异步命令回调")
         assert seen == ["switch_mode"]
 
