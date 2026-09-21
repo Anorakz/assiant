@@ -1,3 +1,7 @@
+<!-- ⚠ 下面 Phase 1 / 2 / 3 三个块是**历史计划**, 不是当前状态。其中部分交付物
+     已删除或改名 —— 例如 host_input_rb.*(含"主机输入接收线程")以及 binding 的
+     host_input_rb 子模块, 已按 Phase 6 决策 2 删除, 详见文末"决策 2 的落地"。
+     当前状态以仓库代码与 docs/ 为准。 -->
 <!-- Phase 1 — native 层（C++ 核心）
 □ image_rb.h/.cpp：固定容量 300 帧，支持 read_latest、read_by_timestamp
 □ host_input_rb.h/.cpp：固定容量 128 事件，read_latest、read_all

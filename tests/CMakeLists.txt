@@ -74,6 +74,7 @@ agent_add_host_test(test_moonlight_adapter
     ../native/image_rb.cpp
     ../native/preprocess.cpp
 )
-if(WIN32)
-    target_link_libraries(test_moonlight_adapter PRIVATE ws2_32)
-endif()
+# 注: 原来这里为 moonlight_connection.cpp (手写裸 socket HTTP 客户端) 在 Windows 上
+# 链接 ws2_32。那一层已在 Phase 6 删除 —— 握手移到 Python 侧
+# (agent/net/sunshine_client.py), 本测试链进来的 native 源码 (moonlight_adapter /
+# decoder / image_rb / preprocess) 没有任何 socket 调用, 所以 ws2_32 也去掉了。

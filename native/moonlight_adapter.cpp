@@ -127,7 +127,6 @@ struct MoonlightAdapter::Impl {
     int width = 0;
     int height = 0;
     int fps = 0;
-    std::string unique_id = "0123456789ABCDEF";
 
     mutable std::mutex err_mutex;
     std::string last_error;
