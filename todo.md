@@ -387,15 +387,25 @@ Phase 6 决策记录（已评审）
    板端 test_binding_api.py 反过来断言 host_input_rb **不存在**，防止它被带回来。
 
 项目归一化处理（新增，与 Phase 6 并行）
-□ 唯一真源收敛：命令信封以实际实现为准后，docs/ipc-protocol.md 必须同步改，避免"文档说 A、代码做 B"
+☑ 唯一真源收敛：**已完成**（B1 `a364269` + B2 `5333bff`）。ipc-protocol.md 加了 §0 划清真源边界
+     （只管线上格式）；字段定义表只留协议文档一份，gui-agent-integration.md 降级为"GUI 行为 + 指针"；
+     Readme 删掉"实现未做"并补上命令信封。另加 tests/test_docs.py 文档守卫（相对链接 + 过时说法黑名单），
+     已注册进三端共享的套件清单 —— 以后漂移会直接让测试变红。
+     还发现并修掉：Readme 的 ZeroMQ 约定、architecure.md 整篇旧设计（ZeroMQ + PC 侧 GUI）。
 □ 配置入口收敛：只有 config/config.yaml 是 Agent 的运行时配置；
      gui/config/gui.yaml 与 llm/config/llm.env 不再被 Agent 读取 —— 需明确「谁写、谁读」，
      否则 GUI 模型测试页写三份、Agent 只认一份，改了不生效
-☑ 清理并存实现：agent/ipc/server.py **已删除**（归一化 C1，2026-09-21）——它是第二份 server 实现，自带第二份 decode_command()，只被 gui/tests/e2e_ipc.py 当联调对端用
+     （归一化 D 系列做：D1 决定把 gui.yaml 整个并进 config.yaml 的 gui: 段）
+☑ 清理并存实现：agent/ipc/server.py **已删除**（归一化 C1 `8608438`）——它是第二份 server 实现，自带第二份 decode_command()，只被 gui/tests/e2e_ipc.py 当联调对端用
      现在生产侧只有 agent/ipc/local_server.py 一份（收命令信封），e2e_ipc.py 改用现成的 gui/tests/local_server.py 当真对端。
-      判据: agent/ipc/ 只剩 4 个文件; 全仓 `def decode_command` 只有 1 处; 板端 ctest e2e_ipc 全绿。
+     判据: agent/ipc/ 只剩 4 个文件; 全仓 `def decode_command` 只有 1 处; 板端 ctest e2e_ipc 全绿。
+     顺带（C2 `4dcd42e`）把 gui/tools 两个只差一点的假 Agent 合成 fake_agent.py。
 □ 板端 ⇄ PC 同步机制固化：明确 git pull 与 deploy.ps1 各自负责什么，杜绝"板端落后好几个提交却没人发现"
-□ 文档去重：gui-agent-integration.md §3 与 ipc-protocol.md §4 内容重叠且互相矛盾，合并到一处
+     （归一化 F 系列做。F1 已完成：main 的 30 个提交推到 GitHub，板端 fetch 后能看到 `59779c2`；
+      待做 F2 部署清单+落后判决+`-Prune`、F3 板端切到 main、F4 规则成文）
+☑ 文档去重：**已完成**（B1 `a364269`）。gui-agent-integration.md §2/§3 的两张字段表降级为指针
+     （字段定义只在 ipc-protocol.md），该文档只管"GUI 在哪儿发、收到后界面怎么变"；
+     §6 里指向 temp/（clone 后不存在）的假 Agent 换成了仓库内真实脚本。
 
 Phase 7 — 工具层
 □ tools/base.py：工具基类（name、schema、execute、权限、allowed_states）
