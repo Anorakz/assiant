@@ -1,0 +1,33 @@
+{
+  "days": [
+    {
+      "date": "2026-09-21",
+      "label": "今天",
+      "rows": [
+        {
+          "end": "15:30",
+          "past": true,
+          "time": "14:00",
+          "title": "今天评审"
+        }
+      ]
+    },
+    {
+      "date": "2026-09-22",
+      "label": "明天",
+      "rows": [
+        {
+          "end": "",
+          "past": false,
+          "time": "08:00",
+          "title": "明天体检"
+        }
+      ]
+    }
+  ],
+  "fixture": "02_oneoff_dates.yaml",
+  "now": "2026-09-21T15:00:00",
+  "python_error": null,
+  "python_ok": true,
+  "total_in_config": 4
+}

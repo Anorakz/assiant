@@ -1,0 +1,39 @@
+{
+  "days": [
+    {
+      "date": "2026-09-21",
+      "label": "今天",
+      "rows": [
+        {
+          "end": "",
+          "past": true,
+          "time": "08:00",
+          "title": "顶层的"
+        },
+        {
+          "end": "",
+          "past": true,
+          "time": "09:00",
+          "title": "段里的"
+        }
+      ]
+    },
+    {
+      "date": "2026-09-22",
+      "label": "明天",
+      "rows": [
+        {
+          "end": "",
+          "past": false,
+          "time": "08:00",
+          "title": "顶层的"
+        }
+      ]
+    }
+  ],
+  "fixture": "05_top_level_fallback.yaml",
+  "now": "2026-09-21T15:00:00",
+  "python_error": null,
+  "python_ok": true,
+  "total_in_config": 2
+}

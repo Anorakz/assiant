@@ -1,0 +1,19 @@
+{
+  "days": [
+    {
+      "date": "2026-09-21",
+      "label": "今天",
+      "rows": []
+    },
+    {
+      "date": "2026-09-22",
+      "label": "明天",
+      "rows": []
+    }
+  ],
+  "fixture": "08_bad_section.yaml",
+  "now": "2026-09-21T15:00:00",
+  "python_error": "SchedulerError",
+  "python_ok": false,
+  "total_in_config": 0
+}

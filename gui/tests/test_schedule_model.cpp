@@ -11,13 +11,20 @@
 // ============================================================================
 #include <QDate>
 #include <QDateTime>
+#include <QDir>
 #include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
+#include <QStringList>
 #include <QTemporaryDir>
 #include <QTime>
 #include <QtTest/QtTest>
 
 #include "core/schedule_model.h"
 
+using core::ScheduleDay;
 using core::ScheduleModel;
 using core::ScheduleResult;
 using core::ScheduleRow;
@@ -46,6 +53,33 @@ int rowsOn(const ScheduleResult& result, int index)
 QString titleOn(const ScheduleResult& result, int dayIndex, int rowIndex)
 {
     return result.days.at(dayIndex).rows.at(rowIndex).title;
+}
+
+/// 把一段行渲染成与期望同形的紧凑串（`time|end|title|past`），整段比对用。
+QString renderRows(const QVector<ScheduleRow>& rows)
+{
+    QStringList out;
+    for (const ScheduleRow& row : rows) {
+        out << QStringLiteral("%1|%2|%3|%4")
+                   .arg(row.time, row.end, row.title,
+                        row.past ? QStringLiteral("1") : QStringLiteral("0"));
+    }
+    return out.join(QStringLiteral("\n"));
+}
+
+QString renderJsonRows(const QJsonArray& rows)
+{
+    QStringList out;
+    for (const QJsonValue& value : rows) {
+        const QJsonObject row = value.toObject();
+        out << QStringLiteral("%1|%2|%3|%4")
+                   .arg(row.value(QStringLiteral("time")).toString(),
+                        row.value(QStringLiteral("end")).toString(),
+                        row.value(QStringLiteral("title")).toString(),
+                        row.value(QStringLiteral("past")).toBool() ? QStringLiteral("1")
+                                                                   : QStringLiteral("0"));
+    }
+    return out.join(QStringLiteral("\n"));
 }
 
 } // namespace
@@ -424,6 +458,72 @@ recurring:
         QCOMPARE(rowsOn(result, 0), 1);
         QCOMPARE(titleOn(result, 0, 0), QStringLiteral("文件里的"));
     }
+
+#ifdef SCHEDULE_PARITY_DIR
+    /// S3：跨实现一致性守卫。
+    ///   夹具与期望都由 Python 侧生成（tests/test_schedule_parity.py 用**真的**
+    ///   agent.core.scheduler），这里读同一份夹具 + 同一份期望做断言 ——
+    ///   C++ 这边镜像的语义漂了，这个用例就红。
+    void parityWithPythonFixtures()
+    {
+        const QDir dir(QStringLiteral(SCHEDULE_PARITY_DIR));
+        QVERIFY2(dir.exists(), qPrintable(dir.absolutePath()));
+
+        const QStringList fixtures =
+            dir.entryList(QStringList() << QStringLiteral("*.yaml"), QDir::Files, QDir::Name);
+        QVERIFY2(fixtures.size() >= 6, qPrintable(dir.absolutePath()));
+
+        for (const QString& name : fixtures) {
+            const QString base = name.left(name.size() - 5);          // 去掉 ".yaml"
+            const QString expectPath = dir.filePath(base + QStringLiteral(".expect.json"));
+            QFile file(expectPath);
+            QVERIFY2(file.open(QIODevice::ReadOnly), qPrintable(expectPath));
+            const QJsonObject expected = QJsonDocument::fromJson(file.readAll()).object();
+            file.close();
+            QVERIFY2(!expected.isEmpty(), qPrintable(expectPath));
+
+            const ScheduleResult result =
+                ScheduleModel::loadFromConfig(dir.filePath(name), kNow);
+
+            // 期望里的 now 是 Python 侧写死的同一个时刻；对不上说明两边常量漂了
+            QCOMPARE(expected.value(QStringLiteral("now")).toString(),
+                     kNow.toString(Qt::ISODate));
+
+            if (!expected.value(QStringLiteral("python_ok")).toBool()) {
+                // Python 会整份拒绝（SchedulerError）：C++ 侧不许崩，且必须把问题暴露出来
+                QVERIFY2(!result.problems.isEmpty(), qPrintable(name));
+                continue;
+            }
+
+            QVERIFY2(result.ok, qPrintable(result.error));
+            QVERIFY2(result.problems.isEmpty(),
+                     qPrintable(result.problems.join(QStringLiteral("; "))));
+            QVERIFY2(result.totalInConfig == expected.value(QStringLiteral("total_in_config")).toInt(),
+                     qPrintable(QStringLiteral("%1: total_in_config 期望 %2 实际 %3")
+                                    .arg(name)
+                                    .arg(expected.value(QStringLiteral("total_in_config")).toInt())
+                                    .arg(result.totalInConfig)));
+
+            const QJsonArray days = expected.value(QStringLiteral("days")).toArray();
+            QVERIFY2(result.days.size() == days.size(), qPrintable(name));
+            for (int d = 0; d < days.size(); ++d) {
+                const QJsonObject day = days.at(d).toObject();
+                const ScheduleDay& actualDay = result.days.at(d);
+                QCOMPARE(actualDay.label, day.value(QStringLiteral("label")).toString());
+                QCOMPARE(actualDay.date.toString(Qt::ISODate),
+                         day.value(QStringLiteral("date")).toString());
+
+                const QJsonArray rows = day.value(QStringLiteral("rows")).toArray();
+                // 整段比对（失败时能一眼看出差在哪一行），格式 time|end|title|past
+                QVERIFY2(renderRows(actualDay.rows) == renderJsonRows(rows),
+                         qPrintable(QStringLiteral("%1 %2 的行不一致:\n--- C++ ---\n%3\n"
+                                                   "--- Python ---\n%4")
+                                        .arg(name, actualDay.label,
+                                             renderRows(actualDay.rows), renderJsonRows(rows))));
+            }
+        }
+    }
+#endif
 };
 
 QTEST_APPLESS_MAIN(TestScheduleModel)

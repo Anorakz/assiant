@@ -1,0 +1,30 @@
+# ============================================================================
+#  跨实现一致性夹具 01 — recurring 的星期各种写法
+#
+#  固定"现在" = 2026-09-21 15:00（周一），所以 mon/0 命中今天、tue/1 命中明天。
+#  期望文件由 tests/test_schedule_parity.py 用真的 Scheduler 生成，别手写。
+# ============================================================================
+scheduler:
+  interval_min: 1
+  recurring:
+    - title: 每天喝水
+      start: "10:00"
+    - title: 周一学习
+      days: [mon]
+      start: "09:00"
+    - title: 周二站会
+      days: [tue]
+      start: "09:30"
+      end: "09:45"
+    - title: 整数0也是周一
+      days: [0]
+      start: "08:00"
+    - title: 大写MON
+      days: [MON]
+      start: "08:01"
+    - title: 全名monday
+      days: [monday]
+      start: "08:02"
+    - title: 空days等于每天
+      days: []
+      start: "23:00"

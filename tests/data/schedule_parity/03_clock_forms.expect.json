@@ -1,0 +1,81 @@
+{
+  "days": [
+    {
+      "date": "2026-09-21",
+      "label": "今天",
+      "rows": [
+        {
+          "end": "",
+          "past": true,
+          "time": "09:30",
+          "title": "一位小时"
+        },
+        {
+          "end": "",
+          "past": true,
+          "time": "09:30",
+          "title": "两位小时"
+        },
+        {
+          "end": "",
+          "past": true,
+          "time": "09:30",
+          "title": "全角冒号"
+        },
+        {
+          "end": "",
+          "past": true,
+          "time": "09:30",
+          "title": "紧凑不加引号"
+        },
+        {
+          "end": "",
+          "past": true,
+          "time": "09:30",
+          "title": "紧凑带引号"
+        }
+      ]
+    },
+    {
+      "date": "2026-09-22",
+      "label": "明天",
+      "rows": [
+        {
+          "end": "",
+          "past": false,
+          "time": "09:30",
+          "title": "一位小时"
+        },
+        {
+          "end": "",
+          "past": false,
+          "time": "09:30",
+          "title": "两位小时"
+        },
+        {
+          "end": "",
+          "past": false,
+          "time": "09:30",
+          "title": "全角冒号"
+        },
+        {
+          "end": "",
+          "past": false,
+          "time": "09:30",
+          "title": "紧凑不加引号"
+        },
+        {
+          "end": "",
+          "past": false,
+          "time": "09:30",
+          "title": "紧凑带引号"
+        }
+      ]
+    }
+  ],
+  "fixture": "03_clock_forms.yaml",
+  "now": "2026-09-21T15:00:00",
+  "python_error": null,
+  "python_ok": true,
+  "total_in_config": 5
+}

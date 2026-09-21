@@ -1,0 +1,75 @@
+{
+  "days": [
+    {
+      "date": "2026-09-21",
+      "label": "今天",
+      "rows": [
+        {
+          "end": "",
+          "past": true,
+          "time": "08:00",
+          "title": "整数0也是周一"
+        },
+        {
+          "end": "",
+          "past": true,
+          "time": "08:01",
+          "title": "大写MON"
+        },
+        {
+          "end": "",
+          "past": true,
+          "time": "08:02",
+          "title": "全名monday"
+        },
+        {
+          "end": "",
+          "past": true,
+          "time": "09:00",
+          "title": "周一学习"
+        },
+        {
+          "end": "",
+          "past": true,
+          "time": "10:00",
+          "title": "每天喝水"
+        },
+        {
+          "end": "",
+          "past": false,
+          "time": "23:00",
+          "title": "空days等于每天"
+        }
+      ]
+    },
+    {
+      "date": "2026-09-22",
+      "label": "明天",
+      "rows": [
+        {
+          "end": "09:45",
+          "past": false,
+          "time": "09:30",
+          "title": "周二站会"
+        },
+        {
+          "end": "",
+          "past": false,
+          "time": "10:00",
+          "title": "每天喝水"
+        },
+        {
+          "end": "",
+          "past": false,
+          "time": "23:00",
+          "title": "空days等于每天"
+        }
+      ]
+    }
+  ],
+  "fixture": "01_recurring_weekdays.yaml",
+  "now": "2026-09-21T15:00:00",
+  "python_error": null,
+  "python_ok": true,
+  "total_in_config": 7
+}

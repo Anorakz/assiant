@@ -54,6 +54,12 @@ foreach(core_test test_config_store test_config_sync test_view_state test_idle_w
     set_tests_properties(${core_test} PROPERTIES TIMEOUT 60)
 endforeach()
 
+# S3: 跨实现一致性夹具目录。夹具/期望由 Python 侧生成（tests/test_schedule_parity.py
+# 用真的 agent.core.scheduler），C++ 侧读同一份做断言。测试进程的 cwd 不确定，
+# 所以编译期写死 —— 与 test_local_client 的 LOCAL_SERVER_SCRIPT 同一套路。
+target_compile_definitions(test_schedule_model PRIVATE
+    SCHEDULE_PARITY_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../tests/data/schedule_parity")
+
 # ------------------------------------------------- T5/T7: 控件级测试 ---
 # 真的点控件（输入框 / 发送按钮 / 模式按钮 / 音乐条占位块），所以需要
 # QApplication + Widgets，跑的时候用 offscreen 平台插件。
