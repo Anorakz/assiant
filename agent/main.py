@@ -26,10 +26,10 @@
 #
 #  关于 IPC (第 10 步)
 #  ---------------------------------------------------------------------------
-#  协议已定 (docs/ipc-protocol.md + agent/ipc/protocol.py), 但**收发还没写**
-#  (server / client 在 todo.md 里)。这里**不假装**起了一个 IPC: 找不到
-#  build_ipc() / IPCServer 就记一条 warning 跳过。将来把 server 放进 agent/ipc/
-#  并导出 build_ipc(bus, config) 即可自动接入, 不用改本文件。
+#  IPC 已经实现: agent/ipc/local_server.py 的 LocalServer, 由 agent/ipc/__init__.py
+#  的 build_ipc(bus, config, runtime) 导出。这里按"找接入点"的方式接 —— 找不到
+#  build_ipc() 就记一条 warning 跳过, **不假装**起了一个 IPC。
+#  这样 agent/ipc/ 换实现时不用改本文件。
 #
 #  不做的事 (按约定)
 #  ---------------------------------------------------------------------------
@@ -582,7 +582,7 @@ class Runtime:
 
     # ---- 6) ipc ----
     async def _start_ipc(self) -> None:
-        """启动 IPC。只有协议、没有 server 就跳过 —— 不假装提供, 也不因此失败。"""
+        """启动 IPC。agent/ipc/ 里没有接入点就跳过 —— 不假装提供, 也不因此失败。"""
         try:
             module = importlib.import_module("agent.ipc")
         except ImportError:
@@ -591,12 +591,11 @@ class Runtime:
             )
             return
 
-        factory = getattr(module, "build_ipc", None) or getattr(module, "IPCServer", None)
+        factory = getattr(module, "build_ipc", None)
         if factory is None:
-            # 当前就是这个状态: agent/ipc/ 里只有 protocol.py (协议已定, 收发还没写)
             self.log.warning(
-                "ipc: agent/ipc/ 里只有协议 (protocol.py), 还没有 build_ipc()/IPCServer, "
-                "跳过 —— GUI 暂时连不上, 不影响其余功能"
+                "ipc: agent/ipc/ 里没有 build_ipc(), 跳过 —— "
+                "GUI 暂时连不上, 不影响其余功能"
             )
             return
 

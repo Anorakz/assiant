@@ -391,8 +391,9 @@ Phase 6 决策记录（已评审）
 □ 配置入口收敛：只有 config/config.yaml 是 Agent 的运行时配置；
      gui/config/gui.yaml 与 llm/config/llm.env 不再被 Agent 读取 —— 需明确「谁写、谁读」，
      否则 GUI 模型测试页写三份、Agent 只认一份，改了不生效
-□ 清理并存实现：agent/ipc/server.py（收 {action,payload}）与 local_server.py（按 protocol 收 topic）
-     两份 server 现都躺在仓库里且格式不同 —— 二选一，另一份删除或明确标注废弃
+☑ 清理并存实现：agent/ipc/server.py **已删除**（归一化 C1，2026-09-21）——它是第二份 server 实现，自带第二份 decode_command()，只被 gui/tests/e2e_ipc.py 当联调对端用
+     现在生产侧只有 agent/ipc/local_server.py 一份（收命令信封），e2e_ipc.py 改用现成的 gui/tests/local_server.py 当真对端。
+      判据: agent/ipc/ 只剩 4 个文件; 全仓 `def decode_command` 只有 1 处; 板端 ctest e2e_ipc 全绿。
 □ 板端 ⇄ PC 同步机制固化：明确 git pull 与 deploy.ps1 各自负责什么，杜绝"板端落后好几个提交却没人发现"
 □ 文档去重：gui-agent-integration.md §3 与 ipc-protocol.md §4 内容重叠且互相矛盾，合并到一处
 
