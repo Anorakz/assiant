@@ -8,7 +8,9 @@
 //     找到 '\n' 时才切一行出来 (docs/ipc-protocol.md §1)。
 //
 //  2) 接收方向校验到信封为止
-//     本类负责信封 {topic, data, timestamp} 的合法性 (协议 §2/§6);
+//     接收 (Agent -> GUI) 的信封是 {topic, data, timestamp} (协议 §2/§6);
+//     发送 (GUI -> Agent) 的是 {action, payload}, 见 sendCommand()。
+//     两个方向字段名不同是协议约定, 不是笔误。
 //     负载里的字段含义 (mode / text / path / title / playing …) 属于各个
 //     信号接收方 (面板) 的应用层语义, 不在这一层丢消息 —— 否则同一份 schema
 //     要在 client 和 panel 里各写一遍。
@@ -124,11 +126,14 @@ void LocalClient::sendCommand(const QString& action, const QJsonObject& payload)
         return;
     }
 
-    // 线格式 (阶段 2 任务约定): {"action": "...", "payload": {...}} + '\n'
+    // 线格式: {"action": "...", "payload": {...}} + '\n'  —— **没有 timestamp**。
     //
-    // ⚠ 注意: 这**不是** docs/ipc-protocol.md §4 里的命令信封
-    //   ({topic, data, timestamp})。按本任务给出的接口实现; 若将来要对上
-    //   Agent 的 protocol.decode_full(), 两边需要统一成 topic/data/timestamp。
+    // ⚠ 两个方向的信封不一样, 这是协议本身的约定 (docs/ipc-protocol.md §2):
+    //   命令 (本方法, GUI -> Agent) = {action, payload}
+    //   推送 (handleLine, Agent -> GUI) = {topic, data, timestamp}
+    //   Phase 6 D1 把 **Agent 侧统一到了 GUI 这一种** (protocol.decode_command) ——
+    //   在此之前 Agent 只认 topic 形态, 于是这里发出去的每条命令都被当坏行丢掉。
+    //   不要再"统一成 topic/data/timestamp": 那会把已经对齐好的两侧再拆开。
     QJsonObject envelope;
     envelope.insert(QStringLiteral("action"), action);
     envelope.insert(QStringLiteral("payload"), payload);

@@ -207,8 +207,31 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
      三方验证：PC 整套 exit 0；WSL 14 文件 OK（pytest 23 passed）；
      板端 test_ipc_local_server 78 OK / pytest 23 passed。
      注意：status **推送**里的 `mode` 是反方向的另一个字段（本来就该叫 mode），没有动它。
-□ D3 三份文档同步：ipc-protocol.md §4 / gui-agent-integration.md §3（那句「与 protocol §4 一致」是错的）/
-     gui/src/services/local_client.cpp 的注释
+■ D3 三份文档同步（命令信封改成 GUI 的实际实现）
+     · docs/ipc-protocol.md：
+         §2 重写为**两个方向的信封**（推送 {topic,data,timestamp} / 命令 {action,payload}，
+            命令方向没有 timestamp），并写明"不做双信封兼容"；
+         §4 命令表改成 action/payload，`switch_mode` 那行点明**键是 value 不是 mode**
+            （mode 是 §3 里 status 推送的字段，方向不同）；
+         §5 补了命令方向的**逐字节示例**（52 字节，中文原样 UTF-8）；
+         §6 错误表按方向拆开（缺 action / 缺 payload / **信封发错方向** 各一行）；
+         §7 Python 与 C++ 两侧的实现要点都按新信封改写；
+         §8 常量表补 ACTION_FIELD / PAYLOAD_FIELD；
+         §10 顺手改掉一处过时说明：GUI 那行原写「**尚未实现**」，其实 gui/ 里早就是真代码了。
+     · docs/gui-agent-integration.md：
+         §1 传输表新增一行「信封：两个方向不一样」，避免读者从中间看起时混用；
+         §3 那句「与 protocol §4 一致」原来**是错的**（protocol §4 当时写的是 topic 形态），
+            现在两边真的对齐了 —— 改成可核对的说明，并留下 D1/D2 的历史提醒（勿再退回：
+            Agent 侧曾收 topic 信封 + 读 payload["mode"]，导致 GUI 的每条命令被整条丢掉）。
+     · gui/src/services/local_client.cpp：sendCommand 上方的注释原文写着
+        "这**不是** docs §4 的信封 … 若将来要对齐 Agent 的 decode_full()，两边需要统一成
+        topic/data/timestamp" —— 方向已经反了（是 Agent 对齐 GUI）。改成说明协议本身就是
+        两个方向两种信封，并点明 D1 之后 Agent 由 decode_command() 收这个信封。
+     另外加了一条测试 test_documented_byte_example_is_exact：把文档 §5 里那 52 字节
+     钉在代码上，免得以后改了格式、文档里的 hex 变成骗人的。
+     验证：test_ipc_protocol 67 OK；PC 整套 exit 0；板端 GUI 重新编译 **BUILD_OK**、
+     `ctest -R local_client` **1/1 passed (9.21s)**（这个 C++ 用例正是拿真 server 核对
+     action/payload 字段的那个）。
 □ D4 build_ipc(bus, config, runtime=None) 接线出方向推送（status / llm）
      （现在只拿得到 bus，handle_event() 的回复又被主循环丢弃，推不出去）
 □ D5 Agent 状态推送到 GUI 验证

@@ -389,6 +389,17 @@ class TestCommandEnvelope(unittest.TestCase):
     就哑"。D1 之前 Agent 只认 {"topic","data","timestamp"}, 真 GUI 的命令会被当坏行丢掉。
     """
 
+    def test_documented_byte_example_is_exact(self):
+        """docs/ipc-protocol.md §5 里那段命令方向的十六进制, 必须与代码一致。
+
+        文档里贴了 52 字节的逐字节示例 (含中文原样 UTF-8 e4 bd a0 e5 a5 bd);
+        这里把它钉住 —— 否则改一次格式, 文档里的 hex 就变成骗人的。
+        """
+        raw = p.encode_command(p.COMMAND_CHAT_INPUT, {"text": "你好"})
+        self.assertEqual(len(raw), 52, "文档 §5 写的是 52 字节")
+        self.assertEqual(raw,
+                         b'{"action":"chat_input","payload":{"text":"\xe4\xbd\xa0\xe5\xa5\xbd"}}\n')
+
     def test_field_name_constants(self):
         self.assertEqual(p.ACTION_FIELD, "action")
         self.assertEqual(p.PAYLOAD_FIELD, "payload")

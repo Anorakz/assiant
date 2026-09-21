@@ -38,7 +38,10 @@ Agent（Python）与 GUI（C++ / Qt5）都跑在 RK3568 板端，通过 Unix dom
 
 ## 2. 消息信封
 
-每条消息都是一个 JSON object，**恰好三个字段**：
+**两个方向的信封不一样** —— 这不是笔误，是照 GUI 的实际实现定的
+（Phase 6 决策 1：命令格式以 GUI 为准）。同一层里两种信封共存，混用会被丢弃（见 §6）。
+
+### Agent → GUI（推送）
 
 ```json
 {"topic": "status", "data": {"mode": "STUDY", "connected": true}, "timestamp": 1234567890.123}
@@ -46,17 +49,37 @@ Agent（Python）与 GUI（C++ / Qt5）都跑在 RK3568 板端，通过 Unix dom
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `topic` | string | ✅ | 消息名。Agent→GUI 用 topic 表，GUI→Agent 用 command 表（§3 / §4） |
+| `topic` | string | ✅ | 消息名。取值见 §3 |
 | `data` | **object** | ✅ | 负载。**必须是 JSON object**，不能是 array / string / number；没有参数时给 `{}` |
 | `timestamp` | number | ✅ | Unix epoch **秒**（浮点），例如 `1234567890.123` |
+
+### GUI → Agent（命令）
+
+```json
+{"action": "chat_input", "payload": {"text": "现在几点了"}}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `action` | string | ✅ | 命令名。取值见 §4 |
+| `payload` | **object** | ✅ | 参数。**必须是 JSON object**；没有参数时给 `{}` |
+
+**命令方向没有 `timestamp`**：GUI 不发，Agent 也不要求（`decode_command()` 不检查它）
+—— 少一个字段就少一处两边可能不一致的地方。字段顺序是 `action` 在前（Qt 按插入顺序
+序列化，GUI 先插 `action`），但两侧都应**按 key 取值**，不要依赖顺序。
+
+> ⚠ `topic`/`data` 与 `action`/`payload` **不能混用**：推送用前者，命令用后者。
+> Agent 侧的对应关系是 `encode/decode/decode_full`（推送）与
+> `encode_command/decode_command`（命令）。收错形态的行会被丢弃并记 warning ——
+> **不**做"两种都认"的兼容（那等于"文档说 A、代码也收 B"）。
 
 规则：
 
 1. **字段顺序无关**。JSON object 无序，两侧都必须按 key 取值。
 2. **未知字段必须忽略**，不要报错。这是本协议没有版本号时唯一的向前兼容手段
    —— 将来加字段时，老实现忽略它即可继续工作。
-3. **`data` 必须是 object**。这条是硬约束：放行标量会让两侧的取值代码到处写类型
-   分支，而 array 与 object 的边界最容易两边理解不一致。
+3. **`data` / `payload` 必须是 object**。这条是硬约束：放行标量会让两侧的取值代码
+   到处写类型分支，而 array 与 object 的边界最容易两边理解不一致。
 4. **没有版本号字段**（v1 不需要）。需要演进时靠"加字段 + 忽略未知字段"，
    而不是靠版本协商。
 
@@ -115,19 +138,22 @@ GUI 收到后按 `topic` 分发。**不认识的 topic 忽略**。
 
 ## 4. Command 表（GUI → Agent）
 
-Agent 收到后按 `topic` 分发（**command 也放在 `topic` 字段里**，信封结构完全相同；
-方向由"谁发的"决定）。**不认识的 command 忽略**。
+命令用 §2 的**命令信封**：`{"action": ..., "payload": {...}}`，**没有 `timestamp`**。
+Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warning，不是错误 —— 两侧
+版本可能不一致）。
 
-| command | data 字段 | 类型 | 说明 |
+| action | payload 字段 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `switch_mode` | `value` | string | 目标状态，取值同 `MODES`（`SLEEP`/`IDLE`/`STUDY`/`GAME`） |
-| `next_wallpaper` | — | — | 切下一张壁纸；`data` 必须是 `{}` |
+| `switch_mode` | `value` | string | 目标状态，取值同 `MODES`（`SLEEP`/`IDLE`/`STUDY`/`GAME`）。⚠ **键是 `value`，不是 `mode`**：`mode` 是 §3 里 `status` **推送**的字段，方向不同，别混 |
+| `next_wallpaper` | — | — | 切下一张壁纸；`payload` 必须是 `{}` |
 | `chat_input` | `text` | string | 用户在 GUI 里敲的一行输入，等价于终端输入 |
-| `next_bilibili` | — | — | 播放下一集 B 站视频；`data` 必须是 `{}` |
+| `next_bilibili` | — | — | 播放下一集 B 站视频；`payload` 必须是 `{}` |
 
 注意：
 
-- **没有参数的 command 也必须带 `data`**，写成 `{}`。缺 `data` 字段会被判为非法消息。
+- **没有参数的 command 也必须带 `payload`**，写成 `{}`。缺 `payload` 字段会被判为非法消息。
+- 少了 `payload` 里该有的键（例如 `switch_mode` 缺 `value`）**不会**被当成"用默认值"：
+  该条命令被丢弃，并记一条**点名字段**的 warning。
 - `switch_mode` 的合法性由 Agent 侧状态机判定：非法转换（例如 `STUDY → GAME`）
   **不会**报协议错，而是被拒绝并回一条 `status` 说明当前真实状态。
   GUI 应当以随后收到的 `status` 为准，不要乐观地自行切换显示。
@@ -135,10 +161,10 @@ Agent 收到后按 `topic` 分发（**command 也放在 `topic` 字段里**，�
 **示例**
 
 ```
-{"topic":"switch_mode","data":{"value":"GAME"},"timestamp":1234567892.0}
-{"topic":"next_wallpaper","data":{},"timestamp":1234567892.5}
-{"topic":"chat_input","data":{"text":"帮我看看现在几点了"},"timestamp":1234567893.0}
-{"topic":"next_bilibili","data":{},"timestamp":1234567893.5}
+{"action":"switch_mode","payload":{"value":"GAME"}}
+{"action":"next_wallpaper","payload":{}}
+{"action":"chat_input","payload":{"text":"帮我看看现在几点了"}}
+{"action":"next_bilibili","payload":{}}
 ```
 
 ---
@@ -173,6 +199,21 @@ Agent 收到后按 `topic` 分发（**command 也放在 `topic` 字段里**，�
 > Python 侧 `encode()` 用原样 UTF-8（便于抓包/看日志），Qt 侧 `toJson()` 也只输出
 > 原样 UTF-8。
 
+命令方向（`encode_command()`，注意**没有 `timestamp`**，长度 52 字节）：
+
+```
+7b 22 61 63 74 69 6f 6e 22 3a 22 63 68 61 74 5f   {"action":"chat_
+69 6e 70 75 74 22 2c 22 70 61 79 6c 6f 61 64 22   input","payload"
+3a 7b 22 74 65 78 74 22 3a 22 e4 bd a0 e5 a5 bd   :{"text":"你好
+22 7d 7d 0a                                       "}}.
+```
+
+文本形式：
+
+```json
+{"action":"chat_input","payload":{"text":"你好"}}
+```
+
 ---
 
 ## 6. 错误处理约定
@@ -184,19 +225,23 @@ Agent 收到后按 `topic` 分发（**command 也放在 `topic` 字段里**，�
 | 不是合法 JSON | 丢弃该行，记 warning，不断开 |
 | 不是合法 UTF-8 | 丢弃该行，记 warning，不断开 |
 | 是 JSON 但不是 object（数组/标量） | 丢弃，记 warning |
-| 缺 `topic` / `topic` 不是非空字符串 | 丢弃，记 warning |
-| 缺 `data` / `data` 不是 object | 丢弃，记 warning |
-| 缺 `timestamp` / 不是数字 | 丢弃，记 warning |
+| **推送**方向：缺 `topic` / 不是非空字符串 | 丢弃，记 warning |
+| **推送**方向：缺 `data` / `data` 不是 object | 丢弃，记 warning |
+| **推送**方向：缺 `timestamp` / 不是数字 | 丢弃，记 warning |
+| **命令**方向：缺 `action` / 不是非空字符串 | 丢弃，记 warning |
+| **命令**方向：缺 `payload` / `payload` 不是 object | 丢弃，记 warning |
+| **信封发错方向**（命令位给了 `{topic,data,…}`，或推送位给了 `{action,payload}`） | 丢弃，记 warning —— 报的正是"缺本方向那个必填字段"（如缺 `action`）。**不**做双信封兼容 |
 | 超过 1 MiB（一直不发换行） | 丢弃该行，记 warning，不断开 |
-| `topic` 不认识 | **忽略**（不是错误）：可能对端版本更新 |
-| 已知 topic 但 payload 字段缺失 | 丢弃并记 warning；**不影响其它消息** |
+| `topic` / `action` 不认识 | **忽略**（不是错误）：可能对端版本更新 |
+| 已知命令，但 `payload` 里缺该有的键（如 `switch_mode` 缺 `value`） | 丢弃并记**点名字段**的 warning；**不影响其它消息** |
 | 对端关闭连接（EOF） | 关闭该连接，继续 `accept` 新连接 |
 
 约定细节：
 
 - 丢弃时**必须记日志**（包含原始行内容的截断形式，便于定位），否则坏消息会变成
   静默丢数据，非常难查。
-- **不做**任何"猜测性修复"：例如缺 `data` 就去猜它想干什么。宁可丢一条。
+- **不做**任何"猜测性修复"：例如缺 `data` / `payload` 就去猜它想干什么，或者
+  `switch_mode` 少了 `value` 就当成默认模式。宁可丢一条。
 - 解析失败的**计数器**建议暴露出来（日志或诊断接口），方便判断是协议不兼容还是
   偶发抖动。
 - 单条消息处理失败（例如 `switch_mode` 触发非法状态转换）**不算协议错误**，
@@ -209,30 +254,41 @@ Agent 收到后按 `topic` 分发（**command 也放在 `topic` 字段里**，�
 ### Python（Agent）
 
 ```python
-from agent.ipc import encode, decode, decode_full, TOPIC_STATUS, MODE_STUDY
+from agent.ipc import (encode, decode_full, encode_command, decode_command,
+                       TOPIC_STATUS, COMMAND_CHAT_INPUT, MODE_STUDY)
 
+# 发推送 (Agent -> GUI): topic 信封
 sock.sendall(encode(TOPIC_STATUS, {"mode": MODE_STUDY, "connected": True}))
 
-# 按行读:
+# 发命令 (GUI -> Agent): action 信封, 没有 timestamp
+sock.sendall(encode_command(COMMAND_CHAT_INPUT, {"text": "现在几点了"}))
+
+# 按行读 (这里以 Agent 为例: 入方向是命令):
 buf = b""
 buf += sock.recv(4096)
 while b"\n" in buf:
     line, buf = buf.split(b"\n", 1)
     try:
-        topic, data = decode(line)
-    except IpcProtocolError as exc:      # 丢弃 + 记日志, 连接继续
-        log.warning("丢弃非法 IPC 消息: %r (%r)", line[:200], exc)
+        action, payload = decode_command(line)   # 命令信封
+    except IpcProtocolError as exc:              # 丢弃 + 记日志, 连接继续
+        log.warning("丢弃非法 IPC 命令: %r (%r)", line[:200], exc)
         continue
-    handle(topic, data)
+    handle(action, payload)
 ```
+
+> **两端各自只收一个方向**：Agent 的读循环只解命令（`decode_command`），只发推送
+> （`encode`）；GUI 反过来 —— 只发命令（`encode_command`），只解推送（`decode_full`）。
+> 所以"收错形态"永远是**对端发错了方向**或版本不一致，丢掉并记 warning 是对的。
 
 要点：
 
-- `encode()` 返回**含结尾 `\n` 的完整字节**，直接 `sendall` 即可，不要重复加换行。
-- `decode()` 结尾有无 `\n` 都能吃，但只剥**结尾**：行首空白会让 JSON 解析失败，
-  那是应该报错的。
-- 需要时间戳时用 `decode_full()`（`decode()` 按签名只返回 `(topic, data)`）。
-- `encode()` 的 `data` 传错类型（list/str/…）会抛 `InvalidMessageError`，不要吞。
+- `encode()` / `encode_command()` 都返回**含结尾 `\n` 的完整字节**，直接 `sendall` 即可，
+  不要重复加换行。
+- `decode()` / `decode_full()` / `decode_command()` 结尾有无 `\n` 都能吃，但只剥**结尾**：
+  行首空白会让 JSON 解析失败，那是应该报错的。
+- 推送要时间戳用 `decode_full()`（`decode()` 按签名只返回 `(topic, data)`）；
+  命令没有时间戳，用 `decode_command() -> (action, payload)`。
+- 三个 encode 的负载传错类型（list/str/…）都会抛 `InvalidMessageError`，不要吞。
 
 ### C++ / Qt5（GUI）
 
@@ -241,12 +297,14 @@ while b"\n" in buf:
   `while` 找 `\n` 切分。**不要**假设一次 `readyRead` 正好是一条消息。
 - 解析：`QJsonDocument::fromJson(line, &err)`；`err.error != QJsonParseError::NoError`
   → 丢弃 + `qWarning`。
-- 取值：`doc.object().value("data").toObject()`；**校验 `isObject()`**，
+- 取值（**收**推送）：`doc.object().value("data").toObject()`；**校验 `isObject()`**，
   别直接 `toObject()`（标量会被静默变成空对象，把协议错误吞掉）。
 - 时间戳：`double ts = obj.value("timestamp").toDouble();`（见 §2 的精度警告）。
-- 写：`QJsonDocument(obj).toJson(QJsonDocument::Compact) + "\n"`；
-  然后 `flush()`。Compact 与本协议示例的紧凑写法一致。
-- 发送前校验 `data` 是 object；`next_wallpaper` / `next_bilibili` 发 `{}`。
+- 写（**发**命令）：信封是 `{"action","payload"}`（**没有 timestamp**）——
+  照 `gui/src/services/local_client.cpp::sendCommand()` 那样按插入顺序塞两个字段，
+  再 `QJsonDocument(obj).toJson(QJsonDocument::Compact) + "\n"` 然后 `flush()`。
+  参考实现见 `gui/src/services/local_client.cpp`。
+- 发送前校验 `payload` 是 object；`next_wallpaper` / `next_bilibili` 发 `{}`。
 - 断线重连：`disconnected` → 定时重连 `/tmp/agent.sock`。
   重复连接前先删掉自己创建的 socket 文件（Agent 侧负责 `unlink`）。
 
@@ -270,6 +328,8 @@ while b"\n" in buf:
 | `COMMAND_NEXT_WALLPAPER` | `"next_wallpaper"` |
 | `COMMAND_CHAT_INPUT` | `"chat_input"` |
 | `COMMAND_NEXT_BILIBILI` | `"next_bilibili"` |
+| `ACTION_FIELD` | `"action"`（命令信封的字段名） |
+| `PAYLOAD_FIELD` | `"payload"`（命令信封的字段名） |
 | `MODE_SLEEP` / `MODE_IDLE` / `MODE_STUDY` / `MODE_GAME` | `"SLEEP"` / `"IDLE"` / `"STUDY"` / `"GAME"` |
 
 ---
@@ -285,7 +345,7 @@ while b"\n" in buf:
 
 | 一侧 | 实现 | 说明 |
 | --- | --- | --- |
-| Agent（server） | `agent/ipc/local_server.py` 的 `LocalServer` | 监听、`push()` 推状态、`on_command()` 收命令；`agent/ipc/__init__.py` 的 `build_ipc()` 是 `agent/main.py` 的接入点 |
-| GUI（client） | **C++ / Qt5**（尚未实现） | 按本文的线格式自己实现，见第 8 节 |
-| 测试用 client | `agent/ipc/local_client.py` 的 `LocalClient` | **只用于测试/联调**，不是生产 GUI |
+| Agent（server） | `agent/ipc/local_server.py` 的 `LocalServer` | 监听、`push()` 推状态、`on_command()` 收命令（收的是**命令信封**）；`agent/ipc/__init__.py` 的 `build_ipc()` 是 `agent/main.py` 的接入点 |
+| GUI（client） | `gui/src/services/local_client.cpp`（C++ / Qt5） | 发命令用 `{"action","payload"}`（`sendCommand`），收推送解 `{"topic","data","timestamp"}`（`handleLine`）—— 两个方向的信封不同，见 §2 |
+| 测试用 client | `agent/ipc/local_client.py` 的 `LocalClient` | **只用于测试/联调**，不是生产 GUI；它发的命令信封与 C++ GUI 逐字节一致 |
 

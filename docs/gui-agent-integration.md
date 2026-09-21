@@ -14,6 +14,7 @@
 | 角色 | **Agent 是服务端**（`bind`+`listen`+`accept`），**GUI 是客户端** |
 | 编码 | UTF-8，**一行一条 JSON**（NDJSON），不要多行、不要 BOM |
 | 方向 | 同一条连接**双向**：GUI → Agent 发命令；Agent → GUI 推状态 |
+| 信封 | ⚠ **两个方向不一样**：命令 `{"action","payload"}`（§3），推送 `{"topic","data","timestamp"}`（§2）。别混用 |
 | 重连 | GUI 断线后**每 1s 重试**；Agent 重启后重新 `accept` 即可 |
 
 GUI 侧日志（排查用）：连上打 `[ipc] 已连接`；每条收到的报文打 `[recv] <topic> {...}`；
@@ -62,7 +63,14 @@ GUI 侧日志（排查用）：连上打 `[ipc] 已连接`；每条收到的报�
 | `next_wallpaper` | `{}` | 主区右下角「下一张」 | 挑下一张壁纸并推 `wallpaper{path,index}` |
 | `next_bilibili` | `{}` | 视频控制条「下一集」 | 切下一集，并推你有的状态（`status`/封面等） |
 
-⚠ 注意 `switch_mode` 的键是 **`value`**（不是 `mode`）——与 `docs/ipc-protocol.md` §4 的 GUI 侧格式一致。
+⚠ 注意 `switch_mode` 的键是 **`value`**（不是 `mode`）—— `mode` 是 §2 里 `status` **推送**
+的字段，方向不同，别混。
+
+上面这个信封（`{"action","payload"}`，无 `timestamp`）已与 `docs/ipc-protocol.md` §4 对齐。
+历史提醒（Phase 6 D1/D2 之前，勿再退回）：Agent 侧当时收的是 `{"topic","data","timestamp"}`
+**并且**读 `payload["mode"]` —— 两个不一致叠加的结果是 **GUI 发的每一条命令都被整条丢掉**，
+而测试全绿（测试客户端发的是 topic 形态）。现在 Agent 侧由 `decode_command()` 收这个信封、
+`switch_mode` 读 `value`，有专门的用例钉住这两点。
 
 GUI 在**未连接 / 主机未就绪**时不会发这些命令（会先在界面上提示"没发出去：与 Agent 未连接"）。
 
