@@ -438,20 +438,18 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
 
         GUI 发的是 {"value": "STUDY"}（docs/ipc-protocol.md §4 与 gui-agent-integration.md §4
         都这么写）; 而 status **推送**里的 "mode" 是反方向的另一个字段, 别混。
-        用日志把两条路分开断言: 认了 value 才会走到"收到 switch_mode(...)",
-        给了老键 mode 只应得到"缺少 value 字段"。
+        这里只钉"键"这一件事: 认了 value 就不会报"缺少 value"(D5 之后走的是
+        "没有状态机"那条路, 因为这里故意不给 runtime); 给了老键 mode 必须点名字段拒掉。
         """
         from agent.ipc import _make_command_handler
 
-        handler = _make_command_handler(None)
+        handler = _make_command_handler(None)   # 故意不给 runtime
 
         with self.assertLogs("agent.ipc", level="WARNING") as caught:
             await handler(COMMAND_SWITCH_MODE, {"value": "STUDY"})
         joined = "\n".join(caught.output)
-        # 日志里打的是**内部**模式名 (mode_from_wire("STUDY") -> "study"),
-        # 所以这里只断言走到了"收到 switch_mode"这条支路
-        self.assertIn("收到 switch_mode", joined)
         self.assertNotIn("缺少 value", joined)
+        self.assertIn("没有状态机", joined, "没有 runtime 时要说清是缺状态机")
 
         with self.assertLogs("agent.ipc", level="WARNING") as caught:
             await handler(COMMAND_SWITCH_MODE, {"mode": "STUDY"})
@@ -558,6 +556,88 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         runtime.state.transition(State.STUDY, "after-stop")   # 不该抛
         runtime.on_reply("x")
         await asyncio.sleep(0)
+
+    # ---- Phase 6 D5: switch_mode 真的驱动状态机 ----
+
+    async def test_switch_mode_transitions_the_state_machine(self):
+        from agent.ipc import _make_command_handler
+        from agent.io.chat_bus import ChatInputBus
+
+        runtime = self._StubRuntime()
+        handler = _make_command_handler(ChatInputBus(), runtime=runtime)
+
+        self.assertEqual(runtime.state.current(), State.IDLE)
+        await handler(COMMAND_SWITCH_MODE, {"value": "STUDY"})
+        self.assertEqual(runtime.state.current(), State.STUDY, "命令要真的切状态")
+
+        await handler(COMMAND_SWITCH_MODE, {"value": "IDLE"})
+        self.assertEqual(runtime.state.current(), State.IDLE)
+
+    async def test_illegal_switch_mode_pushes_the_real_state_back(self):
+        """非法转换: 拒绝 + 把**真实**状态推回 GUI (docs §4 承诺过这件事)。
+
+        IDLE -> STUDY 合法; STUDY -> GAME 非法 (状态机的表里 STUDY 只能回 IDLE)。
+        """
+        from agent.ipc import _make_command_handler
+        from agent.io.chat_bus import ChatInputBus
+
+        runtime = self._StubRuntime()
+        pushed = []
+        handler = _make_command_handler(
+            ChatInputBus(), runtime=runtime, push=lambda topic, data: pushed.append((topic, data))
+        )
+
+        await handler(COMMAND_SWITCH_MODE, {"value": "STUDY"})
+        self.assertEqual(runtime.state.current(), State.STUDY)
+        self.assertEqual(pushed, [], "成功时由 on_change 推送, 这里不该再推一条")
+
+        await handler(COMMAND_SWITCH_MODE, {"value": "GAME"})      # STUDY -> GAME 非法
+        self.assertEqual(runtime.state.current(), State.STUDY, "非法转换不能改状态")
+        self.assertEqual(len(pushed), 1, "要把真实状态推回去")
+        topic, data = pushed[0]
+        self.assertEqual(topic, TOPIC_STATUS)
+        self.assertEqual(data["mode"], "STUDY", "推的是**当前真实**状态, 不是请求的 GAME")
+
+    async def test_switch_mode_without_runtime_is_ignored(self):
+        from agent.ipc import _make_command_handler
+
+        handler = _make_command_handler(None, runtime=None)
+        # 不该抛 (老 factory 不给 runtime 时就是这条路)
+        await handler(COMMAND_SWITCH_MODE, {"value": "STUDY"})
+
+    async def test_switch_mode_round_trip_over_a_real_socket(self):
+        """D5 的验收形态: GUI 发 switch_mode -> Agent 切状态 -> 推 status 回来。"""
+        if not UNIX_SOCKET_SUPPORTED:
+            self.skipTest("需要 AF_UNIX")
+        runtime = self._StubRuntime(connected=False)
+        server = build_ipc(None, {"ipc": {"socket_path": _tmp_socket_path()}}, runtime=runtime)
+        await server.start()
+        writer = None
+        try:
+            reader, writer = await asyncio.open_unix_connection(server.path)
+            await _wait_until(lambda: server.client_count == 1, what="GUI 连上")
+
+            writer.write(encode_command(COMMAND_SWITCH_MODE, {"value": "STUDY"}))
+            await writer.drain()
+
+            topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+            self.assertEqual(topic, TOPIC_STATUS)
+            self.assertEqual(data["mode"], "STUDY")
+            self.assertIs(data["connected"], False)
+            self.assertEqual(runtime.state.current(), State.STUDY)
+
+            # 再来一条非法的: 应当收到一条**真实状态**的 status (仍是 STUDY)
+            writer.write(encode_command(COMMAND_SWITCH_MODE, {"value": "GAME"}))
+            await writer.drain()
+            topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+            self.assertEqual((topic, data["mode"]), (TOPIC_STATUS, "STUDY"))
+            self.assertEqual(runtime.state.current(), State.STUDY)
+        finally:
+            if writer is not None:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+            await server.stop()
 
 
 # ===========================================================================

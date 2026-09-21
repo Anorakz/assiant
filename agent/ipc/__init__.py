@@ -156,31 +156,30 @@ def build_ipc(bus: Any = None,
     queue_size = _positive_int(section.get("queue_size"), DEFAULT_QUEUE_SIZE)
 
     server = LocalServer(path=path, queue_size=queue_size)
-    server.on_command(_make_command_handler(bus))
+    # switch_mode 被状态机拒绝时要**立刻**把真实状态推回去 (docs §4), 所以命令
+    # 处理函数也需要一个"现在就推"的入口 —— 与出方向用同一个 dispatcher。
+    dispatch = _make_dispatcher(server, _current_loop())
+    server.on_command(_make_command_handler(bus, runtime=runtime, push=dispatch))
     if runtime is not None:
-        _wire_outbound(server, runtime)
+        _wire_outbound(server, runtime, dispatch=dispatch)
     return server
 
 
-def _wire_outbound(server: Any, runtime: Any) -> None:
-    """把 Agent 的状态与回复推给 GUI (Phase 6 D4)。
-
-    这是 D4 之前缺的那一半: 只有入方向 (命令), 出方向一个字都推不出去 ——
-    `handle_event()` 算出来的回复被主循环直接丢掉, 状态变化也没人告诉 GUI。
-
-    · mode 变化   -> ``status{mode, connected}``
-    · 每条 LLM 回复 -> ``llm{text}``
-
-    @note 状态变化回调是**同步**的, 而且可能从非事件循环线程进来 (调度器/原生回调),
-          而 `push()` 是协程 —— 所以建好时抓住 loop, 用
-          ``run_coroutine_threadsafe`` 投回去。
-    @note 回调在 server 没跑或没有 GUI 连着时静默跳过: `push()` 返回 0 本来就不是
-          错误 ("当前没 GUI 连着")。
-    """
+def _current_loop() -> Any:
+    """当前事件循环; 没有就返回 None (同步脚本里直接调 build_ipc 的情况)。"""
     try:
-        loop = asyncio.get_running_loop()
+        return asyncio.get_running_loop()
     except RuntimeError:
-        loop = None
+        return None
+
+
+def _make_dispatcher(server: Any, loop: Any):
+    """造一个"把一条推送投到事件循环上"的同步入口。
+
+    状态变化回调是同步的、还可能从非事件循环线程进来 (调度器/原生回调), 而
+    `push()` 是协程 —— 所以这里用 ``run_coroutine_threadsafe`` 投回去。
+    server 没跑就静默跳过: `push()` 返回 0 ("当前没 GUI 连着") 本来就不是错误。
+    """
 
     def _dispatch(topic: str, data: Dict[str, Any]) -> None:
         if not getattr(server, "is_running", False):
@@ -192,48 +191,75 @@ def _wire_outbound(server: Any, runtime: Any) -> None:
         try:
             asyncio.get_running_loop().create_task(coro)
         except RuntimeError:
-            # 连事件循环都没有 (同步脚本里直接调 build_ipc) —— 关掉协程免得
-            # 报 "coroutine was never awaited"
+            # 连事件循环都没有 —— 关掉协程免得报 "coroutine was never awaited"
             coro.close()
             _log.debug("ipc: 没有事件循环, 推送 %s 被丢弃", topic)
+
+    return _dispatch
+
+
+def _status_data(state: Any) -> Dict[str, Any]:
+    """status 推送的负载。
+
+    @note 只有这一处构造 status 载荷 —— 状态变化推送与"非法转换后把真实状态推回去"
+          用的是同一份, 免得两处慢慢漂移。
+    @note 线上取值是**大写** (SLEEP/IDLE/STUDY/GAME), 状态机内部是小写。
+    """
+    current = state.current()
+    raw = getattr(current, "value", current)
+    try:
+        mode = mode_to_wire(raw)
+    except IpcProtocolError:
+        mode = str(raw)
+        _log.warning("ipc: 状态 %r 无法转成线上取值, 原样推送", raw)
+
+    connected = False
+    is_connected = getattr(state, "is_connected", None)
+    if callable(is_connected):
+        try:
+            connected = bool(is_connected())
+        except Exception as exc:            # noqa: BLE001
+            _log.debug("ipc: is_connected() 失败 (%r), 按未连接推送", exc)
+
+    return {"mode": mode, "connected": connected}
+
+
+def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
+    """把 Agent 的状态与回复推给 GUI (Phase 6 D4)。
+
+    这是 D4 之前缺的那一半: 只有入方向 (命令), 出方向一个字都推不出去 ——
+    `handle_event()` 算出来的回复被主循环直接丢掉, 状态变化也没人告诉 GUI。
+
+    · mode 变化   -> ``status{mode, connected}``
+    · 每条 LLM 回复 -> ``llm{text}``
+    """
+    if dispatch is None:
+        dispatch = _make_dispatcher(server, _current_loop())
 
     state = getattr(runtime, "state", None)
     on_change = getattr(state, "on_change", None)
     if callable(on_change):
         def _status_on_change(old: Any, new: Any) -> None:
-            mode = getattr(new, "value", new)
-            try:
-                wire_mode = mode_to_wire(mode)
-            except IpcProtocolError:
-                # 状态机的取值域变了而这里没跟上时, 别把推送整个搞崩
-                wire_mode = str(mode)
-                _log.warning("ipc: 状态 %r 无法转成线上取值, 原样推送", mode)
-            connected = False
-            is_connected = getattr(state, "is_connected", None)
-            if callable(is_connected):
-                try:
-                    connected = bool(is_connected())
-                except Exception as exc:        # noqa: BLE001
-                    _log.debug("ipc: is_connected() 失败 (%r), 按未连接推送", exc)
-            _dispatch(TOPIC_STATUS, {"mode": wire_mode, "connected": connected})
+            # 回调触发时状态**已经**改好了 (state_machine 的约定), 所以直接读 current()
+            dispatch(TOPIC_STATUS, _status_data(state))
 
         on_change(_status_on_change)
         _log.debug("ipc: 已接上状态推送 (state.on_change -> status)")
 
     if hasattr(runtime, "on_reply"):
         def _on_reply(text: str) -> None:
-            _dispatch(TOPIC_LLM, {"text": text})
+            dispatch(TOPIC_LLM, {"text": text})
 
         runtime.on_reply = _on_reply
         _log.debug("ipc: 已接上回复推送 (runtime.on_reply -> llm)")
 
 
-def _make_command_handler(bus: Any):
+def _make_command_handler(bus: Any, runtime: Any = None, push: Any = None):
     """把 GUI 命令翻译成 Agent 侧的动作。
 
-    目前只有 chat_input 是通的 (它是唯一已经有完整下游的功能: bus -> LLM ->
-    回复)。其余命令**明确记日志并忽略**, 而不是悄悄吞掉 —— 免得 GUI 那边
-    以为生效了。
+    @param runtime 给了就说明 switch_mode 能真的切状态 (Phase 6 D5: 之前只记一条
+                   "状态机还没接进来")
+    @param push    可选: "现在就推一条"的入口 (非法转换时要把**真实**状态回给 GUI)
     """
 
     async def _on_command(action: str, payload: dict) -> None:
@@ -242,23 +268,7 @@ def _make_command_handler(bus: Any):
             return
 
         if action == COMMAND_SWITCH_MODE:
-            # ⚠ 键是 **value** 不是 mode (Phase 6 D2): GUI 与 docs/ipc-protocol.md §4
-            #   都是 {"value": "STUDY"}; 而 status 推送里那个 "mode" 是**另一个方向**
-            #   的字段, 别把两者混起来。
-            if "value" not in payload:
-                _log.warning(
-                    "ipc: switch_mode 的 payload 缺少 value 字段 (得到 %r), 已忽略",
-                    payload,
-                )
-                return
-            try:
-                mode = mode_from_wire(payload.get("value"))
-            except IpcProtocolError as exc:
-                _log.warning("ipc: switch_mode 的 value 不合法, 已忽略: %s", exc)
-                return
-            _log.warning(
-                "ipc: 收到 switch_mode(%s), 但状态机还没接进来 (下一步), 已忽略", mode
-            )
+            _handle_switch_mode(runtime, push, payload)
             return
 
         if action in (COMMAND_NEXT_WALLPAPER, COMMAND_NEXT_BILIBILI):
@@ -268,6 +278,51 @@ def _make_command_handler(bus: Any):
         _log.warning("ipc: 命令 %s 没有处理分支, 已忽略", action)
 
     return _on_command
+
+
+def _handle_switch_mode(runtime: Any, push: Any, payload: dict) -> None:
+    """switch_mode: ``{"value": "STUDY"}`` -> 状态机转换 (Phase 6 D5)。
+
+    ⚠ 键是 **value** 不是 mode (D2): GUI 与 docs/ipc-protocol.md §4 都是
+      ``{"value": "STUDY"}``; status **推送**里那个 "mode" 是另一个方向的字段。
+
+    非法转换**不报协议错**: 状态机返回 False, 这里拒绝 + 记日志, 并把**当前真实
+    状态**推回给 GUI —— 否则界面会停在它自己乐观切过去的那个状态上 (docs §4)。
+    成功时不用手动推: 状态机的 on_change 回调已经负责推送 (D4)。
+    """
+    if "value" not in payload:
+        _log.warning(
+            "ipc: switch_mode 的 payload 缺少 value 字段 (得到 %r), 已忽略",
+            payload,
+        )
+        return
+
+    try:
+        mode = mode_from_wire(payload.get("value"))
+    except IpcProtocolError as exc:
+        _log.warning("ipc: switch_mode 的 value 不合法, 已忽略: %s", exc)
+        return
+
+    state = getattr(runtime, "state", None)
+    if state is None:
+        _log.warning(
+            "ipc: 收到 switch_mode(%s) 但没有状态机 (build_ipc 没拿到 runtime), 已忽略",
+            mode,
+        )
+        return
+
+    # transition() 接受 "study" 这样的小写字符串, 并且非法/原地转换都只返回 False
+    if state.transition(mode, "ipc: switch_mode"):
+        _log.info("ipc: switch_mode -> %s", mode)
+        return
+
+    current = getattr(state.current(), "value", "?")
+    _log.warning(
+        "ipc: switch_mode(%s) 被状态机拒绝 (当前 %s), 把真实状态推回给 GUI",
+        mode, current,
+    )
+    if push is not None:
+        push(TOPIC_STATUS, _status_data(state))
 
 
 async def _handle_chat_input(bus: Any, payload: dict) -> None:

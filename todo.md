@@ -259,7 +259,27 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
      板端（84 OK / 53 OK）。
      本次**没做**：`switch_mode` 还没驱动状态机（处理器仍是"状态机还没接进来，已忽略"），
      所以状态推送目前只能由直接 transition 触发。命令 -> 状态机那一步放 D5/D6。
-□ D5 Agent 状态推送到 GUI 验证
+■ D5 Agent 状态推送到 GUI 验证（含 switch_mode 真正驱动状态机）
+     先补上缺的那一步：switch_mode 之前只记一条"状态机还没接进来"就丢掉。
+     现在 `_make_command_handler(bus, runtime, push)` 拿到 runtime 后：
+       · 合法转换 -> `state.transition(mode, "ipc: switch_mode")`；推送交给 D4 的 on_change
+       · 非法转换 -> 状态机返回 False：**拒绝 + 把当前真实状态推回给 GUI**
+         （docs §4 承诺过这件事，之前是空话）—— 否则界面会停在它自己乐观切过去的状态上
+       · 没给 runtime -> 说清是"没有状态机"，不静默
+     顺带抽出 `_make_dispatcher()` 与 `_status_data()`：让"状态变化推送"与"非法转换纠正推送"
+     共用同一份载荷构造，免得两处慢慢漂移。
+     板端活体验证（真 Runtime + 真主循环 + LocalClient 当 GUI）：
+       1) switch_mode(STUDY)      -> status{mode: STUDY}，板端 state=study
+       2) switch_mode(GAME)(非法) -> 日志"被状态机拒绝 (当前 study)，把真实状态推回给 GUI"
+                                    -> status{mode: STUDY}，状态未变
+       3) chat_input("现在几点")   -> llm{text: "现在是 2026-09-21 18:57:59。"}
+       这条把整链走通了：命令 -> socket -> bus -> **主循环** -> handle_event -> 规则引擎
+       -> on_reply 钩子 -> push llm。
+     （第一次探针第 3 步超时，是因为我**没起主循环** —— bus 只有 `Runtime.serve()` 会消费；
+       补上 serve() 立刻通过。是探针不全，不是产品问题。）
+     测试 +4（合法转换真的切状态 / 非法转换推真实状态 / 无 runtime 不炸 / 真 socket 往返）；
+     三方：PC 整套 exit 0；WSL 14 文件 OK（TestBuildIpc 18 条全跑，含真 socket 往返）；
+     板端 test_ipc_local_server 88 OK + 上面那次活体往返。
 □ D6 GUI 命令到 Agent 验证（switch_mode 往返 / chat_input 往返）
 □ D7 未接线的命令（next_wallpaper / next_bilibili）回推一条 llm 说明「功能未接入」
      （下游属 Phase 7；已确认可接受，避免 GUI 上点了没反应）
