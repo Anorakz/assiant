@@ -154,6 +154,9 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
 - **没有参数的 command 也必须带 `payload`**，写成 `{}`。缺 `payload` 字段会被判为非法消息。
 - 少了 `payload` 里该有的键（例如 `switch_mode` 缺 `value`）**不会**被当成"用默认值"：
   该条命令被丢弃，并记一条**点名字段**的 warning。
+- **`next_wallpaper` / `next_bilibili` 目前还没接下游**（属 Phase 7）：Agent 收到后会回推一条
+  `llm{"text": "…还没接入（Phase 7）…"}` —— 让"点了"有反馈，而不是毫无动静
+  （文案见 `agent/ipc/__init__.py` 的 `UNWIRED_COMMAND_NOTES`）。
 - `switch_mode` 的合法性由 Agent 侧状态机判定：非法转换（例如 `STUDY → GAME`）
   **不会**报协议错，而是被拒绝并回一条 `status` 说明当前真实状态。
   GUI 应当以随后收到的 `status` 为准，不要乐观地自行切换显示。

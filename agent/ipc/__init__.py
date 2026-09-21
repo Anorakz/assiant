@@ -83,6 +83,7 @@ __all__ = [
     "COMMAND_CHAT_INPUT",
     "COMMAND_NEXT_BILIBILI",
     "COMMANDS",
+    "UNWIRED_COMMAND_NOTES",
     "ACTION_FIELD",
     "PAYLOAD_FIELD",
     # 取值域
@@ -254,12 +255,22 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
         _log.debug("ipc: 已接上回复推送 (runtime.on_reply -> llm)")
 
 
+#: 还没接下游的命令 -> 回给用户的那句话 (Phase 6 D7 / 决策 7)。
+#: 下游属 Phase 7; 现在必须**回一句说明**, 否则 GUI 上点了完全没反应, 用起来像坏了。
+#: 文案是给**用户**看的 (GUI 会把 llm 的 text 显示成助手气泡), 所以不要写成日志腔。
+UNWIRED_COMMAND_NOTES: Dict[str, str] = {
+    COMMAND_NEXT_WALLPAPER: "换壁纸的功能还没接入（Phase 7），这次点击先没有生效。",
+    COMMAND_NEXT_BILIBILI: "B 站「下一集」还没接入（Phase 7），这次点击先没有生效。",
+}
+
+
 def _make_command_handler(bus: Any, runtime: Any = None, push: Any = None):
     """把 GUI 命令翻译成 Agent 侧的动作。
 
     @param runtime 给了就说明 switch_mode 能真的切状态 (Phase 6 D5: 之前只记一条
                    "状态机还没接进来")
-    @param push    可选: "现在就推一条"的入口 (非法转换时要把**真实**状态回给 GUI)
+    @param push    可选: "现在就推一条"的入口 —— 非法模式转换要把**真实**状态回给 GUI
+                   (D5), 未接线的命令要回一句说明 (D7)
     """
 
     async def _on_command(action: str, payload: dict) -> None:
@@ -271,8 +282,12 @@ def _make_command_handler(bus: Any, runtime: Any = None, push: Any = None):
             _handle_switch_mode(runtime, push, payload)
             return
 
-        if action in (COMMAND_NEXT_WALLPAPER, COMMAND_NEXT_BILIBILI):
-            _log.warning("ipc: 命令 %s 的下游还没实现, 已忽略", action)
+        if action in UNWIRED_COMMAND_NOTES:
+            # Phase 6 D7 (决策 7): 下游在 Phase 7, 但**必须回一句** —— 否则 GUI 上
+            # 点了完全没反应, 用起来像坏了。回的是 llm (用户看得见的那条通道)。
+            _log.warning("ipc: 命令 %s 的下游还没实现 (Phase 7), 已回推说明", action)
+            if push is not None:
+                push(TOPIC_LLM, {"text": UNWIRED_COMMAND_NOTES[action]})
             return
 
         _log.warning("ipc: 命令 %s 没有处理分支, 已忽略", action)

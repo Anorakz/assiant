@@ -60,6 +60,7 @@ from agent.ipc.local_server import (  # noqa: E402
 )
 from agent.ipc.protocol import (  # noqa: E402
     COMMAND_CHAT_INPUT,
+    COMMAND_NEXT_BILIBILI,
     COMMAND_NEXT_WALLPAPER,
     COMMAND_SWITCH_MODE,
     MAX_LINE_BYTES,
@@ -604,6 +605,66 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         handler = _make_command_handler(None, runtime=None)
         # 不该抛 (老 factory 不给 runtime 时就是这条路)
         await handler(COMMAND_SWITCH_MODE, {"value": "STUDY"})
+
+    # ---- Phase 6 D7: 未接线的命令要回一句说明 (GUI 上别点了没反应) ----
+
+    async def test_unwired_commands_reply_with_a_note(self):
+        from agent.ipc import _make_command_handler
+
+        pushed = []
+        handler = _make_command_handler(
+            None, runtime=None, push=lambda topic, data: pushed.append((topic, data))
+        )
+
+        await handler(COMMAND_NEXT_WALLPAPER, {})
+        await handler(COMMAND_NEXT_BILIBILI, {})
+
+        self.assertEqual(len(pushed), 2, "两条未接线的命令各回一句")
+        for (topic, data), action in zip(pushed, (COMMAND_NEXT_WALLPAPER,
+                                                  COMMAND_NEXT_BILIBILI)):
+            self.assertEqual(topic, TOPIC_LLM, "走 llm 通道 (GUI 显示成助手气泡)")
+            self.assertIn("接入", data["text"], "%s 的说明要讲清没接入" % action)
+            self.assertIn("Phase 7", data["text"])
+
+    async def test_unknown_action_does_not_spam_llm(self):
+        # 不认识的 action 只记 warning: 它是版本不一致的正常现象, 不该往聊天里塞话
+        from agent.ipc import _make_command_handler
+
+        pushed = []
+        handler = _make_command_handler(
+            None, runtime=None, push=lambda topic, data: pushed.append((topic, data))
+        )
+        await handler("something_new", {})
+        self.assertEqual(pushed, [])
+
+    async def test_unwired_command_without_push_is_harmless(self):
+        from agent.ipc import _make_command_handler
+
+        handler = _make_command_handler(None)
+        await handler(COMMAND_NEXT_WALLPAPER, {})   # 不该抛
+
+    async def test_unwired_command_note_reaches_a_real_client(self):
+        if not UNIX_SOCKET_SUPPORTED:
+            self.skipTest("需要 AF_UNIX")
+        server = build_ipc(None, {"ipc": {"socket_path": _tmp_socket_path()}})
+        await server.start()
+        writer = None
+        try:
+            reader, writer = await asyncio.open_unix_connection(server.path)
+            await _wait_until(lambda: server.client_count == 1, what="GUI 连上")
+
+            writer.write(encode_command(COMMAND_NEXT_WALLPAPER, {}))
+            await writer.drain()
+
+            topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+            self.assertEqual(topic, TOPIC_LLM)
+            self.assertIn("接入", data["text"])
+        finally:
+            if writer is not None:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+            await server.stop()
 
     async def test_switch_mode_round_trip_over_a_real_socket(self):
         """D5 的验收形态: GUI 发 switch_mode -> Agent 切状态 -> 推 status 回来。"""
