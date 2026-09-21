@@ -658,6 +658,11 @@ ModePanel* MainWindow::modePanel() const
     return (mainPage_ != nullptr) ? mainPage_->modePanel() : nullptr;
 }
 
+SchedulePanel* MainWindow::schedulePanel() const
+{
+    return (mainPage_ != nullptr) ? mainPage_->schedulePanel() : nullptr;
+}
+
 BottomBar* MainWindow::bottomBar() const
 {
     return (mainPage_ != nullptr) ? mainPage_->bottomBar() : nullptr;

@@ -29,6 +29,7 @@ class QPushButton;
 class QStackedWidget;
 class QVariantAnimation;
 class ChatPanel;
+class SchedulePanel;
 class BottomBar;
 class LocalClient;
 class MainPage;
@@ -93,6 +94,8 @@ public:
 
     ChatPanel* chatPanel() const;
     ModePanel* modePanel() const;
+    /// 日程区（S8 取证用：--dump-schedule 打印它真实渲染出来的行）
+    SchedulePanel* schedulePanel() const;
     BottomBar* bottomBar() const;
     SysPage* sysPage() const { return sysPage_; }
     ModelPage* modelPage() const { return modelPage_; }

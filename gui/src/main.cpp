@@ -33,6 +33,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <cstdio>
 #include <QMouseEvent>
 #include <QObject>
 #include <QSocketNotifier>
@@ -50,6 +51,7 @@
 #include "core/config_store.h"
 #include "core/idle_watcher.h"
 #include "main_window.h"
+#include "ui/schedule_panel.h"
 #include "services/local_client.h"
 #include "ui/chat_panel.h"
 #include "ui/bottom_bar.h"
@@ -88,6 +90,7 @@ struct Options {
     bool benchStopDemo = false;     ///< 启动后点"停止测试"（验收用）
     bool reportDemo = false;        ///< 启动后点"查看最新报告"（验收用）
     bool settingsSaveDemo = false;  ///< 启动后改两个时间并保存（验收用）
+    bool dumpSchedule = false;      ///< 打印日程区**真实渲染出来的行**并退出（S8 取证用）
     QString videoNoteDemo;         ///< 非空 = 触发视频区占位说明（验收用）
     QString videoFile;             ///< 非空 = 主区视频源（本地文件，验收用）
     bool help = false;
@@ -124,7 +127,7 @@ void printUsage()
         "  --bench-stop-demo   启动后点「停止测试」（验收用）\n"
         "  --report-demo       启动后点「查看最新报告」（验收用）\n"
         "  --settings-save-demo 启动后改两个休眠时间并保存（验收用）\n"
-        "  --config <path>      指定 config/config.yaml（默认自动在仓库里找）\n"
+        "  --dump-schedule      打印日程区真实渲染出来的行并退出（取证用）\n"        "  --config <path>      指定 config/config.yaml（默认自动在仓库里找）\n"
         "  --socket <path>      Agent 的 unix socket 路径（默认 /tmp/agent.sock）\n"
         "  -h, --help           显示本帮助\n";
     qInfo().noquote() << QString::fromUtf8(text);
@@ -214,6 +217,8 @@ Options parseArgs(int argc, char** argv)
             opt.reportDemo = true;
         } else if (arg == QLatin1String("--settings-save-demo")) {
             opt.settingsSaveDemo = true;
+        } else if (arg == QLatin1String("--dump-schedule")) {
+            opt.dumpSchedule = true;
         } else if (arg == QLatin1String("--video-note-demo")
                    || arg.startsWith(QLatin1String("--video-note-demo="))) {
             opt.videoNoteDemo =
@@ -456,6 +461,28 @@ int runGuiMode(const Options& opt, int argc, char** argv)
         window.setRepoRoot(QDir(root).absolutePath());
     }
     window.applyConfig(gui);
+
+    // S8 取证：打印日程区**真实渲染出来的行**（与界面同源：同一个 SchedulePanel），
+    // 让"GUI 显示 vs Agent 展开"能做逐行比对，而不是靠人眼读截图。
+    // 输出走 stdout（Qt 的日志在 stderr），格式：SUBTITLE/ROW/NOTE + TAB + 文本。
+    if (opt.dumpSchedule) {
+        SchedulePanel* panel = window.schedulePanel();
+        if (panel == nullptr) {
+            qWarning().noquote() << "[dump] 没有日程区";
+            return 2;
+        }
+        std::printf("SUBTITLE\t%s\n", qPrintable(panel->subtitleText()));
+        for (const QString& row : panel->rowTexts()) {
+            std::printf("ROW\t%s\n", qPrintable(row));
+        }
+        if (panel->hiddenCount() > 0) {
+            std::printf("HIDDEN\t%d\n", panel->hiddenCount());
+        }
+        if (!panel->noteText().isEmpty()) {
+            std::printf("NOTE\t%s\n", qPrintable(panel->noteText()));
+        }
+        return 0;
+    }
 
     if (opt.idleMs >= 0) {
         window.idleWatcher()->setIdleMs(opt.idleMs);   // 验收时把 5s 缩短
