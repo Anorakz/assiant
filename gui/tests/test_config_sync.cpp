@@ -42,19 +42,9 @@ QString readFile(const QString& path)
     return QString::fromUtf8(file.readAll());
 }
 
-/// 从改动列表里取某个键的新值；没有该键返回 fallback。
-QString newValueOf(const QVector<LineChange>& changes, const QString& key,
-                   const QString& fallback = QStringLiteral("<无>"))
-{
-    for (const LineChange& c : changes) {
-        if (c.key == key) {
-            return c.newLine.section(QLatin1Char(':'), 1).trimmed();
-        }
-    }
-    return fallback;
-}
-
-/// llm.env 的行是 `KEY=value`（没有冒号），所以单独一个取值助手。
+/// llm.env 的行是 `KEY=value`（没有冒号），所以取值助手按 `=` 切。
+/// ⚠ D3 之后 ConfigSyncer **只**派生 llm.env（不再产出 config.yaml 侧的改动），
+///   所以这里只需要这一个助手；以前那个按 `:` 切的 newValueOf 已随它一起删除。
 QString envValueOf(const QVector<LineChange>& changes, const QString& key,
                    const QString& fallback = QStringLiteral("<无>"))
 {
