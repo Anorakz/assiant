@@ -12,7 +12,7 @@
 #      src/main_window.* Widgets 主窗口框架
 #      src/main.cpp    入口 (GUI 默认 / --stdio 保留终端行为)
 #      tests/          QTest 单测 (Python local_server.py 当真对端)
-#      tools/          Python 假 Agent (ipc_test_server.py / ipc_echo_server.py)
+#      tools/          假 Agent (fake_agent.py) + 配置同步 CLI (gui_config_sync.cpp)
 # ============================================================================
 cmake_minimum_required(VERSION 3.16)
 

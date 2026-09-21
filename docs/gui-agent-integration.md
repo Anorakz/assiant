@@ -121,22 +121,22 @@ LLM 调用与降级。GUI 的"模型测试页"会把配置写进 `gui/config/gui
 
 ## 6. 没有真 Agent 时怎么测
 
-仓里已有三个假 Agent，**都在版本库里**（不需要 `temp/` 下的临时脚本）：
+仓里已有两个假 Agent，**都在版本库里**（不需要 `temp/` 下的临时脚本）：
 
 | 脚本 | 能力 | 用来验证 |
 |---|---|---|
-| `gui/tools/ipc_test_server.py` | 只 push：4 个已知 topic + "一条消息拆成两次 send" + 5 种坏消息 + 坏消息之后的合法消息 | GUI 的**收** |
-| `gui/tools/ipc_echo_server.py` | 收命令（打印 `action`/`payload`）+ 可选回推 `llm` | GUI 的**发**、重连（可 kill 后重启） |
+| `gui/tools/fake_agent.py` | 默认**只推**：4 个已知 topic + "一条消息拆成两次 send" + 4 种坏消息 + 坏消息之后的合法消息。加 `--echo` 则**收命令**（打印 `action`/`payload`，默认回推一条 `llm`，`--no-reply` 可关） | GUI 的**收**与**发**、重连（可 kill 后重启） |
 | `gui/tests/local_server.py` | 连上即按 `--push` 推，逐行打印 `RECV <原始行>` | GUI 的 QTest（`test_local_client` 的真对端，不是 mock） |
 
 ```bash
-# 终端 A：假 Agent（推 4 个 topic，并把收到的命令打印出来）
-python3 gui/tools/ipc_test_server.py --path /tmp/a.sock
+# 终端 A：假 Agent（推一组边界用例，并把收到的命令打印出来）
+python3 gui/tools/fake_agent.py --path /tmp/a.sock          # 只推
+python3 gui/tools/fake_agent.py --path /tmp/a.sock --echo   # 收命令 + 回推
 # 终端 B：GUI
 ./gui/build/agent_gui --windowed --socket /tmp/a.sock
 ```
 
-三者的编码都走 `agent/ipc/protocol.py`，与真 Agent 同一套实现 —— 所以不会出现
+两者的编码都走 `agent/ipc/protocol.py`，与真 Agent 同一套实现 —— 所以不会出现
 "两边各自照文档手写、字段名不一致"（那正是 Phase 6 D1 那次 GUI 命令被整条丢掉的成因）。
 
 ---
