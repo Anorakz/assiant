@@ -135,8 +135,27 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
      （10bit/4:4:4/AV1 的拒绝路径、H.264 实流、`timestamp_ns` 仍写 0 导致 read_by_timestamp 无意义）。
 
 -- C 输入方向 --
-□ C1 send_key 端到端验证：板端调用 → Windows 主机动作
-     （先用不锁屏动作：WIN 打开开始菜单 / ALT+F4 关测试窗口；锁屏作为最后一项单独做）
+■ C1 send_key 端到端验证：板端调用 → Windows 主机动作
+     客观验证（不依赖看图）: 读主机键盘锁定状态
+       发键前 CapsLock=False → 板端 InputSender.send_hotkey(["capslock"]) → True
+       再发一次 → False（恢复原状、无残留）；发送本身 6~10ms。
+     视觉验证: 板端发 WIN (send_hotkey(["meta"])) → 全分辨率主机截图里出现 Win11 开始菜单
+       （搜索框「搜索应用、设置和文档」/ 已固定 Edge·Word·Excel…/ 推荐的项目），
+       再发一次后确认关闭，主机保持干净（没留下菜单开着）。
+     ⚠ 第一次用"我们自己的 256x256 流"判读是**失败**的：三帧对比是单向变化（A→B 0.90、
+       B→C 0.12、A→C 0.89），不符合"开了又关"的形态。原因见 C1b —— 开始菜单开在**主屏**
+       DISPLAY1，而我们的流是副屏 DISPLAY15，菜单压根没进画面。教训：验证 UI 动作要看
+       对应那块屏，或用可查询的宿主状态。
+     □ 未做：锁屏（属 C2，按决策 5 单独最后做）
+■ C1b 【C1 期间发现】ROI → 主机鼠标坐标在 pillarbox 下失真
+     Sunshine 抓的是副屏 DISPLAY15（物理 1440x2160 竖屏，sunshine.conf output_name 指定），
+     而我们的流按 1280x720 请求 → 画面是"竖屏内容 + 左右黑边"，内容带只占约 37% 宽
+     （与 720x1440/2160/1280 吻合，B5 实测）。
+     但 preprocess 把**整帧**（含黑边）缩到 256x256，send_mouse 又把这个 256x256 原样
+     作为参考平面交给 LiSendMousePositionEvent（宿主按 0..1 归一化映射到显示器）。
+     后果：中心点仍然对得上，但偏离中心的点击在水平方向会偏 —— **看见的像素与点到的
+     位置不是同一个坐标系**。键盘不受影响（C1 因此全绿）。
+     建议：请求与显示器同比例的流（例如 720x1080），或让 Agent 按黑边补偿后再算 ROI。
 □ C2 ~~Host Input RB 实流验证：主机原生键盘事件被板端读到~~ **【已删除】**
      原因：moonlight-common-c 没有任何「主机 → 客户端」输入接收 API（只有 LiSendKeyboardEvent
      等发送方向），原设计假设不成立，见 docs/sunshine-pairing-findings.md 同期调研
