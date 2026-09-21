@@ -6,16 +6,18 @@
 ## 1. 一句话
 
 **`config/config.yaml` 是唯一的配置真源。** Agent 只读它；GUI 读它的 `gui:` 段、
-读写它的 `llm:` 段；喂 llama-server 的 `llm/config/llm.env` 是**派生**文件，不是真源。
+读写它的 `llm:` 段、**只读**它的 `scheduler:` 段（画日程区，见 §5）；
+喂 llama-server 的 `llm/config/llm.env` 是**派生**文件，不是真源。
 
 ```
                     ┌───────────────────────────┐
                     │  config/config.yaml       │   ← 唯一真源（板端本地，不入库）
-                    │    llm:     推理位置与参数  │
-                    │    gui:     界面参数       │
+                    │    llm:       推理位置与参数 │
+                    │    gui:       界面参数      │
+                    │    scheduler: 日程（只读展示）│
                     │    sunshine / ipc / …      │
                     └───────┬───────────┬───────┘
-            只读（llm/…）    │           │  读写（gui: 读、llm: 读+写）
+         只读（llm/scheduler）│           │  读写（gui: 读、llm: 读+写）
                     ┌───────▼───┐   ┌───▼────────────────────┐
                     │  Agent    │   │  GUI (Qt5, 板端)        │
                     │ agent/    │   │  gui/src/**             │
@@ -58,14 +60,51 @@
 没有第二个入口。`agent/` 里出现 GUI 专用配置名或 `llm.env` 就是回归 ——
 `tests/test_config_source_guard.py` 会直接变红。
 
-## 5. 历史（为什么会变成这样）
+## 5. GUI 也读 `scheduler:` 段（只读，且只保证到夹具覆盖的范围）
+
+GUI 的**日程区**显示的内容来自 `config.yaml` 的 `scheduler.recurring` / `scheduler.oneoff`
+—— 与 Agent 的 `Scheduler._load_events()` **同一处**，连"某个键在 scheduler 段里找不到就
+**逐键**回落到顶层"这条都一致。GUI 不写这一段，也不新增 IPC topic。
+
+| | 谁 | 做什么 |
+|---|---|---|
+| 触发 | Agent（`agent/core/scheduler.py`） | 按 `window_min` / `late_grace_min` / `remind_before_min` 真正触发日程动作 |
+| 展示 | GUI（`gui/src/core/schedule_model.cpp`） | 只读同一段，展开成"今天 / 明天"两段给日程区 |
+
+**代价（写清楚，别当它是免费的）**：这等于在 C++ 里镜像了一份 Python 的日程语义
+（`parse_clock` / `_weekday_index` / `date.fromisoformat` / `occurs_on`）。
+镜像会漂，所以有两条守卫互为表里：
+
+| 守卫 | 在哪 | 红了说明 |
+|---|---|---|
+| `tests/test_schedule_parity.py` | Python（三端都跑） | **Python 语义变了**：它用真的 `Scheduler` 重新生成期望，与入库的 `tests/data/schedule_parity/*.expect.json` 对不上 |
+| `gui/tests/test_schedule_model.cpp::parityWithPythonFixtures` | C++（板端 ctest） | **C++ 镜像变了**：读同一份夹具 + 同一份期望，行级比对不一致 |
+
+**保证边界**：只承诺"夹具覆盖到的写法两边等价"。夹具之外（锚点、显式 `!tag`、复杂 flow、
+不同 Python 版本对日期宽容度不同的写法如 `20260920`）**不承诺**。
+夹具里的写法是两边都能读的那一档；改动语义时要**同时**改 Python、C++ 镜像、本文件，
+然后重新生成期望：
+
+```bash
+# ⚠ 在**板端**生成（python3.8 = Agent 真正跑的解释器；3.11+ 的 fromisoformat 更宽松）
+ssh rk3568 'cd /home/kickpi/myproject/assitant && python3 tests/test_schedule_parity.py --write'
+```
+
+> ⚠ **现状（已知漂移，暂不处理）**：仓库里还有一份 `config/schedule.example.yaml`
+> （模板：`timezone` / `recurring` / `oneoff` / `defaults`），但**全仓没有任何代码读它**
+> —— `Scheduler._load_events()` 只从 `config.yaml` 的 scheduler 段/顶层找日程，
+> 它的 `timezone` 与 `defaults.remind_before_min` 也没人读。
+> 日程的**家**就是 `config.yaml` 的 `scheduler` 段；那份模板要么将来接线、要么废弃，
+> 现在两边都别当成真源。GUI 的日程区同理只读 `config.yaml`。
+
+## 6. 历史（为什么会变成这样）
 
 归一化之前有三份配置：`config/config.yaml`（Agent）、GUI 自己那份界面配置、
 `llm/config/llm.env`（那时还能手改）。GUI 的模型测试页一次写三份，Agent 只认一份，
 所以"界面上改了参数，运行时不生效"。D 系列把界面参数并进 `config/config.yaml` 的
 `gui:` 段、把 `llm.env` 降为纯派生产物，GUI 侧那份配置文件连同模板一起删除。
 
-## 6. 常见操作
+## 7. 常见操作
 
 ```bash
 # 起一份自己的配置（新环境 / 沙箱验收）

@@ -12,6 +12,9 @@
 `cp config/config.example.yaml config/config.yaml`。
 
 ```bash
+# 板端依赖：Qt 5.12（本来就有）+ yaml-cpp（日程区读配置用，只读）
+sudo apt-get install -y libyaml-cpp-dev
+
 cd gui && cmake -S . -B build && cmake --build build -j4
 ./build/agent_gui                       # 自动向上找 config/config.yaml，全屏 kiosk
 ./build/agent_gui --config /tmp/g/config.yaml   # 显式指定配置（验收/沙箱用）
@@ -24,7 +27,7 @@ cd gui && cmake -S . -B build && cmake --build build -j4
 `--chat-demo <文本>`、`--input-type-demo <terminal|keyboard>`、`--model-mode-demo <mode>`、
 `--bench-demo <qwen_precheck|qwen_full|multimodal>`、`--report-demo`、`--settings-save-demo` 等。
 
-测试：`cd gui/build && ctest --output-on-failure`（**16 个测试**：核心逻辑 + 控件级 + e2e IPC）。
+测试：`cd gui/build && ctest --output-on-failure`（**19 个测试**：核心逻辑 + 控件级 + 图标守卫 + e2e IPC）。
 
 ## 2. 界面结构
 
@@ -34,8 +37,12 @@ cd gui && cmake -S . -B build && cmake --build build -j4
 │ （设置下沉）  │                                                        │
 └──────────────┴────────────────────────────────────────────────────────┘
 主页面内部：主区（非游戏=留给壁纸 / 游戏=视频区）+ 下区域（音乐条 / B站封面）
-             右区域：上=模式按钮区，下=对话区（含输入行 + 输入源小按钮）
+             右区域（320px 固定宽）：上=模式按钮区 · 中=对话区 · 下=日程区
 ```
+
+右区域三块的伸缩因子是 **对话区 3 : 日程区 2**（`pages.cpp` 的 `rightBox`）。注意它只是
+**伸缩因子**：窗口很矮时日程区的最小高度会占超过 2/5，所以别把 3:2 当成硬比例。
+板端真机是 800×1280 竖屏，空间足够。
 
 - **唤醒机制**：四区域各自 `active`（空闲折叠，点一下出现）或 `locked`（常显）；
   任一区域的点击都会唤醒全部；隐藏区域设 `WA_TransparentForMouseEvents`，150ms 滑动。
@@ -54,10 +61,27 @@ GUI 读写 `config/config.yaml` 的两个段：
 | `gui.video_overlay.mode` / `gui.video_overlay.idle_ms` | GUI | 视频内嵌控制条的活动/锁定与**独立**休眠时间 |
 | `gui.chat_channel` / `gui.input_source` / `gui.onboard_auto` | GUI | 对话通道 / 输入源（`keyboard`｜`terminal`）/ 是否真控 onboard |
 | `gui.monitor_interval_ms` | GUI | 系统页刷新间隔 |
+| `gui.schedule.max_rows` | GUI | 日程区最多显示几行（今天+明天**合计**，默认 6） |
 | `llm.*` | GUI 写、Agent 读 | 推理位置（`edge`／`cloud`／`disabled`）与参数 |
+| `scheduler.recurring` / `scheduler.oneoff` | Agent 触发、**GUI 只读展示** | 日程本身（GUI 读它画日程区，见下） |
 
 写回规则：只替换**已存在的键**，保留注释与顺序；文件里没有的键追加到该段末尾。
 保存前 ConfigStore 会在原文件旁留一份 `.bak`（`*.bak` 已在 `.gitignore`）。
+
+### 日程区读的是 `scheduler` 段（只读）
+
+日程区**不自己存一份日程**，也不新增 IPC topic：它直接读 `config.yaml` 的
+`scheduler.recurring` / `scheduler.oneoff`（与 Agent 的 `Scheduler._load_events()` 同一处、
+连"某个键在 scheduler 段里找不到就回落到顶层"这条都一致），展开成**今天 / 明天**两段。
+读用 `yaml-cpp`（**只读**；写回仍然只有 `ConfigStore` 的文本级替换，因为 yaml-cpp 会重排+丢注释）。
+
+代价说清楚：这等于在 C++ 里**镜像**了一份 Python 的日程语义。
+防漂移靠 `tests/test_schedule_parity.py`（用真的 `agent.core.scheduler` 生成期望）
++ `gui/tests/test_schedule_model.cpp::parityWithPythonFixtures`（读同一份夹具断言）——
+**保证范围就是那份夹具覆盖的写法**，超出夹具的冷门写法不承诺等价。
+详细边界见 [`config-sources.md`](config-sources.md)。
+
+刷新时机：启动、设置页保存后、之后每 60 秒一次（跨零点翻页 + "已过"的变暗跟着时间走）。
 
 派生链路是**单向**的：
 
@@ -83,16 +107,20 @@ config/config.yaml  ──ConfigSyncer──▶  llm/config/llm.env      （喂 
 
 | 页 | 已实现 | 占位（点了给说明，不发协议） |
 |---|---|---|
-| 主页面 | 模式切换、对话（chat_input/llm）、音乐条、壁纸（wallpaper + 下一张）、视频（本地文件播放/暂停/全屏/下一集）、输入源二选（键盘 onboard / 命令行） | 歌词、歌手、专辑、进度、上一集、倍速、B站封面 |
+| 主页面 | 模式切换、对话（chat_input/llm）、音乐条、壁纸（wallpaper + 下一张）、视频（本地文件播放/暂停/全屏/下一集）、输入源二选（键盘 onboard / 命令行）、**日程区**（只读展示 `scheduler` 段：今天/明天、时间区间、今天已过的时间变暗） | 歌词、歌手、专辑、进度、上一集、倍速、B站封面 |
 | 模型测试 | 推理位置三选、本地 GGUF 下拉与参数、云端参数、配置保存与同步、服务脚本启停与日志、基准测试（预检/全量/多模态）、停止测试、最新报告 | SigLIP 固定只读块 |
 | 系统 | CPU/内存/NPU 负载/频率/温度/网络 IP/串流主机，按 `monitor_interval_ms` 刷新 | 看门狗启停 |
 | 设置 | debug、四区域活动锁定与共用休眠、视频控制条活动锁定与独立休眠、启动形态、默认页、默认输入类型、配置路径、恢复默认、关于 | 主题仅一档 |
 
 ## 5. 图标
 
-`gui/resources/icons/*.svg`（**22 个自绘单色描边图标**）+ `icons.qrc`，
+`gui/resources/icons/*.svg`（**23 个自绘单色描边图标**）+ `icons.qrc`，
 `ui::icon(name)` / `ui::tintedIcon(name, color)` 按需染色（`CompositionMode_SourceIn`）。
 好处：不再依赖字体码位（板端 `⏸`/`⏮` 等码位没有字体覆盖，会被画成豆腐块）。
+
+⚠ 加图标要**同时**改三处：`resources/icons/<名字>.svg`、`resources/icons.qrc`、
+`src/ui/icons.cpp` 的 `kNames`。漏一处界面上只是"静默少一个图标"，
+所以 `test_icons` 会核对 `kNames` 与源码目录里的 `*.svg` 清单**逐个对上**。
 
 ## 6. 验收取证约定
 
