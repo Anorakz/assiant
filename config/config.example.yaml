@@ -35,9 +35,11 @@ llm:
   # ---- mode=edge: 本地模型 ----
   # GGUF 路径 —— **由 llama-server 加载**; Agent 只记录它 (不自己读模型文件)
   model_path: /home/kickpi/model/Qwen3-0.6B-Q4_K_M.gguf
-  # 上下文长度上限, 超过要截断
+  # 单次回复的 token 上限 —— **不是**上下文长度 (上下文由 llama-server 的 --ctx-size 决定)
+  # ⚠ 当前 agent/ 里还没有人读这个键
   max_tokens: 512
   # 采样温度
+  # ⚠ 当前 agent/ 里还没有人读这个键
   temperature: 0.7
 
   # ---- mode=cloud: 远端 API ----
