@@ -21,7 +21,7 @@ cd gui && cmake -S . -B build && cmake --build build -j4
 ```
 
 常用验收参数：`--screenshot <png> --screenshot-delay <ms>`、`--video <文件>`、
-`--chat-demo <文本>`、`--input-type-demo <keyboard|pc|terminal>`、`--model-mode-demo <mode>`、
+`--chat-demo <文本>`、`--input-type-demo <terminal|keyboard>`、`--model-mode-demo <mode>`、
 `--bench-demo <qwen_precheck|qwen_full|multimodal>`、`--report-demo`、`--settings-save-demo` 等。
 
 测试：`cd gui/build && ctest --output-on-failure`（**16 个测试**：核心逻辑 + 控件级 + e2e IPC）。
@@ -50,7 +50,7 @@ cd gui && cmake -S . -B build && cmake --build build -j4
 | `wake.top/bottom/left/right` | 四区域 `active` 或 `locked` |
 | `wake.idle_ms` | **四区域共用**的休眠时间 |
 | `video_overlay.mode` / `video_overlay.idle_ms` | 视频内嵌控制条的活动/锁定与**独立**休眠时间 |
-| `chat_channel` / `input_source` / `onboard_auto` | 对话通道 / 输入源 / 是否真控 onboard |
+| `chat_channel` / `input_source` / `onboard_auto` | 对话通道 / 输入源（`keyboard`｜`terminal`）/ 是否真控 onboard |
 | `monitor_interval_ms` | 系统页刷新间隔 |
 | `llm.*` | 推理位置（local/cloud/disabled）与参数；由模型测试页写入并同步 |
 
@@ -61,7 +61,7 @@ cd gui && cmake -S . -B build && cmake --build build -j4
 
 | 页 | 已实现 | 占位（点了给说明，不发协议） |
 |---|---|---|
-| 主页面 | 模式切换、对话（chat_input/llm）、音乐条、壁纸（wallpaper + 下一张）、视频（本地文件播放/暂停/全屏/下一集）、输入源三选（键盘真控 onboard） | 歌词、歌手、专辑、进度、上一集、倍速、B站封面 |
+| 主页面 | 模式切换、对话（chat_input/llm）、音乐条、壁纸（wallpaper + 下一张）、视频（本地文件播放/暂停/全屏/下一集）、输入源二选（键盘 onboard / 命令行） | 歌词、歌手、专辑、进度、上一集、倍速、B站封面 |
 | 模型测试 | 推理位置三选、本地 GGUF 下拉与参数、云端参数、配置保存与同步、服务脚本启停与日志、基准测试（预检/全量/多模态）、停止测试、最新报告 | SigLIP 固定只读块 |
 | 系统 | CPU/内存/NPU 负载/频率/温度/网络 IP/串流主机，按 `monitor_interval_ms` 刷新 | 看门狗启停 |
 | 设置 | debug、四区域活动锁定与共用休眠、视频控制条活动锁定与独立休眠、启动形态、默认页、默认输入类型、配置路径、恢复默认、关于 | 主题仅一档 |

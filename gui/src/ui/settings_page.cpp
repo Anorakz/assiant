@@ -116,8 +116,8 @@ void SettingsPage::build()
     generalForm->addRow(QStringLiteral("默认页"), startPage_);
     inputSource_ = new QComboBox(general);
     inputSource_->addItem(QStringLiteral("键盘（onboard）"), QStringLiteral("keyboard"));
-    inputSource_->addItem(QStringLiteral("PC"), QStringLiteral("pc"));
     inputSource_->addItem(QStringLiteral("命令行"), QStringLiteral("terminal"));
+    // 原第三个选项 "PC"（= 用宿主机键盘当输入源）已随主机输入方向一起移除 (Phase 6 C4)。
     generalForm->addRow(QStringLiteral("默认输入类型"), inputSource_);
     generalBox->addLayout(generalForm);
     root->addWidget(general);

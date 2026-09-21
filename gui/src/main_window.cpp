@@ -595,17 +595,15 @@ void MainWindow::applyInputType(const QString& type)
         }
     }
 
-    // PC / 命令行：只是记下选择 —— 真正的输入源由 Agent 侧合并（协议还没有切换命令）
+    // 命令行：只是记下选择 —— 真正的输入源由 Agent 侧合并（协议还没有切换命令）
+    // (原来的 "PC"（宿主机键盘）选项已随主机输入方向一起移除, Phase 6 C4)
     if (mainPage_ != nullptr && mainPage_->chatPanel() != nullptr) {
         ChatPanel* panel = mainPage_->chatPanel();
         if (OnboardCtl::wantsOnboard(type)) {
             panel->setInputHint(QString());
         } else {
-            const QString label = (type == QLatin1String("pc")) ? QStringLiteral("PC")
-                                                                : QStringLiteral("命令行");
             panel->setInputHint(
-                QStringLiteral("输入源「%1」：实际输入由 Agent 侧决定（协议暂未支持切换）")
-                    .arg(label));
+                QStringLiteral("输入源「命令行」：实际输入由 Agent 侧决定（协议暂未支持切换）"));
         }
     }
 

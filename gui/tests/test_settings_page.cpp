@@ -48,7 +48,7 @@ QString TestSettingsPage::writeConfig(QTemporaryDir& tmp, const QString& extra)
                               "video_overlay:\n"
                               "  mode: locked\n"
                               "  idle_ms: 1500\n"
-                              "input_source: pc\n").toUtf8());
+                              "input_source: terminal\n").toUtf8());
     file.write(extra.toUtf8());
     file.close();
     return path;
@@ -71,7 +71,7 @@ void TestSettingsPage::loadFromConfigFillsWidgets()
     QCOMPARE(page.overlayMode()->currentData().toString(), QStringLiteral("locked"));
     QCOMPARE(page.overlayIdleSpin()->value(), 1500);          // 控制条自己的时间
     QCOMPARE(page.startPageBox()->currentData().toString(), QStringLiteral("system"));
-    QCOMPARE(page.inputSourceBox()->currentData().toString(), QStringLiteral("pc"));
+    QCOMPARE(page.inputSourceBox()->currentData().toString(), QStringLiteral("terminal"));
     QVERIFY(page.pathLabel()->text().contains(path));
     QVERIFY(page.aboutLabel()->text().contains(QStringLiteral("RK3568")));
 }
@@ -104,7 +104,7 @@ void TestSettingsPage::saveWritesGuiYamlWithSeparateTimeouts()
     QVERIFY(!after.boolValue(QStringLiteral("debug"), true));
     // 没动过的项保持原样
     QCOMPARE(after.value(QStringLiteral("wake.right")), QStringLiteral("locked"));
-    QCOMPARE(after.value(QStringLiteral("input_source")), QStringLiteral("pc"));
+    QCOMPARE(after.value(QStringLiteral("input_source")), QStringLiteral("terminal"));
 }
 
 void TestSettingsPage::restoreDefaultsOnlyTouchesUi()

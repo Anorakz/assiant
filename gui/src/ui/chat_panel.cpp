@@ -4,6 +4,7 @@
 #include "ui/chat_panel.h"
 
 #include <QAction>
+#include <QDebug>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -15,6 +16,13 @@
 #include <QVBoxLayout>
 
 namespace {
+
+/// 输入源缺省值 / 回落值。
+///
+/// 原先这里是"键盘 / PC / 命令行"三选, 其中 **PC = 用宿主机键盘当输入源** ——
+/// 那个方向 (主机 → 板端) 在 Phase 6 被删掉了 (moonlight-common-c 没有主机 → 客户端
+/// 的输入接收 API), 所以这个入口也一并移除。剩下两个都是板端本地真实存在的来源。
+const char* const kDefaultInputType = "keyboard";
 
 /// 一行消息：左/右对齐靠"两侧伸缩"实现（不用 QListWidget 的自定义 item，省一层）
 QWidget* makeBubbleRow(QWidget* parent, QLabel* bubble, bool fromUser)
@@ -91,7 +99,8 @@ ChatPanel::ChatPanel(QWidget* parent)
     send_->setMinimumWidth(96);
     connect(send_, &QPushButton::clicked, this, [this]() { doSend(); });
 
-    // ---- 输入源小按钮（T6）：PC / 命令行 / 键盘 三选 ----
+    // ---- 输入源小按钮（T6）：命令行 / 键盘 二选 ----
+    // 原来还有第三个 "PC"（宿主机键盘）—— 那个方向已随 Phase 6 删除主机输入而移除。
     typeButton_ = new QToolButton(inputRow);
     typeButton_->setObjectName(QStringLiteral("InputTypeButton"));
     typeButton_->setPopupMode(QToolButton::InstantPopup);
@@ -104,7 +113,6 @@ ChatPanel::ChatPanel(QWidget* parent)
         const char* label;
     } kTypes[] = {
         {"keyboard", "键盘"},
-        {"pc", "PC"},
         {"terminal", "命令行"},
     };
     for (const auto& type : kTypes) {
@@ -198,18 +206,34 @@ void ChatPanel::scrollToBottom()
 
 void ChatPanel::setInputType(const QString& type)
 {
-    inputType_ = type;
+    // 不认识的取值回落到默认, 而不是在按钮上显示一个**没有对应菜单项**的幽灵标签。
+    // 典型场景: 旧 gui.yaml 里还写着已经删掉的 "pc" (宿主机键盘)。
+    QString wanted = type;
+    bool known = false;
     const QList<QAction*> actions = typeMenu_->actions();
-    QString label = type;
     for (QAction* action : actions) {
-        const bool hit = (action->data().toString() == type);
+        if (action->data().toString() == wanted) {
+            known = true;
+            break;
+        }
+    }
+    if (!known) {
+        qWarning().noquote() << "[ui] 未知输入源" << type << "-> 回落到"
+                             << QString::fromUtf8(kDefaultInputType);
+        wanted = QString::fromUtf8(kDefaultInputType);
+    }
+
+    inputType_ = wanted;
+    QString label = wanted;
+    for (QAction* action : actions) {
+        const bool hit = (action->data().toString() == wanted);
         action->setChecked(hit);
         if (hit) {
             label = action->text();
         }
     }
     typeButton_->setText(label + QStringLiteral(" ▾"));
-    emit inputTypeChanged(type);
+    emit inputTypeChanged(wanted);
 }
 
 void ChatPanel::setInputHint(const QString& text)

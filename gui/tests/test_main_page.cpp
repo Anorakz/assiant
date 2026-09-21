@@ -145,30 +145,36 @@ void TestMainPage::inputTypeButtonSwitchesThroughSamePath()
 {
     ChatPanel panel;
     QVERIFY(panel.inputTypeButton() != nullptr);
-    // 菜单里应该有三个输入源，且默认选中 gui.yaml 的默认值（keyboard）
+    // 菜单里应该有**两个**输入源（keyboard / terminal），默认选中 gui.yaml 的默认值（keyboard）
+    // 原第三个 "PC"（宿主机键盘）已随主机输入方向一起移除 (Phase 6 C4)
     QMenu* menu = panel.inputTypeButton()->menu();
     QVERIFY(menu != nullptr);
-    QCOMPARE(menu->actions().size(), 3);
+    QCOMPARE(menu->actions().size(), 2);
     QCOMPARE(panel.inputType(), QStringLiteral("keyboard"));
     QCOMPARE(panel.inputTypeButton()->text(), QStringLiteral("键盘 ▾"));
+
+    // "pc" 不该再出现在菜单里
+    for (QAction* action : menu->actions()) {
+        QVERIFY(action->data().toString() != QLatin1String("pc"));
+    }
 
     QSignalSpy spy(&panel, &ChatPanel::inputTypeChanged);
 
     // 走"菜单项被触发"这条真实路径（不是直接 setInputType）
-    QAction* pcAction = nullptr;
+    QAction* terminalAction = nullptr;
     for (QAction* action : menu->actions()) {
-        if (action->data().toString() == QLatin1String("pc")) {
-            pcAction = action;
+        if (action->data().toString() == QLatin1String("terminal")) {
+            terminalAction = action;
         }
     }
-    QVERIFY(pcAction != nullptr);
-    pcAction->trigger();
+    QVERIFY(terminalAction != nullptr);
+    terminalAction->trigger();
 
     QCOMPARE(spy.count(), 1);
-    QCOMPARE(spy.first().at(0).toString(), QStringLiteral("pc"));
-    QCOMPARE(panel.inputType(), QStringLiteral("pc"));
-    QCOMPARE(panel.inputTypeButton()->text(), QStringLiteral("PC ▾"));
-    QVERIFY(pcAction->isChecked());
+    QCOMPARE(spy.first().at(0).toString(), QStringLiteral("terminal"));
+    QCOMPARE(panel.inputType(), QStringLiteral("terminal"));
+    QCOMPARE(panel.inputTypeButton()->text(), QStringLiteral("命令行 ▾"));
+    QVERIFY(terminalAction->isChecked());
     // 同一时刻只有一个被选中
     int checked = 0;
     for (QAction* action : menu->actions()) {
@@ -183,7 +189,16 @@ void TestMainPage::inputTypeButtonSwitchesThroughSamePath()
         }
     }
     QCOMPARE(panel.inputType(), QStringLiteral("keyboard"));
+    // 到这里一共两次切换: keyboard -> terminal, terminal -> keyboard
     QCOMPARE(spy.count(), 2);
+
+    // 旧配置里的 "pc" 必须**回落到 keyboard**, 而不是显示幽灵标签 (Phase 6 C4)。
+    // 这一条放在最后: 它自己会再发一次 inputTypeChanged (回落值), 免得影响上面的计数。
+    panel.setInputType(QStringLiteral("pc"));
+    QCOMPARE(panel.inputType(), QStringLiteral("keyboard"));
+    QCOMPARE(panel.inputTypeButton()->text(), QStringLiteral("键盘 ▾"));
+    QCOMPARE(spy.count(), 3);
+    QCOMPARE(spy.last().at(0).toString(), QStringLiteral("keyboard"));
 }
 
 QTEST_MAIN(TestMainPage)

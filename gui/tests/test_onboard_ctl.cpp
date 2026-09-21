@@ -20,9 +20,10 @@ private slots:
 void TestOnboardCtl::onlyKeyboardWantsOnboard()
 {
     QVERIFY(OnboardCtl::wantsOnboard(QStringLiteral("keyboard")));
-    // PC（主机键盘）与命令行都不需要屏上软键盘
-    QVERIFY(!OnboardCtl::wantsOnboard(QStringLiteral("pc")));
+    // 命令行不需要屏上软键盘
     QVERIFY(!OnboardCtl::wantsOnboard(QStringLiteral("terminal")));
+    // "pc"（宿主机键盘）这个输入源已在 Phase 6 C4 移除 —— 现在它落到"不认识"那条路,
+    // 断言依然成立 (未知取值不弹键盘), 见下一个用例
 }
 
 void TestOnboardCtl::unknownSourceDoesNotWantOnboard()

@@ -108,7 +108,7 @@ void printUsage()
         "  --idle-ms <ms>       覆盖 wake.idle_ms（验收时把 5s 缩短）\n"
         "  --debug              强制打开 debug（覆盖 gui.yaml，只改内存）\n"
         "  --chat-demo <文本>   启动后走真实输入框+发送按钮发一条（验收用）\n"
-        "  --input-type-demo <pc|terminal|keyboard>  启动后切到该输入源（验收用）\n"
+        "  --input-type-demo <terminal|keyboard>  启动后切到该输入源（验收用）\n"
         "  --input-menu-demo    启动后展开输入源菜单（配 --scrot 抓图）\n"
         "  --music-note-demo <歌词|歌手|专辑|进度>  触发音乐条占位说明（验收用）\n"
         "  --next-wallpaper-demo  启动后点一下主区的「下一张」（验收用）\n"
