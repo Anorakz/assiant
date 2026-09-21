@@ -24,8 +24,10 @@ cd gui && cmake -S . -B build && cmake --build build -j4
 ```
 
 常用验收参数：`--screenshot <png> --screenshot-delay <ms>`、`--video <文件>`、
-`--chat-demo <文本>`、`--input-type-demo <terminal|keyboard>`、`--model-mode-demo <mode>`、
-`--bench-demo <qwen_precheck|qwen_full|multimodal>`、`--report-demo`、`--settings-save-demo` 等。
+`--chat-demo <文本>`、`--input-type-demo <terminal|keyboard>`、`--focus-input-demo`
+（取证：软键盘应在这时才弹）、`--model-mode-demo <mode>`、
+`--bench-demo <qwen_precheck|qwen_full|multimodal>`、`--report-demo`、`--settings-save-demo`、
+`--dump-schedule`（打印日程区真实渲染的行）等。
 
 测试：`cd gui/build && ctest --output-on-failure`（**19 个测试**：核心逻辑 + 控件级 + 图标守卫 + e2e IPC）。
 
@@ -53,6 +55,9 @@ cd gui && cmake -S . -B build && cmake --build build -j4
 - **唤醒机制**：四区域各自 `active`（空闲折叠，点一下出现）或 `locked`（常显）；
   任一区域的点击都会唤醒全部；隐藏区域设 `WA_TransparentForMouseEvents`，150ms 滑动。
 - **视频内嵌控制条**有自己的 `active/locked` 与**独立的** `idle_ms`（不与区域共享）。
+- **软键盘（onboard）**：`gui.input_source = keyboard` 且 `gui.onboard_auto = true` 时，
+  **只有对话输入框拿到焦点才弹**（S10 起的政策），输入框失焦自动收起；
+  启动与切换输入源都不弹 —— 以前一开机键盘就盖住主区。切到 `terminal` 会立即收起。
 
 ## 3. 配置（`config/config.yaml` 是唯一真源）
 
@@ -65,7 +70,7 @@ GUI 读写 `config/config.yaml` 的两个段：
 | `gui.wake.top/bottom/left/right` | GUI | 四区域 `active` 或 `locked` |
 | `gui.wake.idle_ms` | GUI | **四区域共用**的休眠时间 |
 | `gui.video_overlay.mode` / `gui.video_overlay.idle_ms` | GUI | 视频内嵌控制条的活动/锁定与**独立**休眠时间 |
-| `gui.chat_channel` / `gui.input_source` / `gui.onboard_auto` | GUI | 对话通道 / 输入源（`keyboard`｜`terminal`）/ 是否真控 onboard |
+| `gui.chat_channel` / `gui.input_source` / `gui.onboard_auto` | GUI | 对话通道 / 输入源（`keyboard`｜`terminal`）/ 是否真控 onboard（**点输入框才弹**，失焦收起） |
 | `gui.monitor_interval_ms` | GUI | 系统页刷新间隔 |
 | `gui.schedule.max_rows` | GUI | 日程区最多显示几行（今天+明天**合计**，默认 6） |
 | `llm.*` | GUI 写、Agent 读 | 推理位置（`edge`／`cloud`／`disabled`）与参数 |

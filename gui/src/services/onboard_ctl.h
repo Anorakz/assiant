@@ -44,6 +44,13 @@ public:
     /// 纯逻辑：哪种输入源需要软键盘（只有 keyboard 需要）——可直接单测。
     static bool wantsOnboard(const QString& inputSource);
 
+    /// 纯逻辑：**现在**该不该把软键盘弹出来？——可直接单测。
+    ///
+    /// 政策（S10 起）：**只有输入框拿到焦点时才弹**。启动、切换输入源都不弹 ——
+    /// 以前一开机键盘就盖住半个主区，用户根本没打算打字。输入框失焦就收起。
+    /// `gui.onboard_auto = false` 时永远不弹（完全不碰 onboard）。
+    static bool shouldShow(bool onboardAuto, const QString& inputSource, bool inputFocused);
+
 private:
     bool callMethod(const QString& method, QString* error);
     QString runGdbus(const QStringList& args, bool* ok, QString* error) const;

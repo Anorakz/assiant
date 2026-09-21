@@ -502,6 +502,12 @@ GUI 日程区（S 系列：右区域切成"对话区 + 日程区"，已全部验
 ☑ S9 四端回归：PC 宿主机 ctest 172/172；PC python exit 0；WSL python exit 0；
      板端 python 17 文件 ALL OK + 板端 GUI ctest 19/19；deploy 清单 115 文件全匹配
      （`config.yaml`/`llm.env` 指纹未变，板端 git status 归零）。
+☑ S10 onboard 行为改为"点输入框才弹"（用户要求）：新增纯逻辑
+     `OnboardCtl::shouldShow(onboardAuto, inputSource, inputFocused)` + `ChatPanel::inputFocusChanged`
+     （只盯输入框的 FocusIn/FocusOut）。`applyInputType()` 不再弹键盘（只在切到 terminal 时收起），
+     **弹的唯一调用点**变成"输入框获得焦点"。取证：真机两张 —— 启动态 `Visible=false` 且日志无弹出；
+     `--focus-input-demo` 后 `Visible=true` + `[ui] 软键盘弹出（输入框获得焦点）`；live 配置指纹未变。
+     单测：onboard 7 项（含 shouldShow 四种组合）+ main_page 10 项。取证参数 `--focus-input-demo` 也登记进 docs/gui.md。
 Phase 7 — 工具层
 □ tools/base.py：工具基类（name、schema、execute、权限、allowed_states）
 □ tools/init.py：工具注册入口

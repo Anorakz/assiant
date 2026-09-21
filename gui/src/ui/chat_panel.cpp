@@ -5,6 +5,7 @@
 
 #include <QAction>
 #include <QDebug>
+#include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -92,6 +93,8 @@ ChatPanel::ChatPanel(QWidget* parent)
     input_->setPlaceholderText(QStringLiteral("说点什么…"));
     input_->setMinimumHeight(48);
     connect(input_, &QLineEdit::returnPressed, this, [this]() { doSend(); });
+    // S10：把输入框的焦点变化转成信号（主窗口据此弹/收软键盘）
+    input_->installEventFilter(this);
 
     send_ = new QPushButton(QStringLiteral("发送"), inputRow);
     send_->setObjectName(QStringLiteral("ChatSend"));
@@ -132,6 +135,19 @@ ChatPanel::ChatPanel(QWidget* parent)
     setInputType(inputType_);     // 初始按配置里的默认值显示
     setLinkUp(false);
     setInputEnabled(true);
+}
+
+bool ChatPanel::eventFilter(QObject* watched, QEvent* event)
+{
+    // S10：只有输入框的焦点变化需要往外报（软键盘的弹出时机）
+    if (watched == input_) {
+        if (event->type() == QEvent::FocusIn) {
+            emit inputFocusChanged(true);
+        } else if (event->type() == QEvent::FocusOut) {
+            emit inputFocusChanged(false);
+        }
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void ChatPanel::doSend()

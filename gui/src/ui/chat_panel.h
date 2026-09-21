@@ -64,6 +64,13 @@ signals:
     /// 用户切换了输入源（pc / terminal / keyboard）
     void inputTypeChanged(const QString& type);
 
+    /// 输入框获得/失去焦点（S10：主窗口据此弹/收软键盘 —— 只有点输入框才弹）
+    void inputFocusChanged(bool focused);
+
+protected:
+    /// 只盯 input_ 的 FocusIn/FocusOut，转成上面的信号
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private:
     void doSend();
     void appendBubble(const QString& text, bool fromUser);

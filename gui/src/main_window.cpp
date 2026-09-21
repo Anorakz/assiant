@@ -331,6 +331,9 @@ MainWindow::MainWindow(QWidget* parent)
         // T6：输入源切换（小按钮三选）→ 弹/收 onboard + 写回 config.yaml 的 gui: 段
         connect(mainPage_->chatPanel(), &ChatPanel::inputTypeChanged, this,
                 [this](const QString& type) { applyInputType(type); });
+        // S10：只有输入框拿到焦点才弹软键盘；失焦收起
+        connect(mainPage_->chatPanel(), &ChatPanel::inputFocusChanged, this,
+                [this](bool focused) { onChatInputFocused(focused); });
     }
 
     // T8：主区右下角"下一张" → 真实发协议 next_wallpaper
@@ -582,37 +585,73 @@ void MainWindow::setRepoRoot(const QString& root)
     }
 }
 
+void MainWindow::showOnboard(const QString& why)
+{
+    if (onboard_ == nullptr) {
+        return;
+    }
+    QString detail;
+    if (!onboard_->available() && !onboard_->probe(&detail)) {
+        qWarning().noquote() << "[ui] 软键盘不可用（" << why << "）:" << detail;
+        if (mainPage_ != nullptr && mainPage_->chatPanel() != nullptr) {
+            mainPage_->chatPanel()->appendSystem(
+                QStringLiteral("软键盘不可用（%1）——可改用鼠标/终端输入").arg(detail));
+        }
+        return;
+    }
+    QString error;
+    if (!onboard_->show(&error)) {
+        qWarning().noquote() << "[ui] 软键盘弹出失败（" << why << "）:" << error;
+        if (mainPage_ != nullptr && mainPage_->chatPanel() != nullptr) {
+            mainPage_->chatPanel()->appendSystem(
+                QStringLiteral("软键盘不可用（%1）——可改用鼠标/终端输入").arg(error));
+        }
+        return;
+    }
+    bool ok = false;
+    const bool visible = onboard_->isVisible(&ok);
+    qInfo().noquote() << QStringLiteral("[ui] 软键盘弹出（%1，Visible=%2）")
+                             .arg(why, ok ? (visible ? QStringLiteral("true")
+                                                     : QStringLiteral("false"))
+                                          : QStringLiteral("未知"));
+}
+
+void MainWindow::hideOnboard(const QString& why)
+{
+    if (onboard_ == nullptr) {
+        return;
+    }
+    if (!onboard_->available() && !onboard_->probe(nullptr)) {
+        return;                     // 这台机器没有 onboard：安静跳过（不是错误）
+    }
+    QString error;
+    if (!onboard_->hide(&error)) {
+        qWarning().noquote() << "[ui] 软键盘收起失败（" << why << "）:" << error;
+        return;
+    }
+    qInfo().noquote() << QStringLiteral("[ui] 软键盘收起（%1）").arg(why);
+}
+
+void MainWindow::onChatInputFocused(bool focused)
+{
+    if (OnboardCtl::shouldShow(onboardAuto_, inputSource_, focused)) {
+        showOnboard(QStringLiteral("输入框获得焦点"));
+        return;
+    }
+    if (!focused) {
+        hideOnboard(QStringLiteral("输入框失焦"));
+    }
+}
+
 void MainWindow::applyInputType(const QString& type)
 {
-    // 1) 只有"键盘"需要软键盘；onboard_auto 关掉时完全不碰它
-    if (onboardAuto_ && onboard_ != nullptr) {
-        QString detail;
-        if (!onboard_->available() && !onboard_->probe(&detail)) {
-            qWarning().noquote() << "[ui] 输入源" << type << "→ 软键盘不可用:" << detail;
-            if (mainPage_ != nullptr && mainPage_->chatPanel() != nullptr) {
-                mainPage_->chatPanel()->appendSystem(
-                    QStringLiteral("软键盘不可用（%1）——可改用鼠标/终端输入").arg(detail));
-            }
-        } else {
-            QString error;
-            const bool want = OnboardCtl::wantsOnboard(type);
-            const bool done = want ? onboard_->show(&error) : onboard_->hide(&error);
-            if (done) {
-                bool ok = false;
-                const bool visible = onboard_->isVisible(&ok);
-                qInfo().noquote() << QStringLiteral("[ui] 输入源=%1 → 软键盘%2（当前 Visible=%3）")
-                                         .arg(type, want ? QStringLiteral("弹出") : QStringLiteral("收起"),
-                                              ok ? (visible ? QStringLiteral("true")
-                                                            : QStringLiteral("false"))
-                                                 : QStringLiteral("未知"));
-            } else {
-                qWarning().noquote() << "[ui] 软键盘操作失败:" << error;
-                if (mainPage_ != nullptr && mainPage_->chatPanel() != nullptr) {
-                    mainPage_->chatPanel()->appendSystem(
-                        QStringLiteral("软键盘不可用（%1）——可改用鼠标/终端输入").arg(error));
-                }
-            }
-        }
+    inputSource_ = type;
+
+    // 1) S10：这里**只**负责"切到命令行时把已经弹出来的键盘收掉"。
+    //    弹的时机只有一个 —— 输入框拿到焦点（见 onChatInputFocused）。
+    //    以前启动时就弹，一开机键盘盖住半个主区，而用户根本没打算打字。
+    if (!OnboardCtl::wantsOnboard(type)) {
+        hideOnboard(QStringLiteral("输入源切到命令行"));
     }
 
     // 命令行：只是记下选择 —— 真正的输入源由 Agent 侧合并（协议还没有切换命令）
@@ -821,8 +860,9 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
     onboardAuto_ = gui.boolValue(QStringLiteral("gui.onboard_auto"), true);
     const QString inputSource =
         gui.value(QStringLiteral("gui.input_source"), QStringLiteral("keyboard"));
+    inputSource_ = inputSource;      // S10：焦点策略要用它判断"要不要弹键盘"
     if (mainPage_ != nullptr && mainPage_->chatPanel() != nullptr) {
-        // 会让面板发 inputTypeChanged → 走到 applyInputType()，启动时顺带把软键盘同步到配置状态
+        // 只是把界面对齐配置；**不**在这里弹键盘（弹的时机是输入框获得焦点）
         mainPage_->chatPanel()->setInputType(inputSource);
     }
 

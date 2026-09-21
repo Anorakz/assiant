@@ -55,7 +55,6 @@ public:
 
     /// 当前页 key。
     QString currentPage() const;
-
     /// 按配置应用界面：gui.wake.*（四区域/统一休眠）+ gui.debug（[D] 指示）。
     void applyConfig(const core::ConfigStore& gui);
 
@@ -72,8 +71,13 @@ public:
 
     /// config.yaml 路径（切换输入源时要写回它的 gui: 段）。空 = 不持久化。
     void setConfigPath(const QString& path);
-    /// 处理输入源变化：按 gui.onboard_auto 弹/收软键盘，并把选择写回 config.yaml。
+    /// 处理输入源变化：只更新"政策"与提示行、并把选择写回 config.yaml。
+    /// ⚠ S10 起**不**在这里弹软键盘 —— 弹的时机只有一个：输入框拿到焦点
+    /// （见 onChatInputFocused）；切到"命令行"时会把已弹出的键盘收掉。
     void applyInputType(const QString& type);
+
+    /// 输入框焦点变化 → 按 OnboardCtl::shouldShow() 弹/收软键盘（S10）
+    void onChatInputFocused(bool focused);
 
     /// 验收辅助：触发音乐条某个占位块的说明（歌词/歌手/专辑/进度）。
     void demoPlaceholderNote(const QString& what);
@@ -129,6 +133,10 @@ private:
     /// 视频全屏：隐藏/恢复四区域面板（画面铺满整个屏幕）
     void setVideoFullscreen(bool on);
 
+    /// 弹/收软键盘（失败时往对话里说明一次）。S10：弹的调用点只有焦点变化那一处。
+    void showOnboard(const QString& why);
+    void hideOnboard(const QString& why);
+
     QStackedWidget* stack_ = nullptr;
     QVector<QPushButton*> navButtons_;
     QVector<QString> navKeys_;
@@ -147,6 +155,8 @@ private:
     OnboardCtl* onboard_ = nullptr;
     QString configPath_;
     bool onboardAuto_ = true;
+    /// 当前输入源（S10：焦点策略要知道它；由 applyInputType/applyConfig 维护）
+    QString inputSource_ = QStringLiteral("keyboard");
     QPixmap wallpaper_;
     QPixmap prevWallpaper_;
     QString wallpaperPath_;

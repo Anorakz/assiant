@@ -115,6 +115,12 @@ bool OnboardCtl::wantsOnboard(const QString& inputSource)
     return inputSource == QLatin1String("keyboard");
 }
 
+bool OnboardCtl::shouldShow(bool onboardAuto, const QString& inputSource, bool inputFocused)
+{
+    // 见头文件：弹的时机只有"输入框拿到焦点"这一个（S10）
+    return onboardAuto && inputFocused && wantsOnboard(inputSource);
+}
+
 bool OnboardCtl::probe(QString* detail)
 {
     busAddress_.clear();

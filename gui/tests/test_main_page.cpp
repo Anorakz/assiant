@@ -57,6 +57,7 @@ private slots:
     void chatCapsMessageCount();
     void inputTypeButtonSwitchesThroughSamePath();
     void rightRegionHasChatAndScheduleAtThreeToTwo();
+    void inputFocusIsReportedForOnboardPolicy();
 };
 
 void TestMainPage::modePanelOffersThreeWhenIdleOrUnknown()
@@ -244,6 +245,29 @@ void TestMainPage::rightRegionHasChatAndScheduleAtThreeToTwo()
                             .arg(chat->height()).arg(schedule->height())));
 
     page.hide();
+}
+
+/// S10：输入框的焦点变化必须报出来 —— 主窗口就是靠它决定"什么时候弹软键盘"。
+/// 这里只测 ChatPanel 这一半（决策规则在 test_onboard_ctl 里测；
+/// 真机上"弹没弹"由 --focus-input-demo + 截图/日志证明）。
+void TestMainPage::inputFocusIsReportedForOnboardPolicy()
+{
+    ChatPanel panel;
+    panel.resize(400, 300);
+    panel.show();
+
+    QSignalSpy spy(&panel, &ChatPanel::inputFocusChanged);
+    QVERIFY(panel.input() != nullptr);
+
+    panel.input()->setFocus(Qt::OtherFocusReason);
+    QTRY_COMPARE(spy.count(), 1);
+    QCOMPARE(spy.first().at(0).toBool(), true);       // 获得焦点
+
+    panel.input()->clearFocus();
+    QTRY_COMPARE(spy.count(), 2);
+    QCOMPARE(spy.last().at(0).toBool(), false);       // 失去焦点
+
+    panel.hide();
 }
 
 QTEST_MAIN(TestMainPage)

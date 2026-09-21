@@ -163,7 +163,8 @@ gui:
   chat_channel: via_agent  # 主页面对话只走 agent (chat_input -> llm)
   input_source: keyboard   # keyboard | terminal (只有 keyboard 会真控 onboard)
                            # 原来的 "pc"(用宿主机键盘当输入源) 已随主机输入方向一起移除
-  onboard_auto: true       # 选"键盘"时自动弹 onboard, 切走自动关
+  onboard_auto: true       # 选"键盘"时，**点输入框才弹** onboard，输入框失焦自动关
+                           # (S10 起不在启动/切输入源时弹 —— 免得一开机键盘盖住主区)
 
   # ---- 系统监控 ----
   monitor_interval_ms: 1000
