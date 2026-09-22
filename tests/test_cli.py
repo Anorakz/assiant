@@ -33,10 +33,12 @@ from agent import cli, config  # noqa: E402
 from agent.ipc.local_server import LocalServer, UNIX_SOCKET_SUPPORTED  # noqa: E402
 from agent.ipc.protocol import (  # noqa: E402
     COMMAND_CHAT_INPUT,
+    COMMAND_QUERY_SCHEDULE,
     COMMAND_SWITCH_MODE,
     SOCKET_PATH,
     TOPIC_LLM,
     TOPIC_MUSIC,
+    TOPIC_SCHEDULE,
     TOPIC_STATUS,
 )
 
@@ -164,6 +166,36 @@ class TestPushFormatting(unittest.TestCase):
         self.assertTrue(cli.format_push("music", {}, datetime(2026, 9, 21, 1, 2, 3))
                         .startswith("01:02:03  music"))
 
+    # ---- P 系列: schedule 推送要打得像人话, 不能倒 dict ----
+
+    FACT = {"title": "午休", "date": "2026-09-22", "scheduled_at": "2026-09-22T13:00",
+            "fired_at": "2026-09-22T13:00:03",
+            "actions": [{"type": "message", "text": "日程提醒：午休", "timestamp": 1.0}]}
+
+    def test_schedule_fired_push_is_a_readable_line(self):
+        line = cli.format_push(TOPIC_SCHEDULE, {"kind": "fired", "event": self.FACT},
+                               datetime(2026, 9, 22, 13, 0, 4))
+        self.assertEqual(
+            line,
+            "13:00:04  schedule  kind=fired title=午休 date=2026-09-22 "
+            "scheduled_at=2026-09-22T13:00 fired_at=2026-09-22T13:00:03")
+        self.assertNotIn("actions", line, "别把事实里那一坨 actions 原样倒出来")
+
+    def test_schedule_state_push_shows_count_and_limit(self):
+        line = cli.format_push(
+            TOPIC_SCHEDULE,
+            {"kind": "state", "now": "2026-09-22T13:05:00", "limit": 50,
+             "fired": [self.FACT, self.FACT]},
+            datetime(2026, 9, 22, 13, 5, 1))
+        self.assertEqual(line, "13:05:01  schedule  kind=state fired=2 limit=50")
+
+    def test_unknown_schedule_kind_is_shown_verbatim(self):
+        """将来加 kind 时: 老 CLI 要把它原样打出来, 而不是装懂或假装没有。"""
+        line = cli.format_push(TOPIC_SCHEDULE, {"kind": "later", "x": 1},
+                               datetime(2026, 9, 22, 13, 5, 1))
+        self.assertIn("kind=later", line)
+        self.assertIn("x=1", line)
+
 
 class TestScheduleRendering(unittest.TestCase):
     """日程渲染用的是**真的** ScheduleEvent（不是替身）。"""
@@ -253,6 +285,105 @@ class TestScheduleRendering(unittest.TestCase):
         """文案防线：不许让 CLI 的"已过"被读成"Agent 已经触发过"。"""
         self.assertIn("按时间", cli.SCHEDULE_FOOTER)
         self.assertIn("不代表", cli.SCHEDULE_FOOTER)
+
+    # ---- P 系列: 真的触发过的那几条要标出来 ----
+
+    TODAY = date(2026, 9, 22)
+
+    @staticmethod
+    def _fact(title, scheduled_at, fired_at):
+        return {"title": title, "date": scheduled_at[:10], "scheduled_at": scheduled_at,
+                "fired_at": fired_at, "actions": [{"type": "message", "text": "x",
+                                                   "timestamp": 1.0}]}
+
+    def test_fired_row_is_marked_with_the_real_time(self):
+        events = self._events()
+        now = datetime(2026, 9, 22, 15, 0)          # 14:00 那条已经过了
+        facts = [self._fact("项目评审", "2026-09-22T14:00", "2026-09-22T14:00:02")]
+        rows = cli.schedule_rows(events, self.TODAY, now, facts=facts)
+        by_title = {row["title"]: row for row in rows}
+        self.assertEqual(by_title["项目评审"]["fired_at"], "2026-09-22T14:00:02")
+
+        lines = cli.render_schedule([("今天", self.TODAY)],
+                                    lambda day: rows, now, limit=10, asked=True)
+        text = "\n".join(lines)
+        self.assertIn("14:00  项目评审  ← 已触发 14:00:02", text)
+        self.assertNotIn("项目评审  ← 已过", text)
+
+    def test_past_row_says_unfired_only_when_we_could_ask(self):
+        """问到了才能说"未触发"；没问到时只说"已过" —— 别把"没问"说成"没触发"。"""
+        events = self._events()
+        now = datetime(2026, 9, 22, 15, 0)
+        rows = cli.schedule_rows(events, self.TODAY, now, facts=[])
+
+        asked = "\n".join(cli.render_schedule([("今天", self.TODAY)], lambda day: rows,
+                                             now, limit=10, asked=True))
+        self.assertIn("← 已过（未触发）", asked)
+
+        not_asked = "\n".join(cli.render_schedule([("今天", self.TODAY)], lambda day: rows,
+                                                  now, limit=10, asked=False))
+        self.assertIn("← 已过", not_asked)
+        self.assertNotIn("未触发", not_asked)
+
+    def test_future_row_is_not_marked(self):
+        events = self._events()
+        now = datetime(2026, 9, 22, 8, 0)
+        rows = cli.schedule_rows(events, self.TODAY, now, facts=[])
+        text = "\n".join(cli.render_schedule([("今天", self.TODAY)], lambda day: rows,
+                                             now, limit=10, asked=True))
+        self.assertIn("14:00  项目评审", text)
+        self.assertNotIn("项目评审  ←", text)
+
+    def test_facts_do_not_change_the_row_text(self):
+        """⚠ `row_text` 是"与 GUI 逐行 diff"的接口: 加了事实也不能动它。"""
+        events = self._events()
+        now = datetime(2026, 9, 22, 15, 0)
+        facts = [self._fact("项目评审", "2026-09-22T14:00", "2026-09-22T14:00:02"),
+                 self._fact("每天喝水", "2026-09-22T10:00", "2026-09-22T10:00:01")]
+        plain = [cli.row_text(r) for r in cli.schedule_rows(events, self.TODAY, now)]
+        with_facts = [cli.row_text(r) for r in cli.schedule_rows(events, self.TODAY, now,
+                                                                facts=facts)]
+        self.assertEqual(plain, with_facts)
+
+    def test_remind_before_fact_lands_on_the_event_day(self):
+        """提前量把触发点推到**前一天**时, 事实仍要落到事件日那一行上。
+
+        这就是"按 trigger_at 对齐、而不是按 start 对齐"的原因: 只按 start 找,
+        跨天那条永远匹配不上（它的 scheduled_at 是前一天 23:55）。
+        """
+        from agent.core.scheduler import ScheduleEvent
+        events = [ScheduleEvent.from_config(
+            {"title": "深夜小结", "start": "00:05", "remind_before_min": 10}, 0)]
+        day = date(2026, 9, 22)
+        facts = [self._fact("深夜小结", "2026-09-21T23:55", "2026-09-21T23:55:00")]
+
+        rows = cli.schedule_rows(events, day, datetime(2026, 9, 22, 1, 0), facts=facts)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["trigger_at"], "2026-09-21T23:55")
+        self.assertEqual(rows[0]["fired_at"], "2026-09-21T23:55:00")
+
+    def test_a_fact_does_not_leak_to_another_day(self):
+        events = self._events()
+        facts = [self._fact("每天喝水", "2026-09-21T10:00", "2026-09-21T10:00:01")]
+        rows = cli.schedule_rows(events, self.TODAY, datetime(2026, 9, 22, 15, 0),
+                                 facts=facts)
+        self.assertEqual([r["fired_at"] for r in rows], [None, None, None],
+                         "昨天触发的那条不能标到今天头上")
+
+    def test_fired_clock_strips_the_date(self):
+        self.assertEqual(cli.fired_clock("2026-09-22T13:00:03"), "13:00:03")
+        self.assertEqual(cli.fired_clock("看不懂"), "看不懂")   # 不装懂
+        self.assertEqual(cli.fired_clock(None), "")
+
+    def test_asked_with_no_facts_is_not_a_claim(self):
+        """Agent 说"一条都没触发过"时, 绝不能有任何一行显示「已触发」。"""
+        events = self._events()
+        now = datetime(2026, 9, 22, 23, 0)
+        rows = cli.schedule_rows(events, self.TODAY, now, facts=[])
+        text = "\n".join(cli.render_schedule([("今天", self.TODAY)], lambda day: rows,
+                                             now, limit=10, asked=True))
+        self.assertNotIn("已触发", text)
+        self.assertIn("已过（未触发）", text)
 
 
 class TestDerivationVerdict(unittest.TestCase):
@@ -381,6 +512,50 @@ class TestScheduleCommand(unittest.TestCase):
         self.assertEqual(code, cli.EXIT_ERROR)
         self.assertIn("读不到配置", err)
         self.assertIn("config.yaml", err)             # 提示名字要求
+
+    # ---- P 系列: 问 Agent 这条路 (问不到要如实说) ----
+
+    def test_no_ask_skips_the_agent_and_says_so(self):
+        path = self._write_config(
+            "scheduler:\n  recurring:\n    - title: 每天喝水\n      start: \"10:00\"\n")
+        code, out, err = self._run(path, ["--no-ask"])
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("不代表", out)                   # 还是那句按时间比较
+        self.assertIn("--no-ask", out, "要讲明是**你**让它别问的")
+        self.assertNotIn("问不到 Agent", err, "--no-ask 时不该去连 Agent")
+
+    def test_ask_failure_falls_back_and_says_why(self):
+        """Agent 没跑: 日程照样列出来, 但"已过"必须说明是按时间算的。"""
+        tmp = tempfile.mkdtemp(prefix="cli-nosock-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = self._write_config(
+            "scheduler:\n  recurring:\n    - title: 每天喝水\n      start: \"10:00\"\n")
+        missing = os.path.join(tmp, "nope.sock")
+        code, out, err = self._run(path, ["--socket", missing, "--timeout", "0.2"])
+
+        self.assertEqual(code, cli.EXIT_OK, "问不到触发记录不是失败")
+        self.assertIn("问不到 Agent 的触发记录", err)
+        self.assertIn("连不上 Agent", err)
+        self.assertIn("每天喝水", out)
+        self.assertIn("不代表", out)
+        self.assertNotIn("已触发", out, "没问到就一条都不能标")
+        self.assertNotIn("未触发", out, "没问到也不许替 Agent 说「未触发」")
+
+    def test_ask_with_no_answer_is_not_reported_as_a_connection_error(self):
+        """连上了但没回: 文案要说"没回那一条", 不能糊成"连不上"。
+
+        ⚠ "真连上但不回"需要真 socket（下面 TestCliAgainstRealServer 里那条）；
+          这里只钉住"路径不存在 -> 说的是连不上", 两种原因别混成一句。
+        """
+        tmp = tempfile.mkdtemp(prefix="cli-nosock2-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = self._write_config(
+            "scheduler:\n  recurring:\n    - title: 每天喝水\n      start: \"10:00\"\n")
+        code, out, err = self._run(path, ["--socket", os.path.join(tmp, "x.sock"),
+                                          "--timeout", "0.2"])
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("连不上 Agent", err)
+        self.assertNotIn("没回", err)
 
 
 class TestConnectHint(unittest.TestCase):
@@ -659,6 +834,124 @@ class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(code, cli.EXIT_OK)
         self.assertIn("第一行\\n第二行", out)      # 单行显示，不破坏表格
+
+    async def test_watch_shows_a_schedule_fired_push_as_one_readable_line(self):
+        fact = {"title": "午休", "date": "2026-09-22", "scheduled_at": "2026-09-22T13:00",
+                "fired_at": "2026-09-22T13:00:03",
+                "actions": [{"type": "message", "text": "日程提醒：午休",
+                             "timestamp": 1.0}]}
+        code, out, err = await self._watch(
+            ["--count", "1"],
+            [(TOPIC_SCHEDULE, {"kind": "fired", "event": fact})],
+        )
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("kind=fired", out)
+        self.assertIn("title=午休", out)
+        self.assertIn("fired_at=2026-09-22T13:00:03", out)
+        self.assertNotIn("actions", out, "别把嵌套的那坨原样倒出来")
+
+    # ---- P 系列: schedule 问 Agent 要触发记录 ----
+
+    def _write_config(self, body):
+        tmp = tempfile.mkdtemp(prefix="cli-live-sched-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = Path(tmp) / "config.yaml"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    async def test_ask_fired_returns_the_facts(self):
+        fact = {"title": "站会", "date": "2026-09-22", "scheduled_at": "2026-09-22T09:30",
+                "fired_at": "2026-09-22T09:30:04", "actions": []}
+        self.agent.reply_with(COMMAND_QUERY_SCHEDULE, TOPIC_SCHEDULE,
+                              lambda _payload: {"kind": "state", "now": "2026-09-22T09:31:00",
+                                                "limit": 50, "fired": [fact]})
+
+        facts, why = await cli.ask_fired(self.path, 2)
+
+        self.assertEqual(why, "")
+        self.assertEqual(facts, [fact])
+        self.assertEqual(self.agent.commands, [(COMMAND_QUERY_SCHEDULE, {})],
+                         "查询命令的 payload 必须是 {}（协议 §4）")
+
+    async def test_ask_fired_times_out_when_the_agent_stays_silent(self):
+        """连上了但不回: 原因要落在"没回快照"上, 不能糊成"连不上"。"""
+        self.agent.record_only()
+        facts, why = await cli.ask_fired(self.path, 0.2)
+        self.assertIsNone(facts)
+        self.assertIn("没回日程快照", why)
+        self.assertNotIn("连不上", why)
+
+    async def test_schedule_marks_fired_through_a_real_agent(self):
+        """端到端: 真 server 应答 -> cmd_schedule 打出「已触发 HH:MM:SS」。"""
+        today = date.today()
+        fact = {"title": "站会", "date": today.isoformat(),
+                "scheduled_at": "%sT09:30" % today.isoformat(),
+                "fired_at": "%sT09:30:04" % today.isoformat(), "actions": []}
+        self.agent.reply_with(COMMAND_QUERY_SCHEDULE, TOPIC_SCHEDULE,
+                              lambda _payload: {"kind": "state", "now": "x", "limit": 50,
+                                                "fired": [fact]})
+        path = self._write_config(
+            "ipc:\n  socket_path: %s\n" % self.path +
+            "scheduler:\n  recurring:\n    - title: 站会\n      start: \"09:30\"\n")
+
+        old = os.environ.get("AGENT_CONFIG_DIR")
+        os.environ["AGENT_CONFIG_DIR"] = str(path.parent)
+        config.clear_cache()
+
+        def restore():
+            if old is None:
+                os.environ.pop("AGENT_CONFIG_DIR", None)
+            else:
+                os.environ["AGENT_CONFIG_DIR"] = old
+            config.clear_cache()
+
+        self.addCleanup(restore)
+
+        args = cli.build_parser().parse_args(
+            ["schedule", "--config", str(path), "--today", "--timeout", "2"])
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = await cli.cmd_schedule(args)
+
+        self.assertEqual(code, cli.EXIT_OK)
+        text = out.getvalue()
+        self.assertIn("09:30  站会  ← 已触发 09:30:04", text)
+        self.assertIn("来自运行中的 Agent", text, "页脚要说明这份记录的出处")
+        self.assertNotIn("不代表", text, "问到了就不该再用「按时间」那套免责话术")
+        self.assertEqual(err.getvalue(), "", "问到了就不该有「问不到」的噪音")
+
+    async def test_schedule_without_the_agent_still_lists_but_says_why(self):
+        """同一个真 server, 但**不**应答查询: 列表照出, 页脚退回"按时间"。"""
+        self.agent.record_only()
+        today = date.today()
+        path = self._write_config(
+            "ipc:\n  socket_path: %s\n" % self.path +
+            "scheduler:\n  recurring:\n    - title: 站会\n      start: \"09:30\"\n")
+
+        old = os.environ.get("AGENT_CONFIG_DIR")
+        os.environ["AGENT_CONFIG_DIR"] = str(path.parent)
+        config.clear_cache()
+
+        def restore():
+            if old is None:
+                os.environ.pop("AGENT_CONFIG_DIR", None)
+            else:
+                os.environ["AGENT_CONFIG_DIR"] = old
+            config.clear_cache()
+
+        self.addCleanup(restore)
+
+        args = cli.build_parser().parse_args(
+            ["schedule", "--config", str(path), "--today", "--timeout", "0.2"])
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = await cli.cmd_schedule(args)
+
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("站会", out.getvalue())
+        self.assertIn("不代表", out.getvalue())
+        self.assertIn("没回日程快照", err.getvalue())
+        self.assertIn(today.isoformat(), out.getvalue())
 
 
 if __name__ == "__main__":

@@ -8,13 +8,14 @@ agent/cli.py — 板端控制 CLI（同一个 Agent 的第二条前端）
     发一条消息、切模式、盯推送、查日程、做体检。板端还放了个 `assistant` 启动器。
 
 走哪条路（这里决定了它能做什么、不能做什么）
-    · 只走**现有 IPC 协议**（`docs/ipc-protocol.md` 是线上格式的唯一真源），
-      用现成的 `agent.ipc.local_client.LocalClient`；不新增线格式。
+    · 只走**IPC 协议**（`docs/ipc-protocol.md` 是线上格式的唯一真源），用现成的
+      `agent.ipc.local_client.LocalClient`。
     · **不 import Agent 去读它的内存** —— 所以 Agent 没跑时这里会明确说"连不上"，
       而不是给一份假状态。
-    · 后果：看到不"Agent 已经触发过哪条日程"（那是运行中进程的内存状态）。
-      日程展开用**真的** `agent.core.scheduler` 语义，但只标"**已过（按时间）**"；
-      要真的触发记录，得先扩协议（本次不做，见 docs/cli.md 的边界）。
+    · 日程：**列表**用真的 `agent.core.scheduler` 语义自己算（不需要 Agent 在跑）；
+      **"到底触发过哪条"** 只能问运行中的 Agent（协议 `query_schedule` -> `schedule`
+      推送，P 系列加的），问不到就只说「已过（按时间）」，并在页脚写明原因。
+    · 触发记录是**只读**的：CLI 不写配置、不改日程（配置永远是唯一真源）。
 
 退出码
     0 = 成功 ／ 1 = 环境或连接问题 ／ 2 = 参数错（argparse 的默认行为）
@@ -39,12 +40,15 @@ from agent.core.state_machine import StateMachine
 from agent.ipc.local_client import IpcClientError, LocalClient
 from agent.ipc.protocol import (
     COMMAND_CHAT_INPUT,
+    COMMAND_QUERY_SCHEDULE,
     COMMAND_SWITCH_MODE,
     MODES,
     SOCKET_PATH,
     TOPIC_LLM,
+    TOPIC_SCHEDULE,
     TOPIC_STATUS,
 )
+from agent.ipc import SCHEDULE_KIND_FIRED, SCHEDULE_KIND_STATE
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -166,11 +170,40 @@ def format_value(value: Any, limit: int = WATCH_VALUE_LIMIT) -> str:
 
 def format_push(topic: str, data: Optional[Dict[str, Any]],
                 clock: Optional[datetime] = None) -> str:
-    """一条推送渲染成一行：`23:51:02  status  mode=STUDY connected=true`。"""
+    """一条推送渲染成一行：`23:51:02  status  mode=STUDY connected=true`。
+
+    ⚠ `schedule` 单独走：它负载里是**嵌套的事实对象**，原样倒出来会是一坨 dict，
+      这不是"人读的一行"（见 schedule_push_pairs）。
+    """
     stamp = (clock or datetime.now()).strftime("%H:%M:%S")
-    pairs = " ".join("%s=%s" % (key, format_value(value))
-                     for key, value in (data or {}).items())
+    if topic == TOPIC_SCHEDULE:
+        pairs = schedule_push_pairs(data or {})
+    else:
+        pairs = " ".join("%s=%s" % (key, format_value(value))
+                         for key, value in (data or {}).items())
     return "%s  %-9s %s" % (stamp, topic, pairs)
+
+
+def schedule_push_pairs(data: Dict[str, Any]) -> str:
+    """`schedule` 推送压成 key=value，只挑人真正要看的字段。
+
+    · `kind="fired"` 刚触发了一条 -> title / date / scheduled_at / fired_at
+    · `kind="state"` 应答查询的快照 -> 条数 + 上限（不把 N 条事实全倒出来）
+    · 不认识的 kind（将来加的）-> 原样给出来：**不装懂**，也不假装没有
+    """
+    kind = data.get("kind")
+    if kind == SCHEDULE_KIND_FIRED:
+        event = data.get("event") or {}
+        parts = ["kind=%s" % SCHEDULE_KIND_FIRED]
+        for key in ("title", "date", "scheduled_at", "fired_at"):
+            if event.get(key) is not None:
+                parts.append("%s=%s" % (key, format_value(event[key])))
+        return " ".join(parts)
+    if kind == SCHEDULE_KIND_STATE:
+        fired = data.get("fired") or []
+        return "kind=%s fired=%d limit=%s" % (
+            SCHEDULE_KIND_STATE, len(fired), format_value(data.get("limit")))
+    return " ".join("%s=%s" % (key, format_value(value)) for key, value in data.items())
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +433,8 @@ def row_text(row: Dict[str, Any]) -> str:
     return "%s  %s" % (clock, row["title"])
 
 
-def schedule_rows(events: List[Any], day, now: datetime) -> List[Dict[str, Any]]:
+def schedule_rows(events: List[Any], day, now: datetime,
+                  facts: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     """某一天的日程行（按 `(时间, 标题)` 升序）。
 
     `occurs_on()` 是**真的** Python 语义（recurring 看星期、oneoff 看日期）；
@@ -408,7 +442,22 @@ def schedule_rows(events: List[Any], day, now: datetime) -> List[Dict[str, Any]]
     `now > start` 恒成立（例如 12:58 看明天的 08:30），那样标"已过"就是错的。
     ⚠ 与 GUI 同一条规则（`SchedulePanel`：`past` 只作用于今天段）——C4 起真 Agent
       时正是这里露了馅（明天 08:30 被标成"已过"）。
+
+    @param facts 运行中 Agent 报回来的触发事实（`query_schedule` 的应答）。给了就在
+                 行里带上 `fired_at`（这一条**真的**被触发过的时刻）；不给就是 None。
+    @note 事实与行按 **`trigger_at`**（就是 `scheduled_at` 那个字符串）对齐 ——
+          这是 Agent 与 CLI 用**同一个** `ScheduleEvent.trigger_at()` 算出来的，
+          所以提前量跨天（00:05 提前 10 分钟 → 前一天 23:55）也能对上。
+          按 `start` 对齐会漏掉那种跨天的情况。
+    @note 配置改过（比如把 start 挪了）时对不上 -> 那条历史就落不到任何行上：
+          这是如实的结果（"这个时刻没触发过"），不是 bug。
     """
+    by_trigger: Dict[str, Dict[str, Any]] = {}
+    for fact in (facts or []):
+        key = fact.get("scheduled_at")
+        if key and key not in by_trigger:
+            by_trigger[key] = fact
+
     rows = []
     now_minute = now.hour * 60 + now.minute
     is_today = (day == now.date())
@@ -417,20 +466,39 @@ def schedule_rows(events: List[Any], day, now: datetime) -> List[Dict[str, Any]]
             continue
         start = "%02d:%02d" % event.start
         end = ("%02d:%02d" % event.end) if event.end else ""
+        trigger_at = event.trigger_at(day).isoformat(timespec="minutes")
         rows.append({
             "time": start,
             "end": end,
             "title": event.title,
             "past": bool(is_today and now_minute > (event.start[0] * 60 + event.start[1])),
             "day": day,
+            "trigger_at": trigger_at,
+            "fired_at": (by_trigger.get(trigger_at) or {}).get("fired_at"),
         })
     rows.sort(key=lambda row: (row["time"], row["title"]))
     return rows
 
 
+def fired_clock(fired_at: Any) -> str:
+    """事实里的 `fired_at`（`YYYY-MM-DDTHH:MM:SS`）→ `HH:MM:SS`。
+
+    只取时刻：这一行已经在"哪一天"的段里了，再打一次日期是噪音。
+    解析不出来就原样返回（宁可难看，不要假装懂）。
+    """
+    text = str(fired_at or "")
+    _, sep, clock = text.partition("T")
+    return clock if sep else text
+
+
 def render_schedule(days: List[Tuple[str, Any]], rows_of, now: datetime,
-                    limit: int = 10) -> List[str]:
-    """渲染成"人读的行"（不含页脚）。`rows_of(day)` 给当天的行。"""
+                    limit: int = 10, asked: bool = False) -> List[str]:
+    """渲染成"人读的行"（不含页脚）。`rows_of(day)` 给当天的行。
+
+    @param asked 是否**问到了** Agent 的触发记录（`--no-ask` / 连不上就是 False）。
+                 只有问到时才敢把"过了 start 却不在记录里"的行标成「已过（未触发）」；
+                 没问到时保持老样子「已过」—— 那是纯时间比较，不掺一句暗示。
+    """
     lines = []
     weekday = "一二三四五六日"
     for label, day in days:
@@ -441,7 +509,14 @@ def render_schedule(days: List[Tuple[str, Any]], rows_of, now: datetime,
             continue
         shown = rows if limit <= 0 else rows[:limit]
         for row in shown:
-            mark = "  ← 已过" if row["past"] else ""
+            if row.get("fired_at"):
+                mark = "  ← 已触发 %s" % fired_clock(row["fired_at"])
+            elif row["past"] and asked:
+                mark = "  ← 已过（未触发）"
+            elif row["past"]:
+                mark = "  ← 已过"
+            else:
+                mark = ""
             lines.append("  %s%s" % (row_text(row), mark))
         if len(rows) > len(shown):
             lines.append("  …还有 %d 项（--limit 可调）" % (len(rows) - len(shown)))
@@ -449,14 +524,66 @@ def render_schedule(days: List[Tuple[str, Any]], rows_of, now: datetime,
 
 
 SCHEDULE_FOOTER = ("⚠ 「已过」只是「现在过了 start 时刻」（按时间比较），"
-                   "**不代表 Agent 已经触发过** —— 那是运行中 Agent 的内存状态，"
-                   "CLI 看不到（要看先得扩协议）。")
+                   "**不代表 Agent 已经触发过**。")
+
+#: 问到了触发记录时用的页脚（P 系列）：这时标出来的东西**不是**时间比较的结果。
+#: ⚠ 文案要对"0 条"也读得通：新起的 Agent 一条都还没触发过是最常见的情形，
+#:   那时「已过（未触发）」的意思是"这个 Agent 进程没触发过"，**不是**"配置里没有"。
+SCHEDULE_FOOTER_LIVE = ("✓ 触发记录来自运行中的 Agent 本人（本次 %d 条）——「未触发」"
+                        "是**这个 Agent 进程**没触发过，不是配置里没有；"
+                        "记录只在内存里，Agent 重启即清零。")
+
+#: 没问到时的原因文案（`--no-ask` 与"连不上/超时"要分清，别把用户的选择说成故障）
+NO_ASK_REASON = "你用了 --no-ask"
+
+
+async def ask_fired(path: str, timeout: float) -> Tuple[Optional[List[Dict[str, Any]]], str]:
+    """问运行中的 Agent"最近触发过哪些日程"（协议 `query_schedule`）。
+
+    @return (facts, why)。问到了 -> (列表, "")；问不到 -> (None, 原因)
+    @note 这是**只读**查询：CLI 不写配置、不改日程 —— 配置永远是唯一真源，
+          改日程是人在 PC 上做的事。
+    @note 问不到**不是错误**：Agent 没在跑时日程照样列得出来，只是那些"已过"
+          只能按时间比较（见 render_schedule 的 asked）。
+    """
+    client = LocalClient(path)
+    facts: Optional[List[Dict[str, Any]]] = None
+    arrived = asyncio.Event()
+
+    def on_message(topic: str, data: dict) -> None:
+        nonlocal facts
+        if topic == TOPIC_SCHEDULE and data.get("kind") == SCHEDULE_KIND_STATE:
+            facts = list(data.get("fired") or [])
+            arrived.set()
+
+    client.on_message(on_message)
+    try:
+        await client.connect()
+    except IpcClientError as exc:
+        return None, "连不上 Agent（%s）" % exc
+
+    try:
+        try:
+            await client.send_command(COMMAND_QUERY_SCHEDULE, {})
+        except IpcClientError as exc:
+            return None, "发不出 query_schedule（%s）" % exc
+        try:
+            await asyncio.wait_for(arrived.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return None, "Agent 在 %.1f 秒内没回日程快照" % timeout
+        return facts, ""
+    finally:
+        with contextlib.suppress(Exception):
+            await client.close()
 
 
 async def cmd_schedule(args: argparse.Namespace) -> int:
-    """列出今天/明天的日程（用真的 `Scheduler` 语义）。
+    """列出今天/明天的日程（真的 `Scheduler` 语义），并标出**真的触发过**的那些。
 
-    不需要事件循环，但保持与其他子命令一致的签名（`main()` 统一 await）。
+    两件事分开说清楚：
+      · 日程本身来自配置 + `ScheduleEvent` 语义（CLI 自己算，不需要 Agent 在跑）
+      · 「已触发」来自运行中的 Agent（协议的 `query_schedule` 应答）—— 问不到就
+        只说「已过」，并在页脚讲明"那是按时间比较的"（不留幻觉）
     """
     config, why = load_plane_config(args.config)
     if why:
@@ -469,6 +596,13 @@ async def cmd_schedule(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return EXIT_ERROR
 
+    facts: Optional[List[Dict[str, Any]]] = None
+    reason = NO_ASK_REASON
+    if not args.no_ask:
+        facts, reason = await ask_fired(_resolve_path(args), args.timeout)
+        if facts is None:
+            print("问不到 Agent 的触发记录：%s" % reason, file=sys.stderr)
+
     now = datetime.now()
     today = now.date()
     tomorrow = today + timedelta(days=1)
@@ -479,10 +613,16 @@ async def cmd_schedule(args: argparse.Namespace) -> int:
         wanted.append(("明天", tomorrow))
 
     print("日程（共 %d 条；%s）" % (len(events), (config_path("config"))))
-    for line in render_schedule(wanted, lambda day: schedule_rows(events, day, now),
-                               now, limit=args.limit):
+    for line in render_schedule(wanted,
+                               lambda day: schedule_rows(events, day, now, facts=facts),
+                               now, limit=args.limit, asked=facts is not None):
         print(line)
-    print(SCHEDULE_FOOTER)
+
+    if facts is None:
+        print(SCHEDULE_FOOTER)
+        print("（%s —— 所以这里只能按时间比较。）" % reason)
+    else:
+        print(SCHEDULE_FOOTER_LIVE % len(facts))
     return EXIT_OK
 
 
@@ -625,7 +765,7 @@ def _common_options(*, suppress_defaults: bool,
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="assistant",
-        description="RK3568 桌面助手 —— 板端控制 CLI（走现有 IPC 协议，不新增线格式）",
+        description="RK3568 桌面助手 —— 板端控制 CLI（走 IPC 协议；日程能标出真的触发过的）",
         parents=[_common_options(suppress_defaults=False)],
     )
     sub = parser.add_subparsers(dest="command", metavar="<命令>")
@@ -657,12 +797,15 @@ def build_parser() -> argparse.ArgumentParser:
                          help="收够 N 条就退出（0 = 不限；给脚本/测试用）")
     p_watch.set_defaults(func=cmd_watch)
 
-    p_schedule = sub.add_parser("schedule", help="列出今天/明天的日程（真的 Scheduler 语义）",
+    p_schedule = sub.add_parser("schedule",
+                                help="列出今天/明天的日程，并标出真的触发过的那些",
                                 parents=[_common_options(suppress_defaults=True)])
     p_schedule.add_argument("--today", action="store_true", help="只看今天")
     p_schedule.add_argument("--tomorrow", action="store_true", help="只看明天")
     p_schedule.add_argument("--limit", type=int, default=10,
                             help="每天最多列几行（0 = 不限；默认 %(default)s）")
+    p_schedule.add_argument("--no-ask", action="store_true",
+                            help="不问 Agent，只按时间比较（离线/对比用）")
     p_schedule.set_defaults(func=cmd_schedule)
 
     p_doctor = sub.add_parser("doctor", help="体检：配置 / socket / 派生 / 日程 / 关键路径",
