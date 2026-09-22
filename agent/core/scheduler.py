@@ -515,7 +515,7 @@ class Scheduler:
         if "hotkeys" in section:
             self._warnings.append(
                 "配置里的 scheduler.hotkeys 已改名为 scheduler.commands, "
-                "本次被忽略 (见 docs/architecure.md 与 config.example.yaml)"
+                "本次被忽略 (见 docs/architecture.md 与 config.example.yaml)"
             )
 
     # ------------------------------------------------------------ 配置 ---

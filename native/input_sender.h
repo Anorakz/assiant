@@ -1,7 +1,7 @@
 // ============================================================================
 //  input_sender.h — 把"AI 想做的输入动作"翻译成 moonlight-common-c 调用
 //
-//  架构位置 (docs/architecure.md §3.2)
+//  架构位置 (docs/architecture.md §3.2)
 //  ---------------------------------------------------------------------------
 //      Python Agent → pybind11: send_key / send_mouse / send_hotkey
 //        → **input_sender** → LiSendKeyboardEvent / LiSendMouseEvent

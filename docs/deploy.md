@@ -2,7 +2,7 @@
 
 > 一句话：**PC 是唯一提交方，板端是运行环境**；两者靠"commit → 推 → 部署"这条链对齐，
 > 而且有机制能**证明**它们真的一致（不再靠人肉记忆）。架构与拓扑见
-> [`architecure.md`](architecure.md)。
+> [`architecture.md`](architecture.md)。
 
 ---
 
@@ -164,7 +164,7 @@ tests/board/mpp_decode_smoke
 
 ## 9. 相关文档
 
-- 架构与拓扑、板端目录布局：[`architecure.md`](architecure.md)
+- 架构与拓扑、板端目录布局：[`architecture.md`](architecture.md)
 - GUI 的构建与使用：[`gui.md`](gui.md)
 - 交叉编译与 sysroot：[`cross-build-rk3568.md`](cross-build-rk3568.md)
 - Agent ⇄ GUI 协议：[`ipc-protocol.md`](ipc-protocol.md)

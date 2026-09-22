@@ -199,7 +199,7 @@ Phase 6 — 双机联调（方案已评审通过；决策记录见本节末尾�
      connect_limelight，去掉 HTTP 分支与 unique_id）、binding.cpp（去掉 moonlight.start 绑定与头注释）、
      native/CMakeLists.txt（去掉源文件与 ws2_32 链接）、tests/CMakeLists.txt（去掉该测试目标）、
      tests/mocks/mock_agent_native.py（替身改为 start_with_session）、文档四处
-     （sunshine-pairing-findings §5.1、architecure、decoder-mpp、Readme 目录树）与
+     （sunshine-pairing-findings §5.1、architecture、decoder-mpp、Readme 目录树）与
      agent/{main.py,net/sunshine_client.py} 的注释。
      验证：host ctest **193/193 passed**（213 − 20，正好是被删的那 20 条）；
            交叉编译 exit 0（AArch64 / GLIBC 2.17）；PC 整套 exit 0。
@@ -383,7 +383,7 @@ Phase 6 决策记录（已评审）
      · config/config.example.yaml 的 scheduler.host_input_interval_ms
      · tests/test_host_input_rb.cpp、tests/mocks/mock_agent_native.py 的替身子模块、
        tests/test_io.py 的 TestHostInputReader / TestEventToText 用例
-     · docs/architecure.md、Readme.md 里声称"主机键盘 → Host Input RB → pybind11"的图与表
+     · docs/architecture.md、Readme.md 里声称"主机键盘 → Host Input RB → pybind11"的图与表
    板端 test_binding_api.py 反过来断言 host_input_rb **不存在**，防止它被带回来。
 
 项目归一化处理（新增，与 Phase 6 并行）
@@ -391,7 +391,7 @@ Phase 6 决策记录（已评审）
      （只管线上格式）；字段定义表只留协议文档一份，gui-agent-integration.md 降级为"GUI 行为 + 指针"；
      Readme 删掉"实现未做"并补上命令信封。另加 tests/test_docs.py 文档守卫（相对链接 + 过时说法黑名单），
      已注册进三端共享的套件清单 —— 以后漂移会直接让测试变红。
-     还发现并修掉：Readme 的 ZeroMQ 约定、architecure.md 整篇旧设计（ZeroMQ + PC 侧 GUI）。
+     还发现并修掉：Readme 的 ZeroMQ 约定、architecture.md 整篇旧设计（ZeroMQ + PC 侧 GUI）。
 ☑ 配置入口收敛：**已完成**（归一化 D 系列 D1–D5）
      · D1 `56d1ff9` config.yaml 成为唯一真源：原 GUI 专用配置的 17 个键整体并进它的 `gui:` 段，
        同时修正 `llm:` 段漂移（edge = llama.cpp GGUF + 本机 llama-server）并补齐 llama-server 参数
@@ -426,7 +426,7 @@ Phase 6 决策记录（已评审）
        并顺带补齐了 main 有而板端一直没有的 native/ 源码、根 CMakeLists.txt、.gitmodules
      待做：F4 把"git pull 负责什么、deploy.ps1 负责什么、板端哪些不入库"写成 docs/deploy.md
      · F4 **已完成**：新增 `docs/deploy.md`（三条同步路径各管什么 / 清单与落后判定 /
-       板端不入库清单 / 常见操作 / 踩过的坑），`docs/architecure.md` §2 §8.2 §9.2 同步，
+       板端不入库清单 / 常见操作 / 踩过的坑），`docs/architecture.md` §2 §8.2 §9.2 同步，
        Readme 的 docs 目录树补成实际 8 个文件。文档守卫（相对链接 + 过时说法）通过。
 ☑ 板端卫生 + 四端复核（G1，归一化收尾）
      · 推送与同步：F3/F4/D1–D5 共 8 个提交推到 GitHub（`f78d273..52e9459`），板端
@@ -488,7 +488,7 @@ GUI 日程区（S 系列：右区域切成"对话区 + 日程区"，已全部验
      三段布局图 / 新键 / 现状表 / 图标 23）；`docs/config-sources.md` 新增"GUI 也读 scheduler 段"
      （Agent 触发 vs GUI 展示、两条互为表里的守卫、**保证边界只到夹具覆盖的写法**、重新生成期望
      要在板端跑），并记下 `config/schedule.example.yaml` 全仓没人读这处已知漂移；
-     `architecure.md` 同步。
+     `architecture.md` 同步。
 ☑ S7 板端 live 配置：加 `gui.schedule.max_rows: 6` + 4 条**样例**日程（晨间计划 08:30 每天 /
      午休 13:00-13:30 每天 / 周会 10:00 周一三五 / 项目评审 2026-09-22 14:00 一次性）。
      先给目标文件、授权后落盘（指纹 `931d83c4…` → `789b14b7…`，`llm.env` 未动）。
@@ -588,12 +588,24 @@ CLI（C 系列：板端控制 CLI `assistant`，C1–C4 已验收；C5 排在 P 
      ⚠ 用注释而不是真条目：`_fire()` 对没有 action 的事件**也会推**「日程提醒：<标题>」，
      真条目会让每个新 clone 凭空多出提醒（S7 实测过这条）。
      连带改：`Readme.md`（目录树 / 配置一节的两条 `cp` + 一句"日程写在 scheduler 段"）、
-     `docs/architecure.md` 目录树、`docs/config-sources.md`（§5 的"已知漂移，暂不处理"→"**已删除（L1）**"）、
+     `docs/architecture.md` 目录树、`docs/config-sources.md`（§5 的"已知漂移，暂不处理"→"**已删除（L1）**"）、
      `agent/core/scheduler.py` 里那句"与 schedule.example.yaml 一致"的注释。
      迁移后 PC 与板端都验过读得动：Python 侧 `assistant schedule` 报"共 0 条"（空列表，符合预期）、
      GUI 侧 `agent_gui --dump-schedule --config <模板>` 报"日程: 0 行 / SUBTITLE 今天没有日程"。
      ⚠ 有意偏离：`remove_fired_oneoff` 开关的注释**没有**跟着一起写进模板 —— 现在写进去就是
      "文档说有个键、代码不读"，正是 L1 要清掉的那类漂移；它跟 R3 的代码一起加。
+☑ L2 修文件名拼写 `docs/architecure.md` → `docs/architecture.md`：`git mv`（保留历史）+ **全仓零命中**
+     —— 活引用 19 处（Readme 4 / ipc-protocol 1 / deploy 4 / cli 2 / `native/*.h` 6 个头注释 /
+     state_machine.py 1 / scheduler.py 1 / test_docs.py 的 must 清单 1）+ todo.md 里 6 处历史提法，
+     合计 **25 处 / 15 个文件**（22 行增 22 行删 —— 只动了那一行里的名字）。
+     ⚠ `tests/test_docs.py` 把旧名字写死在"必须扫到"的清单里, 不改就红 —— 这正好是
+     "改名必须全仓找引用"的守卫。
+     ⚠ 手法：25 处替换没有手工点，用 `[IO.File]::ReadAllText` + `UTF8Encoding($false)` 逐文件重写
+     （逐个确认过都没有 BOM；用 `-creplace` 而不是 `-replace`，免得误改大小写）。
+     todo.md 的历史行**按你的选择一起改名**（没加"当时叫…"的注记 —— 加了就又不零命中了），
+     所以现在 `grep architecure` 是 **0 命中**。
+     ⚠ 我第一版只 grep 了**文件名**就以为清干净了, 结果漏掉按**名字**引用它的地方 —— 是测试把它
+     顶出来的；那条教训记在 L1。
 
 Phase 7 — 工具层
 □ tools/base.py：工具基类（name、schema、execute、权限、allowed_states）

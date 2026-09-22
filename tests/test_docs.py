@@ -168,7 +168,7 @@ class TestNoStaleClaims(unittest.TestCase):
         paths = _doc_paths()
         self.assertGreaterEqual(len(paths), 5, "扫描到的 md 太少: %r" % (paths,))
         names = {p.name for p in paths}
-        for must in ("Readme.md", "ipc-protocol.md", "architecure.md", "config-sources.md"):
+        for must in ("Readme.md", "ipc-protocol.md", "architecture.md", "config-sources.md"):
             self.assertIn(must, names, "扫描范围漏了 %s" % must)
 
 

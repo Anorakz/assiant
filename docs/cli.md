@@ -252,6 +252,6 @@ llm/config/llm.env  OK    在
 ## 7. 相关
 
 - 线上格式唯一真源：[`ipc-protocol.md`](ipc-protocol.md)（§3 topic / §4 command / §8 常量）
-- 日程语义与去重、触发窗口：[`architecure.md`](architecure.md) §6.1 与 `agent/core/scheduler.py` 模块头
+- 日程语义与去重、触发窗口：[`architecture.md`](architecture.md) §6.1 与 `agent/core/scheduler.py` 模块头
 - GUI 那一端： [`gui.md`](gui.md)、[`gui-agent-integration.md`](gui-agent-integration.md)
 - 部署与双机同步： [`deploy.md`](deploy.md)

@@ -2,7 +2,7 @@
 
 开发机（Windows PC）上的源码工作区，也是**唯一提交方**。负责 C++/pybind11 底层、
 Python Agent Core、Qt5 C++ GUI 的开发、交叉编译与部署；GUI 的**编译在板端**进行
-（板端装了 Qt5，PC 上没有），见 [`docs/architecure.md`](docs/architecure.md)。
+（板端装了 Qt5，PC 上没有），见 [`docs/architecture.md`](docs/architecture.md)。
 
 目标板：RK3568 / Ubuntu 20.04 / aarch64 / glibc 2.31
 
@@ -79,8 +79,8 @@ agent/
 │   ├── mocks/                   # mock_agent_native: native 替身
 │   ├── host/                    # 需要 numpy 的绑定层测试 (按需手动跑)
 │   └── board/                   # 板端真机验收脚本
-├── docs/                        # 文档 (入口: docs/architecure.md)
-│   ├── architecure.md           # 架构与拓扑、板端布局
+├── docs/                        # 文档 (入口: docs/architecture.md)
+│   ├── architecture.md           # 架构与拓扑、板端布局
 │   ├── deploy.md                # 部署与双机同步规则
 │   ├── config-sources.md        # 配置来源: 谁写 / 谁读 / 谁派生
 │   ├── cli.md                   # 板端控制 CLI (assistant) 使用手册

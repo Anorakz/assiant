@@ -13,7 +13,7 @@ Agent（Python）与 GUI（C++ / Qt5）都跑在 RK3568 板端，通过 Unix dom
 | 不负责的内容 | 去哪看 |
 | --- | --- |
 | GUI 界面行为：哪个控件发什么、收到 topic 后界面怎么变、哪些位置还是占位 | `docs/gui-agent-integration.md` |
-| 模式的实际语义（SLEEP/STUDY/GAME 各自做什么）、LLM 调用与降级 | `docs/architecure.md`、`agent/core/`、`agent/llm/` |
+| 模式的实际语义（SLEEP/STUDY/GAME 各自做什么）、LLM 调用与降级 | `docs/architecture.md`、`agent/core/`、`agent/llm/` |
 | 日程怎么写、什么时候算"到点"、去重、触发事实从哪来 | `agent/core/scheduler.py` 模块头 + `config/config.example.yaml` |
 | Agent 侧 server 的接入点与装配 | `agent/ipc/__init__.py` 的 `build_ipc()`、`agent/main.py` |
 | 配置项从哪来、谁能改 | `config/config.example.yaml` 的注释 + `Readme.md` 的配置相关小节 |

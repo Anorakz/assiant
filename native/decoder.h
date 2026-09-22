@@ -1,7 +1,7 @@
 // ============================================================================
 //  decoder.h — 视频硬解封装 (H.264 / H.265)
 //
-//  架构位置 (docs/architecure.md §3.1)
+//  架构位置 (docs/architecture.md §3.1)
 //  ---------------------------------------------------------------------------
 //      Sunshine 视频流 → moonlight-common-c 收 RTP → **Decoder (硬解)**
 //        → YUV(I420) → preprocess_frame() → ImageRingBuffer → pybind11
