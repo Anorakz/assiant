@@ -524,8 +524,18 @@ CLI（C 系列：板端控制 CLI `assistant`，C1–C4 已验收；C5 排在 P 
      ② `watch` 挂着永远用不上的 `--timeout` -> 摘掉，并加"给 watch 传 --timeout 必须被拒（exit 2）"的用例。
      ⚠ 那个用例我第一版写成 `hasattr(args,"timeout")`，是**测试写错**：主解析器那份默认值本来就在
      namespace 里，"有没有这个选项"要看的是"传它会不会被拒"。
-□ C5 `docs/cli.md` + Readme 入口 + 板端 `/usr/local/bin/assistant` 启动器（**排在 P 系列之后**：
-     P4 改了 CLI 行为，文档按最终行为写才不用返工）。
+☑ C5 文档与启动器：新增 `docs/cli.md`（使用手册：怎么跑、公共选项与优先级、退出码、六条命令用
+     **真机原始输出**当例子、"已触发 / 已过（未触发）/ 已过"三种标记对照表、边界、排障）；`Readme.md`
+     三处（目录树加 `agent/cli.py`、docs 清单加 `cli.md`、`## 运行` 之后新增 `## 板端控制 CLI` 一节）；
+     新增仓库文件 `scripts/assistant`（POSIX sh，**提交时带可执行位 100755** —— 不带的话软链目标不可执行）。
+     板端按**软链**安装：`ln -sf <repo>/scripts/assistant /usr/local/bin/assistant`（`git pull`/deploy
+     之后启动器自动最新，不会与仓库漂移）。启动器只做三件事：找仓库根 → 补 **PYTHONPATH** → `exec
+     python3 -m agent.cli`；**不改 cwd**（改了会让 `--config ./x.yaml` 指向别处，实测反证：从 /tmp/c5cfg
+     用 `--config ./config.yaml` 解析到的是 /tmp 那份「相对路径测试」，不是 live 配置的「晨间计划」）。
+     板上取证：软链 `ls -l` 正常、首行 `od -c` 确认是 `# ! / b i n / s h \n`（没有 CR）、cwd=/root 下
+     **六条命令全部跑通**（mode/status/chat/watch/schedule/doctor，退出码 0；watch 用外部 timeout 兜底 ——
+     给 watch 传 `--timeout` 是被拒的）；live config 指纹 `789b14b7…` 全程未变。实测出并写进文档的一个细节：
+     `doctor` 只要有一项警告，退出码就是 1（所以能直接当脚本健康检查用）。
 
 日程触发事实协议（P 系列：让 CLI 看到"Agent 到底触发过哪条日程"，P1–P5 已验收）
 ☑ P1 `Scheduler` 记触发事实（`agent/core/scheduler.py`，**只加不改**：+87/−1，唯一删掉的那一行是
