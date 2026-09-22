@@ -14,6 +14,8 @@ GUI 读它的 `gui:` 段、读写它的 `llm:` 段、**只读**它的 `scheduler
                     ┌───────────────────────────┐
                     │  config/config.yaml       │   ← 唯一真源（板端本地，不入库）
                     │    llm:       推理位置与参数 │
+                    │    vision:    离线打标签用的  │
+                    │               SigLIP 模型路径 │
                     │    gui:       界面参数      │
                     │    wallpaper: 壁纸目录      │
                     │    scheduler: 日程（谁读都行 │
@@ -66,6 +68,19 @@ llama-server。这张表是"哪个键有第二个读者"的唯一说明（改键
 读不到的键各自退回默认值（`port=9000`、`model_name=qwen3-0.6b`），**不抛异常** ——
 配置写漏了不该让 Agent 起不来。⚠ 但"能发请求"≠"llama-server 活着"：
 `EdgeBackend.is_ready()` 只查配置与 SDK，**不联网**；真活着的证据是一次成功的请求。
+
+### 2.2 `vision:` 段只给**离线**打标签用（T7-1）
+
+| 键 | 谁读 | 说明 |
+| --- | --- | --- |
+| `model_path` | `agent/vision/siglip/`（经 `assistant tag` / 检索） | SigLIP 双塔 rknn；**Agent 启动路径不加载它** |
+| `tokenizer_path` | 同上 | `tokenizer.json`（板端需 `tokenizers==0.20.3`） |
+| `runtime_lib` | 同上（只记进日志/报错） | 实测需 librknnrt ≥ 1.6.0（model version 6） |
+| `verbose` / `warmup_runs` | 同上 | rknn 日志开关 / 首帧预热次数 |
+
+⚠ **模型契约不在这一段里**：256×256、nhwc、uint8 原始 0-255、64 token、pad=1、768 维、
+L2 归一化、只能按余弦 —— 全部写死在 `agent/vision/siglip/config.py` 的常量里。
+那些值改错**不报错、只会静默变笨**，所以刻意不给配置入口（见 `architecture.md` §4.3）。
 
 ## 3. 单向性（最容易踩的一条）
 

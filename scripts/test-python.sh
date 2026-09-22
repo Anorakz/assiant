@@ -34,6 +34,7 @@ tests/test_state_machine.py
 tests/test_tool_router.py
 tests/test_llm.py
 tests/test_vision.py
+tests/test_siglip.py
 tests/test_scheduler.py
 tests/test_main.py
 tests/test_ipc_protocol.py

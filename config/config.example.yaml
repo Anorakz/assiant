@@ -73,6 +73,32 @@ llm:
   #    同步是"文本级替换", 只改映射到的那几行, 不会动它们。
 
 # ---------------------------------------------------------------------------
+# 视觉: SigLIP 双塔 (Phase 7 T7)
+# ---------------------------------------------------------------------------
+# 用途: **离线**给壁纸打标签 / 按内容检索 (Agent 启动路径不加载它)。
+# 跑在 NPU 上, 模型是板端本地的 rknn; 打标签走 `assistant tag` (见 docs/tagging.md)。
+#
+# ⚠ 这里只配"文件放哪儿 / 怎么跑"; **模型契约写死在代码里**
+#    (agent/vision/siglip/config.py 的常量): 256×256、3 通道、nhwc、
+#    **uint8 原始 0-255**、64 token、pad=1、768 维、L2 归一化、只能按余弦。
+#    原因: 这些值改错**不报错、只会静默变笨** —— 实测喂 0-1 浮点时不同图的余弦
+#    全挤在 0.98+, 判别力全丢。换模型 = 改常量 + 重跑参考向量, 不是"在这里试试"。
+# ⚠ int8 那份 (siglip_full_int8.rknn) 实测**不可用**: 文本塔量化过度,
+#    不同文本得到几乎相同的 embedding; 别指到这里。
+vision:
+  # 完整双塔 rknn (图像塔 + 文本塔)。板端文件, 不入库。
+  model_path: /home/kickpi/model/siglip_full.rknn
+  # tokenizer.json (HF google/siglip-base-patch16-256)。板端需要 tokenizers 库:
+  #   pip3 install --no-deps tokenizers==0.20.3
+  tokenizer_path: /home/kickpi/model/siglip_tokenizer/tokenizer.json
+  # 仅用于日志/排障: 模型加载失败时要知道是哪个 librknnrt (实测需 >= 1.6.0)
+  runtime_lib: /usr/lib/librknnrt.so
+  # rknnlite 自己的日志 (排障时打开)
+  verbose: false
+  # 首帧之前空跑几次: 首次推理含内存分配, 计时必须丢掉它
+  warmup_runs: 1
+
+# ---------------------------------------------------------------------------
 # 壁纸 (Phase 7 T3)
 # ---------------------------------------------------------------------------
 wallpaper:

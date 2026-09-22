@@ -135,7 +135,7 @@ agent/
 ├── core/              state_machine.py / tool_router.py / scheduler.py / wallpaper.py
 ├── io/                chat_bus.py / image_reader.py / input_sender.py / _native.py
 ├── llm/               provider.py（edge / cloud / disabled；细节见 docs/llm.md）/ rule_engine.py
-├── vision/            roi.py / siglip_encoder.py（当前 mock）
+├── vision/            roi.py / siglip_encoder.py（实时帧那条路，仍是 mock）/ siglip/（真 RKNN 双塔，离线打标签/检索）
 ├── ipc/               protocol.py / local_server.py / local_client.py
 ├── net/               sunshine_client.py（HTTPS 47984 握手）
 └── tools/             具体工具（Phase 7）：`build_tools(router)` + 每个工具一个模块
@@ -229,6 +229,29 @@ agent/
 edge 挂了**不装作答过**：`chat()` 照抛；`chat_with_tools()` 退回规则兜底，正文前缀说明
 这不是模型答的（GUI 只看正文），结果里另有 `degraded` 写原因，`main.py` 记 warning。
 板端实测数据（`/no_think`、耗时、降级）与验证步骤见 [`llm.md`](llm.md)。
+
+### 4.3 视觉层：两条 SigLIP 路径（T7-1）
+
+| 路径 | 是什么 | 谁用 |
+| --- | --- | --- |
+| `agent/vision/siglip_encoder.py` | **mock**（由图像内容决定的确定性伪随机向量，`ready` 恒 False） | 给"板端实时帧 → embedding"占位；**目前没有调用方** |
+| `agent/vision/siglip/` | **真实现**：SigLIP 双塔 RKNN（图像塔 + 文本塔），走 NPU | **离线**打标签 / 图像检索（`assistant tag`、`list_wallpaper_tags`） |
+
+两条路**接口不同**（前者只 encode 图像；后者是完整双塔：`encode_image` / `encode_text` /
+`similarities` / `rank`），不是同一个东西的两个实现 —— 别拿 mock 那条去算文本相似度。
+
+**`agent/vision/siglip/` 的三条规矩**（都是实测逼出来的，别改）：
+
+1. **配置只配"文件放哪儿 / 怎么跑"**（`config.yaml` 的 `vision:` 段：`model_path` /
+   `tokenizer_path` / `runtime_lib` / `verbose` / `warmup_runs`）。**模型契约写死在代码里**：
+   256×256、3 通道、nhwc、**uint8 原始 0-255**、64 token、pad=1、768 维、L2 归一化、
+   只能按余弦。理由是这些值改错**不报错、只会静默变笨**（实测喂 0-1 浮点时不同图余弦
+   全挤在 0.98+，判别力全丢；int8 模型的文本塔量化过度，不同文本得到几乎相同的向量）。
+2. **Agent 启动路径不碰它**：`import agent.vision.siglip` 不加载 rknnlite / tokenizers /
+   numpy（三者都是延迟导入），所以宿主机上也能 import 并跑纯逻辑单测。
+3. **搬运要有对齐证据**：这份实现是从板端实验树 `sig/` 搬进仓库的，
+   `tests/board/siglip_align.py` 用**同一张图**分别过两条路径比 embedding ——
+   实测余弦 1.000000、逐位差 0（搬运没有改变行为）。换模型/改常量后重跑它。
 
 ---
 

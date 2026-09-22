@@ -1038,6 +1038,59 @@ T6 记录（已完成，等验收）：把 T5 列的两个"可选收口"做掉
      `gui-agent-integration.md`（连上就有一张 + 受状态表约束）、`Readme.md` 工具路由一节。
      `STALE_CLAIMS` 那条守卫继续盯着"还没接入"的旧话。
 
+T7 系列（标签化）：方案与任务列表已定稿（用户审核通过），分期如下
+     T7-1 引擎入库（SigLIP 进仓库 + 配置归位 + 对齐）→ **已完成，见下面记录**
+     T7-2 打标签 + `config/wall_data.jsonl` + `assistant tag`
+     T7-3 Agent 侧：标签索引 + `list_wallpaper_tags` / `next_wallpaper(match=…)`，
+         并**删掉 GUI 与 CLI 的手动换壁纸入口**（换壁纸只能通过对话）
+     T7-4 板端验收（三轴命中率 / IP 锚点检索 / 对话挑图 / 如实拒绝）+ 文档收口
+     方案要点（复查用）: 用板端已验过的 **SigLIP 零样本分类**（1.3–1.7 s/张，NPU）,
+     三轴 `scene`/`tone`/`mood` + 第 4 轴 **`ip` 检索**（用用户给的 11 张确认图当**锚点**,
+     不靠"模型认识作品名"）; 标签落 `config/wall_data.jsonl`（含预存 embedding →
+     `ip` 检索是纯 CPU）; 12 张真值验收集**只入库真值 + 脚本**（图片不入库）。
+
+T7-1 记录（已完成，等验收）：SigLIP 引擎搬进仓库 + 配置归位 + 对齐
+☑ 先侦察再动手: 板端**已经有**一份实测验证过的 SigLIP 双塔实现（`sig/siglip/`, 板端本地
+     实验树、不在仓库）+ 29 条单测 + 黄金参考向量 + `sig.env` 里写满实测踩过的坑
+     （int8 不可用、0-1 浮点会静默劣化、core_mask 只 RK3588 支持、tokenizers 版本…）。
+     模型 `siglip_full.rknn` fp16; 实测 **1.3–1.7 s/张（NPU）**; `llm/multimodal_report.md`
+     里还有现成对照（VLM 路线 649 s/张 → 本期不用）。所以 T7 的引擎不是从零写,
+     而是**把已验过的搬进仓库 + 换配置来源**。
+☑ `agent/vision/siglip/`（新, 5 个模块从 `sig/siglip/` 搬入）: `errors.py` / `config.py`
+     （**重写**）/ `runtime.py` / `tokenizer.py` / `model.py`; 入口从
+     `SiglipModel.from_env()`（读 `sig/config/sig.env`）换成
+     `SiglipModel.from_config(config.yaml 的 vision: 段)`。
+☑ **配置边界**（T7-1 的核心决定）:
+     · 能配（`vision:` 段）: model_path / tokenizer_path / runtime_lib / verbose / warmup_runs
+     · **写死（代码常量）**: 256×256、3 通道、nhwc、**uint8 原始 0-255**、64 token、pad=1、
+       768 维、L2 归一化、只能按余弦 —— 这些值"改错不报错、只会静默变笨"
+       （实测: 喂 0-1 浮点 → 不同图余弦全挤 0.98+; int8 模型文本塔 → 不同文本几乎同向量）。
+       `validate()` 顺手把 `warmup_runs < 0` 也拦了（原版没查, "-1 次预热"没意义）。
+☑ `tests/test_siglip.py`（新, 31 项）: 配置契约（含"常量冻结"用例）/ 自相矛盾的配置要被
+     `validate()` 拦下 / 分词（padding、截断、空串、批量）/ 门面（形状、单位长度、文本缓存、
+     **每次新建 data_type list** 的回归、余弦排序、close 只管自己加载的 runtime）/
+     板端集成（形状、确定性、判别力）。
+     ⚠ 开发机上**没有 numpy**（仓库里的 `conda/` 也没有）→ PC 只跑 12 项、19 项 skip；
+     配置层与分词层的纯逻辑不依赖 numpy，两边都能跑（与 `tests/test_vision.py` 同一口径）。
+☑ 搬运**对齐证据**（`tests/board/siglip_align.py`, 新）: 同一张图分别过**仓库版**与 `sig/` 原版,
+     比 image embedding 余弦 + 零样本排序 + 逐位差。板端实测三张
+     （01_landscape / 02_portrait / 06_extreme）: **余弦 1.000000、逐位差 0.00e+00、
+     排序完全一致**; 文本塔余弦 1.000000 → **搬运没有改变行为**。环境不满足时退 2
+     （不算失败也不算通过）并说清缺什么。
+☑ 板端 live config 补上 `vision:` 段（值 = 代码默认值, 行为不变）:
+     指纹 `34482331…` → `f0e29d81…`; `llm.env` 没动。
+☑ 板端 `tests/test_siglip.py` **31 项全绿**（真 NPU, 28.6 s 含模型加载）。
+     ⚠ 板端当场抓到一条**我自己测试写错**的: 判别力用例把纯蓝样张描述成 "a landscape",
+     模型诚实地选了 "a blue sky with clouds" —— 改成照实描述（"a solid blue rectangle"）才对。
+     教训: 拿合成样张做判别力回归时, 描述必须是**像素的实话**。
+☑ 一处**有意的偏离**（对原版的小改进, 2 行）: `tokenizer.encode()` 原来先 `import numpy`
+     再校验文本, 于是"空串/类型不对"在没 numpy 的机器上报 ModuleNotFoundError（与调用方
+     无关的错）。改成先 `tokens(text)` 校验、再 import numpy → 永远报 SiglipTokenizeError;
+     对齐测试证明正常输入下数值完全一致。
+☑ 文档: `docs/architecture.md` §4.3（**两条 SigLIP 路径**别混 + 三条规矩）;
+     `docs/config-sources.md` §2.2（`vision:` 段只给离线打标签用 + 契约不在配置里）;
+     `Readme.md` 目录树; `config.example.yaml` 的 `vision:` 段（含 int8 不可用的警告）。
+
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档

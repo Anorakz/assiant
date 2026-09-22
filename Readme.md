@@ -44,7 +44,8 @@ agent/
 │   │   └── local_client.py      # 客户端 (板端脚本 / 活体验证用)
 │   ├── vision/                  # 视觉层
 │   │   ├── roi.py               # ROI 字符串解析 ("x,y,w,h")
-│   │   └── siglip_encoder.py    # SigLIP 图像编码 (⚠ 当前 mock)
+│   │   ├── siglip_encoder.py    # 实时帧那条路 (⚠ 仍是 mock)
+│   │   └── siglip/              # 真 RKNN 双塔: 离线打标签 / 图像检索 (T7-1)
 │   └── io/                      # native 的 asyncio 包装 + 输入汇聚
 │       ├── chat_bus.py          # ChatInputBus: 终端/GUI 统一事件流
 │       ├── image_reader.py      # ImageReader: image_rb → numpy 帧
@@ -72,6 +73,7 @@ agent/
 │   ├── test_tool_router.py      # 工具注册/权限/参数校验/超时/异常单测
 │   ├── test_llm.py              # LLM 三模式切换 / edge 真后端 / 工具循环 / 规则匹配
 │   ├── test_vision.py           # ROI 解析 / SigLIP mock (有无 numpy 两条路径)
+│   ├── test_siglip.py           # SigLIP 双塔: 配置契约 / 分词 / 余弦排序 (T7-1)
 │   ├── test_main.py             # 进程装配: 启停顺序 / 异常隔离 / 主循环
 │   ├── test_ipc_protocol.py     # IPC 线格式契约 (字节级)
 │   ├── test_scheduler.py        # 日程触发 / 去重 / 终端命令识别
