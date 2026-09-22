@@ -202,9 +202,24 @@ llm/config/llm.env  OK    在
 体检结果：6 项全部 OK
 ```
 
-六项各自独立判 OK/警告，**不因为一项失败就跳过其余**。"派生 llm.env"那一项跑的是 C++ 侧
-`gui/build/gui_config_sync` 的 dry-run（映射表只有 `gui/src/core/config_sync.cpp` 一份），
-CLI 只负责跑它、读它的结论。
+六项各自独立判 OK/警告，**不因为一项失败就跳过其余**。**只要有一项警告，退出码就是 1** ——
+所以它能直接当脚本里的健康检查用（`assistant doctor || echo 需要处理`）。"派生 llm.env"那一项
+跑的是 C++ 侧 `gui/build/gui_config_sync` 的 dry-run（映射表只有 `gui/src/core/config_sync.cpp`
+一份），CLI 只负责跑它、读它的结论。
+
+Agent 没在跑时它照样能跑，只是 socket 那一项变成警告：
+
+```bash
+$ assistant doctor
+配置                  OK    /home/kickpi/myproject/assitant/config/config.yaml
+Agent socket        警告    /tmp/agent.sock 不存在（Agent 没在跑？）
+派生 llm.env          OK    llm.env 与 config.yaml 一致
+日程                  OK    装载 4 条（语义来自 agent/core/scheduler.py）
+config/config.yaml  OK    在
+llm/config/llm.env  OK    在
+
+体检结果：5 项 OK，1 项警告（Agent socket）        # 退出码 1
+```
 
 ---
 
