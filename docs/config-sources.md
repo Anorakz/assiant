@@ -90,12 +90,12 @@ GUI 的**日程区**显示的内容来自 `config.yaml` 的 `scheduler.recurring
 ssh rk3568 'cd /home/kickpi/myproject/assitant && python3 tests/test_schedule_parity.py --write'
 ```
 
-> ⚠ **现状（已知漂移，暂不处理）**：仓库里还有一份 `config/schedule.example.yaml`
-> （模板：`timezone` / `recurring` / `oneoff` / `defaults`），但**全仓没有任何代码读它**
-> —— `Scheduler._load_events()` 只从 `config.yaml` 的 scheduler 段/顶层找日程，
-> 它的 `timezone` 与 `defaults.remind_before_min` 也没人读。
-> 日程的**家**就是 `config.yaml` 的 `scheduler` 段；那份模板要么将来接线、要么废弃，
-> 现在两边都别当成真源。GUI 的日程区同理只读 `config.yaml`。
+> ✅ **已删除（L1）**：仓库里那份 `config/schedule.example.yaml` 已经不在了 —— 它是历史遗留，
+> **全仓没有任何代码读它**（`Scheduler._load_events()` 只从 `config.yaml` 的 scheduler 段/顶层找日程）。
+> 里面唯一有价值的东西是**事件语法**，已并入 `config/config.example.yaml` 的 `scheduler:` 段注释，
+> 且**只写真的会被读的键**（`title` / `days` / `start` / `end` / `date` / `remind_before_min` / `action`）。
+> 它原有的 `timezone` / `defaults.remind_before_min` / `location` **从来没有读取者**，
+> 所以没有替代物 —— 也不要再往那儿加。日程的**家**只有 `config.yaml` 的 `scheduler` 段。
 
 ## 6. 历史（为什么会变成这样）
 

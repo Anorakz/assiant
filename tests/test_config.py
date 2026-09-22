@@ -109,16 +109,17 @@ class TestLoad(ConfigTestBase):
 
     def test_nested_and_list_values(self):
         self.write(
-            "schedule.yaml",
-            "recurring:\n"
+            "user_profile.yaml",
+            "name: 主人\n"
+            "habits:\n"
             "  - title: standup\n"
             "    days: [mon, fri]\n"
             "  - title: report\n"
             "    days: [fri]\n",
         )
-        data = cfg.load_config("schedule")
-        self.assertEqual(data["recurring"][0]["title"], "standup")
-        self.assertEqual(data["recurring"][1]["days"], ["fri"])
+        data = cfg.load_config("user_profile")
+        self.assertEqual(data["habits"][0]["title"], "standup")
+        self.assertEqual(data["habits"][1]["days"], ["fri"])
 
     def test_unicode_roundtrip_on_load(self):
         self.write("user_profile.yaml", "name: 主人\nnotes:\n  - 早上别排会\n")
@@ -128,12 +129,12 @@ class TestLoad(ConfigTestBase):
 
     def test_whitelisted_name_with_no_file_raises_not_found(self):
         with self.assertRaises(cfg.ConfigNotFoundError):
-            cfg.load_config("schedule")
+            cfg.load_config("user_profile")
 
     def test_missing_raises_even_with_other_files_present(self):
         self.write("config.yaml", "a: 1\n")
         with self.assertRaises(cfg.ConfigNotFoundError):
-            cfg.load_config("schedule")
+            cfg.load_config("user_profile")
 
     def test_directory_named_like_config_is_not_a_config(self):
         (self.tmp / "config.yaml").mkdir()
@@ -228,9 +229,9 @@ class TestSave(ConfigTestBase):
         self.assertEqual(cfg.load_config("config"), {"c": 3})
 
     def test_save_accepts_name_with_suffix(self):
-        cfg.save_config("schedule.yaml", {"tz": "UTC"})
-        self.assertTrue((self.tmp / "schedule.yaml").is_file())
-        self.assertEqual(cfg.load_config("schedule"), {"tz": "UTC"})
+        cfg.save_config("user_profile.yaml", {"tz": "UTC"})
+        self.assertTrue((self.tmp / "user_profile.yaml").is_file())
+        self.assertEqual(cfg.load_config("user_profile"), {"tz": "UTC"})
 
     def test_save_unicode_is_readable(self):
         cfg.save_config("user_profile", {"name": "主人"})
@@ -359,9 +360,9 @@ class TestCache(ConfigTestBase):
 
     def test_separate_configs_have_separate_cache(self):
         self.write("config.yaml", "v: 1\n")
-        self.write("schedule.yaml", "v: 2\n")
+        self.write("user_profile.yaml", "v: 2\n")
         self.assertEqual(cfg.load_config("config")["v"], 1)
-        self.assertEqual(cfg.load_config("schedule")["v"], 2)
+        self.assertEqual(cfg.load_config("user_profile")["v"], 2)
 
     def test_clear_cache_is_idempotent(self):
         cfg.clear_cache()
@@ -553,7 +554,7 @@ class TestTypeErrors(ConfigTestBase):
         with self.assertRaises(ValueError):
             cfg.load_config("not_whitelisted")
         with self.assertRaises(ValueError):
-            cfg.load_config("schedule")  # 白名单内但没有文件
+            cfg.load_config("user_profile")  # 白名单内, 但本测试的临时目录里没有它
 
 
 # ===========================================================================
@@ -579,7 +580,7 @@ class TestConfigDir(ConfigTestBase):
     def test_config_path_raises_when_missing(self):
         # 白名单内但没有文件 -> NotFound (而不是"名字非法")
         with self.assertRaises(cfg.ConfigNotFoundError):
-            cfg.config_path("schedule")
+            cfg.config_path("user_profile")
 
 
 # ===========================================================================
@@ -599,7 +600,7 @@ class TestShippedExamples(unittest.TestCase):
             os.environ[cfg.CONFIG_DIR_ENV] = self._old_env
 
     def test_examples_exist_and_load(self):
-        for name in ("config", "user_profile", "schedule"):
+        for name in ("config", "user_profile"):
             with self.subTest(name=name):
                 data = cfg.load_config(name)
                 self.assertIsInstance(data, dict)

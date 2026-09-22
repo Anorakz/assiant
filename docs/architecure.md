@@ -248,7 +248,7 @@ gui/src/
 │                      input_sender, moonlight_adapter, binding(_utils), third_party/
 ├── agent/             §4 的包结构
 ├── gui/               CMakeLists.txt, src/, tests/, tools/, config/, resources/
-├── config/            config.example.yaml / user_profile.example.yaml / schedule.example.yaml
+├── config/            config.example.yaml / user_profile.example.yaml
 ├── tests/             C++ 单测 + Python 单测 + mocks/ + host/ + board/ + data/
 ├── scripts/           build / deploy / sync-gui / test-host / test-python(.ps1|.sh) /
 │                      run-board-tests / health_check.sh / setup-sysroot-deps / pair_* / authorize_client

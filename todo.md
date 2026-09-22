@@ -577,6 +577,24 @@ CLI（C 系列：板端控制 CLI `assistant`，C1–C4 已验收；C5 排在 P 
      ⚠ 已知边界：触发记录**只在内存**（重启即清零，这是"事实"的定义）；GUI 界面暂不显示"已触发"
      （协议已经铺好，要不要显示是另一个任务）。
 
+遗留清理（L 系列）
+☑ L1 删掉没人读的日程模板 `config/schedule.example.yaml`：它是历史遗留，**全仓 0 处代码读它**
+     （`Scheduler._load_events()` 只从 `config.yaml` 的 scheduler 段/顶层找日程），里面的
+     `timezone` / `defaults.remind_before_min` / `location` 也从来没有读取者。
+     做法是**先迁移、再删除**：把它唯一有价值的东西——**事件语法**——以**注释**形式并入
+     `config/config.example.yaml` 的 `scheduler:` 段（**只写真会被读的键**：title / days / start /
+     end / date / remind_before_min / action），并明确写出"`timezone`/`defaults`/`location` 写了也不生效"，
+     同时给上 `recurring: []` / `oneoff: []` 两个空键（与 `commands: []` 同一风格）。
+     ⚠ 用注释而不是真条目：`_fire()` 对没有 action 的事件**也会推**「日程提醒：<标题>」，
+     真条目会让每个新 clone 凭空多出提醒（S7 实测过这条）。
+     连带改：`Readme.md`（目录树 / 配置一节的两条 `cp` + 一句"日程写在 scheduler 段"）、
+     `docs/architecure.md` 目录树、`docs/config-sources.md`（§5 的"已知漂移，暂不处理"→"**已删除（L1）**"）、
+     `agent/core/scheduler.py` 里那句"与 schedule.example.yaml 一致"的注释。
+     迁移后 PC 与板端都验过读得动：Python 侧 `assistant schedule` 报"共 0 条"（空列表，符合预期）、
+     GUI 侧 `agent_gui --dump-schedule --config <模板>` 报"日程: 0 行 / SUBTITLE 今天没有日程"。
+     ⚠ 有意偏离：`remove_fired_oneoff` 开关的注释**没有**跟着一起写进模板 —— 现在写进去就是
+     "文档说有个键、代码不读"，正是 L1 要清掉的那类漂移；它跟 R3 的代码一起加。
+
 Phase 7 — 工具层
 □ tools/base.py：工具基类（name、schema、execute、权限、allowed_states）
 □ tools/init.py：工具注册入口

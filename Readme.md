@@ -54,7 +54,6 @@ agent/
 ├── config/                      # 配置模板 (真实配置不入 git)
 │   ├── config.example.yaml      # 唯一真源模板: llm.* / gui.* / sunshine.* / ipc.*
 │   ├── user_profile.example.yaml# 用户画像
-│   └── schedule.example.yaml    # 日程
 ├── scripts/                     # 构建 / 部署 / 测试 / 配对工具
 │   ├── build.ps1                # aarch64 交叉编译
 │   ├── test-host.ps1            # 宿主机 C++ 单测 (ctest)
@@ -449,8 +448,11 @@ sm.is_connected()                         # moonlight 连接状态 (与状态无
 ```bash
 cp config/config.example.yaml       config/config.yaml
 cp config/user_profile.example.yaml config/user_profile.yaml
-cp config/schedule.example.yaml     config/schedule.yaml
 ```
+
+日程写在 `config.yaml` 的 `scheduler:` 段（`recurring` / `oneoff` 的写法与真正会被读的键，
+见 `config/config.example.yaml` 里那一大段注释 —— 模板里不放真日程，免得刚 clone 下来
+就凭空多出提醒）。
 
 没有建真实配置时会自动退回读模板，所以刚 clone 下来也能直接跑。
 

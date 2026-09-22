@@ -15,10 +15,12 @@
 #
 #  文件与目录
 #  ---------------------------------------------------------------------------
-#      config/config.yaml              # 全局: llm.mode, sunshine.*, ipc.*
+#      config/config.yaml              # 全局: llm.mode, sunshine.*, ipc.*, scheduler.*
 #      config/user_profile.yaml        # 用户画像
-#      config/schedule.yaml            # 日程
 #
+#  · 日程**不是**独立配置: 它住在 config.yaml 的 `scheduler:` 段。原先那份
+#    `config/schedule.example.yaml` 全仓没人读, L1 已删除 —— 所以白名单里
+#    不再有 "schedule" 这个名字。
 #  · 真实 *.yaml 不入 git; 仓库里只放 *.example.yaml 模板
 #  · load_config(name) 先找 <name>.yaml, 没有就退回 <name>.example.yaml,
 #    所以"刚 clone 下来没建配置"也能跑起来(用模板默认值)
@@ -85,7 +87,8 @@ CONFIG_DIR_ENV = "AGENT_CONFIG_DIR"
 #:     目录穿越; 白名单是"只认这几个", 漏掉的自动被拒, 失败方向是安全的。
 #:   · 配置名是有限的、由本仓库自己定义的集合, 本来就不该是任意字符串。
 #: 新增配置时在这里加一个名字, 并同步加 config/<name>.example.yaml 模板。
-ALLOWED_CONFIGS = ("config", "user_profile", "schedule")
+#: (曾经的 "schedule" 已随 L1 删除: 日程住在 config.yaml 的 scheduler 段。)
+ALLOWED_CONFIGS = ("config", "user_profile")
 
 #: 默认配置目录 = 仓库根下的 config/
 #:   本文件在 <root>/agent/config.py, 所以 parents[1] 就是 <root>

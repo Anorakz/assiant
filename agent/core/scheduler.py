@@ -86,7 +86,7 @@ DEFAULT_WINDOW_MIN = 1
 #: 它**不是**去重依据 (那个是 _fired), 也不参与任何触发判定。
 DEFAULT_HISTORY_LIMIT = 50
 
-#: 允许的星期缩写 (与 schedule.example.yaml 一致)
+#: 允许的星期缩写 (与 config/config.example.yaml 的 scheduler 段一致)
 WEEKDAYS: Tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 #: 命令只从这个来源认 —— 终端里敲的那一行 (见 normalize_command)。
