@@ -20,6 +20,7 @@ tests/test_ipc_protocol.py — agent/ipc/protocol.py 单测
   错误        JSON 非法 / 非 UTF-8 / 顶层非 object / 缺字段 / data 非 object /
               timestamp 非法 / 超长
   向前兼容    未知字段忽略; 未知 topic 不报错 (由接收方决定忽略)
+  日程事实    schedule topic / query_schedule command 的形状能 round-trip (P 系列)
   与文档一致  §3/§4 表里列出的每个 topic/command 都能 round-trip
 """
 
@@ -44,16 +45,19 @@ class TestConstants(unittest.TestCase):
         self.assertEqual(p.TOPIC_LLM, "llm")
         self.assertEqual(p.TOPIC_WALLPAPER, "wallpaper")
         self.assertEqual(p.TOPIC_MUSIC, "music")
+        self.assertEqual(p.TOPIC_SCHEDULE, "schedule")
         self.assertEqual(p.TOPICS,
-                         ("status", "llm", "wallpaper", "music"))
+                         ("status", "llm", "wallpaper", "music", "schedule"))
 
     def test_commands(self):
         self.assertEqual(p.COMMAND_SWITCH_MODE, "switch_mode")
         self.assertEqual(p.COMMAND_NEXT_WALLPAPER, "next_wallpaper")
         self.assertEqual(p.COMMAND_CHAT_INPUT, "chat_input")
         self.assertEqual(p.COMMAND_NEXT_BILIBILI, "next_bilibili")
+        self.assertEqual(p.COMMAND_QUERY_SCHEDULE, "query_schedule")
         self.assertEqual(p.COMMANDS,
-                         ("switch_mode", "next_wallpaper", "chat_input", "next_bilibili"))
+                         ("switch_mode", "next_wallpaper", "chat_input",
+                          "next_bilibili", "query_schedule"))
 
     def test_topics_and_commands_do_not_overlap(self):
         # 同一条连接双向都用 topic 字段, 名字重了就没法区分方向
@@ -344,10 +348,21 @@ class TestWireContract(unittest.TestCase):
             (p.TOPIC_LLM, {"text": "已经切换到学习模式。"}),
             (p.TOPIC_WALLPAPER, {"path": "/home/kickpi/wallpapers/04.jpg", "index": 3}),
             (p.TOPIC_MUSIC, {"title": "夜曲", "playing": True}),
+            (p.TOPIC_SCHEDULE, {
+                "kind": "fired",
+                "event": {"title": "午休", "date": "2026-09-22",
+                          "scheduled_at": "2026-09-22T13:00",
+                          "fired_at": "2026-09-22T13:00:03",
+                          "actions": [{"type": "message", "text": "日程提醒：午休",
+                                       "timestamp": 1234567890.5}]},
+            }),
+            (p.TOPIC_SCHEDULE, {"kind": "state", "now": "2026-09-22T13:05:00",
+                                "limit": 50, "fired": []}),
             (p.COMMAND_SWITCH_MODE, {"value": "GAME"}),
             (p.COMMAND_NEXT_WALLPAPER, {}),
             (p.COMMAND_CHAT_INPUT, {"text": "帮我看看现在几点了"}),
             (p.COMMAND_NEXT_BILIBILI, {}),
+            (p.COMMAND_QUERY_SCHEDULE, {}),
         ]
         for topic, data in examples:
             with self.subTest(topic=topic):
@@ -357,7 +372,7 @@ class TestWireContract(unittest.TestCase):
     def test_every_documented_topic_and_command_is_covered(self):
         # 防止"文档加了条目但测试漏了"
         documented = set(p.TOPICS) | set(p.COMMANDS)
-        self.assertEqual(len(documented), 8)
+        self.assertEqual(len(documented), 10)
 
     def test_one_message_is_exactly_one_line(self):
         # NDJSON 的前提: 消息里不能出现裸换行
@@ -424,7 +439,8 @@ class TestCommandEnvelope(unittest.TestCase):
     def test_round_trip_every_documented_command(self):
         for action in p.COMMANDS:
             with self.subTest(action=action):
-                payload = {} if action == p.COMMAND_NEXT_WALLPAPER else {"text": "你好"}
+                # 只有 chat_input 有参数, 其余都必须吃 {}
+                payload = {"text": "你好"} if action == p.COMMAND_CHAT_INPUT else {}
                 self.assertEqual(p.decode_command(p.encode_command(action, payload)),
                                  (action, payload))
 

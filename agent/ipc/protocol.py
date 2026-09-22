@@ -41,12 +41,14 @@ __all__ = [
     "TOPIC_LLM",
     "TOPIC_WALLPAPER",
     "TOPIC_MUSIC",
+    "TOPIC_SCHEDULE",
     "TOPICS",
     # command (GUI -> Agent)
     "COMMAND_SWITCH_MODE",
     "COMMAND_NEXT_WALLPAPER",
     "COMMAND_CHAT_INPUT",
     "COMMAND_NEXT_BILIBILI",
+    "COMMAND_QUERY_SCHEDULE",
     "COMMANDS",
     # 命令方向的信封字段名 (GUI 实际实现为准)
     "ACTION_FIELD",
@@ -95,8 +97,15 @@ TOPIC_LLM = "llm"
 TOPIC_WALLPAPER = "wallpaper"
 TOPIC_MUSIC = "music"
 
+#: 日程**触发事实** (P 系列)。data.kind 二取一:
+#:     "state"  应答 query_schedule 的快照 (data.fired = 事实数组)
+#:     "fired"  刚刚真的触发了一条 (data.event = 那一条事实)
+#: ⚠ 它传的不是"日程表" (那个在 config 里), 而是**运行中 Agent 真发生过的事**:
+#:   进程重启即清零。详见 docs/ipc-protocol.md §3。
+TOPIC_SCHEDULE = "schedule"
+
 #: 全部 topic (Agent -> GUI)
-TOPICS = (TOPIC_STATUS, TOPIC_LLM, TOPIC_WALLPAPER, TOPIC_MUSIC)
+TOPICS = (TOPIC_STATUS, TOPIC_LLM, TOPIC_WALLPAPER, TOPIC_MUSIC, TOPIC_SCHEDULE)
 
 
 # ---------------------------------------------------------------------------
@@ -107,12 +116,18 @@ COMMAND_NEXT_WALLPAPER = "next_wallpaper"
 COMMAND_CHAT_INPUT = "chat_input"
 COMMAND_NEXT_BILIBILI = "next_bilibili"
 
+#: 问一句"你最近触发过哪些日程" (payload 必须是 {})。
+#: 应答**就是**随后那条 topic=TOPIC_SCHEDULE / kind="state" 的推送 —— 与 switch_mode
+#: 的应答是随后那条 status 一样, **没有请求 id** (协议没有版本号与关联字段)。
+COMMAND_QUERY_SCHEDULE = "query_schedule"
+
 #: 全部 command (GUI -> Agent)
 COMMANDS = (
     COMMAND_SWITCH_MODE,
     COMMAND_NEXT_WALLPAPER,
     COMMAND_CHAT_INPUT,
     COMMAND_NEXT_BILIBILI,
+    COMMAND_QUERY_SCHEDULE,
 )
 
 # 命令方向的信封字段名。**以 GUI 的实际实现为准** (Phase 6 决策 1):

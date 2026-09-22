@@ -14,6 +14,7 @@ Agent（Python）与 GUI（C++ / Qt5）都跑在 RK3568 板端，通过 Unix dom
 | --- | --- |
 | GUI 界面行为：哪个控件发什么、收到 topic 后界面怎么变、哪些位置还是占位 | `docs/gui-agent-integration.md` |
 | 模式的实际语义（SLEEP/STUDY/GAME 各自做什么）、LLM 调用与降级 | `docs/architecure.md`、`agent/core/`、`agent/llm/` |
+| 日程怎么写、什么时候算"到点"、去重、触发事实从哪来 | `agent/core/scheduler.py` 模块头 + `config/config.example.yaml` |
 | Agent 侧 server 的接入点与装配 | `agent/ipc/__init__.py` 的 `build_ipc()`、`agent/main.py` |
 | 配置项从哪来、谁能改 | `config/config.example.yaml` 的注释 + `Readme.md` 的配置相关小节 |
 
@@ -131,6 +132,32 @@ GUI 收到后按 `topic` 分发。**不认识的 topic 忽略**。
 | | `index` | number | 该壁纸在列表里的序号（从 0 开始） |
 | `music` | `title` | string | 当前曲目标题 |
 | | `playing` | bool | 是否正在播放 |
+| `schedule` | `kind` | string | `"state"`（应答 `query_schedule` 的快照）或 `"fired"`（刚刚真的触发了一条） |
+| | `now` | string | **仅 `kind:"state"`**：生成快照的本地时刻 `YYYY-MM-DDTHH:MM:SS` |
+| | `limit` | number | **仅 `kind:"state"`**：这份快照最多带多少条事实（当前实现 50） |
+| | `fired` | array | **仅 `kind:"state"`**：**事实对象**数组，按触发时间正序 |
+| | `event` | object | **仅 `kind:"fired"`**：刚触发的那个**事实对象** |
+
+#### `schedule` 里"事实对象"的字段
+
+`fired` 的元素与 `event` 是同一个结构：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `title` | string | 日程标题（就是配置里写的那个） |
+| `date` | string | **事件日** `YYYY-MM-DD`（配置里那条日程属于哪天） |
+| `scheduled_at` | string | 该触发的时刻 `YYYY-MM-DDTHH:MM`。⚠ 配了提前量时它可能落在 `date` **前一天**（例如 `00:05` 提前 10 分钟 → 前一天 `23:55`） |
+| `fired_at` | string | Agent **真的触发**它的时刻 `YYYY-MM-DDTHH:MM:SS`。通常比 `scheduled_at` 晚几秒 —— 检查是每分钟一次，窗口内第一次检查才触发 |
+| `actions` | array | Agent 实际做了的动作摘要，每条是 object 且至少含 `type`（如 `type:"message"` 时还有 `text`、`timestamp`）。**动作种类会增长，客户端按 `type` 取自己认识的，其余忽略** |
+
+> ⚠ **`schedule` 不是"日程表"**：日程本身在配置里，想显示"接下来有什么安排"应当读配置
+> （GUI 的日程区就是这么做的，见 `docs/gui-agent-integration.md`）。这条 topic 传的是
+> **运行中 Agent 身上真发生过的事** —— 本进程内触发过什么、什么时候触发的，**进程重启即清零**。
+> 它**不等于**"现在过了 `start` 时刻"那种纯时间比较：Agent 没在跑时那种比较照样成立，
+> 但一条事实都不会有。
+>
+> **不认识 `schedule` 的客户端按未知 topic 忽略即可**（§3 开头就要求如此）——
+> 因此加这条 topic **不需要**老 GUI 改任何代码。
 
 ### `status.mode` 的取值
 
@@ -148,6 +175,8 @@ GUI 收到后按 `topic` 分发。**不认识的 topic 忽略**。
 {"topic":"llm","data":{"text":"已经切换到学习模式。"},"timestamp":1234567890.456}
 {"topic":"wallpaper","data":{"path":"/home/kickpi/wallpapers/04.jpg","index":3},"timestamp":1234567891.0}
 {"topic":"music","data":{"title":"夜曲","playing":true},"timestamp":1234567891.5}
+{"topic":"schedule","data":{"kind":"fired","event":{"title":"午休","date":"2026-09-22","scheduled_at":"2026-09-22T13:00","fired_at":"2026-09-22T13:00:03","actions":[{"type":"message","text":"日程提醒：午休","timestamp":1234567890.5}]}},"timestamp":1234567891.8}
+{"topic":"schedule","data":{"kind":"state","now":"2026-09-22T13:05:00","limit":50,"fired":[{"title":"午休","date":"2026-09-22","scheduled_at":"2026-09-22T13:00","fired_at":"2026-09-22T13:00:03","actions":[{"type":"message","text":"日程提醒：午休","timestamp":1234567890.5}]}]},"timestamp":1234567891.9}
 ```
 
 ---
@@ -164,6 +193,7 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
 | `next_wallpaper` | — | — | 切下一张壁纸；`payload` 必须是 `{}` |
 | `chat_input` | `text` | string | 用户在 GUI 里敲的一行输入，等价于终端输入 |
 | `next_bilibili` | — | — | 播放下一集 B 站视频；`payload` 必须是 `{}` |
+| `query_schedule` | — | — | 问一句"你最近触发过哪些日程"；`payload` 必须是 `{}`。应答是随后那条 §3 的 `schedule`（`kind:"state"`） |
 
 注意：
 
@@ -176,6 +206,10 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
 - `switch_mode` 的合法性由 Agent 侧状态机判定：非法转换（例如 `STUDY → GAME`）
   **不会**报协议错，而是被拒绝并回一条 `status` 说明当前真实状态。
   GUI 应当以随后收到的 `status` 为准，不要乐观地自行切换显示。
+- `query_schedule` 的应答**就是**随后那条 `schedule` 推送（`kind:"state"`）——
+  与上面 `switch_mode` 的应答是随后那条 `status` 是同一个套路：**没有请求 id**，
+  发出请求的一方等自己那条推送即可。Agent 侧若没有调度器（例如没接 runtime），
+  它会回一条 `llm` 说明这件事，**不会静默**。
 
 **示例**
 
@@ -184,6 +218,7 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
 {"action":"next_wallpaper","payload":{}}
 {"action":"chat_input","payload":{"text":"帮我看看现在几点了"}}
 {"action":"next_bilibili","payload":{}}
+{"action":"query_schedule","payload":{}}
 ```
 
 ---
@@ -343,10 +378,12 @@ while b"\n" in buf:
 | `TOPIC_LLM` | `"llm"` |
 | `TOPIC_WALLPAPER` | `"wallpaper"` |
 | `TOPIC_MUSIC` | `"music"` |
+| `TOPIC_SCHEDULE` | `"schedule"` |
 | `COMMAND_SWITCH_MODE` | `"switch_mode"` |
 | `COMMAND_NEXT_WALLPAPER` | `"next_wallpaper"` |
 | `COMMAND_CHAT_INPUT` | `"chat_input"` |
 | `COMMAND_NEXT_BILIBILI` | `"next_bilibili"` |
+| `COMMAND_QUERY_SCHEDULE` | `"query_schedule"` |
 | `ACTION_FIELD` | `"action"`（命令信封的字段名） |
 | `PAYLOAD_FIELD` | `"payload"`（命令信封的字段名） |
 | `MODE_SLEEP` / `MODE_IDLE` / `MODE_STUDY` / `MODE_GAME` | `"SLEEP"` / `"IDLE"` / `"STUDY"` / `"GAME"` |
