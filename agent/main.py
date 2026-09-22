@@ -500,7 +500,18 @@ class Runtime:
         await self._guarded(_Component("state_machine", _start_state))
 
         async def _start_tools() -> None:
-            self.tools = ToolRouter(state_provider=self.state)
+            self.tools = ToolRouter(
+                state_provider=self.state,
+                # 工具要用的依赖：agent/tools/ 从 router.services 取（缺了就让那个工具
+                # 自己跳过并记 warning，见 agent/tools/__init__.py 的约定）。
+                # io 在步骤 2 就绪，tools 是步骤 3，所以这里一定拿得到。
+                services={
+                    "input_sender": self.input_sender,
+                    "image_reader": self.image_reader,
+                    "bus": self.bus,
+                    "config": self.config,
+                },
+            )
             registered = self._register_tools(self.tools)
             self.log.info("ToolRouter 就绪 (%d 个工具)", registered)
 
@@ -509,16 +520,18 @@ class Runtime:
     def _register_tools(self, router: ToolRouter) -> int:
         """注册工具。
 
-        agent/tools/ 还没实现, 所以这里找不到模块就当作"还没有工具" —— 空的
-        ToolRouter 是完全可用的 (LLM 只是没有工具可调), 不该因此起不来。
-        想加工具时按下面的约定提供工厂即可, 本文件不用改。
+        工具在 `agent/tools/`（Phase 7 起有真工具了）：它提供 `build_tools(router)`
+        或 `TOOLS`，本文件不用认识任何具体工具。工具自己从 `router.services` 取依赖。
+        找不到模块/工厂时按"还没有工具"处理 —— 空的 ToolRouter 完全可用，
+        不该因此起不来。
         """
         try:
             module = importlib.import_module("agent.tools")
-        except ImportError:
+        except ImportError as exc:
             self.log.warning(
-                "tools: agent/tools/ 还没有实现, 工具列表为空 "
-                "(LLM 仍可对话, 只是没有工具可调)"
+                "tools: 导不进 agent/tools (%r), 工具列表为空 "
+                "(LLM 仍可对话, 只是没有工具可调)",
+                exc,
             )
             return 0
 

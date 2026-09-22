@@ -138,7 +138,7 @@ agent/
 ├── vision/            roi.py / siglip_encoder.py（当前 mock）
 ├── ipc/               protocol.py / local_server.py / local_client.py
 ├── net/               sunshine_client.py（HTTPS 47984 握手）
-└── tools/             尚未实现（Phase 7）
+└── tools/             具体工具（Phase 7）：`build_tools(router)` + 每个工具一个模块
 ```
 
 | 模块 | 职责 |
@@ -164,6 +164,24 @@ agent/
 ```python
 {"source": "terminal" | "gui", "text": "...", "timestamp": 1234567890.123}
 ```
+
+### 4.1 工具层（`agent/tools/`，Phase 7）
+
+`core/tool_router.py` 是**机制**（注册 / 权限 / 校验 / 超时 / 异常兜底），`agent/tools/` 是
+**具体工具**。两边互不认识：`main.py` 只 import `agent.tools` 并调用它的
+`build_tools(router)`，再一个个 `register()` 进去（见 `_register_tools()`）。
+
+| 约定 | 内容 |
+| --- | --- |
+| 工厂 | `agent/tools/__init__.py::build_tools(router) -> list[Tool]`；工具模块清单在 `TOOL_MODULES`，加工具就加一行 |
+| 每个模块 | `NAME` / `DESCRIPTION` / `SCHEMA` / `ALLOWED_STATES` / `build(services) -> Tool｜None` |
+| 依赖从哪来 | `router.services`（`main.py` 装配时填 `input_sender` / `image_reader` / `bus` / `config`）。**不让工厂多收参数**：挂在 router 上，`build_tools(router)` 签名与所有测试都不用改 |
+| 缺依赖 | `build()` 返回 `None` 并自己记一条 warning（"跳过这个工具"），**不抛异常**；少一个工具不该让工具层起不来 |
+| 权限 | `Tool.allowed_states` **默认空集 = 任何状态都不允许**（fail closed）；不在允许状态里只回绝，handler 一次都不跑 |
+| 给模型看的说明 | `DESCRIPTION` 要写清**副作用与不确定性** —— 例如 `back_to_desktop` 明说"是开关动作、没有回执、别连着调"。CLI 那边"不假装调了工具"是同一条口径 |
+
+只有 `cloud` 模式的 LLM 会走真正的工具循环（多轮，见 `llm/provider.py`）；`disabled`
+是规则引擎，**不假装调过工具**。
 
 ---
 

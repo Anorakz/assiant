@@ -331,17 +331,29 @@ class ToolRouter:
         state_provider: Optional[StateMachine] = None,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         permissive_schema: bool = True,
+        services: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         @param state_provider  提供 current() 的状态机; None 时自建一个
                                (接口只依赖 current(), 所以任何有这个方法的对象都行)
         @param timeout_s       单次执行超时 (秒), 默认 5.0
         @param permissive_schema 注册时是否放行 schema 子集之外的关键字
+        @param services        **工具要用的依赖**（`agent/tools/` 从 `router.services` 取）:
+                               main.py 装配时填 `input_sender` / `image_reader` / `bus` / `config` 等。
+                               为什么不让 `build_tools()` 多收一个参数: 那样每处调用与测试都要改；
+                               挂在 router 上，工厂签名保持 `build_tools(router)` 不变。
+                               ⚠ 只是**存放处**，本模块不解释里面有什么（工具自己按名字取，缺了就是缺了）。
         """
         self._state_provider = state_provider if state_provider is not None else StateMachine()
         self._timeout_s = float(timeout_s)
         self._permissive_schema = bool(permissive_schema)
         self._tools: Dict[str, Tool] = {}
+        self._services: Dict[str, Any] = dict(services or {})
+
+    @property
+    def services(self) -> Dict[str, Any]:
+        """工具用的依赖（可读可改；`agent/tools/` 从这里取）。"""
+        return self._services
 
     # ------------------------------------------------------------ 注册 ---
     def register(self, tool: Tool) -> None:

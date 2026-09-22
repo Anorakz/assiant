@@ -18,6 +18,7 @@ tests/test_main.py — agent/main.py 的装配与生命周期单测
 
 import asyncio
 import atexit
+import importlib
 import logging
 import os
 import shutil
@@ -293,12 +294,34 @@ class TestFailureIsolation(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(stopped, "一个组件停止失败不该让其余组件漏停")
 
     async def test_missing_tools_module_is_not_a_failure(self):
-        # agent/tools/ 还没实现: 工具为空是预期状态, 不算启动失败
+        # agent/tools/ **整个 import 不进来**时 (Phase 7 之前的处境):
+        # 工具为空是预期状态, 不算启动失败。这里真的把那个 import 打断来钉住这条。
+        real_import = importlib.import_module
+
+        def fake_import(name, *args, **kwargs):
+            if name == "agent.tools" or name.startswith("agent.tools."):
+                raise ImportError("模拟 agent/tools 不存在")
+            return real_import(name, *args, **kwargs)
+
+        rt = make_runtime()
+        with mock.patch("agent.main.importlib.import_module", side_effect=fake_import):
+            await rt.start()
+        try:
+            self.assertEqual(rt.failures, [])
+            self.assertEqual(len(rt.tools), 0)
+        finally:
+            await rt.stop()
+
+    async def test_real_tools_module_registers_its_tools(self):
+        # Phase 7 起 agent/tools/ 有真工具了: 启动时必须真的装进来。
+        # 只断言"非空 + 认得 back_to_desktop", 数量留给 tests/test_tools.py 去钉。
         rt = make_runtime()
         await rt.start()
         try:
             self.assertEqual(rt.failures, [])
-            self.assertEqual(len(rt.tools), 0)
+            self.assertGreaterEqual(len(rt.tools), 1)
+            names = [t["name"] for t in rt.tools.list_tools()]
+            self.assertIn("back_to_desktop", names)
         finally:
             await rt.stop()
 

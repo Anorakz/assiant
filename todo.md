@@ -741,24 +741,56 @@ R 系列到此结束：**日程显示重构**（R1 CLI 窗口 / R2 GUI 同一套
      加载器当然先找到它，测不到"模板"那条分支 —— 各改用**独立空目录**。
 
 Phase 7 — 工具层
-□ tools/base.py：工具基类（name、schema、execute、权限、allowed_states）
-□ tools/init.py：工具注册入口
-□ core/tool_router.py：注册、权限、调度（Phase 3 已建骨架，此处完善）
-□ tools/back_to_desktop.py（原 lockscreen.py）：调 InputSender.show_desktop()（= WIN+D），仅 STUDY 未完成时
+☑ tools/__init__.py：工具注册入口（`TOOL_MODULES` + `build_tools(router)`）
+      **没有** `tools/base.py`：工具的形状就是 `core/tool_router.py` 里的 `Tool` dataclass
+      （name/description/schema/handler/allowed_states），再包一层基类只是多一层没人用的壳。
+      每个工具模块自己导出 `NAME/DESCRIPTION/SCHEMA/ALLOWED_STATES/build(services)`。
+☑ core/tool_router.py：注册、权限、调度（Phase 3 的骨架已完备，此处只补 `services`）
+      `ToolRouter(services={...})` —— 工具要用的依赖（input_sender / image_reader / bus / config）
+      **挂在 router 上**，这样 `build_tools(router)` 的签名不变、测试不用改；本模块不解释依赖内容，
+      工具自己按名字取，缺了就是缺了（`build()` 返回 None 并记 warning）。
+☑ tools/back_to_desktop.py（原 lockscreen.py）：调 InputSender.show_desktop()（= WIN+D），仅 STUDY
      为什么不是锁屏：Windows 过滤**合成输入**的 Win+L（实测连 host 本机 keybd_event 合成也锁不上，
      与 Ctrl+Alt+Del 同属安全动作）→ 按你的决定改成"回到桌面"，而 WIN+D 在真机上是通的。
      机制已经在 `agent/io/input_sender.py::InputSender.show_desktop()` 里（Phase 6 收尾时就位）。
      ⚠ 它是**开关**且没有回执：实测连按两次里有一次没落地（第 2 次丢了，第 3 次才还原），
        而且那次还原的截图字节数与基线不同（1352621 vs 1718395，右侧的 VS Code 没回来）。
-       所以工具层要么发完校验效果（例如看 image_rb 或让主机回执），要么别把它当幂等动作使。
+       **这两句必须让模型看见**，所以写进了 `DESCRIPTION`（不是只写在注释里）：
+       "开关动作 + 没有回执 + 一次调用只发一次、不要连着调"。tests 有一条专门钉这个措辞。
 □ tools/netease_music.py：cloud-music-mcp 集成，动态歌单、批量加歌、URL Scheme
+      ↓ 往后放（你定的）：见本节末尾"下一个任务列表（草案）"
 □ tools/bilibili.py：搜索、order=play 排序、顺序播放、反馈切换
-□ tools/wallpaper.py：按 LLM 编排序列切换
-□ 每个工具的单元测试（mock 外部依赖）
-□ tests/test_tools.py：工具注册、状态权限、参数校验
-□ LLM 能调用工具完成任务
-□ 工具在正确状态下才允许执行
-□ 权限控制生效（如锁屏仅 STUDY 未完成时）
+      ↓ 同上
+□ tools/wallpaper.py：按 LLM 编排序列切换（**T3**：先做切换 + IPC，图片本身你后面再放）
+☑ 每个工具的单元测试（mock 外部依赖）—— back_to_desktop 已覆盖
+☑ tests/test_tools.py：工具注册、状态权限、参数校验（17 项）
+☑ 工具在正确状态下才允许执行 / 权限控制生效（如回到桌面仅 STUDY）
+□ LLM 能调用工具完成任务 ← **T2**：edge 后端接真模型（现在 edge 还是 mock）
+      **T2 决定（你选的 b）**：给 edge 补 function-call 解析，把工具循环共享给 edge/cloud
+□ 工具层端到端验收（T5：真板 + 真模型 + 真工具）
+
+T1 记录（已完成，等验收）：工具层骨架 + 第一个真工具
+☑ 落地的文件：`agent/tools/__init__.py`、`agent/tools/back_to_desktop.py`、
+     `agent/core/tool_router.py`（+`services`）、`agent/main.py`（装配 services + 文案）、
+     `tests/test_tools.py`（新，17 项）、`tests/test_main.py`（改了一条旧用例，见下）。
+☑ `agent/main.py::_register_tools()` 的旧文案"agent/tools/ 还没有实现"已过期（现在有真工具了），
+     改成"导不进 agent/tools (%r)"，并把 import 的异常原因带上 —— 原来那句会让人以为工具层还是空的。
+     ⚠ 原来那条 `test_missing_tools_module_is_not_a_failure` 断言的是 `len(rt.tools) == 0`，
+     **它成立只是因为当时 `agent/tools/` 不存在**；现在这个前提没了，所以把它改成**真的**打断
+     `importlib.import_module("agent.tools")`（mock 只对 `agent.tools*` 抛 ImportError，其余放行），
+     另加一条 `test_real_tools_module_registers_its_tools`（非空 + 认得 back_to_desktop）。
+     教训：靠"某个东西还不存在"成立的测试，等它存在的那天会以**看起来无关**的方式红。
+☑ 缺依赖是可测分支：`build()` 缺 `input_sender`（或 sender 没有 `show_desktop()`）→ 返回 None +
+     一条 warning，工具层少一个工具但**照常起来**；`agent/tools/__init__.py` 对导入失败/工厂抛异常
+     也只记 error 并跳过（与 main.py"单组件失败不影响其他组件"同一口径）。
+☑ 权限 fail-closed 有测试钉住：IDLE 下调 `back_to_desktop` 被拒且 `sender.calls == 0`（handler 一次没跑）。
+☑ 文档：`docs/architecture.md` §4.1 新增"工具层"（约定表 + 依赖来源 + fail-closed + 只有 cloud 走工具循环）。
+
+下一个任务列表（**草案，等你审核**）：音乐 / 视频两个工具
+□ tools/netease_music.py：cloud-music-mcp 集成 —— 动态歌单、批量加歌、URL Scheme
+□ tools/bilibili.py：搜索、order=play 排序、顺序播放、反馈切换
+（这两项是已批准的任务列表里**你主动往后放**的：先把工具层的骨架、edge 真后端、壁纸工具
+ 跑通，再上这两个"要联网 + 要外部服务"的工具。）
 
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
