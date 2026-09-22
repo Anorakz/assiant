@@ -5,6 +5,7 @@
 //    · 未知 topic 忽略（只计数，不算错误）
 //    · 已知 topic 字段缺失/类型错 → 该字段不动 + dropped 计数，其它合法字段照常应用
 // ============================================================================
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QtTest/QtTest>
 
@@ -30,6 +31,7 @@ private slots:
     void modeSwitchChoicesFollowCurrentMode();
     void llmWallpaperMusicApply();
     void unknownTopicIsIgnoredNotAnError();
+    void scheduleTopicIsStillIgnoredByTheGui();
     void missingFieldCountsAsDroppedButKeepsOthers();
     void resetClearsEverything();
 };
@@ -114,6 +116,33 @@ void TestViewState::unknownTopicIsIgnoredNotAnError()
                                 QJsonObject{{QStringLiteral("x"), 1}}));
     QCOMPARE(state.ignoredTopicCount(), 1);
     QCOMPARE(state.droppedCount(), 0);          // 忽略 ≠ 错误
+}
+
+void TestViewState::scheduleTopicIsStillIgnoredByTheGui()
+{
+    // P 系列往协议里加了 topic "schedule"（日程触发事实，docs/ipc-protocol.md §3）。
+    // GUI 这一侧**故意不认它**：界面暂时不显示"已触发"，靠 §3 的"未知 topic 忽略"
+    // 保持向前兼容。这个用例把"不认"钉成**契约**而不是巧合 —— 哪天有人顺手加了
+    // 一个不完整的 schedule 分支，这里会红，逼他先把行为想清楚。
+    //
+    // 两种线上形态都过一遍（kind="fired" 实时 / kind="state" 应答快照）。
+    ViewState state;
+    const QJsonObject fired{
+        {QStringLiteral("kind"), QStringLiteral("fired")},
+        {QStringLiteral("event"),
+         QJsonObject{{QStringLiteral("title"), QStringLiteral("午休")},
+                     {QStringLiteral("fired_at"), QStringLiteral("2026-09-22T13:00:03")}}}};
+    const QJsonObject snapshot{
+        {QStringLiteral("kind"), QStringLiteral("state")},
+        {QStringLiteral("limit"), 50},
+        {QStringLiteral("fired"), QJsonArray{fired.value(QStringLiteral("event"))}}};
+
+    QVERIFY(!state.applyMessage(QStringLiteral("schedule"), fired));
+    QVERIFY(!state.applyMessage(QStringLiteral("schedule"), snapshot));
+
+    QCOMPARE(state.ignoredTopicCount(), 2);
+    QCOMPARE(state.droppedCount(), 0);          // 忽略 ≠ 收到坏消息
+    QVERIFY(!state.hasStatus());                // 也没顺手改别的东西
 }
 
 void TestViewState::missingFieldCountsAsDroppedButKeepsOthers()

@@ -209,6 +209,20 @@ gui/src/
 [`docs/ipc-protocol.md`](ipc-protocol.md)（线上格式唯一真源）；GUI 侧的界面行为见
 [`docs/gui-agent-integration.md`](gui-agent-integration.md)。
 
+### 6.1 日程触发事实（topic `schedule`，P 系列）
+
+日程有**两份**事实，不要混：
+
+| 事实 | 在哪 | 谁看 |
+| --- | --- | --- |
+| 日程**表**（哪天几点该做什么） | `config/config.yaml` 的 `scheduler:` 段，语义在 `agent/core/scheduler.py` | GUI 日程区（只读）、CLI `assistant schedule` 自己展开 |
+| 日程**真的触发过**（本进程内触发过哪条、什么时候） | `Scheduler._history`（有界内存，重启即清零）→ 经 IPC `schedule` 推出去 | CLI「已触发 HH:MM:SS」、`assistant watch`；GUI 目前**不认**这个 topic |
+
+两条通路：`Scheduler.on_fire` → `topic:"schedule"`/`kind:"fired"`（**实时**，每次真的触发一条就推一次）；
+命令 `query_schedule` → `kind:"state"`（**快照**，问一次答一次，无请求 id）。
+`agent/ipc/__init__.py` 里"有就接"：runtime 没有 `scheduler` 时只少推这一类，其余照常。
+命令与 topic 的字段定义**只在** [`docs/ipc-protocol.md` §3/§4](ipc-protocol.md)。
+
 ---
 
 ## 7. 数据流总览

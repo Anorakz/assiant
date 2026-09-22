@@ -508,6 +508,65 @@ GUI 日程区（S 系列：右区域切成"对话区 + 日程区"，已全部验
      **弹的唯一调用点**变成"输入框获得焦点"。取证：真机两张 —— 启动态 `Visible=false` 且日志无弹出；
      `--focus-input-demo` 后 `Visible=true` + `[ui] 软键盘弹出（输入框获得焦点）`；live 配置指纹未变。
      单测：onboard 7 项（含 shouldShow 四种组合）+ main_page 10 项。取证参数 `--focus-input-demo` 也登记进 docs/gui.md。
+
+CLI（C 系列：板端控制 CLI `assistant`，C1–C4 已验收；C5 排在 P 系列之后）
+☑ C1 骨架 `agent/cli.py`（六条只读/控制命令 status/chat/mode/watch/schedule/doctor；人类可读输出，
+     不做 `--json`；`--config` 语义与 `agent/main.py` 一致：给的是**路径**，其父目录必须含
+     config.yaml/config.example.yaml）。踩到的 argparse 坑：全局选项要在子命令**前后**都能用，就得让
+     主解析器与每个子解析器共享 `parents`，而子命令那份必须 `default=argparse.SUPPRESS` ——
+     否则子解析器自己的默认值会盖掉写在命令**前面**的真实值。
+☑ C2 socket 路径优先级（`--socket` > 配置 `ipc.socket_path` > 协议默认）；边界与 GUI 一致：CLI 只**读**
+     `scheduler:` 段。D4 守卫 `tests/test_config_source_guard.py` 相应扩展：`cli.py` 允许**提** `llm.env`
+     这个名字，但同一条语句里出现读调用就红（防"豁免变成后门"）。
+☑ C3 `schedule`（用**真的** `Scheduler`/`occurs_on()`/`trigger_at()` 语义展开今天/明天）+ `doctor` 六项。
+☑ C4 真机验收抓到两个问题：① `schedule_rows()` 把**明天**的行标成「已过」（`now > start` 对明天恒成立）
+     -> `past` 现在要求 `day == now.date()`，加回归 `test_tomorrow_is_never_marked_past`；
+     ② `watch` 挂着永远用不上的 `--timeout` -> 摘掉，并加"给 watch 传 --timeout 必须被拒（exit 2）"的用例。
+     ⚠ 那个用例我第一版写成 `hasattr(args,"timeout")`，是**测试写错**：主解析器那份默认值本来就在
+     namespace 里，"有没有这个选项"要看的是"传它会不会被拒"。
+□ C5 `docs/cli.md` + Readme 入口 + 板端 `/usr/local/bin/assistant` 启动器（**排在 P 系列之后**：
+     P4 改了 CLI 行为，文档按最终行为写才不用返工）。
+
+日程触发事实协议（P 系列：让 CLI 看到"Agent 到底触发过哪条日程"，P1–P5 已验收）
+☑ P1 `Scheduler` 记触发事实（`agent/core/scheduler.py`，**只加不改**：+87/−1，唯一删掉的那一行是
+     `from typing import ...` 里加了 `Deque`）：有界 `_history`（`DEFAULT_HISTORY_LIMIT=50`）、
+     `recent_fired(limit)`（返回副本）、`on_fire` 回调（**抛异常只打一行日志**，不影响触发与去重）、
+     `stats["fired_history"]`。事实形状 `title/date/scheduled_at/fired_at/actions`（`fired_at` 就是原来的
+     `now`，对客户端来说"now"没意义）。板端裸输出四组：空 / 触发后 1 条 / 回调炸了仍然算触发且去重照旧 /
+     limit=3 时丢最旧。16 个新用例。
+☑ P2 协议（真源文档与代码同任务落地）：`TOPIC_SCHEDULE="schedule"`、`COMMAND_QUERY_SCHEDULE="query_schedule"`
+     进 TOPICS/COMMANDS/`__all__`；`docs/ipc-protocol.md` 加 §0 真源归属行、§3 topic 行 + "事实对象"字段表
+     + 两条示例、§4 命令行 + "应答=随后那条推送、**没有请求 id**"、§8 两行常量。`logs/p2_check.py` 做
+     **机械核对**：§8 每一行常量 vs `protocol.py`（20 对）、§3 事实字段表 vs Scheduler 真产出、
+     §3 示例 JSON 里的键必须在表里 —— PC 与板端都 PASS。⚠ 核对脚本第一版自己解析错了引号与表格续行
+     （跑出一片假 FAIL），是**工具**的问题不是文档；已加"解析到几行"的防空转断言。
+☑ P3 接线与降级（`agent/ipc/__init__.py`）：`_scheduler_of()`（拿 `recent_fired` 当能力探测，不
+     isinstance，测试替身与将来实现都接得上）、`_wire_outbound()` 接 `on_fire -> schedule{kind:"fired"}`、
+     命令分支 `query_schedule -> schedule{kind:"state"}`（`limit` 报**真实上限**）、没有调度器时回一条
+     `llm` 说明而不是静默。板端线上原始行三组（fired / state / 无调度器时的 llm 说明）与文档 §3 逐字对齐。
+     `agent/main.py` 的 `_STEPS` 里 `_start_scheduler` 在 `_start_ipc` 之前（依赖已核）。
+     顺带把 `Scheduler.history_limit` 做成公开属性（不然 ipc 层要摸 `_history.maxlen`）——**超出任务列表
+     一行，已单独报备**。9 个新用例（含两条真 socket）。
+☑ P4 CLI（`agent/cli.py`）：`ask_fired()` 发 `query_schedule` 等 `schedule{kind:"state"}`；三态标记
+     「已触发 HH:MM:SS / 已过（未触发）/ 什么都不标」——**只有问到了才敢说"未触发"**（`asked=False` 时
+     一个字都不许提）；两条页脚（问到 / 问不到 + 原因），`--no-ask` 明确"是你要我不问的"；`watch` 把
+     `schedule` 推送打成一行 key=value（不倒嵌套 dict；不认识的 kind 原样打，不装懂）。
+     与行对齐用 `trigger_at`（与 Agent 同一个 `ScheduleEvent.trigger_at()`），所以提前量跨天
+     （00:05 提前 10 分钟 → 前一天 23:55）也能对上；配置改过对不上就是"这个时刻没触发过"，如实。
+     19 个新用例。⚠ 我写测试时两次犯同一个手误（字符串里套双引号），`ast.parse` 当场报红才拦住。
+☑ P5 契约 + 端到端 + 四端回归：C++ 侧补一条**钉住 `schedule` 字面名字**的契约测试
+     （`test_view_state.cpp::scheduleTopicIsStillIgnoredByTheGui`：GUI **故意不认**这个 topic，靠协议 §3
+     的"未知 topic 忽略"保持向前兼容 —— 把"不认"钉成契约而不是巧合；通用"未知 topic 忽略"用例本来就有，
+     没重复造）。板端端到端（`logs/p5verify.sh`）：**临时配置**（`start = 现在+2 分钟`、`interval_min=0.2`）
+     + `--config` 指它 + socket 也在 `/tmp`，真 Agent 起在 13:26:45；`watch --topics schedule` 在
+     **13:28:09** 收到 `kind=fired title=触发事实验收 … fired_at=2026-09-22T13:28:09`（用时 81.7 秒），
+     随后 `assistant schedule --today` 打出 `13:28  触发事实验收  ← 已触发 13:28:09`（同配置里 23:59 那条
+     不标）。**live config 指纹 `789b14b7…` 全程未变**（只用 `--config` 指临时文件，没碰它）。
+     四端：PC 原生 ctest 172/172；PC python 套件 `python tests OK`；板端 python 套件 18 文件 OK；
+     板 GUI ctest 19/19（含新契约用例）。CLI 单测：PC 71 项（skip 17，全是 AF_UNIX）/板端 71 项（0 跳过）。
+     ⚠ 已知边界：触发记录**只在内存**（重启即清零，这是"事实"的定义）；GUI 界面暂不显示"已触发"
+     （协议已经铺好，要不要显示是另一个任务）。
+
 Phase 7 — 工具层
 □ tools/base.py：工具基类（name、schema、execute、权限、allowed_states）
 □ tools/init.py：工具注册入口
