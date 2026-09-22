@@ -28,6 +28,7 @@ agent/
 │   ├── __init__.py
 │   ├── main.py                  # 进程入口: 装配全部组件 + asyncio 主循环
 │   ├── config.py                # YAML 配置加载/保存/点号路径读取
+│   ├── cli.py                   # 板端控制 CLI (assistant): status/chat/mode/watch/schedule/doctor
 │   ├── core/                    # 状态层、工具路由、调度层
 │   │   ├── state_machine.py     # SLEEP ⇄ IDLE ⇄ STUDY/GAME 状态机
 │   │   ├── tool_router.py       # 工具注册 / 权限控制 / 执行调度
@@ -83,6 +84,7 @@ agent/
 │   ├── architecure.md           # 架构与拓扑、板端布局
 │   ├── deploy.md                # 部署与双机同步规则
 │   ├── config-sources.md        # 配置来源: 谁写 / 谁读 / 谁派生
+│   ├── cli.md                   # 板端控制 CLI (assistant) 使用手册
 │   ├── ipc-protocol.md          # Agent ⇄ GUI 协议 (线上格式唯一真源)
 │   ├── gui.md                   # GUI 构建与使用
 │   ├── gui-agent-integration.md # GUI 那一端实际收/发什么
@@ -275,6 +277,28 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 ```
+
+---
+
+## 板端控制 CLI（`assistant`）
+
+ssh 进来不用敲一长串 `python3 -m agent.cli`，板端装了启动器 `/usr/local/bin/assistant`：
+
+```bash
+assistant status            # 当前模式 + 串流连接（等不到就如实说没推，不编一个）
+assistant chat 现在几点      # 发一条给 Agent 并等回复（与 GUI 输入框同一条路）
+assistant mode study        # 切模式（大小写不限；非法转换会被状态机拒掉）
+assistant watch             # 盯推送（排障主力；--topics a,b / --count N）
+assistant schedule          # 今天/明天的日程，并标出**真的触发过**的那些
+assistant doctor            # 体检: 配置 / socket / 派生 llm.env / 日程 / 关键路径
+```
+
+- 走的是**现有 IPC 协议**：不 import Agent、不读它的内存。所以 Agent 没跑时它会明确说"连不上"
+  并给出下一步，而不是给一份假状态。
+- 日程有两件事分得很清：**列出来**（CLI 自己用 `agent.core.scheduler` 语义算，不需要 Agent 在跑）
+  与 **"到底触发过哪条"**（只能问运行中的 Agent —— 协议 `query_schedule`）。问不到时只标
+  「已过（按时间比较）」并写明原因，**不会**含糊成"没触发"；触发记录只在 Agent 内存里，重启即清零。
+- 完整说明（三种标记的含义、退出码、公共选项、边界、排障）：[`docs/cli.md`](docs/cli.md)。
 
 ---
 

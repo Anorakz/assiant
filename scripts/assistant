@@ -1,0 +1,32 @@
+#!/bin/sh
+# ============================================================================
+#  scripts/assistant — 板端控制 CLI 的启动器
+#
+#  装法（板端，一次）:
+#      ln -sf /home/kickpi/myproject/assitant/scripts/assistant /usr/local/bin/assistant
+#  之后从**任何**目录都能用:
+#      assistant status / assistant schedule / assistant watch --topics schedule
+#
+#  为什么需要它: `python3 -m agent.cli` 要求**仓库根**在 sys.path 上。这里只补
+#  PYTHONPATH、**不改 cwd** —— 改了 cwd 会让 `--config ./x.yaml` 这类相对路径指向
+#  别处，而"同一个参数看你从哪个目录敲"是最难查的一类问题。
+#  ⚠ 用 exec: 不留多余的 sh 进程, Ctrl+C / SIGTERM 直接落到 Python 上。
+# ============================================================================
+set -eu
+
+SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
+ROOT=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)
+
+# 软链安装时 $SELF 会解析回仓库里的真身, 上面就对; 若被**拷贝**到别处安装, 从脚本
+# 自身位置就推不出仓库根 —— 这时退回板端的固定路径, 并再确认一次真的在那儿。
+if [ ! -f "$ROOT/agent/cli.py" ]; then
+    ROOT=/home/kickpi/myproject/assitant
+fi
+if [ ! -f "$ROOT/agent/cli.py" ]; then
+    echo "assistant: 找不到仓库（试过脚本自身位置与 /home/kickpi/myproject/assitant）" >&2
+    exit 1
+fi
+
+PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+exec /usr/bin/python3 -m agent.cli "$@"
