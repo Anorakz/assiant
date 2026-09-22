@@ -204,6 +204,28 @@ class TestScheduleRendering(unittest.TestCase):
         self.assertTrue(past["周一学习"])       # 09:00 已过
         self.assertFalse(past["每天喝水"])      # 10:00 还没到
 
+    def test_tomorrow_is_never_marked_past(self):
+        """C4 起真 Agent 时抓到的 bug：明天 08:30 曾被标成「已过」。
+
+        `now > start` 对明天恒成立，所以 `past` 必须**只在今天**成立。
+        """
+        events = self._events()
+        tuesday = date(2026, 9, 22)
+        rows = cli.schedule_rows(events, tuesday, datetime(2026, 9, 21, 12, 58))
+        self.assertTrue(rows, "周二应当有日程")
+        self.assertTrue(all(not row["past"] for row in rows),
+                        "明天的行永远不该标「已过」：%r" % (rows,))
+
+    def test_watch_rejects_a_timeout_option(self):
+        """watch 一直盯到 Ctrl-C / --count，所以它**不接受** --timeout（C4 顺手改的）。
+
+        ⚠ 不能用 `hasattr(args, "timeout")` 判断：主解析器那份默认值仍会出现在
+          namespace 里；"挂没挂这个选项"要看的是**给 watch 传它会不会被拒**。
+        """
+        with self.assertRaises(SystemExit) as ctx:
+            cli.build_parser().parse_args(["watch", "--timeout", "5"])
+        self.assertEqual(ctx.exception.code, cli.EXIT_USAGE)
+
     def test_render_marks_empty_day_and_truncates(self):
         events = self._events()
         now = datetime(2026, 9, 21, 7, 0)

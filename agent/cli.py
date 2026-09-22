@@ -404,10 +404,14 @@ def schedule_rows(events: List[Any], day, now: datetime) -> List[Dict[str, Any]]
     """某一天的日程行（按 `(时间, 标题)` 升序）。
 
     `occurs_on()` 是**真的** Python 语义（recurring 看星期、oneoff 看日期）；
-    `past` 只是"现在时刻已经过了 start"——纯时间比较，**不代表 Agent 触发过**。
+    `past` 只在**今天**才有意义 —— "现在时刻已经过了 start"。对明天来说
+    `now > start` 恒成立（例如 12:58 看明天的 08:30），那样标"已过"就是错的。
+    ⚠ 与 GUI 同一条规则（`SchedulePanel`：`past` 只作用于今天段）——C4 起真 Agent
+      时正是这里露了馅（明天 08:30 被标成"已过"）。
     """
     rows = []
     now_minute = now.hour * 60 + now.minute
+    is_today = (day == now.date())
     for event in events:
         if not event.occurs_on(day):
             continue
@@ -417,7 +421,7 @@ def schedule_rows(events: List[Any], day, now: datetime) -> List[Dict[str, Any]]
             "time": start,
             "end": end,
             "title": event.title,
-            "past": bool(now_minute > (event.start[0] * 60 + event.start[1])),
+            "past": bool(is_today and now_minute > (event.start[0] * 60 + event.start[1])),
             "day": day,
         })
     rows.sort(key=lambda row: (row["time"], row["title"]))
@@ -593,8 +597,9 @@ async def cmd_doctor(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 #  命令行
 # ---------------------------------------------------------------------------
-def _common_options(*, suppress_defaults: bool) -> argparse.ArgumentParser:
-    """主命令与每个子命令共用的三个选项，做成"父解析器"（add_help=False）。
+def _common_options(*, suppress_defaults: bool,
+                    with_timeout: bool = True) -> argparse.ArgumentParser:
+    """主命令与每个子命令共用的选项，做成"父解析器"（add_help=False）。
 
     为什么两边都要挂一份：用户既会写 `assistant status --socket X`，也会写
     `assistant --socket X status` —— 只挂在主命令上，前一种会被子解析器拒掉。
@@ -609,9 +614,11 @@ def _common_options(*, suppress_defaults: bool) -> argparse.ArgumentParser:
     parent.add_argument("--config", default=fallback,
                         help="配置文件路径（按名字找 config.yaml/config.example.yaml，"
                              "与 agent/main.py 一致）")
-    parent.add_argument("--timeout", type=float,
-                        default=argparse.SUPPRESS if suppress_defaults else DEFAULT_TIMEOUT,
-                        help="等一条推送的超时秒数（默认 %s）" % DEFAULT_TIMEOUT)
+    if with_timeout:
+        # ⚠ watch 不挂它：那条命令一直盯到 Ctrl-C / --count，--timeout 对它没有意义
+        parent.add_argument("--timeout", type=float,
+                            default=argparse.SUPPRESS if suppress_defaults else DEFAULT_TIMEOUT,
+                            help="等一条推送的超时秒数（默认 %s）" % DEFAULT_TIMEOUT)
     return parent
 
 
@@ -642,8 +649,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="发出去就返回，不等 status 确认")
     p_mode.set_defaults(func=cmd_mode)
 
-    p_watch = sub.add_parser("watch", help="持续打印 Agent 的推送（Ctrl-C 退出）",
-                             parents=[_common_options(suppress_defaults=True)])
+    p_watch = sub.add_parser("watch", help="持续打印 Agent 的推送（Ctrl-C 退出；无 --timeout）",
+                             parents=[_common_options(suppress_defaults=True,
+                                                      with_timeout=False)])
     p_watch.add_argument("--topics", help="只看这些 topic（逗号分隔；默认全看）")
     p_watch.add_argument("--count", type=int, default=0,
                          help="收够 N 条就退出（0 = 不限；给脚本/测试用）")
