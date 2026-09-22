@@ -1091,6 +1091,84 @@ T7-1 记录（已完成，等验收）：SigLIP 引擎搬进仓库 + 配置归�
      `docs/config-sources.md` §2.2（`vision:` 段只给离线打标签用 + 契约不在配置里）;
      `Readme.md` 目录树; `config.example.yaml` 的 `vision:` 段（含 int8 不可用的警告）。
 
+T7-2 记录（已完成，等验收）：打标签 + `config/wall_data.jsonl` + `assistant tag`
+☑ `agent/vision/tag_vocab.py`（新）: 三轴 **32 条**标签（scene 16 / tone 8 / mood 8），
+     英文裸标签 + 中文显示名；`vocab_sha8()` 指纹（改词表 → 标签作废）；
+     `with_overrides()` 只**追加**（配置里删不掉默认标签，想删就改代码）。
+     标签必须是英文: SigLIP-base 是英文图文对训出来的，中文标签对它没有意义。
+☑ `agent/vision/wall_data.py`（新, **纯 Python 不 import numpy**）: 数据文件的唯一写者。
+     · 记录: path/w/h/bytes/sha256/tagged_at/ms/model_sha8/vocab_sha8/tags/**embedding**
+     · 向量用 `struct` 的 float16 + base64（解码也是 struct）→ 40 张 ≈ 234KB
+       （**第一行词表** ≈ 131KB + 一张图 2.6KB）；**纯 Python**，开发机也能读/检索
+     · **读坏了不装死**: 单个坏行跳过并记一句，其余照读；文件不存在 = 空表（不是错误）
+     · 写: 整体重写 + `write_text_atomic`（全仓唯一原子写）+ `.bak`
+     · 增量: `tag_plan()` 给每张图一个原因（新图/图变了/模型变了/词表变了/格式变了/强制重打）
+       + 孤儿行（图没了）+ `prune_records()`
+☑ `agent/vision/tagger.py`（新, 板端）: 逐张解码 → **官方口径预处理**（BGR→RGB、压扁到
+     256×256、原始 0-255）→ 图像塔 → 三轴 top-k（默认 3）+ 词表向量**预编码一次**复用。
+     依赖（numpy/cv2/rknnlite/tokenizers）全部延迟导入 + `check_dependencies()` 说清缺什么。
+☑ `assistant tag`（第 8 条命令, `agent/cli.py`）: 默认 dry-run；`--apply/--force/--limit/
+     --dir/--data-file/--top-k/--prune`；**逐张写盘**（跑一半崩了不丢已打好的）；
+     结尾报"每张中位耗时 / 总耗时 / 失败数 / 模型加载 / 词表编码"。
+☑ 连带三件（都做了）: `.gitignore` 加 `config/wall_data.jsonl`（它住 config/ 但后缀不是 .yaml，
+     那条盖不住）；`test_config_source_guard` 的 `ALLOWED_WRITERS` **显式**加
+     `agent/vision/wall_data.py`（第三个写入者，写的是派生数据不是真源）；
+     `docs/config-sources.md` §2 表格加一行 + 写明"config/ 下现在有两类东西"。
+☑ 板端实测（40 张, 真 NPU）: **40/40 成功，总 205.7 s，中位 3.56 s/张**
+     （其中**词表编码 61.2 s**、模型加载 2.6 s）；数据文件 108KB（当时还没有词表头）；
+     第二次跑 `assistant tag` → **"已是最新 40 张"**，只花 2.0 s（dry-run 不编码词表）。
+     实现在"逐张写盘"上是对的: 中途崩了只丢当前那张。
+☑ **质量量化**（`tests/board/tag_quality.py`, 新; 真值 `tests/data/wallpaper_tags/truth.json`, 新）:
+     · 真值 12 张（11 张有 IP），**我自己按 4×3 联系表逐张标注**（`logs/eval_sheet.png`），
+       按约定等你只改错的
+     · 命中率: `scene` top-1 **58%**/top-2 83%; `tone` 42%/58%; `mood` 42%/58%
+     · **预处理 A/B（官方压扁 vs 中心裁切）: 7/5/5 vs 7/4/4 → 保持官方口径**, 不加开关
+       （这条纠正了我 earlier 的口误: 官方 preprocessor_config 就是压扁, 不是保比例）
+     · IP 锚点检索: LOO EVA 3/40、GitS 2-3/40、Nier 10-15/40；跨 IP 前 5 名里 own 排最前、
+       后面接"无 IP 真值"的同类动画图。**去均值/PCA 白化基本不改善** → 保持原始余弦。
+       如实结论: **可用但不稳**, 每个 IP 给 3–5 张锚点会明显更稳
+☑ 两条**自己踩的坑**（都记进 tagging.md 了）:
+     ① 测量脚本第一版 LOO 写成 `cosine(target, proto)` 放在候选循环里 → 40 个候选**同分**,
+        "排名 31"只是按文件名排的假结果。是两个实现对拍（numpy 版 vs 纯 Python 版）
+        才发现不一致的 —— 现在脚本会打印"候选分数是否唯一"，同分直接标"排名无效"。
+     ② `os.path.join(repo_root, "config/wall_data.jsonl")` 会混出两种分隔符
+        （`.../assitant\config/wall_data.jsonl`）→ `resolve_data_file` 一律过 `normpath`。
+☑ 文档: `docs/tagging.md`（新: 词表 / 数据文件 / IP 锚点检索 / 实测数字 / 边界 / 怎么验）;
+     `docs/cli.md`（八条命令 + `tag` 一节 + "不手动换壁纸"写进边界）;
+     `docs/config-sources.md`（第三个写入者 + 派生数据一类）; `Readme.md`（目录树 + 测试清单）。
+☑ 测试: `tests/test_wall_data.py`（新, 31 项: 词表/指纹/编码解码/读坏行/备份/原子写/
+     增量计划/摘要/路径解析）; `tests/test_cli.py` 加 `TestTagCommand`（8 项: dry-run 不写、
+     配置优先级、--limit 校验、缺依赖说清、--prune、目录/配置读不到）。
+     ⚠ 这些**都能在开发机跑**（不碰模型）；板端跑同一份。
+☑ **词表向量缓存（你指定的补充项: "把标签向量按指纹存进数据文件第一行"）**——已做:
+      · 数据文件**第一行**变成 `{"kind":"vocab", version, model_sha8, vocab_sha8, dim:768,
+        axes:{轴:[标签…]}, embeds:{轴:[base64 float32 ×768]}}`，第二行起照旧一行一张图
+      · **指纹 = model_sha8 + vocab_sha8 + 每轴标签列表逐条相等**；对不上就不用缓存、
+        重编一遍再覆盖第一行；`embeds` 解不开（base64 坏）也当没有缓存 —— 宁可贵 61 s，
+        不肯用一份错位的缓存（`vocab_matches()` / `vocab_vectors()` 各有一段测试）
+      · **词表向量用 float32、图像向量留 float16**（故意的）: float32 往返逐位精确 →
+        "复用缓存"与"现场重编码"算出的分数**完全相同**，不会出现"看着一样、数字差 1e-3"
+      · 板端实测: 首次写头 **67 s**（"本次编码 61.3s"）；之后增量打 1 张图 **5.8 s**、
+        2 张图 9.7 s，报告里明确写"词表 **复用缓存**"（dry-run 也先说"复用数据文件里的缓存"）
+      · 顺手验了增量本身: 删掉 1 条记录 + 改 1 张图的字节 → 计划准确说"要打 2 张
+        （图变了 1，新图 1）"，打完 40/40 齐全；改图那一次**已按原字节复原**（追加的 1 字节删掉）
+      · **faithfulness 实测**（这条最要紧）: 缓存解出的 32×768 = **24576 个分量** vs
+        现场重编码（60.6 s）逐个比 → **最大绝对差 0、float32 逐位不同的 0 个**。
+        也就是说"复用缓存"不是"差不多"，是**同一个值**
+      · 代价: 文件从 108KB 涨到 **234KB**（多出来的是第一行 131KB）—— 换来的是每次 61 s
+      · 顺手验了 `--apply` 的**空跑**: 40 张都最新 + 缓存最新 → 打印"什么都不用做"，
+        文件 mtime/大小**一动没动**（不白改文件、不白留 .bak）
+      · 测试: `tests/test_wall_data.py` 加 `TestVocabRecord`（10 项: 头必在第一行、第二条头记问题、
+        指纹各种对不上、手改 axes、float32 逐位、base64 坏 → 无缓存、dtype 拒绝）
+⚑ **顺手发现一处与 T7 无关的红**（板端跑 `scripts/run-board-tests.ps1` 时看见的，先记账不动手）:
+      `tests/test_llm_integration.py`（**板端本地文件**, 09-21 写的, 不在仓库里）9 项里
+      `test_chat_raises_on_bad_key` 报错: 它期望 `llm/llm_client.py::LLMClientError`，
+      但 `provider.chat()` 现在**照抛** openai 的 `AuthenticationError`（`_plain_chat` 的约定就是
+      "失败照抛"）。同文件的 `chat_with_tools` 那条（错误收进 `result["error"]`）是**通过**的。
+      两个修法: ① 在 `chat()` 边界把第三方异常包成 `LLMError`（更干净, 但要改仓库代码 + 加测试）;
+      ② 改掉那条板端本地测试的期望（它写于切换到 openai 适配器之前）。
+      **T7 没碰 `agent/llm/`，这不是 T7-2 引入的**；要不要修你说一声，我按你的选择做。
+
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档

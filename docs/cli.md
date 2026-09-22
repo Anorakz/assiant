@@ -62,7 +62,7 @@ python3 -m agent.cli status          # ⚠ 用 -m，不要在 agent/ 里直接 p
 
 ---
 
-## 4. 七条命令
+## 4. 八条命令
 
 ### `status` —— 看一眼当前模式与串流连接
 
@@ -278,11 +278,55 @@ $ assistant cleanup --apply
 
 ---
 
+### `tag` —— 给壁纸打标签（SigLIP 零样本，写 `config/wall_data.jsonl`）
+
+**默认只算计划**（dry-run），`--apply` 才真打：
+
+```bash
+$ assistant tag
+词表 32 条标签 / 3 个轴（scene 16、tone 8、mood 8），指纹 b780f2b5；词表向量: 复用数据文件里的缓存
+壁纸目录里 40 张图；数据文件 /home/kickpi/myproject/assitant/config/wall_data.jsonl
+已是最新 40 张（没有要打的）
+（dry-run：加 --apply 才会真打。会写 …/wall_data.jsonl，并在旁边留一份 .bak）
+
+$ assistant tag --apply
+已是最新 38 张；要打 2 张（图变了 1，新图 1）
+  [1/2] 01_landscape_1280x800.png  1280x800  5801 ms  scene=space
+  [2/2] wallhaven-zy31jv_3840x2160.png  3840x2160  3771 ms  scene=anime
+打过 2 张，失败 0 张；总耗时 9.7s，每张中位 5801 ms（模型加载 0.0s、词表 复用缓存）
+已写入 …/wall_data.jsonl（旁边留了一份 wall_data.jsonl.bak）。
+```
+
+| 选项 | 说明 |
+| --- | --- |
+| `--apply` | 真打。**逐张写盘**（跑一半崩了不丢已打好的）+ 原子写 + `.bak` |
+| `--force` | 全部重打（不看指纹）。**词表缓存照旧复用** —— force 说的是"图片标签重打"，模型和词表没变就没必要重编 61 s |
+| `--limit N` | 本轮最多打 N 张（分批用） |
+| `--dir` / `--data-file` / `--top-k` | 覆盖配置里的值 |
+| `--prune` | 顺手清掉"图已经不在了"的行（与 `--apply` 一起才真写） |
+
+规矩：
+
+- **增量判据**：图变了（`sha256`）/ 模型变了（`model_sha8`）/ 词表变了（`vocab_sha8`）/ 格式版本变了。
+  第二次跑应当说"都已是最新"。
+- **词表向量存在数据文件第一行**、按 `model_sha8 + vocab_sha8 + 标签列表` 认指纹：
+  对得上就复用（省 **61 s** 的文本塔编码），对不上就重编再覆盖。
+  没要打的图、缓存也是最新的 → **什么都不写**（不白改文件）。见
+  [`tagging.md`](tagging.md) §4。
+- **只能在板端跑**（要 NPU + numpy + cv2 + tokenizers）。开发机上 `--apply` 会明确说缺什么；
+  **dry-run 不需要这些**，所以"看计划"在哪儿都能跑。
+- 这是 CLI 的**第二个会写文件的命令**，但写的**不是配置真源**：`cleanup --apply` 写
+  `config.yaml`，`tag --apply` 写的是派生数据（机器生成的标签 + 向量，已进 `.gitignore`）。
+- 词表、数据文件格式、IP 检索、已知不准的地方：见 [`tagging.md`](tagging.md)。
+
+---
+
 ## 5. 它**不**做什么（边界）
 
 | 不做 | 为什么 |
 | --- | --- |
-| 不写配置、不改日程、不重启 Agent | **默认只读**。**唯一例外**是 `cleanup --apply`（显式清理已经过去的一次性日程，见上一节）；写日程本身仍然是人在 PC 上做的事，配置是真源 |
+| 不写配置、不改日程、不重启 Agent | **默认只读**。显式例外有两个，都要你亲手敲：`cleanup --apply`（写 `config.yaml`）与 `tag --apply`（写派生数据 `config/wall_data.jsonl`，不是真源）。写日程本身仍然是人在 PC 上做的事，配置是真源 |
+| 不手动换壁纸 | 换壁纸**只走对话**（对 Agent 说"换一张安静的深色风景"）。CLI 没有换壁纸命令，GUI 也没有「下一张」按钮 —— 见 [`tagging.md`](tagging.md) |
 | 不 `--json` | 输出给人看；要机器读，用 `watch --count` + 原始行，或直接 `LocalClient` |
 | 不 import Agent 去读内存 | 那会拿到"另一份状态"。所有跨进程信息都走 IPC 协议 |
 | GUI 界面不显示"已触发 / 未触发" | GUI 不认 `schedule` topic（合同见 `gui-agent-integration.md`）；它只把"刚过去的"那条**变暗**显示（与 CLI 同一条 30 分钟尾巴），不写字 |

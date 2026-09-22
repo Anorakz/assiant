@@ -111,6 +111,34 @@ wallpaper:
   # ⚠ 目录在仓库外面 (板端 /home/kickpi/wallpapers), 所以图片不入库。
   dir: /home/kickpi/wallpapers
 
+  # ---- 标签化 (Phase 7 T7) ----
+  # 三轴: scene 场景 / tone 色调 / mood 氛围。词表默认写在
+  # agent/vision/tag_vocab.py (英文裸标签 + 中文显示名); 这里只能**追加**。
+  # 用手册见 docs/tagging.md; 打标签用 `assistant tag` (默认只看, --apply 才写)。
+  tagging:
+    # 标签数据文件 (派生数据, 不是配置真源; 已进 .gitignore)。
+    # 一行一张图: 三轴 top-k + L2 归一化后的图像向量 (base64 float16) ——
+    # 向量存下来是为了 "IP 检索/相似图召回"**不用再过 NPU**。
+    data_file: config/wall_data.jsonl
+    # 每轴存几条候选。刻意多存几条: 阈值是**查询期**的事, 存宽一点,
+    # 以后标定阈值/改筛选口径都不用重打标签。
+    top_k: 3
+    # 追加词表 (英文裸标签; 想删默认标签就改 tag_vocab.py 并重跑 assistant tag)。
+    # 例: scene: [cyberpunk, mecha]
+    vocab: {}
+    # IP 锚点: 每个 IP 给 1–2 张**确认过的图**当原型向量 —— 检索是"像不像锚点",
+    # 不要求模型认识这个作品名 (SigLIP 不认识具体 IP; 文本查询只做兜底)。
+    # ⚠ anchors 写**文件名** (相对 wallpaper.dir), 换图/改名后要跟着改。
+    ip_presets:
+      GBC:  {query: GIRLS BAND CRY, anchors: [9b22df807668f01f55ea87394d90103b159047704.png]}
+      EVA:  {query: Evangelion, anchors: [Rei_1.png, wallhaven-85j9qo_2560x1080.png]}
+      KNK:  {query: Kara no Kyoukai, anchors: [wallhaven-95y5md_2560x1600.png]}
+      SC:   {query: THE IDOLM@STER SHINY COLORS, anchors: [wallhaven-k7le6q_1920x1080.png]}
+      Nier: {query: "NieR: Automata", anchors: [wallhaven-kxpyy1_2560x1440.png, wallhaven-3l78rd_2560x1440.png]}
+      SNF:  {query: Sousou no Frieren, anchors: [wallhaven-858vpj_1200x1920.png]}
+      "2077": {query: Cyberpunk 2077, anchors: [wallhaven-jx1ex5_3840x2160.png]}
+      GitS: {query: Ghost in the Shell, anchors: [wallhaven-zy31jv_3840x2160.png, wallhaven-0jdkvq_3840x2160.png]}
+
 # ---------------------------------------------------------------------------
 # Sunshine 串流主机
 # ---------------------------------------------------------------------------

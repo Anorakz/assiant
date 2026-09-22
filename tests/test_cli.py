@@ -1272,5 +1272,106 @@ class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
         self.assertIn(start_at.date().isoformat(), out.getvalue())
 
 
+# ===========================================================================
+#  assistant tag（T7-2）
+# ===========================================================================
+class TestTagCommand(unittest.TestCase):
+    """`assistant tag`：给壁纸打标签（默认只看；--apply 才写数据文件）。
+
+    ⚠ 这一组**故意不碰模型**：dry-run 只算"哪些图要打"（纯 Python），
+      所以开发机上（没有 numpy/cv2/NPU）也能跑。真打标签的验收在板端。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cli-tag-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.walls = Path(self.tmp) / "walls"
+        self.walls.mkdir()
+        for name in ("01_a.png", "02_b.png", "notes.txt"):
+            (self.walls / name).write_bytes(b"\x89PNG\r\n\x1a\n" + name.encode("utf-8"))
+        self.data = Path(self.tmp) / "wall_data.jsonl"
+        self.path = Path(self.tmp) / "config.yaml"
+        self.path.write_text(
+            "wallpaper:\n"
+            "  dir: %s\n"
+            "  tagging:\n"
+            "    data_file: %s\n"
+            "    top_k: 2\n" % (self.walls, self.data),
+            encoding="utf-8")
+
+    def _args(self, extra=()):
+        return cli.build_parser().parse_args(
+            ["tag", "--config", str(self.path)] + list(extra))
+
+    def _run(self, extra=()):
+        return _run_cli_with_config(
+            ["tag", "--config", str(self.path)] + list(extra), self.path)
+
+    def test_dry_run_lists_the_plan_and_writes_nothing(self):
+        code, out, err = self._run()
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("壁纸目录里 2 张图", out)          # notes.txt 不算图
+        self.assertIn("要打 2 张（新图 2）", out)
+        self.assertIn("dry-run", out)
+        self.assertFalse(self.data.exists(), "dry-run 不该写数据文件")
+        self.assertEqual(err, "")
+
+    def test_tag_settings_reads_config_then_cli(self):
+        args = self._args(["--dir", "/tmp/other", "--top-k", "5"])
+        settings = cli.tag_settings({"wallpaper": {"dir": "/cfg/walls",
+                                                   "tagging": {"top_k": 3}}}, args)
+        self.assertEqual(settings["dir"], "/tmp/other", "命令行优先")
+        self.assertEqual(settings["top_k"], 5)
+        bare = cli.tag_settings({}, self._args())
+        self.assertEqual(bare["top_k"], None)           # 没配就用 tagger 的默认
+        self.assertTrue(bare["data_file"].endswith("wall_data.jsonl"))
+
+    def test_plan_text_mentions_orphans_and_prune(self):
+        plan = {"to_tag": [], "fresh": 1, "orphans": ["/gone.png"], "unknown": []}
+        text = "\n".join(cli.tag_plan_text(plan, 2, "/data.jsonl"))
+        self.assertIn("已是最新 1 张", text)
+        self.assertIn("没有要打的", text)
+        self.assertIn("--prune", text)
+
+    def test_limit_must_be_positive(self):
+        for bad in ("0", "-3"):
+            code, out, err = self._run(["--limit", bad])
+            self.assertEqual(code, cli.EXIT_USAGE, bad)
+            self.assertIn("--limit", err)
+
+    def test_apply_without_npu_says_what_is_missing(self):
+        """开发机上 `--apply` 会缺 numpy/cv2/NPU —— 必须**说清缺什么**，而不是崩。"""
+        if not os.path.isdir(self.walls):
+            self.skipTest("没有壁纸目录")
+        code, out, err = self._run(["--apply"])
+        if "rknnlite" not in err and "numpy" not in err:
+            self.skipTest("这台机器居然有全套依赖（板端）")
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("打标签需要这些依赖", err)
+        self.assertIn("板端", err, "要说明这活只能在板端干")
+        self.assertFalse(self.data.exists(), "依赖不齐时不该留下半个文件")
+
+    def test_force_and_prune_are_accepted(self):
+        code, out, err = self._run(["--force", "--prune"])
+        self.assertEqual(code, cli.EXIT_OK)
+        # 从没打过标签的图，原因仍是"新图"（比"强制重打"准确）
+        self.assertIn("要打 2 张（新图 2）", out)
+        self.assertIn("--prune", out)
+
+    def test_missing_wallpaper_dir_is_reported(self):
+        self.path.write_text("wallpaper:\n  dir: %s\n" % (Path(self.tmp) / "nope"),
+                             encoding="utf-8")
+        code, out, err = self._run()
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("壁纸目录用不了", err)
+
+    def test_no_config_is_reported(self):
+        missing = Path(self.tmp) / "nowhere" / "config.yaml"
+        code, out, err = _run_cli_with_config(
+            ["tag", "--config", str(missing)], missing)
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("读不到配置", err)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

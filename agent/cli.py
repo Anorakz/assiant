@@ -883,6 +883,230 @@ async def cmd_cleanup(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+#  tag（第 8 条命令）
+# ---------------------------------------------------------------------------
+def tag_settings(config: Any, args: argparse.Namespace) -> Dict[str, Any]:
+    """把"配置 + 命令行"合成打标签要用的设置（纯逻辑，可单测）。
+
+    优先级: 命令行 > config.yaml > 代码默认值。
+    """
+    from agent.core.wallpaper import DEFAULT_WALLPAPER_DIR
+    from agent.vision import wall_data
+
+    wall = config.get("wallpaper") if isinstance(config, dict) else None
+    wall = wall if isinstance(wall, dict) else {}
+    tagging = wall.get("tagging") if isinstance(wall.get("tagging"), dict) else {}
+
+    top_k = getattr(args, "top_k", None) or tagging.get("top_k")
+    try:
+        top_k = int(top_k)
+    except (TypeError, ValueError):
+        top_k = None
+
+    return {
+        "dir": getattr(args, "dir", None) or wall.get("dir") or DEFAULT_WALLPAPER_DIR,
+        "data_file": wall_data.resolve_data_file(
+            getattr(args, "data_file", None) or tagging.get("data_file")),
+        "top_k": top_k if (top_k and top_k > 0) else None,
+        "vocab_overrides": tagging.get("vocab"),
+        "vision": config.get("vision") if isinstance(config.get("vision"), dict) else None,
+    }
+
+
+def tag_plan_text(plan: Dict[str, Any], images: int, data_file: str) -> List[str]:
+    """把"要打哪些"渲染成给人看的几行（dry-run 与 --apply 共用，便于测试）。"""
+    reasons: Dict[str, int] = {}
+    for item in plan["to_tag"]:
+        reasons[item["reason"]] = reasons.get(item["reason"], 0) + 1
+    detail = "，".join("%s %d" % (name, count) for name, count in sorted(reasons.items()))
+    lines = [
+        "壁纸目录里 %d 张图；数据文件 %s" % (images, data_file),
+        "已是最新 %d 张%s" % (plan["fresh"], ("；要打 %d 张（%s）" % (len(plan["to_tag"]), detail))
+                            if plan["to_tag"] else "（没有要打的）"),
+    ]
+    if plan["orphans"]:
+        lines.append("数据文件里有 %d 行是「图已经不在」的（--prune 可以清掉）"
+                     % len(plan["orphans"]))
+    return lines
+
+
+async def cmd_tag(args: argparse.Namespace) -> int:
+    """给壁纸打标签（SigLIP 零样本，三轴），结果写 `config/wall_data.jsonl`。
+
+    默认**只算计划**（dry-run，与 `cleanup` 同一套习惯）；`--apply` 才真打。
+
+    @note 这是 CLI 的**第二个会写文件的命令**，但它写的不是配置真源:
+          `cleanup --apply` 写 `config.yaml`；`tag --apply` 写的是**派生数据**
+          （`wall_data.jsonl`，机器生成的标签）。边界写在 docs/tagging.md。
+    @note 打标签要过 NPU，**开发机上没有 numpy/cv2** —— dry-run 不需要它们，
+          所以"看计划"在哪儿都能跑；`--apply` 缺依赖会明确说缺什么。
+    """
+    from agent.core.wallpaper import WallpaperDeck, WallpaperError
+    from agent.vision import tag_vocab, tagger, wall_data
+
+    config, why = load_plane_config(args.config)
+    if why:
+        print("读不到配置（%s）——壁纸目录与词表在 config.yaml 的 wallpaper 段。" % why,
+              file=sys.stderr)
+        return EXIT_ERROR
+
+    settings = tag_settings(config, args)
+    directory, data_file = settings["dir"], settings["data_file"]
+    axes = tag_vocab.with_overrides(settings["vocab_overrides"])
+    vocab8 = tag_vocab.vocab_sha8(axes)
+    top_k = settings["top_k"] or tagger.DEFAULT_TOP_K
+
+    try:
+        images = WallpaperDeck(directory).scan()
+    except WallpaperError as exc:
+        print("壁纸目录用不了：%s" % exc, file=sys.stderr)
+        return EXIT_ERROR
+
+    loaded = wall_data.load(data_file)
+    records = loaded["records"]
+    for problem in loaded["problems"]:
+        print("数据文件有问题：%s" % problem, file=sys.stderr)
+
+    tagging = tagger.Tagging(settings["vision"], axes=axes, top_k=top_k)
+    model8 = tagging.model_sha8()
+    plan = wall_data.tag_plan(records, images, model8, vocab8, force=args.force)
+
+    # 词表向量缓存（数据文件第一行）: 同模型同词表就复用，省掉 32 条标签的文本塔编码
+    cached_vocab = loaded["vocab"] if isinstance(loaded["vocab"], dict) else None
+    vocab_ok = wall_data.vocab_matches(cached_vocab, model8, vocab8, axes)
+    if not vocab_ok:
+        cached_vocab = None
+
+    print("词表 %d 条标签 / %d 个轴（scene %d、tone %d、mood %d），指纹 %s%s"
+          % (sum(len(axis.labels) for axis in axes), len(axes),
+             len(axes[0].labels), len(axes[1].labels), len(axes[2].labels), vocab8,
+             "；词表向量: 复用数据文件里的缓存" if cached_vocab else "；词表向量: 需要重新编码"))
+    for line in tag_plan_text(plan, len(images), data_file):
+        print(line)
+
+    kept = list(records)
+    if args.prune:
+        existing = set(images)
+        kept, dropped = wall_data.prune_records(records, existing)
+        if dropped:
+            print("--prune：清掉 %d 行（图已经不在了）：%s"
+                  % (len(dropped), "、".join(os.path.basename(p) for p in dropped[:5])
+                     + ("…" if len(dropped) > 5 else "")))
+            if args.apply:
+                wall_data.write_records(data_file, _sorted_records(kept), vocab=cached_vocab)
+        else:
+            print("--prune：没有需要清的行")
+
+    todo = list(plan["to_tag"])
+    limit = getattr(args, "limit", None)
+    if limit is not None:
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            print("--limit 需要正整数", file=sys.stderr)
+            return EXIT_USAGE
+        if limit <= 0:
+            print("--limit 需要正整数", file=sys.stderr)
+            return EXIT_USAGE
+        if len(todo) > limit:
+            print("本轮只打前 %d 张（--limit %d），其余的再跑一次即可" % (limit, limit))
+            todo = todo[:limit]
+
+    if not args.apply:
+        if not vocab_ok:
+            print("（加 --apply 时会顺手把词表向量写进数据文件第一行，下次同模型同词表就能复用）")
+        print("（dry-run：加 --apply 才会真打。会写 %s，并在旁边留一份 .bak）" % data_file)
+        return EXIT_OK
+
+    if not todo and vocab_ok:
+        print("没有要打的图，词表缓存也是最新的 —— 什么都不用做。")
+        return EXIT_OK
+
+    if not todo:
+        print("没有要打的图；只补写词表向量缓存（下次增量打图就不用重新编码词表了）。")
+
+    reason = tagger.check_dependencies()
+    if reason:
+        print("%s\n（打标签必须在板端跑：模型在 NPU 上。）" % reason, file=sys.stderr)
+        return EXIT_ERROR
+
+    # 词表向量: 有缓存就复用（省 61 s），否则重新编码 —— 编完无论如何都要写回文件
+    cached_vectors = wall_data.vocab_vectors(cached_vocab, axes) if cached_vocab else None
+    tagging.prepare(label_vectors=cached_vectors)
+    try:
+        vocab_record = wall_data.make_vocab_record(
+            axes, {axis.name: [vec for _, vec in tagging.label_vectors()[axis.name]]
+                   for axis in axes}, model8, vocab8)
+    except (wall_data.WallDataError, AttributeError, KeyError, TypeError) as exc:
+        print("词表向量存不进数据文件（%s）—— 这次先不存，标签照样打。" % exc, file=sys.stderr)
+        vocab_record = cached_vocab
+
+    # 已有的记录按 path 索引，打了哪张就替换哪张
+    by_path = {str(record.get("path")): record for record in kept}
+    done, failed = 0, []
+    started = time.time()
+    per_image: List[int] = []
+
+    if vocab_record is not None and not todo:
+        # 只有词表要补写
+        try:
+            wall_data.write_records(data_file, _sorted_records(by_path.values()),
+                                    vocab=vocab_record)
+        except wall_data.WallDataError as exc:
+            print("写数据文件失败：%s" % exc, file=sys.stderr)
+            return EXIT_ERROR
+        print("词表向量已写入 %s（%d 条标签，%s）"
+              % (data_file, sum(len(axis.labels) for axis in axes),
+                 "复用缓存" if tagging.labels_from_cache else "本次编码 %.1fs" % tagging.label_s))
+        return EXIT_OK
+
+    for index, item in enumerate(todo, 1):
+        path = item["path"]
+        name = os.path.basename(path)
+        try:
+            tags, vector, ms, width, height = tagging.score(path)
+        except Exception as exc:                       # noqa: BLE001 - 单张失败不拖垮整批
+            failed.append((name, "%s: %s" % (type(exc).__name__, exc)))
+            print("  [%d/%d] %s 失败：%s" % (index, len(todo), name, exc), file=sys.stderr)
+            continue
+        try:
+            sha = wall_data.image_sha256(path)
+            size = os.path.getsize(path)
+        except (OSError, wall_data.WallDataError) as exc:
+            failed.append((name, str(exc)))
+            continue
+        by_path[path] = wall_data.make_record(
+            path, width, height, size, sha, ms, model8, vocab8, tags, vector)
+        done += 1
+        per_image.append(ms)
+        # **每张都写盘**: 40 张要跑一两分钟，崩在中途不该丢掉已经打好的
+        try:
+            wall_data.write_records(data_file, _sorted_records(by_path.values()),
+                                    vocab=vocab_record)
+        except wall_data.WallDataError as exc:
+            print("写数据文件失败：%s" % exc, file=sys.stderr)
+            return EXIT_ERROR
+        top = tags.get("scene", [["?", 0]])[0][0]
+        print("  [%d/%d] %s  %dx%d  %d ms  scene=%s"
+              % (index, len(todo), name, width, height, ms, top))
+
+    elapsed = time.time() - started
+    median = sorted(per_image)[len(per_image) // 2] if per_image else 0
+    print("打过 %d 张，失败 %d 张；总耗时 %.1fs，每张中位 %d ms（模型加载 %.1fs、词表 %s）"
+          % (done, len(failed), elapsed, median, tagging.load_s,
+             "复用缓存" if tagging.labels_from_cache else "编码 %.1fs" % tagging.label_s))
+    for name, why in failed:
+        print("  没打成 %s：%s" % (name, why), file=sys.stderr)
+    print("已写入 %s（旁边留了一份 %s.bak）。" % (data_file, os.path.basename(data_file)))
+    return EXIT_ERROR if failed else EXIT_OK
+
+
+def _sorted_records(records: Any) -> List[Any]:
+    """按 path 排序 —— 文件内容与目录顺序无关，重跑结果才可比对。"""
+    return sorted(records, key=lambda item: str(item.get("path")))
+
+
+# ---------------------------------------------------------------------------
 #  doctor
 # ---------------------------------------------------------------------------
 OK = "OK"
@@ -1078,6 +1302,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_cleanup.add_argument("--apply", action="store_true",
                            help="真的删（文本级 + 原子写，并在原文件旁留一份 .bak）")
     p_cleanup.set_defaults(func=cmd_cleanup)
+
+    p_tag = sub.add_parser(
+        "tag",
+        help="给壁纸打标签（SigLIP 零样本，写 config/wall_data.jsonl；默认只看）",
+        parents=[_common_options(suppress_defaults=True, with_timeout=False)])
+    p_tag.add_argument("--apply", action="store_true",
+                       help="真打（逐张写盘，并在数据文件旁留一份 .bak）")
+    p_tag.add_argument("--force", action="store_true", help="全部重打（不看指纹）")
+    p_tag.add_argument("--limit", type=int, default=None, help="本轮最多打几张（分批用）")
+    p_tag.add_argument("--dir", default=None, help="覆盖壁纸目录（默认取配置 wallpaper.dir）")
+    p_tag.add_argument("--data-file", default=None,
+                       help="覆盖数据文件（默认 config/wall_data.jsonl）")
+    p_tag.add_argument("--top-k", type=int, default=None, help="每轴存几条候选（默认 3）")
+    p_tag.add_argument("--prune", action="store_true",
+                       help="顺手清掉「图已经不在了」的行（与 --apply 一起才真写）")
+    p_tag.set_defaults(func=cmd_tag)
 
     return parser
 

@@ -110,6 +110,10 @@ config/secrets.yaml
 config/*.yaml
 !config/*.example.yaml
 config/creds/
+# 壁纸标签数据（T7-2）: **机器派生数据**，不是配置真源 —— 由 `assistant tag --apply`
+# 在板端生成，含 40 张图的标签与 base64(float16) 向量（约 80KB），换台机器就该重打。
+# ⚠ 它住在 config/ 下，但 config/*.yaml 那条盖不住它（后缀是 .jsonl），所以单独写一行。
+config/wall_data.jsonl
 # 板端部署用的凭据目录（deploy.ps1 之外的 creds/，见 docs/sunshine-pairing-findings.md）:
 # 除 client.pem / client.key 外还可能放 client.der / clientcert.hex 等中间产物，
 # 那些**不在** *.pem / *.key 的覆盖范围内，所以整个目录一起忽略。

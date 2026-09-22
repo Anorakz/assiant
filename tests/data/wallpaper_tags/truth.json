@@ -1,0 +1,55 @@
+{
+  "note": "壁纸标签化的人工真值（Phase 7 T7）。⚠ 图片**不入库**：这里只按文件名引用 /home/kickpi/wallpapers 里的图，换台机器要自己准备这批图（或改这里的 name）。",
+  "truth_source": "由 AI 看 4×3 联系表（logs/eval_sheet.png）逐张标注，**待用户复核**——按约定「我先填一版，你只改错的」。改了真值就等于改了 T7-4 的验收基线。",
+  "axes": ["scene", "tone", "mood"],
+  "images": {
+    "9b22df807668f01f55ea87394d90103b159047704.png": {
+      "ip": "GBC", "scene": "anime", "tone": "dark", "mood": "cozy",
+      "why": "夜里的摊位/花园，白发少女坐着，灯笼暖光 + 大片暗绿"
+    },
+    "Rei_1.png": {
+      "ip": "EVA", "scene": "anime", "tone": "bright", "mood": "calm",
+      "why": "白底上的红蓝线稿人脸，整张很亮、很空"
+    },
+    "wallhaven-85j9qo_2560x1080.png": {
+      "ip": "EVA", "scene": "portrait", "tone": "bright", "mood": "nostalgic",
+      "why": "橙发少女背影侧脸，白/浅色背景，人物占主体"
+    },
+    "wallhaven-95y5md_2560x1600.png": {
+      "ip": "KNK", "scene": "anime", "tone": "bright", "mood": "calm",
+      "why": "和服人物 + 花枝，天空明亮柔和"
+    },
+    "wallhaven-k7le6q_1920x1080.png": {
+      "ip": "SC", "scene": "portrait", "tone": "warm", "mood": "cute",
+      "why": "粉红头发的大头特写，暖色、可爱向"
+    },
+    "wallhaven-kxpyy1_2560x1440.png": {
+      "ip": "Nier", "scene": "abstract", "tone": "monochrome", "mood": "mysterious",
+      "why": "纯黑底上三个白色徽记/纹样，没有实体场景"
+    },
+    "wallhaven-3l78rd_2560x1440.png": {
+      "ip": "Nier", "scene": "anime", "tone": "monochrome", "mood": "dramatic",
+      "why": "黑白人影站在暗处，水花与强对比"
+    },
+    "wallhaven-858vpj_1200x1920.png": {
+      "ip": "SNF", "scene": "landscape", "tone": "bright", "mood": "calm",
+      "why": "一行人在绿野与水塘边行走，蓝天白云"
+    },
+    "wallhaven-jx1ex5_3840x2160.png": {
+      "ip": "2077", "scene": "city", "tone": "neon", "mood": "futuristic",
+      "why": "霓虹招牌的夜街，紫粉光，赛博感"
+    },
+    "wallhaven-zy31jv_3840x2160.png": {
+      "ip": "GitS", "scene": "anime", "tone": "dark", "mood": "mysterious",
+      "why": "黑底紫调人物 + 标题文字，整体很暗"
+    },
+    "wallhaven-0jdkvq_3840x2160.png": {
+      "ip": "GitS", "scene": "anime", "tone": "dark", "mood": "dramatic",
+      "why": "暗红/黑底上的一张苍白侧脸，强对比"
+    },
+    "wallhaven-x1qq3v_2560x1440.png": {
+      "scene": "anime", "tone": "dark", "mood": "dramatic",
+      "why": "深蓝调人物与蓝色电光（这张没有 IP 真值，专门当检索对照）"
+    }
+  }
+}

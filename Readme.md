@@ -74,6 +74,7 @@ agent/
 │   ├── test_llm.py              # LLM 三模式切换 / edge 真后端 / 工具循环 / 规则匹配
 │   ├── test_vision.py           # ROI 解析 / SigLIP mock (有无 numpy 两条路径)
 │   ├── test_siglip.py           # SigLIP 双塔: 配置契约 / 分词 / 余弦排序 (T7-1)
+│   ├── test_wall_data.py        # 壁纸词表 / 标签数据文件 / 增量计划 (T7-2)
 │   ├── test_main.py             # 进程装配: 启停顺序 / 异常隔离 / 主循环
 │   ├── test_ipc_protocol.py     # IPC 线格式契约 (字节级)
 │   ├── test_scheduler.py        # 日程触发 / 去重 / 终端命令识别
@@ -82,7 +83,7 @@ agent/
 │   ├── test_docs.py             # 文档守卫: 链接有效 + 过时说法黑名单
 │   ├── test_config_source_guard.py  # 配置真源守卫: agent/ 只认 config/config.yaml
 │   ├── test_schedule_config.py  # 文本级删掉已触发的一次性日程
-│   ├── test_cli.py              # CLI 七条命令 / 窗口与尾巴 / cleanup
+│   ├── test_cli.py              # CLI 八条命令 / 窗口与尾巴 / cleanup / tag
 │   ├── test_tools.py            # 工具层: 注册 / 状态权限 / 参数校验 / 缺依赖跳过 (T1)
 │   ├── test_tool_permissions.py # 状态权限表: 4 状态 × 每个工具, 禁止的组合真的被拒 (T4)
 │   ├── test_wallpaper.py        # 壁纸目录游标 / next_wallpaper 工具与命令 (T3)
@@ -94,6 +95,7 @@ agent/
 │   ├── deploy.md                # 部署与双机同步规则
 │   ├── config-sources.md        # 配置来源: 谁写 / 谁读 / 谁派生
 │   ├── cli.md                   # 板端控制 CLI (assistant) 使用手册
+│   ├── tagging.md               # 壁纸标签化: 词表 / wall_data.jsonl / IP 检索 / 实测数字 (T7)
 │   ├── llm.md                   # LLM 三模式 / edge 接 llama-server / 工具循环 / 降级
 │   ├── ipc-protocol.md          # Agent ⇄ GUI 协议 (线上格式唯一真源)
 │   ├── gui.md                   # GUI 构建与使用

@@ -211,10 +211,14 @@ class TestNoGuiConfigLeftovers(unittest.TestCase):
 #:   "一次性日程触发后把它从 config.yaml 里删掉"。写入者每多一处，都该是一次明确的决定。
 WRITE_PRIMITIVES = r"(os\.replace|mkstemp|\.write_text\(|write_text_atomic\()"
 
-#: 允许出现写入原语的文件（**只有**这两个）。
+#: 允许出现写入原语的文件（**只有**这三个）。
 ALLOWED_WRITERS = {
     "agent/config.py",               # write_text_atomic: 全仓唯一的"原子写文本"实现
     "agent/core/schedule_config.py", # 唯一被允许的调用方: 删掉已触发的一次性日程
+    # T7-2 新增的第三个写入者: 壁纸**标签数据**（config/wall_data.jsonl）。
+    # ⚠ 它写的不是配置真源，是**机器派生数据**（SigLIP 打出来的标签 + 向量）——
+    #   真源仍然只有 config.yaml 一份。写入者只有 `assistant tag --apply` 这条路径。
+    "agent/vision/wall_data.py",
 }
 
 
