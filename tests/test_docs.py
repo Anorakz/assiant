@@ -73,6 +73,9 @@ STALE_CLAIMS = [
      "方向只有 config.yaml → llm.env 一个"),
     (r"--today\b|--tomorrow\b",
      "R1 起 CLI 的 schedule 只有 --hours 窗口, 没有'整天'开关了 (--today/--tomorrow 已删)"),
+    (r"(换壁纸[^\n]{0,20}(还没接|未接)|next_wallpaper`?\s*/\s*`?next_bilibili[^\n]{0,24}(还没接|Phase 7))",
+     "T3 起换壁纸真的有下游了: 命令与 LLM 工具都走 Runtime.next_wallpaper() —— "
+     "只有 next_bilibili 还是'还没接入'"),
 ]
 
 

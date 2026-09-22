@@ -29,12 +29,14 @@ agent/
 │   ├── main.py                  # 进程入口: 装配全部组件 + asyncio 主循环
 │   ├── config.py                # YAML 配置加载/保存/点号路径读取
 │   ├── cli.py                   # 板端控制 CLI (assistant): status/chat/mode/watch/schedule/doctor/cleanup
-│   ├── core/                    # 状态层、工具路由、调度层
+│   ├── core/                    # 状态层、工具路由、调度层、壁纸游标
 │   │   ├── state_machine.py     # SLEEP ⇄ IDLE ⇄ STUDY/GAME 状态机
 │   │   ├── tool_router.py       # 工具注册 / 权限控制 / 执行调度
-│   │   └── scheduler.py         # 日程检查 + 定时触发 + 终端命令监听
+│   │   ├── scheduler.py         # 日程检查 + 定时触发 + 终端命令监听
+│   │   └── wallpaper.py         # 壁纸目录 + "下一张"的游标 (T3)
+│   ├── tools/                   # 具体工具 (Phase 7): back_to_desktop / next_wallpaper
 │   ├── llm/                     # LLM 三模式 + 规则兜底
-│   │   ├── provider.py          # edge / cloud / disabled 分发
+│   │   ├── provider.py          # edge / cloud / disabled 分发 (edge 连本机 llama-server)
 │   │   └── rule_engine.py       # 无 LLM 时的正则规则兜底
 │   ├── ipc/                     # Agent ⇄ GUI 通信
 │   │   ├── protocol.py          # IPC 协议: topic/command 常量 + 编解码
@@ -52,7 +54,7 @@ agent/
 │       └── sunshine_client.py   # Sunshine 串流主机 API
 ├── gui/                         # Qt5 C++ GUI (在板端编译: src/ tests/ tools/)
 ├── config/                      # 配置模板 (真实配置不入 git)
-│   ├── config.example.yaml      # 唯一真源模板: llm.* / gui.* / sunshine.* / ipc.*
+│   ├── config.example.yaml      # 唯一真源模板: llm.* / wallpaper.* / gui.* / sunshine.* / ipc.*
 │   ├── user_profile.example.yaml# 用户画像
 ├── scripts/                     # 构建 / 部署 / 测试 / 配对工具
 │   ├── build.ps1                # aarch64 交叉编译
@@ -60,6 +62,7 @@ agent/
 │   ├── test-python.ps1          # 宿主机 Python 单测 (unittest)
 │   ├── deploy.ps1               # 打包并推到板端
 │   ├── setup-sysroot-deps.ps1   # 给 sysroot 补 python3.8-dev / ffmpeg-dev
+│   ├── make-wallpaper-samples.py# 造几张不同比例的纯色壁纸样张 (T3 验收用)
 │   └── pair_sunshine.py 等      # Sunshine SRSAES 配对 (见 docs/)
 ├── tests/                       # 宿主机单测
 │   ├── CMakeLists.txt
@@ -76,6 +79,10 @@ agent/
 │   ├── test_io.py               # image_reader / input_sender
 │   ├── test_docs.py             # 文档守卫: 链接有效 + 过时说法黑名单
 │   ├── test_config_source_guard.py  # 配置真源守卫: agent/ 只认 config/config.yaml
+│   ├── test_schedule_config.py  # 文本级删掉已触发的一次性日程
+│   ├── test_cli.py              # CLI 七条命令 / 窗口与尾巴 / cleanup
+│   ├── test_tools.py            # 工具层: 注册 / 状态权限 / 参数校验 / 缺依赖跳过 (T1)
+│   ├── test_wallpaper.py        # 壁纸目录游标 / next_wallpaper 工具与命令 (T3)
 │   ├── mocks/                   # mock_agent_native: native 替身
 │   ├── host/                    # 需要 numpy 的绑定层测试 (按需手动跑)
 │   └── board/                   # 板端真机验收脚本

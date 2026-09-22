@@ -37,6 +37,7 @@ _log = logging.getLogger(__name__)
 #: 要装的工具模块（相对本包）。加工具时在这里加一行。
 TOOL_MODULES = (
     "back_to_desktop",
+    "wallpaper",
 )
 
 

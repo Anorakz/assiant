@@ -761,7 +761,8 @@ Phase 7 — 工具层
       ↓ 往后放（你定的）：见本节末尾"下一个任务列表（草案）"
 □ tools/bilibili.py：搜索、order=play 排序、顺序播放、反馈切换
       ↓ 同上
-□ tools/wallpaper.py：按 LLM 编排序列切换（**T3**：先做切换 + IPC，图片本身你后面再放）
+□ tools/wallpaper.py：按 LLM 编排序列切换（**T3 已完成**：目录游标 + IPC 命令 + LLM 工具 +
+     板端截图验收；"按内容挑图"要等**标签化**，见下面那条）
 ☑ 每个工具的单元测试（mock 外部依赖）—— back_to_desktop 已覆盖
 ☑ tests/test_tools.py：工具注册、状态权限、参数校验（17 项）
 ☑ 工具在正确状态下才允许执行 / 权限控制生效（如回到桌面仅 STUDY）
@@ -849,6 +850,82 @@ T2 记录（已完成，等验收）：edge 接真模型 + 工具循环共享
 □ tools/bilibili.py：搜索、order=play 排序、顺序播放、反馈切换
 （这两项是已批准的任务列表里**你主动往后放**的：先把工具层的骨架、edge 真后端、壁纸工具
  跑通，再上这两个"要联网 + 要外部服务"的工具。）
+
+T3 记录（已完成，等验收）：壁纸工具 + 接上 next_wallpaper
+☑ 先看清事实：**GUI 那边 T8 早就做完了**（`LocalClient::wallpaperReceived` →
+     `ViewState` → `MainWindow::setWallpaperFromPath()`，等比缩放 + 居中裁切
+     `core::centeredCropRect` + 200ms 交叉淡入 + 读不到给兜底底色与橙字提示，主区右下角
+     本来就有「下一张」按钮，`--next-wallpaper-demo` 也在）。缺的**只有 Agent 这边**:
+     没人推 `wallpaper`，`next_wallpaper` 还挂在"还没接入"那张表上。
+☑ `agent/core/wallpaper.py`（新）：`WallpaperDeck` = 目录 + 游标。**不碰 IPC、不解码图片**。
+     · 认 .jpg/.jpeg/.png/.webp/.bmp（不含 .gif）, 按**文件名**排序（编号 01_/02_ 就是给排序用的）
+     · **每次调用重新列目录** —— 你可以随时往里丢新图, 不用重启 Agent
+     · 游标记的是**当前那张的路径**而不是下标: 新图插在前面也不会让"下一张"跳回去;
+       当前那张被删了就从第一张重新开始
+     · step=0 = 重推当前这张, 负数是往前翻, 越界**回绕**; 目录不存在/没图片 → `WallpaperError`,
+       消息是**给人看的**（会显示到界面上）
+☑ `agent/tools/wallpaper.py`（新）：LLM 那个工具（`next_wallpaper`, 允许 IDLE/STUDY）。
+     它**只把入参转给** `Runtime.next_wallpaper()` —— 不自己挑图、不自己推 IPC。
+     ⚠ 依赖的是**运行时入口**而不是壁纸目录: 目录不存在属于运行期问题, 启动时目录还没建好
+     不该让这个工具消失（`build()` 只检查 services）。
+     `DESCRIPTION` 写清三件事: 只改显示不动文件 / 是翻页不能指定某张 / 推完没有回执。
+☑ 两条入口**共用一份实现**（这是 T3 的结构决定）：
+     GUI 的 `next_wallpaper` 命令（`agent/ipc/__init__.py::_handle_next_wallpaper`）与
+     LLM 的工具，都调 `agent/main.py::Runtime.next_wallpaper(step)`；真正的语义只在
+     `core/wallpaper.py`。成功时**不往对话区写话**（点一次按钮多一条气泡太吵, 界面反馈就是
+     壁纸变了）; 失败才推一条 `llm` 说明（目录不存在/没有图片/模块没接进来）。
+     `UNWIRED_COMMAND_NOTES` 里 `next_wallpaper` 那条**撤掉**了, 只留 `next_bilibili`。
+☑ push 只让 IPC 层认识: `Runtime` 新增 `on_wallpaper(path, index)` 钩子（与 `on_reply`
+     同款"有就接"）, `build_ipc` 把它接到 `wallpaper{path,index}` —— Runtime/工具都不认识
+     线格式字段。`_make_dispatcher` 本来就是**同步且线程安全**的（`run_coroutine_threadsafe`）,
+     所以工具 handler 可以是同步的（ToolRouter 会把同步 handler 丢线程池）。
+☑ 配置: 新增 `wallpaper.dir`（默认 `/home/kickpi/wallpapers`）—— `config.example.yaml` 写了
+     一节说明; **板端 live config 也补上了这一段**（值就是默认值, 行为不变, 只是写明白）。
+     指纹 `598a9d70…` → `34482331…`; `llm.env` 仍没动。
+☑ GUI 侧一处小改（T3 收尾）: 壁纸一到, 主区那两行开发占位文字（"T9：游戏模式 = 真视频…"）
+     **收起来**（`MainPage::setMainHint("")` = 藏起来; 之前它会压在壁纸上）。
+☑ 素材: `scripts/make-wallpaper-samples.py`（新, 只用标准库 zlib+struct, 不依赖 Pillow/ImageMagick）
+     造 8 张**纯色**样张, 覆盖 16:10 / 10:16 / 16:9 / 9:16 / 21:9 / 1:2 / 1:1, 板端现场生成到
+     `/home/kickpi/wallpapers`（仓库外面, 所以不入库）。
+     ⚠ 每张都加了一圈 3px 白边 + 左上角小方块: **纯色块看不出裁切与变形**, 边框才能看出
+       "有没有被拉变形 / 有没有居中裁掉两边"。第 8 张是**正中一个白圆** —— 专治"有没有拉伸":
+       等比填满时还是正圆, 被拉伸就成明显椭圆。
+☑ 板端验收（真 Agent + 真 GUI + 真面板截图）:
+     · 启动日志: `ToolRouter 就绪 (2 个工具)` + `壁纸目录 = /home/kickpi/wallpapers (8 张)`
+     · 用**真 IPC 客户端**发 `next_wallpaper`: 依次收到
+       `wallpaper{"01_landscape_1280x800.png", 0}` … `{"08_circle_1280x1600.png", 7}`
+       （7 次连点正好走完一圈, 顺序与文件名一致）
+     · `scrot` 截图逐张核对: 主区颜色随图变（蓝 → 深灰 → 深绿）, **占位文字消失**;
+       1280x1600 的竖图在 1280x800 屏上**圆还是正圆**（等比填满 + 居中裁切, 不是拉伸）
+     · **失败路径**: 把壁纸目录改名再点「下一张」→ 界面聊天区出现
+       「换壁纸没成功：壁纸目录不存在: /home/kickpi/wallpapers（先建目录, 或者改配置里的
+       wallpaper.dir）」, 原壁纸留在屏上（不崩、不白屏）; 目录改回来后恢复正常
+     · **LLM 入口**: `assistant chat "调用 next_wallpaper 工具，参数 step=1"` →
+       `工具 next_wallpaper({'step': 1}) -> ok` + `wallpaper: …01_landscape… (index=0/8)`,
+       模型答复里引用了**真实路径**
+     · ⚠ 如实记一条: 第一次用"帮我换一张壁纸"这种**含糊**的问法时, 0.6B **只说要换、没真调工具**
+       （日志里没有工具调用）。明确让它调工具就调对了 —— 这是小模型的可靠性问题, 不是接线问题
+       （接线由单测与上面那条钉住）。
+☑ 测试: `tests/test_wallpaper.py`（新, 38 项: 列目录/游标/回绕/路径游标/工具转调/状态权限/
+     参数校验/IPC 命令成功与失败/运行时入口/启动装配）。更新 `tests/test_ipc_local_server.py`
+     里两处把 `next_wallpaper` 当"未接线命令"的用例（改用 `next_bilibili`）。
+☑ 文档: `docs/ipc-protocol.md`（§3 加"变化时推、连上不补"的说明; §4 把 `next_wallpaper`
+     从"还没接"改成"有下游了"）; `docs/gui-agent-integration.md`（命令表 + 那两段"还没接入"）;
+     `docs/gui.md` 主页能力; `docs/config-sources.md`（真源图里加 `wallpaper:` 一节）;
+     `docs/architecture.md`（§4.1 加"工具不是唯一调用方"、文件树加 `core/wallpaper.py`）;
+     `Readme.md`（目录树 + `test_tools.py`/`test_wallpaper.py`/新脚本）。
+     新守卫: `tests/test_docs.py` 的 STALE_CLAIMS 加一条
+     `(换壁纸…还没接 | next_wallpaper / next_bilibili 的下游在 Phase 7)` —— 防这两句回来
+     （单独验过: 旧句命中、新句与新写的 `next_bilibili` 说明都放过）。
+☑ 两个只在**板端**才会红的坑（都记下来）:
+     ① `tests/test_ipc_local_server.py` 里"未接线命令走真 socket"那条用的是 `next_wallpaper`
+        —— 它一接线就红, 但**PC 上 AF_UNIX 不可用会被 skip**, 所以只有板端套件能抓住。
+     ② `Runtime.__init__` 要建 `asyncio.Event()`, 而 **Python 3.8（板端）不允许在没有运行中的
+        事件循环时建它** —— 我在 `TestRuntimeWiring` 里写成同步用例, PC（3.14）全绿、板端全红。
+        改成 `IsolatedAsyncioTestCase` 就对了。
+     教训沿用 T2 那条: 板端套件不是"再跑一遍 PC 套件", 它是**唯一**能抓这类差异的守门人。
+☑ 四端: PC python `python tests OK`; PC native ctest 172/172; 板端 python **21 个文件 OK**;
+     板端 GUI ctest **19/19**（GUI 改动重建后再跑）。`assistant doctor` 6 项全 OK。
 
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查

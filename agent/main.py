@@ -65,6 +65,7 @@ from agent.io import (
     InputSender,
 )
 from agent.llm import DEFAULT_MODE, LLMProvider, RuleEngine
+from agent.core.wallpaper import DEFAULT_WALLPAPER_DIR, WallpaperDeck, WallpaperError
 
 __all__ = ["Runtime", "run", "main", "setup_logging", "DEFAULT_LOG_PATH"]
 
@@ -262,6 +263,14 @@ class Runtime:
         #: 默认 None —— 没有 IPC 时行为与以前完全一样。
         #: Phase 6 D4: 之前 handle_event() 的回复被主循环直接丢掉, 推不出去。
         self.on_reply: Optional[Callable[[str], Any]] = None
+
+        #: 壁纸钩子: 换了一张壁纸就调一次 (IPC 层用它推 wallpaper{path,index})。
+        #: 与 on_reply 同款"有就接" —— 没有 IPC 时换壁纸照样能算, 只是推不出去。
+        #: T3: topic 名只由 agent/ipc/ 知道, 这里不认识任何线格式字段。
+        self.on_wallpaper: Optional[Callable[[str, int], Any]] = None
+
+        #: 壁纸目录 + 游标 (T3 起)。在 _start_state_and_tools() 里按配置建。
+        self.wallpaper: Optional[WallpaperDeck] = None
 
         self._components: List[_Component] = []
         self._terminal_task: Optional[asyncio.Task] = None
@@ -500,6 +509,10 @@ class Runtime:
         await self._guarded(_Component("state_machine", _start_state))
 
         async def _start_tools() -> None:
+            # 壁纸目录 + 游标（T3）。它不是"需要启动/停止的组件"，就是一个纯对象，
+            # 所以不占一个启动步骤；目录不存在也不在这里报错（真换的时候才报给用户）。
+            self.wallpaper = WallpaperDeck(self._cfg("wallpaper", "dir",
+                                                    default=DEFAULT_WALLPAPER_DIR))
             self.tools = ToolRouter(
                 state_provider=self.state,
                 # 工具要用的依赖：agent/tools/ 从 router.services 取（缺了就让那个工具
@@ -510,12 +523,51 @@ class Runtime:
                     "image_reader": self.image_reader,
                     "bus": self.bus,
                     "config": self.config,
+                    # 壁纸: 工具与 GUI 命令**共用**这一个入口（见 next_wallpaper()）
+                    "next_wallpaper": self.next_wallpaper,
                 },
             )
             registered = self._register_tools(self.tools)
             self.log.info("ToolRouter 就绪 (%d 个工具)", registered)
+            self.log.info("壁纸目录 = %s (%d 张)", self.wallpaper.directory,
+                          self.wallpaper.count())
 
         await self._guarded(_Component("tool_router", _start_tools))
+
+    # ------------------------------------------------------------ 壁纸 ---
+    def next_wallpaper(self, step: int = 1) -> Dict[str, Any]:
+        """换一张壁纸并把结果推给 GUI（T3 的**唯一**入口）。
+
+        两条路都走这里: GUI 的 `next_wallpaper` 命令、LLM 的 `next_wallpaper` 工具。
+
+        @return {"ok", "path", "index", "total", "pushed", "error"}
+                · ok=False 时 error 是**给人看的**一句话（会经 llm 推送显示到界面上）
+                · pushed=True 只表示"已经交给 IPC 去推了", 不代表 GUI 收到了
+        @note 目录不存在/没图片属于运行期问题: 这里报错, 不让工具在启动时消失。
+        @note 这个方法是**同步**的: 推送入口（IPC 的 dispatcher）本身就是同步且线程安全的,
+              而工具 handler 可能在线程池里跑（ToolRouter 对同步 handler 就是这么做的）。
+        """
+        if self.wallpaper is None:
+            return {"ok": False, "error": "壁纸还没初始化（Agent 的 tools 步骤没起来？）"}
+
+        try:
+            index, path, total = self.wallpaper.step(step)
+        except WallpaperError as exc:
+            self.log.warning("wallpaper: 换不了: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+        pushed = False
+        if self.on_wallpaper is not None:
+            try:
+                self.on_wallpaper(path, index)
+                pushed = True
+            except Exception as exc:        # noqa: BLE001 - 推送失败不该让"换壁纸"失败
+                self.log.warning("wallpaper: 推送失败 (已忽略): %r", exc)
+        else:
+            self.log.info("wallpaper: 没有 IPC 推送入口（没接 GUI），只更新了游标")
+
+        self.log.info("wallpaper: %s (index=%d/%d, pushed=%s)", path, index, total, pushed)
+        return {"ok": True, "path": path, "index": index, "total": total, "pushed": pushed}
 
     def _register_tools(self, router: ToolRouter) -> int:
         """注册工具。

@@ -15,6 +15,7 @@ GUI 读它的 `gui:` 段、读写它的 `llm:` 段、**只读**它的 `scheduler
                     │  config/config.yaml       │   ← 唯一真源（板端本地，不入库）
                     │    llm:       推理位置与参数 │
                     │    gui:       界面参数      │
+                    │    wallpaper: 壁纸目录      │
                     │    scheduler: 日程（谁读都行 │
                     │               写只允许删已触发的 oneoff）│
                     │    sunshine / ipc / …      │

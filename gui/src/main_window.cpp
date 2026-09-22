@@ -462,6 +462,11 @@ void MainWindow::setWallpaperFromPath(const QString& path, int index)
                              .arg(pixmap.width())
                              .arg(pixmap.height())
                              .arg(index);
+    // T3：壁纸画上去了，主区那两行开发占位文字就收起来（否则压在图上）。
+    //     传空串 = 藏起来，见 MainPage::setMainHint 的注释。
+    if (mainPage_ != nullptr) {
+        mainPage_->setMainHint(QString());
+    }
     if (prevWallpaper_.isNull()) {
         wallpaperFade_ = 1.0;
     } else {

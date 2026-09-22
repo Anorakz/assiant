@@ -624,15 +624,29 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
             None, runtime=None, push=lambda topic, data: pushed.append((topic, data))
         )
 
-        await handler(COMMAND_NEXT_WALLPAPER, {})
+        # ⚠ T3 起 next_wallpaper **接上下游了**, 所以它不再走"未接线"这条路 ——
+        #   它有自己的处理器 (见 tests/test_wallpaper.py 的 TestIpcCommand)。
         await handler(COMMAND_NEXT_BILIBILI, {})
 
-        self.assertEqual(len(pushed), 2, "两条未接线的命令各回一句")
-        for (topic, data), action in zip(pushed, (COMMAND_NEXT_WALLPAPER,
-                                                  COMMAND_NEXT_BILIBILI)):
-            self.assertEqual(topic, TOPIC_LLM, "走 llm 通道 (GUI 显示成助手气泡)")
-            self.assertIn("接入", data["text"], "%s 的说明要讲清没接入" % action)
-            self.assertIn("Phase 7", data["text"])
+        self.assertEqual(len(pushed), 1, "未接线的命令要回一句")
+        topic, data = pushed[0]
+        self.assertEqual(topic, TOPIC_LLM, "走 llm 通道 (GUI 显示成助手气泡)")
+        self.assertIn("接入", data["text"], "说明要讲清没接入")
+        self.assertIn("Phase 7", data["text"])
+
+    async def test_next_wallpaper_without_a_runtime_replies_too(self):
+        # 老 factory 不给 runtime 时: 不是"未接线", 而是"模块没接进来" —— 同样要回话
+        from agent.ipc import NO_WALLPAPER_NOTE, _make_command_handler
+
+        pushed = []
+        handler = _make_command_handler(
+            None, runtime=None, push=lambda topic, data: pushed.append((topic, data))
+        )
+        await handler(COMMAND_NEXT_WALLPAPER, {})
+
+        self.assertEqual(len(pushed), 1)
+        self.assertEqual(pushed[0][0], TOPIC_LLM)
+        self.assertEqual(pushed[0][1]["text"], NO_WALLPAPER_NOTE)
 
     async def test_unknown_action_does_not_spam_llm(self):
         # 不认识的 action 只记 warning: 它是版本不一致的正常现象, 不该往聊天里塞话
@@ -661,7 +675,9 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
             reader, writer = await asyncio.open_unix_connection(server.path)
             await _wait_until(lambda: server.client_count == 1, what="GUI 连上")
 
-            writer.write(encode_command(COMMAND_NEXT_WALLPAPER, {}))
+            # ⚠ T3 起换成了 next_bilibili: next_wallpaper 已经接上下游,
+            #   走的是"真的换一张"那条路（见 tests/test_wallpaper.py）。
+            writer.write(encode_command(COMMAND_NEXT_BILIBILI, {}))
             await writer.drain()
 
             topic, data = decode(await asyncio.wait_for(reader.readline(), 2))

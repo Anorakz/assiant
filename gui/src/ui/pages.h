@@ -77,6 +77,8 @@ public:
     QPushButton* nextWallpaperButton() const { return nextWallpaper_; }
     QLabel* mainHintLabel() const { return mainHint_; }
     VideoPanel* videoPanel() const { return videoPanel_; }
+    /// 主区那行提示。**空字符串 = 藏起来**（T3：壁纸来了以后占位文字要让位）；
+    /// warn=true 用橙色（壁纸读不到这类"要看得出来"的情况）
     void setMainHint(const QString& text, bool warn = false);
     void setGameMode(bool game);
 
@@ -95,6 +97,8 @@ private:
     BottomBar* bottomBar_ = nullptr;
     QPushButton* nextWallpaper_ = nullptr;
     QLabel* mainHint_ = nullptr;
+    /// 当前是不是游戏模式（主区是视频区那页）。T3：给 setMainHint 判断可见性用
+    bool isGameMode_ = false;
     QStackedWidget* mainStack_ = nullptr;
     VideoPanel* videoPanel_ = nullptr;
 };

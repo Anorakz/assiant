@@ -209,10 +209,14 @@ void MainPage::setMainHint(const QString& text, bool warn)
     // 出错（例如壁纸读不到）要看得出来，别用那套"占位灰"
     mainHint_->setStyleSheet(warn ? QStringLiteral("color:#F59E0B; background:transparent;")
                                   : QString());
+    // T3：空字符串 = 藏起来。壁纸一到位，主区那两行开发占位文字就该让位
+    //     （否则它会压在壁纸上）。
+    mainHint_->setVisible(!text.isEmpty() && !isGameMode_);
 }
 
 void MainPage::setGameMode(bool game)
 {
+    isGameMode_ = game;
     // 游戏模式主区换成 T9 的视频区；非游戏模式回到"完全留给壁纸"的那页
     if (mainStack_ != nullptr) {
         mainStack_->setCurrentIndex(game ? 1 : 0);
@@ -221,7 +225,8 @@ void MainPage::setGameMode(bool game)
         nextWallpaper_->setVisible(!game);
     }
     if (mainHint_ != nullptr) {
-        mainHint_->setVisible(!game);
+        // 空提示在切回非游戏模式时也不该冒出来（见 setMainHint）
+        mainHint_->setVisible(!game && !mainHint_->text().isEmpty());
     }
     if (!game && videoPanel_ != nullptr) {
         videoPanel_->pause();      // 离开游戏模式就别在后台继续解码

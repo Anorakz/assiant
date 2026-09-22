@@ -277,6 +277,16 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
         runtime.on_reply = _on_reply
         _log.debug("ipc: 已接上回复推送 (runtime.on_reply -> llm)")
 
+    # · 换壁纸 -> wallpaper{path, index}（T3）
+    # 与 on_reply / scheduler.on_fire 同款"有就接": topic 名只在本层出现,
+    # Runtime 不认识任何线格式字段（它只调 on_wallpaper(path, index)）。
+    if hasattr(runtime, "on_wallpaper"):
+        def _on_wallpaper(path: str, index: int) -> None:
+            dispatch(TOPIC_WALLPAPER, {"path": path, "index": index})
+
+        runtime.on_wallpaper = _on_wallpaper
+        _log.debug("ipc: 已接上壁纸推送 (runtime.on_wallpaper -> wallpaper)")
+
     # · 日程触发 -> schedule{kind:"fired", event}
     # 与上面 on_reply 同款"有就接": runtime 没带调度器 (或它还没起来) 就跳过 ——
     # 老 Runtime 与测试替身不该因为少这一样而接不上其余推送。
@@ -292,10 +302,14 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
 #: 还没接下游的命令 -> 回给用户的那句话 (Phase 6 D7 / 决策 7)。
 #: 下游属 Phase 7; 现在必须**回一句说明**, 否则 GUI 上点了完全没反应, 用起来像坏了。
 #: 文案是给**用户**看的 (GUI 会把 llm 的 text 显示成助手气泡), 所以不要写成日志腔。
+#: ⚠ T3 起 `next_wallpaper` **已经有下游**了, 所以从这张表里搬走了 ——
+#:   它现在走 _handle_next_wallpaper()。
 UNWIRED_COMMAND_NOTES: Dict[str, str] = {
-    COMMAND_NEXT_WALLPAPER: "换壁纸的功能还没接入（Phase 7），这次点击先没有生效。",
     COMMAND_NEXT_BILIBILI: "B 站「下一集」还没接入（Phase 7），这次点击先没有生效。",
 }
+
+#: 收到 next_wallpaper 但 Agent 侧没有壁纸入口时回的那句话 (给用户看)。
+NO_WALLPAPER_NOTE = "现在还不能换壁纸：Agent 的壁纸模块没接进来。"
 
 
 #: schedule.data.kind 的两个取值 (线格式见 docs/ipc-protocol.md §3)。
@@ -345,6 +359,10 @@ def _make_command_handler(bus: Any, runtime: Any = None, push: Any = None):
 
         if action == COMMAND_QUERY_SCHEDULE:
             _handle_query_schedule(runtime, push)
+            return
+
+        if action == COMMAND_NEXT_WALLPAPER:
+            _handle_next_wallpaper(runtime, push)
             return
 
         if action in UNWIRED_COMMAND_NOTES:
@@ -430,6 +448,35 @@ def _handle_query_schedule(runtime: Any, push: Any) -> None:
     _log.debug("ipc: query_schedule -> schedule{kind=%s, %d 条}",
                data["kind"], len(data["fired"]))
     push(TOPIC_SCHEDULE, data)
+
+
+def _handle_next_wallpaper(runtime: Any, push: Any) -> None:
+    """next_wallpaper: 主区右下角「下一张」 -> 换一张壁纸 (T3)。
+
+    动作本身在 ``Runtime.next_wallpaper()`` 里 —— 与 LLM 的 next_wallpaper 工具
+    **同一个入口**, 所以"下一张是哪张"只有一份实现（agent/core/wallpaper.py）。
+
+    · 成功: 只推 ``wallpaper{path,index}``, **不**往对话区写一句话 ——
+      点一次按钮就多一条助手气泡太吵; 界面上的反馈就是壁纸本身变了。
+    · 失败: 推一条 ``llm`` 说明（目录不存在/没有图片/模块没接进来）——
+      点了完全没反应最难查。
+    """
+    advance = getattr(runtime, "next_wallpaper", None) if runtime is not None else None
+    if not callable(advance):
+        _log.warning("ipc: 收到 next_wallpaper 但 runtime 没有壁纸入口, 回一句说明")
+        if push is not None:
+            push(TOPIC_LLM, {"text": NO_WALLPAPER_NOTE})
+        return
+
+    result = advance()
+    if result.get("ok"):
+        _log.debug("ipc: next_wallpaper -> %s", result.get("path"))
+        return
+
+    reason = result.get("error") or "原因不明"
+    _log.warning("ipc: next_wallpaper 失败: %s", reason)
+    if push is not None:
+        push(TOPIC_LLM, {"text": "换壁纸没成功：%s" % reason})
 
 
 async def _handle_chat_input(bus: Any, payload: dict) -> None:

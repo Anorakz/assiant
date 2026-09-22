@@ -132,7 +132,7 @@ agent_native.send_mouse(x, y, action)                # 0..255 参考平面, 越�
 agent/
 ├── main.py            进程入口：装配全部组件、按序起停、asyncio 主循环
 ├── config.py          配置加载（白名单 + 不做 schema 校验）
-├── core/              state_machine.py / tool_router.py / scheduler.py
+├── core/              state_machine.py / tool_router.py / scheduler.py / wallpaper.py
 ├── io/                chat_bus.py / image_reader.py / input_sender.py / _native.py
 ├── llm/               provider.py（edge / cloud / disabled；细节见 docs/llm.md）/ rule_engine.py
 ├── vision/            roi.py / siglip_encoder.py（当前 mock）
@@ -182,6 +182,12 @@ agent/
 
 工具**只在真会调模型的模式下才有意义**：`edge` 与 `cloud` 都走同一个工具循环
 （T2 起 edge 也接进来了，见 §4.2），`disabled` 是规则引擎，**不假装调过工具**。
+
+⚠ **工具不是唯一的调用方**：`next_wallpaper` 这个动作既有 LLM 工具，也有 GUI 的
+`next_wallpaper` 命令（主区「下一张」）。两者**共用** `Runtime.next_wallpaper()`，
+真正的语义在 `core/wallpaper.py`（目录 + 游标）—— 工具只把入参转过去。
+推给 GUI 的 topic 名只有 `agent/ipc/` 知道（`Runtime.on_wallpaper` 钩子），
+`Runtime` 与工具都不认识线格式字段。
 
 ### 4.2 LLM 层：edge / cloud / disabled（T2）
 

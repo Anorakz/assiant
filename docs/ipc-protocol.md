@@ -130,6 +130,11 @@ GUI 收到后按 `topic` 分发。**不认识的 topic 忽略**。
 | `llm` | `text` | string | Agent 给用户看的一段回复文本 |
 | `wallpaper` | `path` | string | 壁纸文件绝对路径 |
 | | `index` | number | 该壁纸在列表里的序号（从 0 开始） |
+
+> ⚠ `wallpaper` 是**变化时推**（T3 起 Agent 真的会推了）：只在"换了一张"的那一刻发，
+> 客户端**连上时不会**补一条当前壁纸（与 `status` 同一条约定）。
+> 所以刚连上的 GUI 在主区看到的是兜底底色，按一下「下一张」就会来一张
+> （或者等下一次切换）。想"连上就补一条"需要新加一条查询命令，目前**没有**。
 | `music` | `title` | string | 当前曲目标题 |
 | | `playing` | bool | 是否正在播放 |
 | `schedule` | `kind` | string | `"state"`（应答 `query_schedule` 的快照）或 `"fired"`（刚刚真的触发了一条） |
@@ -190,7 +195,7 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
 | action | payload 字段 | 类型 | 说明 |
 | --- | --- | --- | --- |
 | `switch_mode` | `value` | string | 目标状态，取值同 `MODES`（`SLEEP`/`IDLE`/`STUDY`/`GAME`）。⚠ **键是 `value`，不是 `mode`**：`mode` 是 §3 里 `status` **推送**的字段，方向不同，别混 |
-| `next_wallpaper` | — | — | 切下一张壁纸；`payload` 必须是 `{}` |
+| `next_wallpaper` | — | — | 切下一张壁纸；`payload` 必须是 `{}`。应答是随后那条 `wallpaper` 推送（§3） |
 | `chat_input` | `text` | string | 用户在 GUI 里敲的一行输入，等价于终端输入 |
 | `next_bilibili` | — | — | 播放下一集 B 站视频；`payload` 必须是 `{}` |
 | `query_schedule` | — | — | 问一句"你最近触发过哪些日程"；`payload` 必须是 `{}`。应答是随后那条 §3 的 `schedule`（`kind:"state"`） |
@@ -200,7 +205,12 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
 - **没有参数的 command 也必须带 `payload`**，写成 `{}`。缺 `payload` 字段会被判为非法消息。
 - 少了 `payload` 里该有的键（例如 `switch_mode` 缺 `value`）**不会**被当成"用默认值"：
   该条命令被丢弃，并记一条**点名字段**的 warning。
-- **`next_wallpaper` / `next_bilibili` 目前还没接下游**（属 Phase 7）：Agent 收到后会回推一条
+- **`next_wallpaper` 从 Phase 7 T3 起有下游了**：Agent 从配置的壁纸目录（`wallpaper.dir`）
+  里按文件名翻下一张，然后推 §3 的 `wallpaper{path,index}`。**成功时不额外回话**（界面的
+  反馈就是壁纸变了）；**失败时回一条 `llm` 说明**（目录不存在 / 没有图片 / 壁纸模块没接进来）。
+  同一个动作 LLM 也能发起：`agent/tools/wallpaper.py` 的工具与这条命令走**同一个入口**
+  （`Runtime.next_wallpaper()`）。
+- **`next_bilibili` 还没接下游**（属 Phase 7）：Agent 收到后会回推一条
   `llm{"text": "…还没接入（Phase 7）…"}` —— 让"点了"有反馈，而不是毫无动静
   （文案见 `agent/ipc/__init__.py` 的 `UNWIRED_COMMAND_NOTES`）。
 - `switch_mode` 的合法性由 Agent 侧状态机判定：非法转换（例如 `STUDY → GAME`）
