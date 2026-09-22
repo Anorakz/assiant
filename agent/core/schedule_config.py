@@ -40,7 +40,7 @@ __all__ = [
     "strip_scalar",
     "find_oneoff_block",
     "remove_oneoff_entry",
-    "remove_fired_oneoff",
+    "remove_oneoff_from_file",
 ]
 
 #: 备份后缀：与 GUI 的 ConfigStore 同一约定（`config/config.yaml.bak`；已被 .gitignore 覆盖）
@@ -233,12 +233,17 @@ def remove_oneoff_entry(text: str, matches: Callable[[Dict[str, str]], bool]
     return text, "配置里没有匹配的那条（可能已经删过了，或者被人改过）"
 
 
-def remove_fired_oneoff(config_file: Any, matches: Callable[[Dict[str, str]], bool]) -> bool:
-    """把匹配的那条一次性日程从**文件**里删掉（留 `.bak` + 原子写）。
+def remove_oneoff_from_file(config_file: Any, matches: Callable[[Dict[str, str]], bool]) -> bool:
+    """把匹配的那条 oneoff 从**文件**里删掉（留 `.bak` + 原子写）。
 
+    @param config_file 配置文件路径
+    @param matches     `matches(fields) -> bool`；见 `Scheduler.oneoff_matcher()`
     @return True = 删了并落盘；False = 没删（没匹配上 / 写法不支持）
-    @raise OSError 读/写盘失败 —— 原样抛出，调用方（Scheduler）记 WARNING 就好
+    @raise OSError 读/写盘失败 —— 原样抛出，调用方（Scheduler / CLI）自己决定怎么报
 
+    @note 两个调用方：Agent 触发后删自己刚触发的那条（`remove_fired_oneoff` 开关），
+          以及 CLI 的 `assistant cleanup --apply`（清理**已经过去**的一次性日程）。
+          两者走的是**同一套**文本级删除，只有"谁的 predicate"不同。
     @note 写前**重新读一遍**，匹配就在这份刚读到的文本上做 —— 所以"配置在半路被人或 GUI
           改过"不会误删（对不上就不删）。
     @note 读与 `os.replace` 之间还剩毫秒级窗口（另一个写入者可能正好插进来）。那点风险用

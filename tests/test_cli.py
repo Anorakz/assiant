@@ -55,6 +55,26 @@ def _run_cli(argv):
     return code, out.getvalue(), err.getvalue()
 
 
+def _run_cli_with_config(argv, config_path):
+    """跑一次 CLI，并把 `AGENT_CONFIG_DIR` **显式**指向 `config_path` 的父目录。
+
+    ⚠ `load_plane_config()` 用的是 `os.environ.setdefault("AGENT_CONFIG_DIR", …)` ——
+       **一个进程里只认第一次**。测试里不显式覆盖的话，后一个用例会读到前一个的目录
+      （临时目录被删掉后还会变成"配置不存在"），那种假绿/假红最难查。
+    """
+    old = os.environ.get("AGENT_CONFIG_DIR")
+    os.environ["AGENT_CONFIG_DIR"] = str(Path(config_path).resolve().parent)
+    config.clear_cache()
+    try:
+        return _run_cli(argv)
+    finally:
+        if old is None:
+            os.environ.pop("AGENT_CONFIG_DIR", None)
+        else:
+            os.environ["AGENT_CONFIG_DIR"] = old
+        config.clear_cache()
+
+
 # ===========================================================================
 #  纯逻辑（哪都能跑）
 # ===========================================================================
@@ -724,6 +744,127 @@ class TestScheduleCommand(unittest.TestCase):
         self.assertEqual(code, cli.EXIT_OK)
         self.assertIn("连不上 Agent", err)
         self.assertNotIn("没回", err)
+
+
+class TestCleanupCommand(unittest.TestCase):
+    """`assistant cleanup`：清理**已经过去**的一次性日程（默认只看，--apply 才删）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cli-clean-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.path = Path(self.tmp) / "config.yaml"
+        self.path.write_text(
+            "scheduler:\n"
+            "  recurring:\n"
+            "    - title: 每天都有的\n"
+            "      start: \"07:00\"\n"
+            "  oneoff:\n"
+            "    - title: 早就过去了\n"
+            "      date: 2026-09-20\n"
+            "      start: \"14:00\"\n"
+            "    - title: 今天已经过了的\n"
+            "      date: %s\n"
+            "      start: \"00:01\"\n"
+            "    - title: 将来的一次性\n"
+            "      date: 2099-12-01\n"
+            "      start: \"09:00\"\n" % date.today().isoformat(),
+            encoding="utf-8")
+        self.original = self.path.read_text(encoding="utf-8")
+
+    def _run_with(self, path, extra=()):
+        return _run_cli_with_config(["cleanup", "--config", str(path)] + list(extra), path)
+
+    def _run(self, extra=()):
+        return self._run_with(self.path, extra)
+
+    def test_dry_run_lists_but_does_not_write(self):
+        code, out, err = self._run()
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("早就过去了", out)
+        self.assertIn("2026-09-20", out)
+        self.assertIn("--apply", out)
+        self.assertNotIn("已删除", out)
+        self.assertEqual(self.path.read_text(encoding="utf-8"), self.original,
+                         "dry-run 不许动文件")
+
+    def test_today_and_future_and_recurring_are_not_touched(self):
+        now = datetime.now()
+        if now.hour == 0 and now.minute < 2:
+            self.skipTest("刚过午夜，造不出'今天已经过了 start'这条")
+        code, out, err = self._run()
+        self.assertEqual(code, cli.EXIT_OK)
+        listing = out.split("共")[0]                      # "要清理"那一段
+        self.assertIn("早就过去了", listing)
+        self.assertNotIn("今天已经过了的", listing, "今天的不该进清理清单")
+        self.assertIn("今天已经过了 start", out, "要提示一句'今天那条没动'")
+        self.assertIn("没动", out)
+
+    def test_apply_removes_only_the_stale_one(self):
+        code, out, err = self._run(["--apply"])
+        self.assertEqual(code, cli.EXIT_OK)
+        text = self.path.read_text(encoding="utf-8")
+        self.assertNotIn("早就过去了", text)
+        self.assertIn("今天已经过了的", text, "今天的那条要留着")
+        self.assertIn("将来的一次性", text)
+        self.assertIn("每天都有的", text, "recurring 一条都不能动")
+        self.assertTrue(Path(str(self.path) + ".bak").is_file(), "要留 .bak")
+        self.assertEqual(Path(str(self.path) + ".bak").read_text(encoding="utf-8"),
+                         self.original)
+
+    def test_apply_twice_is_harmless(self):
+        self._run(["--apply"])
+        after_first = self.path.read_text(encoding="utf-8")
+        code, out, err = self._run(["--apply"])
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("没有需要清理", out)
+        self.assertEqual(self.path.read_text(encoding="utf-8"), after_first)
+
+    def test_nothing_to_clean(self):
+        self.path.write_text("scheduler:\n  recurring:\n    - title: 每天\n      start: \"07:00\"\n",
+                             encoding="utf-8")
+        code, out, err = self._run(["--apply"])
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("没有需要清理", out)
+
+    def test_template_is_never_written(self):
+        """`config.example.yaml` 是模板，`--apply` 不许碰它。
+
+        ⚠ 要放在**独立空目录**里：`setUp` 那个目录已经有 `config.yaml` 了，
+          加载器按名字找会先找到它，这条用例就测不到模板那条分支。
+        """
+        other = Path(tempfile.mkdtemp(prefix="cli-clean-ex-"))
+        self.addCleanup(shutil.rmtree, str(other), True)
+        example = other / "config.example.yaml"
+        example.write_text(self.original, encoding="utf-8")
+        code, out, err = self._run_with(example, ["--apply"])
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("模板", err)
+        self.assertEqual(example.read_text(encoding="utf-8"), self.original)
+
+    def test_unreadable_config(self):
+        other = Path(tempfile.mkdtemp(prefix="cli-clean-bad-"))
+        self.addCleanup(shutil.rmtree, str(other), True)
+        bad = other / "nope.yaml"
+        bad.write_text("x: 1\n", encoding="utf-8")
+        code, out, err = self._run_with(bad)
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("读不到配置", err)
+
+    def test_cleanup_rejects_a_timeout_option(self):
+        """cleanup 不连 Agent，所以它不挂 `--timeout`（与 watch 同一条规矩）。"""
+        with self.assertRaises(SystemExit) as ctx:
+            cli.build_parser().parse_args(["cleanup", "--timeout", "3"])
+        self.assertEqual(ctx.exception.code, cli.EXIT_USAGE)
+
+    def test_stale_oneoffs_is_pure(self):
+        from datetime import date as d
+        events = cli.load_events({"scheduler": {
+            "recurring": [{"title": "每天", "start": "07:00"}],
+            "oneoff": [{"title": "过去", "date": "2026-09-20", "start": "14:00"},
+                       {"title": "今天", "date": "2026-09-22", "start": "14:00"},
+                       {"title": "将来", "date": "2026-12-01", "start": "14:00"}]}})
+        stale = cli.stale_oneoffs(events, d(2026, 9, 22))
+        self.assertEqual([e.title for e in stale], ["过去"])
 
 
 class TestConnectHint(unittest.TestCase):

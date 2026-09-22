@@ -84,17 +84,21 @@ GUI 读写 `config/config.yaml` 的两个段：
 日程区**不自己存一份日程**，也不新增 IPC topic：它直接读 `config.yaml` 的
 `scheduler.recurring` / `scheduler.oneoff`（与 Agent 的 `Scheduler._load_events()` 同一处、
 连"某个键在 scheduler 段里找不到就回落到顶层"这条都一致），展开成**今天 / 明天**两段，
-再按**窗口**筛出**接下来 24 小时**（`core::kWindowHours`；`[现在, 现在+24h)`，判据是行的 `start`）。
-读用 `yaml-cpp`（**只读**；写回仍然只有 `ConfigStore` 的文本级替换，因为 yaml-cpp 会重排+丢注释）。
+再按**窗口**筛出**接下来 24 小时**（`core::kWindowHours`；`[现在 - 30 分钟, 现在 + 24h)`，
+起点那 30 分钟是"刚刚过去"的尾巴 —— 与 CLI 同口径，那些行**变暗**显示）。
+判据是行的 `start`。读用 `yaml-cpp`（**只读**；写回仍然只有 `ConfigStore` 的文本级替换，
+因为 yaml-cpp 会重排+丢注释）。
 
 窗口是**独立一层**（`ScheduleModel::applyWindow()` / `loadWindowed()`）：展开层
 （`parse()` / `loadFromConfig()`）一行没动 —— 那层被 parity 夹具盯着，显示规则不混进去。
 副标题写窗口终点（`接下来 24 小时 · 到 明天 18:42 · 3 项 · 下一条 明天 08:30`），
 被截断这件事**只在副标题说明**（第二段标题仍写"明天"）。
 
-> ⚠ GUI **没有"最近 30 分钟"尾巴**（它拿不到 Agent 的触发事实）——所以窗口内的行**不会**有
-> "已过"状态，界面上看不到变暗那一路（渲染与单测都留着，见 `schedule_panel.h` 的说明）。
-> CLI 侧有那条尾巴，为了显示「已触发 / 已过（未触发）」。
+> **尾巴那 30 分钟怎么显示**：里面的行是"已过" → **变暗**（与 S4 那套渲染同一路，不写字）。
+> CLI 那边同样留 30 分钟，只是它还能靠触发事实写出「已触发 HH:MM:SS」——GUI 拿不到事实
+> （不认 `schedule` topic），所以只有颜色这一个信号。
+> ⚠ 窗口起点跨午夜时，前一天的尾巴行 GUI 看不到（展开层只有今天/明天两段）；CLI 能看到
+> （它按需展开任意天）。这是"展开层不动"的代价。
 
 代价说清楚：这等于在 C++ 里**镜像**了一份 Python 的日程语义。
 防漂移靠 `tests/test_schedule_parity.py`（用真的 `agent.core.scheduler` 生成期望）

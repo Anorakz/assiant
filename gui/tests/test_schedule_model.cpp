@@ -410,19 +410,40 @@ private slots:
         QCOMPARE(rowsOn(windowed, 0), 1);
     }
 
-    /// 窗口内的行永远不是"已过"（窗口只往前看）—— 这条把界面上"看不到变暗"钉成事实。
-    void windowedRowsAreNeverPast()
+    /// 尾巴（最近 30 分钟）里的行**留着**且是 `past` —— 界面上变暗；尾巴外的丢掉。
+    void tailRowsAreKeptAndMarkedPast()
     {
         const ScheduleResult expanded = parseIt(QStringLiteral(R"(scheduler:
   recurring:
-    - title: 上午的
-      start: "09:30"
+    - title: 尾巴里的
+      start: "14:40"
+    - title: 尾巴外的
+      start: "14:29"
     - title: 晚上的
       start: "18:00"
 )"));
         const ScheduleResult result = ScheduleModel::applyWindow(expanded, kNow);
-        QCOMPARE(result.days.at(0).rows.at(0).past, false);
-        QCOMPARE(result.days.at(1).rows.at(0).past, false);
+
+        QCOMPARE(rowsOn(result, 0), 2);              // 14:40 在 [14:30, 15:00) 里 -> 留
+        QCOMPARE(titleOn(result, 0, 0), QStringLiteral("尾巴里的"));
+        QCOMPARE(result.days.at(0).rows.at(0).past, true);    // 尾巴里 = 已过 -> 变暗
+        QCOMPARE(titleOn(result, 0, 1), QStringLiteral("晚上的"));
+        QCOMPARE(result.days.at(0).rows.at(1).past, false);
+    }
+
+    /// 尾巴的边界：正好 now-30 分钟算在内，再早一分钟就出去。
+    void tailBoundaryIsInclusiveAtThirtyMinutes()
+    {
+        const ScheduleResult expanded = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 正好三十分钟前
+      start: "14:30"
+    - title: 三十一分钟前
+      start: "14:29"
+)"));
+        const ScheduleResult result = ScheduleModel::applyWindow(expanded, kNow);
+        QCOMPARE(rowsOn(result, 0), 1);
+        QCOMPARE(titleOn(result, 0, 0), QStringLiteral("正好三十分钟前"));
     }
 
     // ---------------------------------------------------------------- 坏数据 ---

@@ -28,7 +28,7 @@ agent/
 │   ├── __init__.py
 │   ├── main.py                  # 进程入口: 装配全部组件 + asyncio 主循环
 │   ├── config.py                # YAML 配置加载/保存/点号路径读取
-│   ├── cli.py                   # 板端控制 CLI (assistant): status/chat/mode/watch/schedule/doctor
+│   ├── cli.py                   # 板端控制 CLI (assistant): status/chat/mode/watch/schedule/doctor/cleanup
 │   ├── core/                    # 状态层、工具路由、调度层
 │   │   ├── state_machine.py     # SLEEP ⇄ IDLE ⇄ STUDY/GAME 状态机
 │   │   ├── tool_router.py       # 工具注册 / 权限控制 / 执行调度
@@ -289,6 +289,7 @@ assistant chat 现在几点      # 发一条给 Agent 并等回复（与 GUI 输
 assistant mode study        # 切模式（大小写不限；非法转换会被状态机拒掉）
 assistant watch             # 盯推送（排障主力；--topics a,b / --count N）
 assistant schedule          # **接下来 24 小时**（--hours 可调）的日程，标出真的触发过的
+assistant cleanup           # 清理**已经过去**的一次性日程（默认只看，--apply 才删）
 assistant doctor            # 体检: 配置 / socket / 派生 llm.env / 日程 / 关键路径
 ```
 

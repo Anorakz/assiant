@@ -229,8 +229,9 @@ gui/src/
 默认 `N = 24`（CLI 的 `--hours`；GUI 是 `core::kWindowHours`）。判据是**行的 `start`** ——
 不是提前量算出的提醒时刻，否则 `14:00` + `remind_before_min=10` 的条目在 13:55 看会消失。
 
-- **CLI 多留 30 分钟尾巴**（`[现在-30min, ...)`）：否则「已触发 / 已过（未触发）」这两层信息
-  在列表里完全看不见（窗口只往前看）。**GUI 没有尾巴** —— 它拿不到 Agent 的触发事实。
+- **两侧都留 30 分钟尾巴**（窗口起点 = `现在 - 30min`）：窗口只往前看的话，"到点了、触发没触发"
+  在列表里完全看不见。CLI 靠触发事实写出「已触发 / 已过（未触发）」；GUI 拿不到事实，只把那些行
+  **变暗**（同一个 `past` 渲染）。
 - **展开层不动**：`ScheduleModel::parse()` / CLI 的 `schedule_rows()` 仍是"今天/明天逐条展开"，
   被 parity 夹具盯着；窗口是**独立一层**（`applyWindow()` / `window_days()`），显示规则不混进去。
 - 一次性日程触发后被 Agent 从配置里删掉（见 §6.1 与 [config-sources.md](config-sources.md) §3）时，

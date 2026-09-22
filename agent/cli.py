@@ -5,7 +5,8 @@ agent/cli.py — 板端控制 CLI（同一个 Agent 的第二条前端）
 
 为什么有它
     GUI 是板端那块屏的前端；CLI 是给 **ssh / 脚本** 用的那一半：看一眼状态、
-    发一条消息、切模式、盯推送、查日程、做体检。板端还放了个 `assistant` 启动器。
+    发一条消息、切模式、盯推送、查日程、做体检、清理过期的一次性日程。
+    板端还放了个 `assistant` 启动器。
 
 走哪条路（这里决定了它能做什么、不能做什么）
     · 只走**IPC 协议**（`docs/ipc-protocol.md` 是线上格式的唯一真源），用现成的
@@ -15,7 +16,10 @@ agent/cli.py — 板端控制 CLI（同一个 Agent 的第二条前端）
     · 日程：**列表**用真的 `agent.core.scheduler` 语义自己算（不需要 Agent 在跑）；
       **"到底触发过哪条"** 只能问运行中的 Agent（协议 `query_schedule` -> `schedule`
       推送，P 系列加的），问不到就只说「已过（按时间）」，并在页脚写明原因。
-    · 触发记录是**只读**的：CLI 不写配置、不改日程（配置永远是唯一真源）。
+    · 默认**只读**：CLI 不改日程、不写配置。**唯一显式例外**是 `cleanup --apply`
+      （清理已经过去的一次性日程）—— 它不会自动发生，而且走的是 Agent 那套
+      文本级删除（`agent/core/schedule_config.py`），不是另写一份。
+      "触发了就自动删"那条在 **Agent 侧**（`scheduler.remove_fired_oneoff`）。
 
 退出码
     0 = 成功 ／ 1 = 环境或连接问题 ／ 2 = 参数错（argparse 的默认行为）
@@ -35,7 +39,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from agent.config import ConfigError, ConfigNotFoundError, config_path, load_config
-from agent.core.scheduler import Scheduler, SchedulerError
+from agent.core import schedule_config
+from agent.core.scheduler import Scheduler, SchedulerError, oneoff_matcher
 from agent.core.state_machine import StateMachine
 from agent.ipc.local_client import IpcClientError, LocalClient
 from agent.ipc.protocol import (
@@ -790,6 +795,94 @@ async def cmd_schedule(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+#  cleanup（清理已经过去的一次性日程）
+# ---------------------------------------------------------------------------
+def stale_oneoffs(events: List[Any], today) -> List[Any]:
+    """**已经过去、不会再触发**的一次性日程（`date < today`）。
+
+    ⚠ **今天的不算**：`late_grace_min`（迟到的容忍度）可能还认它 —— 保守起见留给 Agent
+      的正常路径处理（开关打开时，真触发了就会自动删）。
+    """
+    return [event for event in events if event.on is not None and event.on < today]
+
+
+def today_passed_oneoffs(events: List[Any], now: datetime) -> List[Any]:
+    """今天**已经过了 start** 的一次性日程（只用来提示，不会被清理）。"""
+    now_minute = now.hour * 60 + now.minute
+    return [event for event in events
+            if event.on is not None and event.on == now.date()
+            and now_minute > (event.start[0] * 60 + event.start[1])]
+
+
+async def cmd_cleanup(args: argparse.Namespace) -> int:
+    """清理**已经过去**的一次性日程（它们不会再触发了）。
+
+    默认**只列出**（dry-run，与 `gui_config_sync` 同一套习惯）；`--apply` 才真删 ——
+    文本级删除 + `.bak` + 原子写，走的是 Agent 那套（`agent/core/schedule_config.py`），
+    不是另写一份。
+
+    @note 这是 CLI"默认只读"的**唯一显式例外**：它不会自动发生，是你敲了 `--apply`。
+          自动那条在 Agent 侧：`scheduler.remove_fired_oneoff`（触发了就删）。
+    """
+    config, why = load_plane_config(args.config)
+    if why:
+        print("读不到配置（%s）——日程在 config.yaml 的 scheduler 段。" % why, file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        events = load_events(config)
+    except SchedulerError as exc:
+        print("配置里的日程读不出来：%s\n（Agent 也会因此起不来 —— 先修配置。）" % exc,
+              file=sys.stderr)
+        return EXIT_ERROR
+
+    now = datetime.now()
+    stale = stale_oneoffs(events, now.date())
+    passed_today = today_passed_oneoffs(events, now)
+
+    if not stale:
+        print("没有需要清理的一次性日程（只清**已经过去**的那些）。")
+    else:
+        print("要清理的一次性日程（已经过去、不会再触发）：")
+        for event in stale:
+            print("  %s  %s %02d:%02d"
+                  % (event.title, event.on.isoformat(), event.start[0], event.start[1]))
+        print("共 %d 条；%s" % (len(stale),
+                              "已开始删除" if args.apply
+                              else "加 --apply 才会真删（会留一份 config.yaml.bak）"))
+    if passed_today:
+        print("（今天已经过了 start 的一次性日程有 %d 条，**没动** —— late_grace_min "
+              "可能还认它；Agent 侧开关打开时，真触发了会自动删。）" % len(passed_today))
+
+    if not args.apply or not stale:
+        return EXIT_OK
+
+    target = config_path("config")
+    if target.name.endswith(".example.yaml"):
+        print("不写模板：%s 是 example 模板，不是真源 —— 先 cp 成 config.yaml 再清理。"
+              % target, file=sys.stderr)
+        return EXIT_ERROR
+
+    removed, failed = 0, []
+    for event in stale:
+        try:
+            ok = schedule_config.remove_oneoff_from_file(target, oneoff_matcher(event))
+        except OSError as exc:
+            failed.append((event.title, str(exc)))
+            continue
+        if ok:
+            removed += 1
+            print("已删除 %s  %s %02d:%02d"
+                  % (event.title, event.on.isoformat(), event.start[0], event.start[1]))
+        else:
+            failed.append((event.title, "配置里对不上（可能已经删过了，或者被人改过）"))
+
+    print("共删除 %d 条（原文件留了一份 %s.bak）。" % (removed, target.name))
+    for title, reason in failed:
+        print("  没删成 %s：%s" % (title, reason), file=sys.stderr)
+    return EXIT_ERROR if failed else EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 #  doctor
 # ---------------------------------------------------------------------------
 OK = "OK"
@@ -977,6 +1070,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor = sub.add_parser("doctor", help="体检：配置 / socket / 派生 / 日程 / 关键路径",
                               parents=[_common_options(suppress_defaults=True)])
     p_doctor.set_defaults(func=cmd_doctor)
+
+    p_cleanup = sub.add_parser(
+        "cleanup",
+        help="清理已经过去的一次性日程（默认只看；--apply 才真删）",
+        parents=[_common_options(suppress_defaults=True, with_timeout=False)])
+    p_cleanup.add_argument("--apply", action="store_true",
+                           help="真的删（文本级 + 原子写，并在原文件旁留一份 .bak）")
+    p_cleanup.set_defaults(func=cmd_cleanup)
 
     return parser
 

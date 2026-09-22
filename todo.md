@@ -709,6 +709,37 @@ CLI（C 系列：板端控制 CLI `assistant`，C1–C4 已验收；C5 排在 P 
 R 系列到此结束：**日程显示重构**（R1 CLI 窗口 / R2 GUI 同一套）+ **触发后从配置里移除**（R3）
 + **文档统一口径**（R4）+ **四端回归与端到端**（R5）。板上 `remove_fired_oneoff` 已按你的决定打开。
 
+收官后追加两项（用户要求，"直接做"）：
+☑ A GUI 也加 30 分钟尾巴（与 CLI 同口径）：`kTailMinutes = 30`，`applyWindow` 的起点从
+     `[now, …)` 改成 `[now-30min, …)` —— 尾巴里的行**沿用展开层算出的 `past`**，所以界面上就是
+     **变暗**（S4 那套渲染原样复用，没写新代码）。`--dump-schedule` 顺手把已过的行标成
+     `ROW\t[已过] …`（否则"尾巴"在证据里看不见）。
+     ⚠ 如实记一条代价：窗口起点跨午夜时，前一天的尾巴行 GUI **看不到**（展开层只有今天/明天两段）；
+     CLI 能看到（它按需展开任意天）。这条写进了 `docs/gui.md`。
+     测试：`test_schedule_model` 把原来那条"窗口内永远不 past"改成
+     `tailRowsAreKeptAndMarkedPast` + `tailBoundaryIsInclusiveAtThirtyMinutes`（正好 30 分钟算在内）。
+☑ B `assistant cleanup`（**显式**清理已经过去的一次性日程）：默认 **dry-run**（只列，不动文件），
+     `--apply` 才真删 —— 走的是 Agent 那套文本级删除（`agent/core/schedule_config.py`），
+     不是另写一份：原有的 `remove_fired_oneoff()` 因此改名成 **`remove_oneoff_from_file()`**
+     （现在有两个调用方：Agent 触发后自动删、CLI 显式清理）。
+     "匹配这条 oneoff"抽成模块级 `Scheduler.oneoff_matcher(event)`，Agent 与 CLI **共用一份**
+     归一化规则（`parse_clock` / `date.fromisoformat`），避免两层互相 import。
+     规矩：只清 `date < 今天`；**今天的不动**（`late_grace_min` 可能还认它，输出里会提示一句）；
+     recurring 一条不动；**给 `--config` 指模板会直接拒绝**（不写 example）。
+     这是 CLI"默认只读"的**唯一显式例外**，docs/cli.md 与 config-sources.md §3.1 都写明了。
+     测试：`tests/test_cli.py` 新增 `TestCleanupCommand` 9 项（dry-run 不动文件 / 只删过期那条 /
+     今天与将来与 recurring 都不动 / 连删两次无害 / 空清单 / 模板拒写 / 配置读不到 / 拒收 `--timeout` /
+     `stale_oneoffs` 纯函数）。
+     证据（板端临时配置）：GUI `--dump-schedule` → `ROW [已过] 19:05  十分钟前的` +
+     `ROW 21:15  两小时后的`；cleanup dry-run 文件不动、无 `.bak`；`--apply` 只删三天前那条、
+     `.bak` 里 3 条都在；再跑一次说"没有需要清理"；live config 上 dry-run 只读（今天那条不算过期）。
+     四端：PC python `python tests OK`（test_cli 99 项）、板 python 19 文件 OK、板 GUI ctest 19/19。
+     ⚠ 我这次在测试上连踩两个"环境隔离"的坑（都是测试自己的错）：① `load_plane_config` 用的是
+     `os.environ.setdefault(AGENT_CONFIG_DIR, …)` —— **一个进程只认第一次**，前面的用例会把临时目录
+     泄漏给后面的（于是有的用例读到了别人的配置、有的读到已删目录）；加了共用辅助
+     `_run_cli_with_config()` 显式覆盖 + 清缓存 + 还原。② 两个用例的临时目录里已经有 `config.yaml`，
+     加载器当然先找到它，测不到"模板"那条分支 —— 各改用**独立空目录**。
+
 Phase 7 — 工具层
 □ tools/base.py：工具基类（name、schema、execute、权限、allowed_states）
 □ tools/init.py：工具注册入口

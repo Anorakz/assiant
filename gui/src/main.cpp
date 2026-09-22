@@ -481,8 +481,11 @@ int runGuiMode(const Options& opt, int argc, char** argv)
         for (const QString& header : panel->sectionHeaders()) {
             std::printf("SECTION\t%s\n", qPrintable(header));   // "今天 · 3 项"
         }
-        for (const QString& row : panel->rowTexts()) {
-            std::printf("ROW\t%s\n", qPrintable(row));
+        const QStringList rows = panel->rowTexts();
+        for (int i = 0; i < rows.size(); ++i) {
+            // 尾巴里的行（已过）标一下：不然"最近 30 分钟"那条在证据里看不出来
+            std::printf("ROW\t%s%s\n", panel->isRowPast(i) ? "[已过] " : "",
+                        qPrintable(rows.at(i)));
         }
         if (panel->hiddenCount() > 0) {
             std::printf("HIDDEN\t%d\n", panel->hiddenCount());

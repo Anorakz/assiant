@@ -500,12 +500,15 @@ ScheduleResult ScheduleModel::applyWindow(const ScheduleResult& expanded, const 
         return result;                    // 整份读不出来: days 本来就是空的, 别再动它
     }
 
+    // 起点还要往前挪 kTailMinutes：那一段"刚刚过去的"留着（界面上是变暗的行）
+    const QDateTime windowFrom = from.addSecs(-static_cast<qint64>(kTailMinutes) * 60);
+
     for (ScheduleDay& day : result.days) {
         QVector<ScheduleRow> keep;
         for (const ScheduleRow& row : day.rows) {
             const QDateTime moment(day.date, QTime::fromString(row.time, QStringLiteral("HH:mm")));
-            // 窗口只往前看（GUI 没有尾巴）：`now` 那一分钟起, 到 now + hours 之前
-            if (moment.isValid() && moment >= from && moment < result.windowEnd) {
+            // 窗口 = [now - 尾巴, now + hours)；尾巴里的行 `past` 用展开层算出来的值（变暗）
+            if (moment.isValid() && moment >= windowFrom && moment < result.windowEnd) {
                 keep.append(row);
             }
         }

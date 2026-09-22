@@ -33,13 +33,13 @@
 //    · 展开层（`parse` / `loadFromConfig`）：固定两段今天、明天；每段按 (start, title) 升序。
 //      **这一层不带窗口** —— 它是与 agent/core/scheduler.py 逐条对齐的那一层，
 //      夹具（tests/data/schedule_parity）与 C++ 的 parity 用例都盯着它，别往里塞显示规则。
-//    · 窗口层（`applyWindow` / `loadWindowed`，R 系列）：只留 `[now, now + hours)` 里的行。
-//      GUI **没有尾巴**（它拿不到 Agent 的触发事实，见 docs/config-sources.md）——
-//      所以已经过去的行在界面上直接消失；CLI 那边多留 30 分钟是为了显示"刚触发"。
+//    · 窗口层（`applyWindow` / `loadWindowed`，R 系列）：只留 `[now - kTailMinutes, now + hours)`
+//      里的行 —— 也就是"接下来 24 小时"**外加最近 30 分钟刚过去的**那一小段。
+//      尾巴里的行 `past == true`（界面上变暗），与 S4 那套渲染是同一路。
+//      ⚠ 窗口起点跨午夜时，前一天的尾巴行 GUI 看不到（展开层只有今天/明天两段）——
+//        CLI 那边能看到（它按需展开任意天）。这是"展开层不动"的代价，已记进 docs/gui.md。
 //    · `past`（今天段专用）= 现在时刻已过 start —— 纯时间比较，
 //      **不代表** Agent 一定触发过（Agent 还有 window_min / late_grace_min）。
-//      ⚠ 窗口只往前看，所以经过 `applyWindow` 之后 `past` 恒为 false（保留计算是为了
-//        "将来给 GUI 也加尾巴"那天不用重写；界面上现在看不到变暗）。
 //    · 不展示 remind_before_min 推导出的提醒时刻（那是 Agent 的触发语义）
 // ============================================================================
 #pragma once
@@ -54,6 +54,12 @@ namespace core {
 
 /// 窗口长度（小时）。与 CLI 的 `--hours` 默认值同口径（agent/cli.py 的 WINDOW_HOURS_DEFAULT）。
 constexpr int kWindowHours = 24;
+
+/// "刚过去"的尾巴（分钟）。与 CLI 的 `TAIL_MINUTES` 同口径：
+/// 窗口只往前看，但**刚刚**过去的那一小段留着 —— 否则"到点了、触发没触发"在界面上
+/// 完全看不见。CLI 那边用它显示「已触发/已过（未触发）」；GUI 拿不到触发事实，
+/// 所以尾巴里的行只是**变暗**（`past`），不写字。
+constexpr int kTailMinutes = 30;
 
 /// 日程区里的一行。
 struct ScheduleRow {
@@ -100,7 +106,7 @@ public:
     /// 直接读一段 YAML 文本（单测 / 沙箱用，不碰文件系统）。
     static ScheduleResult parse(const QString& yamlText, const QDateTime& now);
 
-    /// 按窗口裁剪：只留 `[now, now + hours)` 里的行（**GUI 没有尾巴**）。
+    /// 按窗口裁剪：只留 `[now - kTailMinutes, now + kWindowHours)` 里的行。
     /// @param expanded 展开层的结果；ok=false / problems 原样保留
     /// @param hours 窗口长度；**上限收敛到 kWindowHours(24)** —— 展开层只有今天/明天
     ///              两段（parity 夹具盯着那一层），更宽的窗口拿不到行，与其写着

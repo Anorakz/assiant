@@ -62,7 +62,7 @@ python3 -m agent.cli status          # ⚠ 用 -m，不要在 agent/ 里直接 p
 
 ---
 
-## 4. 六条命令
+## 4. 七条命令
 
 ### `status` —— 看一眼当前模式与串流连接
 
@@ -247,16 +247,45 @@ llm/config/llm.env  OK    在
 体检结果：5 项 OK，1 项警告（Agent socket）        # 退出码 1
 ```
 
+### `cleanup` —— 清理**已经过去**的一次性日程
+
+**默认只列出**（dry-run），`--apply` 才真删：
+
+```bash
+$ assistant cleanup
+要清理的一次性日程（已经过去、不会再触发）：
+  项目评审  2026-09-20 14:00
+共 1 条；加 --apply 才会真删（会留一份 config.yaml.bak）
+（今天已经过了 start 的一次性日程有 1 条，**没动** —— late_grace_min 可能还认它；Agent 侧开关打开时，真触发了会自动删。）
+
+$ assistant cleanup --apply
+已删除 项目评审  2026-09-20 14:00
+共删除 1 条（原文件留了一份 config.yaml.bak）。
+```
+
+| 选项 | 说明 |
+| --- | --- |
+| `--apply` | 真的删。文本级删除 + 原子写 + `.bak` —— 与 Agent 触发后自动删 **同一套实现**（`agent/core/schedule_config.py`） |
+
+规矩：
+
+- **只清 `date < 今天`** 的 oneoff（它们不会再触发）。**今天的不动** —— `late_grace_min`
+  可能还认它，留给 Agent 的正常路径；这条会在输出里提示一句。
+- `recurring` 一条都不动。
+- **不写 `config.example.yaml`**：那是模板不是真源，给 `--config` 指模板会直接报错拒绝。
+- 这是 CLI"默认只读"的**唯一显式例外**：它不会自动发生，是你敲了 `--apply`。
+  "触发了就自动删"那条在 **Agent 侧**（`scheduler.remove_fired_oneoff`）。
+
 ---
 
 ## 5. 它**不**做什么（边界）
 
 | 不做 | 为什么 |
 | --- | --- |
-| 不写配置、不改日程、不重启 Agent | 只读/只控制。写配置是人在 PC 上做的事，配置是真源 |
+| 不写配置、不改日程、不重启 Agent | **默认只读**。**唯一例外**是 `cleanup --apply`（显式清理已经过去的一次性日程，见上一节）；写日程本身仍然是人在 PC 上做的事，配置是真源 |
 | 不 `--json` | 输出给人看；要机器读，用 `watch --count` + 原始行，或直接 `LocalClient` |
 | 不 import Agent 去读内存 | 那会拿到"另一份状态"。所有跨进程信息都走 IPC 协议 |
-| GUI 界面不显示"已触发" | 协议已经把 `schedule` 推出来了，GUI 侧目前按"未知 topic 忽略"处理；要不要显示是另一个任务 |
+| GUI 界面不显示"已触发 / 未触发" | GUI 不认 `schedule` topic（合同见 `gui-agent-integration.md`）；它只把"刚过去的"那条**变暗**显示（与 CLI 同一条 30 分钟尾巴），不写字 |
 | 触发记录不落盘 | `Scheduler._history` 是有界内存（默认 50 条）。跨重启保留是另一套持久化设计 |
 
 协议侧的字段定义**只在** [`ipc-protocol.md`](ipc-protocol.md) §3/§4 —— 本文不抄一份字段表。

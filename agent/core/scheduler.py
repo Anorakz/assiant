@@ -433,6 +433,35 @@ def _as_action(value: Any, label: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 #  Scheduler
 # ---------------------------------------------------------------------------
+def oneoff_matcher(event: "ScheduleEvent") -> Callable[[Dict[str, str]], bool]:
+    """造一个"匹配这条 oneoff"的 predicate，给**文本级删除**用（`schedule_config`）。
+
+    @param event  要匹配的那条日程（用它自己的 `title` / `on` / `start`）
+    @return matches(fields) -> bool；fields 是从配置**文件**里抽出来的裸标量
+            （已去引号与行尾注释），键是 title / date / start
+
+    @note 归一化在这里做、不在 `schedule_config` 里：`start` 走 `parse_clock`（所以文件里写
+          `9:30` 还是 `"09:30"` 都认），`date` 走 `date.fromisoformat`。这样"懂日程语义"与
+          "只懂文本"两层不用互相 import，也保证 Agent 与 CLI 两边**同一套**匹配规则。
+    """
+    def matches(fields: Dict[str, str]) -> bool:
+        if (fields.get("title") or "").strip() != event.title:
+            return False
+        try:
+            if date.fromisoformat((fields.get("date") or "").strip()) != event.on:
+                return False
+        except ValueError:
+            return False
+        try:
+            if parse_clock(fields.get("start") or "") != event.start:
+                return False
+        except SchedulerError:
+            return False
+        return True
+
+    return matches
+
+
 class Scheduler:
     """日程检查 + 定时触发 + 终端命令监听。
 
@@ -787,23 +816,9 @@ class Scheduler:
         if not self.remove_fired_oneoff or event.on is None or self._config_path is None:
             return
 
-        def matches(fields: Dict[str, str]) -> bool:
-            if (fields.get("title") or "").strip() != event.title:
-                return False
-            try:
-                if date.fromisoformat((fields.get("date") or "").strip()) != event.on:
-                    return False
-            except ValueError:
-                return False
-            try:
-                if parse_clock(fields.get("start") or "") != event.start:
-                    return False
-            except SchedulerError:
-                return False
-            return True
-
         try:
-            removed = schedule_config.remove_fired_oneoff(self._config_path, matches)
+            removed = schedule_config.remove_oneoff_from_file(self._config_path,
+                                                              oneoff_matcher(event))
         except OSError as exc:
             _log.warning("scheduler: 删不掉已触发的一次性日程 %r（%s）: %r",
                          event.title, self._config_path, exc)

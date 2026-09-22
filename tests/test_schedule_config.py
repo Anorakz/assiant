@@ -9,7 +9,7 @@ tests/test_schedule_config.py — 触发后删掉那条一次性日程（R3）
 三层：
   1. **文本级**：`remove_oneoff_entry()` 在各种 YAML 写法下的行为 —— 只删属于那条的行，
      其余**逐字节**不变；不认识的写法（flow 风格）给理由、不改文件
-  2. **文件级**：`remove_fired_oneoff()` 落盘 + `.bak`；没匹配上就什么都不动；
+  2. **文件级**：`remove_oneoff_from_file()` 落盘 + `.bak`；没匹配上就什么都不动；
      写盘失败原样抛 OSError（调用方记 WARNING）
   3. **Scheduler 集成**：开关打开/关闭、只动 oneoff、失败不影响触发
 
@@ -250,7 +250,7 @@ class TestRemoveOneoffEntry(unittest.TestCase):
 # ===========================================================================
 #  2. 文件级
 # ===========================================================================
-class TestRemoveFiredOneoffFile(unittest.TestCase):
+class TestRemoveOneoffFromFile(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="schedcfg-"))
         self.addCleanup(shutil.rmtree, str(self.tmp), True)
@@ -266,7 +266,7 @@ class TestRemoveFiredOneoffFile(unittest.TestCase):
         self.path.write_text(self.original, encoding="utf-8")
 
     def test_writes_the_new_text_and_a_backup(self):
-        removed = schedule_config.remove_fired_oneoff(
+        removed = schedule_config.remove_oneoff_from_file(
             self.path, matches_exactly("项目评审", "2026-09-22", "14:00"))
         self.assertTrue(removed)
         text = self.path.read_text(encoding="utf-8")
@@ -277,7 +277,7 @@ class TestRemoveFiredOneoffFile(unittest.TestCase):
         self.assertEqual(backup.read_text(encoding="utf-8"), self.original)
 
     def test_no_match_touches_nothing(self):
-        removed = schedule_config.remove_fired_oneoff(
+        removed = schedule_config.remove_oneoff_from_file(
             self.path, matches_exactly("不存在", "2026-09-22", "14:00"))
         self.assertFalse(removed)
         self.assertEqual(self.path.read_text(encoding="utf-8"), self.original)
@@ -285,7 +285,7 @@ class TestRemoveFiredOneoffFile(unittest.TestCase):
 
     def test_missing_file_raises_oserror(self):
         with self.assertRaises(OSError):
-            schedule_config.remove_fired_oneoff(
+            schedule_config.remove_oneoff_from_file(
                 self.tmp / "nope.yaml", matches_exactly("甲", "2026-09-22", "14:00"))
 
     @unittest.skipIf(os.name == "nt", "只读目录在 Windows 上不拦 root/管理员")
@@ -294,7 +294,7 @@ class TestRemoveFiredOneoffFile(unittest.TestCase):
         os.chmod(str(self.tmp), stat.S_IRUSR | stat.S_IXUSR)
         self.addCleanup(os.chmod, str(self.tmp), stat.S_IRWXU)
         with self.assertRaises(OSError):
-            schedule_config.remove_fired_oneoff(
+            schedule_config.remove_oneoff_from_file(
                 self.path, matches_exactly("项目评审", "2026-09-22", "14:00"))
 
 
