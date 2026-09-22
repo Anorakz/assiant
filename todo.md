@@ -687,6 +687,27 @@ CLI（C 系列：板端控制 CLI `assistant`，C1–C4 已验收；C5 排在 P 
      `tests/test_docs.py` 的 STALE_CLAIMS 加一条 `--today|--tomorrow`（R1 已删这两个开关），并**做了反证**：
      往 `docs/` 放一个写着 `--today` 的临时文档 → 守卫 FAILED；删掉 → 恢复 OK（证明新黑名单真的会咬）。
      证据：PC `python tests OK`；板 `test_docs` 4 OK + `python tests OK (19 files)`。
+☑ R5 四端全量回归 + 板端组合端到端 + 收尾：
+     四端（都在**已归零到 `2349b61` 的提交树**上跑）：PC python 套件 **exit 0**（`python tests OK`）；
+     PC 原生 ctest **172/172**；板 python 套件 **19 文件 OK**；板 GUI ctest **19/19**。
+     板端组合端到端（`logs/r5verify.sh`：临时配置 + 开关 true + 一条 2 分钟后触发的 oneoff）：
+       [触发前] CLI 列 2 条；GUI `今天 · 1 项 / 明天 · 1 项`，两行都在
+       19:05:04 触发（`watch` 收到 `kind=fired`）
+       [触发后] 配置里那条**没了**（`oneoff: []`），Agent 日志有"已从 … 删掉…"；
+                **CLI**：配置共 1 条，但尾巴把那一条**靠事实**画出来 → `19:05  一次性的  ← 已触发 19:05:04`；
+                **GUI**：读得动被改过的文件，而且那一条**不在**列表里（`今天 · 0 项 / 明天 · 1 项`）
+                —— 因为 GUI 没有尾巴（它拿不到触发事实）。这就是 R1+R2+R3 三条拼在一起的验收形态。
+       live config 指纹 `3662d089…` 全程未变。
+     板端归零：HEAD → `2349b61`，`git status` **0 行**；`config/config.yaml` 仍是开关版 `3662d089…`
+     （它被 `.gitignore` 忽略，reset 碰不到）、`llm.env` 未变、`scripts/assistant` 仍 100755、软链仍通。
+     ⚠ 归零脚本最后那句还是旧的 `--today`，板端回了 `unrecognized arguments: --today` —— 顺带**证明**
+     R1 删掉那两个开关在板上真的生效（那是我的临时脚本过期，已改）。
+     ⚠ 临时配置没有 `gui:` 段时 GUI 会打一行 `[ui] 保存输入源失败: … 找不到键 gui.input_source` ——
+     既有行为（真实配置从 config.example.yaml 来、带 `gui:` 段），不是 R3 引起的；但它同时说明
+     **GUI 也在写这个文件**，正好印证 §3.1 记的"第二个写入者"那条限制。
+
+R 系列到此结束：**日程显示重构**（R1 CLI 窗口 / R2 GUI 同一套）+ **触发后从配置里移除**（R3）
++ **文档统一口径**（R4）+ **四端回归与端到端**（R5）。板上 `remove_fired_oneoff` 已按你的决定打开。
 
 Phase 7 — 工具层
 □ tools/base.py：工具基类（name、schema、execute、权限、allowed_states）
