@@ -90,30 +90,45 @@ void SchedulePanel::setSchedule(const core::ScheduleResult& result, int maxRows)
     }
     hiddenCount_ = (budget > 0) ? qMax(0, available - rows_.size()) : 0;
 
-    // ---- 副标题：今天几项 + 下一条 ----
-    // "下一条"= 今天第一条还没过的；今天都过完了就看**明天第一条**（不然会只剩一个
-    // 光秃秃的"今天 · 3 项"，用户看不到后面还有什么）。
-    const core::ScheduleDay* today = result.days.isEmpty() ? nullptr : &result.days.at(0);
-    const core::ScheduleDay* tomorrow = (result.days.size() > 1) ? &result.days.at(1) : nullptr;
+    // ---- 副标题：窗口 + 合计几项 + 下一条（R 系列）----
+    // 日程区现在显示的是"接下来 N 小时"（窗口），不再是"今天整天 / 明天整天"：
+    // 所以副标题先讲清窗口（含终点 —— 第二段标题仍写"明天"，被窗口截断这件事
+    // 只在这里说明），再说几项、下一条。
+    int total = 0;
+    for (const core::ScheduleDay& day : result.days) {
+        total += day.rows.size();
+    }
 
     QString next;
-    if (today != nullptr) {
-        for (const core::ScheduleRow& row : today->rows) {
-            if (!row.past) {
-                next = row.time;
-                break;
+    for (const core::ScheduleDay& day : result.days) {
+        for (const core::ScheduleRow& row : day.rows) {
+            // ⚠ 经过窗口的行不会有 past（窗口只往前看）；这里仍然跳过 past 行是为了
+            //    对"手工喂进来的、带已过行的结果"保持老行为（单测就是这么喂的）
+            if (row.past) {
+                continue;
             }
+            next = row.time;
+            if (day.label != QStringLiteral("今天")) {
+                next = QStringLiteral("%1 %2").arg(day.label, next);
+            }
+            break;
+        }
+        if (!next.isEmpty()) {
+            break;
         }
     }
-    if (next.isEmpty() && tomorrow != nullptr && !tomorrow->rows.isEmpty()) {
-        next = QStringLiteral("明天 %1").arg(tomorrow->rows.at(0).time);
-    }
 
-    const int todayCount = (today != nullptr) ? today->rows.size() : 0;
-    subtitleText_ = (todayCount > 0) ? QStringLiteral("今天 · %1 项").arg(todayCount)
-                                     : QStringLiteral("今天没有日程");
-    if (!next.isEmpty()) {
-        subtitleText_ += QStringLiteral(" · 下一条 %1").arg(next);
+    subtitleText_ = QStringLiteral("接下来 %1 小时").arg(result.windowHours);
+    if (!result.windowEndText.isEmpty()) {
+        subtitleText_ += QStringLiteral(" · 到 %1").arg(result.windowEndText);
+    }
+    if (total == 0) {
+        subtitleText_ += QStringLiteral("里没有日程");
+    } else {
+        subtitleText_ += QStringLiteral(" · %1 项").arg(total);
+        if (!next.isEmpty()) {
+            subtitleText_ += QStringLiteral(" · 下一条 %1").arg(next);
+        }
     }
     subtitle_->setText(subtitleText_);
 
@@ -139,6 +154,7 @@ void SchedulePanel::clearRows()
     }
     rows_.clear();
     sectionLabels_.clear();
+    sectionHeaders_.clear();
 
     // 段容器里的标题 / "无" 行也一起清掉
     while (QLayoutItem* item = sections_->takeAt(0)) {
@@ -153,7 +169,9 @@ void SchedulePanel::addSection(const QString& label, const core::ScheduleDay& da
 {
     sectionLabels_ << label;
 
-    auto* header = new QLabel(QStringLiteral("%1 · %2 项").arg(label).arg(day.rows.size()), this);
+    const QString headerText = QStringLiteral("%1 · %2 项").arg(label).arg(day.rows.size());
+    sectionHeaders_ << headerText;
+    auto* header = new QLabel(headerText, this);
     header->setObjectName(QStringLiteral("AreaHint"));
     sections_->addWidget(header);
 

@@ -13,6 +13,7 @@
 #include <QFile>
 #include <QRegularExpression>
 #include <QSet>
+#include <QTime>
 
 #include <algorithm>
 
@@ -350,6 +351,21 @@ bool rowBefore(const ScheduleRow& a, const ScheduleRow& b)
     return a.title < b.title;
 }
 
+/// 窗口终点的说法：`明天 18:26` / `09-25 18:26`。
+/// 镜像 agent/cli.py 的 `window_end_text`（同一套口径：今天/明天/后天，更远的给日期）。
+QString endLabel(const QDateTime& end, const QDateTime& now)
+{
+    const qint64 days = now.date().daysTo(end.date());
+    QString label;
+    switch (days) {
+    case 0: label = QStringLiteral("今天"); break;
+    case 1: label = QStringLiteral("明天"); break;
+    case 2: label = QStringLiteral("后天"); break;
+    default: label = end.date().toString(QStringLiteral("MM-dd")); break;
+    }
+    return QStringLiteral("%1 %2").arg(label, end.time().toString(QStringLiteral("HH:mm")));
+}
+
 } // namespace
 
 int ScheduleResult::totalRows() const
@@ -464,6 +480,43 @@ ScheduleResult ScheduleModel::parse(const QString& yamlText, const QDateTime& no
     }
 
     return result;
+}
+
+ScheduleResult ScheduleModel::applyWindow(const ScheduleResult& expanded, const QDateTime& now,
+                                          int hours)
+{
+    ScheduleResult result = expanded;                 // ok / error / problems / totalInConfig 原样
+    // ⚠ 窗口上限就是 24 小时：**展开层只有今天/明天两段**（那是与 Python 逐条对齐、
+    //    被 parity 夹具盯着的一层）。想要更宽的窗口，得同时改展开层与夹具 —— 在那之前
+    //    把 hours 收敛到 24，免得副标题写着"接下来 72 小时"却只显示了两天。
+    const int wanted = (hours > 0) ? hours : kWindowHours;
+    result.windowHours = qMin(wanted, kWindowHours);
+    // 分钟粒度：把 now 截到分钟（行的时刻只有分钟，两侧口径要一致）
+    const QDateTime from(now.date(), QTime(now.time().hour(), now.time().minute()));
+    result.windowEnd = from.addSecs(static_cast<qint64>(result.windowHours) * 3600);
+    result.windowEndText = endLabel(result.windowEnd, from);
+
+    if (!result.ok) {
+        return result;                    // 整份读不出来: days 本来就是空的, 别再动它
+    }
+
+    for (ScheduleDay& day : result.days) {
+        QVector<ScheduleRow> keep;
+        for (const ScheduleRow& row : day.rows) {
+            const QDateTime moment(day.date, QTime::fromString(row.time, QStringLiteral("HH:mm")));
+            // 窗口只往前看（GUI 没有尾巴）：`now` 那一分钟起, 到 now + hours 之前
+            if (moment.isValid() && moment >= from && moment < result.windowEnd) {
+                keep.append(row);
+            }
+        }
+        day.rows = keep;
+    }
+    return result;
+}
+
+ScheduleResult ScheduleModel::loadWindowed(const QString& path, const QDateTime& now, int hours)
+{
+    return applyWindow(loadFromConfig(path, now), now, hours);
 }
 
 } // namespace core

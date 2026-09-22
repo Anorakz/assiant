@@ -953,7 +953,7 @@ void MainWindow::reloadSchedule()
     }
 
     const core::ScheduleResult result =
-        core::ScheduleModel::loadFromConfig(configPath_, QDateTime::currentDateTime());
+        core::ScheduleModel::loadWindowed(configPath_, QDateTime::currentDateTime());
     mainPage_->schedulePanel()->setSchedule(result, maxRows);
     qInfo().noquote() << QStringLiteral("[gui] 日程: %1 行（配置 %2 条，最多显示 %3 行）%4")
                              .arg(result.totalRows())

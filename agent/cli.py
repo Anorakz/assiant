@@ -562,8 +562,14 @@ def positive_hours(text: str) -> float:
 
 def window_range(now: datetime, hours: float,
                  tail_minutes: int = TAIL_MINUTES) -> Tuple[datetime, datetime]:
-    """窗口 = `[now - tail, now + hours)`。起点把"最近 tail 分钟"也包进来。"""
-    return now - timedelta(minutes=tail_minutes), now + timedelta(hours=hours)
+    """窗口 = `[now - tail, now + hours)`。起点把"最近 tail 分钟"也包进来。
+
+    @note **分钟粒度**：把 `now` 截到分钟再算。行的时刻只有分钟（`HH:MM`），两侧
+          （CLI 与 GUI 的 `ScheduleModel::applyWindow`）要用同一个口径 —— 否则
+          "当前这一分钟"的那条在两边会不一样。
+    """
+    minute = now.replace(second=0, microsecond=0)
+    return minute - timedelta(minutes=tail_minutes), minute + timedelta(hours=hours)
 
 
 def window_end_text(end: datetime, now: datetime) -> str:

@@ -306,6 +306,125 @@ private slots:
         QCOMPARE(result.days.at(0).rows.at(0).past, false);
     }
 
+    // ---------------------------------------------------------------- 窗口（R 系列）---
+    // 展开层（parse）不带窗口；窗口是独立一层 applyWindow。
+
+    /// 展开层不该有窗口痕迹（否则 parity 夹具/其它用例会跟着漂）。
+    void parseLeavesTheResultUnwindowed()
+    {
+        const ScheduleResult result = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 上午的
+      start: "09:30"
+)"));
+        QVERIFY(result.windowEndText.isEmpty());
+        QCOMPARE(result.windowEnd.isValid(), false);
+        QCOMPARE(result.windowHours, core::kWindowHours);
+        QCOMPARE(rowsOn(result, 0), 1);               // 09:30 还在（没被窗口裁掉）
+    }
+
+    /// 窗口 = [now, now + hours)：已过的丢掉，超过终点的丢掉，窗口内的留着。
+    void applyWindowKeepsOnlyTheNext24Hours()
+    {
+        // ⚠ 四条全用 **oneoff**（指定日期）：没写 days 的 recurring 是**每天** ——
+        //    这个坑我在 CLI 侧踩了两次、这里又踩了一次，所以干脆别在窗口用例里用它。
+        const ScheduleResult expanded = parseIt(QStringLiteral(R"(scheduler:
+  oneoff:
+    - title: 今天上午
+      date: 2026-09-21
+      start: "09:30"
+    - title: 今天晚上
+      date: 2026-09-21
+      start: "18:00"
+    - title: 明天上午
+      date: 2026-09-22
+      start: "10:00"
+    - title: 明天傍晚
+      date: 2026-09-22
+      start: "20:00"
+)"));
+        QCOMPARE(rowsOn(expanded, 0), 2);             // 展开层: 今天两条都在
+        const ScheduleResult result = ScheduleModel::applyWindow(expanded, kNow);
+
+        QCOMPARE(result.windowEndText, QStringLiteral("明天 15:00"));
+        QCOMPARE(result.windowEnd, QDateTime(kToday.addDays(1), QTime(15, 0)));
+        // 今天：09:30 已过 -> 掉；18:00 在窗口里 -> 留
+        QCOMPARE(rowsOn(result, 0), 1);
+        QCOMPARE(titleOn(result, 0, 0), QStringLiteral("今天晚上"));
+        // 明天：10:00 在窗口里（< 15:00）-> 留；20:00 超过终点 -> 掉
+        QCOMPARE(rowsOn(result, 1), 1);
+        QCOMPARE(titleOn(result, 1, 0), QStringLiteral("明天上午"));
+    }
+
+    /// 分钟粒度：now 有秒时，把 now 截到分钟再比 —— "现在这一分钟"的那条要留着。
+    void applyWindowComparesAtMinuteGranularity()
+    {
+        const ScheduleResult expanded = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 正好这一分钟
+      start: "15:00"
+)"));
+        const QDateTime withSeconds(kToday, QTime(15, 0, 40));
+        const ScheduleResult result = ScheduleModel::applyWindow(expanded, withSeconds);
+        QCOMPARE(rowsOn(result, 0), 1);
+        QCOMPARE(titleOn(result, 0, 0), QStringLiteral("正好这一分钟"));
+    }
+
+    /// 窗口时长有**上限**：展开层只有今天/明天两段，更宽的窗口拿不到行 —— 所以
+    /// hours 会被收敛到 24（副标题不能写着 48 小时却只显示两天）。
+    void applyWindowClampsToTheExpansionRange()
+    {
+        const ScheduleResult expanded = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 明天傍晚
+      start: "20:00"
+)"));
+        const ScheduleResult wide = ScheduleModel::applyWindow(expanded, kNow, 48);
+        QCOMPARE(wide.windowHours, core::kWindowHours);
+        QCOMPARE(wide.windowEndText, QStringLiteral("明天 15:00"));
+        QCOMPARE(rowsOn(wide, 1), 0);                 // 20:00 仍在外（窗口确实只有 24 小时）
+    }
+
+    /// 整份失败 / 逐条坏日程在窗口层原样保留（窗口不负责报错）。
+    void applyWindowKeepsErrorsAndProblems()
+    {
+        ScheduleResult broken;
+        broken.ok = false;
+        broken.error = QStringLiteral("配置读不出来（YAML）：x");
+        const ScheduleResult stillBroken = ScheduleModel::applyWindow(broken, kNow);
+        QCOMPARE(stillBroken.ok, false);
+        QCOMPARE(stillBroken.error, broken.error);
+        QCOMPARE(stillBroken.windowEndText, QStringLiteral("明天 15:00"));
+
+        const ScheduleResult withProblem = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 好的
+      start: "18:00"
+    - title: 坏的
+      start: "99:99"
+)"));
+        QCOMPARE(withProblem.problems.size(), 1);
+        const ScheduleResult windowed = ScheduleModel::applyWindow(withProblem, kNow);
+        QCOMPARE(windowed.problems.size(), 1);
+        QCOMPARE(windowed.totalInConfig, 1);
+        QCOMPARE(rowsOn(windowed, 0), 1);
+    }
+
+    /// 窗口内的行永远不是"已过"（窗口只往前看）—— 这条把界面上"看不到变暗"钉成事实。
+    void windowedRowsAreNeverPast()
+    {
+        const ScheduleResult expanded = parseIt(QStringLiteral(R"(scheduler:
+  recurring:
+    - title: 上午的
+      start: "09:30"
+    - title: 晚上的
+      start: "18:00"
+)"));
+        const ScheduleResult result = ScheduleModel::applyWindow(expanded, kNow);
+        QCOMPARE(result.days.at(0).rows.at(0).past, false);
+        QCOMPARE(result.days.at(1).rows.at(0).past, false);
+    }
+
     // ---------------------------------------------------------------- 坏数据 ---
     void oneBadEntryDoesNotKillTheOthers()
     {

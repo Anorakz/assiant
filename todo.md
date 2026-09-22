@@ -628,6 +628,29 @@ CLI（C 系列：板端控制 CLI `assistant`，C1–C4 已验收；C5 排在 P 
      24 小时窗口内）—— 是测试错、不是代码错；改用 `oneoff`（指定日期）做边界用例，并把"每天"那条改成
      断言真实语义（只显示下一次）。
      ⚠ `docs/cli.md` 里 `--today/--tomorrow` 与"今天/明天"的说法**暂时过时**，R4 统一改。
+☑ R2 GUI 用同一套窗口（`gui/src/core/schedule_model.{h,cpp}`、`ui/schedule_panel.{h,cpp}`、
+     `main_window.cpp`、`main.cpp`）：窗口做成**独立一层** `applyWindow()/loadWindowed()`，
+     **`parse()/loadFromConfig()` 一动不动** —— 那是与 `scheduler.py` 逐条对齐、被 8 份夹具与
+     C++ parity 用例盯着的一层，显示规则不该混进去。`main_window` 改调 `loadWindowed`
+     （`[now, now+24h)`，**GUI 没有尾巴** —— 它拿不到 Agent 的触发事实）。
+     副标题改成 `接下来 24 小时 · 到 明天 18:42 · 3 项 · 下一条 明天 08:30`（窗口终点在副标题里，
+     第二段标题仍写"明天" —— 按你的选择：截断只用副标题说明）；`--dump-schedule` 加
+     `SECTION\t今天 · 0 项` 行，让"今天 0 项 / 明天 3 项"这种结构也进得了证据。
+     两侧口径统一到**分钟粒度**：`applyWindow` 把 now 截到分钟，`agent/cli.py` 的 `window_range`
+     也截到分钟（否则"当前这一分钟"的那条两边会不一致）。
+     ⚠ `applyWindow` 的窗口**上限收敛到 24 小时**：展开层只有今天/明天两段，要更宽得同时改展开层
+     与夹具 —— 与其副标题写着 72 小时却只显示两天，不如收敛（有单测钉住）。
+     ⚠ **附带后果**：窗口只往前看 → 经过窗口的行不会有 `past`，界面上**看不到"已过变暗"**了。
+     变暗的渲染与单测都**保留着**（将来给 GUI 加尾巴那天不用重写），并有单测把"窗口内永远不 past"
+     钉成事实。要不要给 GUI 也加同一条 30 分钟尾巴（不依赖事实，只是变暗淡出），**等你说**。
+     证据：板端 `--dump-schedule` 两组 —— live 配置 → `今天 · 0 项 / 明天 · 3 项`（今天那三条全被挡）；
+     临时配置（今天 1 小时前 + 今天 1 小时后 + 明天同一时刻）→ 只留"待会儿的"一行（过去那条被丢、
+     超出窗口终点的那条也被丢）。测试：板 GUI ctest **19/19**（连跑两遍），`test_schedule_model`
+     **50 项**（原 44，+6 窗口用例），`test_schedule_panel` 全绿；板 `tests/test_cli.py` **90 项**。
+     ⚠ 同一次全量 ctest 里 `test_bench_runner` 失败过一次，单跑与随后两次全量都通过 —— 那是
+     **并发负载下的抖动**（它与日程无关），不是 R2 引起的。
+     ⚠ 我在窗口用例里**连续三次**把"没写 days 的 recurring 当成只在那一天"（其实那是**每天**）：
+     R1 两次、R2 一次。改法是把窗口用例里的日程全写成 `oneoff`（指定日期），语义才唯一。
 
 Phase 7 — 工具层
 □ tools/base.py：工具基类（name、schema、execute、权限、allowed_states）

@@ -30,9 +30,16 @@
 //
 //  显示口径
 //  ---------------------------------------------------------------------------
-//    · 固定两段：今天、明天；每段按 (start, title) 升序
+//    · 展开层（`parse` / `loadFromConfig`）：固定两段今天、明天；每段按 (start, title) 升序。
+//      **这一层不带窗口** —— 它是与 agent/core/scheduler.py 逐条对齐的那一层，
+//      夹具（tests/data/schedule_parity）与 C++ 的 parity 用例都盯着它，别往里塞显示规则。
+//    · 窗口层（`applyWindow` / `loadWindowed`，R 系列）：只留 `[now, now + hours)` 里的行。
+//      GUI **没有尾巴**（它拿不到 Agent 的触发事实，见 docs/config-sources.md）——
+//      所以已经过去的行在界面上直接消失；CLI 那边多留 30 分钟是为了显示"刚触发"。
 //    · `past`（今天段专用）= 现在时刻已过 start —— 纯时间比较，
-//      **不代表** Agent 一定触发过（Agent 还有 window_min / late_grace_min）
+//      **不代表** Agent 一定触发过（Agent 还有 window_min / late_grace_min）。
+//      ⚠ 窗口只往前看，所以经过 `applyWindow` 之后 `past` 恒为 false（保留计算是为了
+//        "将来给 GUI 也加尾巴"那天不用重写；界面上现在看不到变暗）。
 //    · 不展示 remind_before_min 推导出的提醒时刻（那是 Agent 的触发语义）
 // ============================================================================
 #pragma once
@@ -44,6 +51,9 @@
 #include <QVector>
 
 namespace core {
+
+/// 窗口长度（小时）。与 CLI 的 `--hours` 默认值同口径（agent/cli.py 的 WINDOW_HOURS_DEFAULT）。
+constexpr int kWindowHours = 24;
 
 /// 日程区里的一行。
 struct ScheduleRow {
@@ -70,6 +80,13 @@ struct ScheduleResult {
     QStringList problems;       ///< 逐条坏日程，形如 "recurring #1: 缺少 title"
     int totalInConfig = 0;      ///< 配置里成功解析出几条（含今天/明天之外的）
 
+    /// 窗口长度（小时）：副标题用；未经 `applyWindow` 时是 kWindowHours。
+    int windowHours = kWindowHours;
+    /// 窗口终点（= now + windowHours）；**无效**表示这份结果没经过窗口层。
+    QDateTime windowEnd;
+    /// 窗口终点的说法（"明天 18:26" / "09-25 18:26"）；空 = 不知道（没经过窗口层）。
+    QString windowEndText;
+
     /// 两段合计行数。
     int totalRows() const;
 };
@@ -82,6 +99,20 @@ public:
 
     /// 直接读一段 YAML 文本（单测 / 沙箱用，不碰文件系统）。
     static ScheduleResult parse(const QString& yamlText, const QDateTime& now);
+
+    /// 按窗口裁剪：只留 `[now, now + hours)` 里的行（**GUI 没有尾巴**）。
+    /// @param expanded 展开层的结果；ok=false / problems 原样保留
+    /// @param hours 窗口长度；**上限收敛到 kWindowHours(24)** —— 展开层只有今天/明天
+    ///              两段（parity 夹具盯着那一层），更宽的窗口拿不到行，与其写着
+    ///              "接下来 72 小时"却只显示两天，不如收敛。
+    /// @note 比较在**分钟粒度**上做（行的时刻只有分钟）：把 now 截到分钟，
+    ///       这样"现在这一分钟"的那条还在，也与 CLI 的窗口口径一致。
+    static ScheduleResult applyWindow(const ScheduleResult& expanded, const QDateTime& now,
+                                      int hours = kWindowHours);
+
+    /// 应用真正用的入口：读文件 + 展开 + 按窗口裁剪。
+    static ScheduleResult loadWindowed(const QString& path, const QDateTime& now,
+                                       int hours = kWindowHours);
 };
 
 } // namespace core

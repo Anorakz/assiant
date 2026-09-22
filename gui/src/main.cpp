@@ -469,7 +469,8 @@ int runGuiMode(const Options& opt, int argc, char** argv)
 
     // S8 取证：打印日程区**真实渲染出来的行**（与界面同源：同一个 SchedulePanel），
     // 让"GUI 显示 vs Agent 展开"能做逐行比对，而不是靠人眼读截图。
-    // 输出走 stdout（Qt 的日志在 stderr），格式：SUBTITLE/ROW/NOTE + TAB + 文本。
+    // 输出走 stdout（Qt 的日志在 stderr），格式：SUBTITLE/SECTION/ROW/NOTE + TAB + 文本。
+    // SECTION 是两段的表头（"今天 · 3 项"）—— 让"今天 0 项 / 明天 3 项"这种结构也进得了证据。
     if (opt.dumpSchedule) {
         SchedulePanel* panel = window.schedulePanel();
         if (panel == nullptr) {
@@ -477,6 +478,9 @@ int runGuiMode(const Options& opt, int argc, char** argv)
             return 2;
         }
         std::printf("SUBTITLE\t%s\n", qPrintable(panel->subtitleText()));
+        for (const QString& header : panel->sectionHeaders()) {
+            std::printf("SECTION\t%s\n", qPrintable(header));   // "今天 · 3 项"
+        }
         for (const QString& row : panel->rowTexts()) {
             std::printf("ROW\t%s\n", qPrintable(row));
         }

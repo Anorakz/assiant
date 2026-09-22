@@ -71,7 +71,7 @@ private slots:
         QCOMPARE(panel.hiddenCount(), 0);
         QCOMPARE(panel.sectionLabels(),
                  QStringList() << QStringLiteral("今天") << QStringLiteral("明天"));
-        QCOMPARE(panel.subtitleText(), QStringLiteral("今天没有日程"));
+        QCOMPARE(panel.subtitleText(), QStringLiteral("接下来 24 小时里没有日程"));
         QVERIFY(panel.noteText().isEmpty());          // 空 ≠ 出错
         QVERIFY(!panel.noteIsWarning());
     }
@@ -91,8 +91,10 @@ private slots:
         QCOMPARE(texts.at(0), QStringLiteral("09:30  学习"));
         QCOMPARE(texts.at(1), QStringLiteral("14:00-15:30  评审"));   // 有 end 就是区间
         QCOMPARE(texts.at(2), QStringLiteral("08:00  体检"));
-        // 今天两条都已过 -> "下一条"落到明天第一条
-        QCOMPARE(panel.subtitleText(), QStringLiteral("今天 · 2 项 · 下一条 明天 08:00"));
+        // 今天两条都已过 -> "下一条"落到明天第一条（手工喂的结果没有窗口终点，
+        // 所以副标题里没有"到 …"那一段）
+        QCOMPARE(panel.subtitleText(),
+                 QStringLiteral("接下来 24 小时 · 3 项 · 下一条 明天 08:00"));
 
         QLabel* title = panel.findChild<QLabel*>(QStringLiteral("ScheduleTime"));
         QVERIFY(title != nullptr);                    // 控件的对象名给 QSS 用
@@ -119,7 +121,8 @@ private slots:
                                       makeRow(QStringLiteral("18:00"), QStringLiteral("下一条"), QString(), false)},
                                      {}),
                          6);
-        QCOMPARE(panel.subtitleText(), QStringLiteral("今天 · 3 项 · 下一条 18:00"));
+        QCOMPARE(panel.subtitleText(),
+                 QStringLiteral("接下来 24 小时 · 3 项 · 下一条 18:00"));
     }
 
     void maxRowsTruncatesAcrossBothSections()
@@ -233,7 +236,7 @@ private slots:
         SchedulePanel panel;
         panel.setSchedule(empty, 6);
         QCOMPARE(panel.rowCount(), 0);
-        QCOMPARE(panel.subtitleText(), QStringLiteral("今天没有日程"));
+        QCOMPARE(panel.subtitleText(), QStringLiteral("接下来 24 小时里没有日程"));
     }
 
     void longTitleIsElidedButFullTextKept()
@@ -271,18 +274,27 @@ private slots:
         QCOMPARE(file.write(text), static_cast<qint64>(text.size()));
         file.close();
 
-        const ScheduleResult result = ScheduleModel::loadFromConfig(path, kNow);
+        // R 系列起走**窗口**入口：kNow = 周一 15:00 -> 窗口 [15:00, 周二 15:00)
+        const ScheduleResult result = ScheduleModel::loadWindowed(path, kNow);
         QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(result.windowEndText, QStringLiteral("明天 15:00"));
 
         SchedulePanel panel;
         panel.setSchedule(result, 6);
-        // 今天：每天喝水（1 条）；明天：周二站会 + 每天喝水（2 条）—— 一共 3 条
-        QCOMPARE(panel.rowCount(), 3);
-        QCOMPARE(panel.rowTexts().at(0), QStringLiteral("10:00  每天喝水"));
-        QCOMPARE(panel.rowTexts().at(1), QStringLiteral("09:30-09:45  周二站会"));
-        QCOMPARE(panel.rowTexts().at(2), QStringLiteral("10:00  每天喝水"));
-        // 今天那条（10:00）已经过了 -> "下一条"是明天第一条（周二站会 09:30）
-        QCOMPARE(panel.subtitleText(), QStringLiteral("今天 · 1 项 · 下一条 明天 09:30"));
+        // 今天那条（10:00）已经出了窗口 -> 只剩明天两条：周二站会 + 每天喝水
+        QCOMPARE(panel.rowCount(), 2);
+        QCOMPARE(panel.rowTexts().at(0), QStringLiteral("09:30-09:45  周二站会"));
+        QCOMPARE(panel.rowTexts().at(1), QStringLiteral("10:00  每天喝水"));
+        // 窗口只往前看 -> 界面上不会再有"已过"的行（变暗那条路径留着, 但走不到）
+        QCOMPARE(panel.isRowPast(0), false);
+        QCOMPARE(panel.isRowPast(1), false);
+        QVERIFY(!panel.sectionLabels().isEmpty());
+        // 段表头也带上窗口后的真实条数（今天 0 项 / 明天 2 项）
+        QCOMPARE(panel.sectionHeaders().size(), 2);
+        QCOMPARE(panel.sectionHeaders().at(0), QStringLiteral("今天 · 0 项"));
+        QCOMPARE(panel.sectionHeaders().at(1), QStringLiteral("明天 · 2 项"));
+        QCOMPARE(panel.subtitleText(),
+                 QStringLiteral("接下来 24 小时 · 到 明天 15:00 · 2 项 · 下一条 明天 09:30"));
     }
 };
 

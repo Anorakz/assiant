@@ -409,6 +409,12 @@ class TestScheduleWindow(unittest.TestCase):
         self.assertEqual(begin, datetime(2026, 9, 22, 17, 56))
         self.assertEqual(end, datetime(2026, 9, 23, 18, 26))
 
+    def test_window_range_truncates_to_the_minute(self):
+        """行的时刻只有分钟 —— 两侧（CLI / GUI 的 applyWindow）都在分钟粒度上比。"""
+        begin, end = cli.window_range(datetime(2026, 9, 22, 18, 26, 40), 24)
+        self.assertEqual(begin, datetime(2026, 9, 22, 17, 56))
+        self.assertEqual(end, datetime(2026, 9, 23, 18, 26))
+
     def test_a_daily_event_only_shows_its_next_occurrence(self):
         """每天 08:30 的条目在 18:26 看：**今天早上那条在窗口外，明天早上那条在**。
 
