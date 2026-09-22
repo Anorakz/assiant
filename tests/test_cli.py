@@ -13,6 +13,7 @@ tests/test_cli.py — 板端控制 CLI（agent/cli.py）单测
 mock 掉对端等于把要验的东西验没了。
 """
 
+import argparse
 import asyncio
 import io
 import os
@@ -27,7 +28,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from datetime import date, datetime  # noqa: E402
+from datetime import date, datetime, timedelta  # noqa: E402
 
 from agent import cli, config  # noqa: E402
 from agent.ipc.local_server import LocalServer, UNIX_SOCKET_SUPPORTED  # noqa: E402
@@ -386,6 +387,143 @@ class TestScheduleRendering(unittest.TestCase):
         self.assertIn("已过（未触发）", text)
 
 
+class TestScheduleWindow(unittest.TestCase):
+    """R1: 窗口语义（真的 `ScheduleEvent` + **注入 now**，不依赖墙钟）。
+
+    窗口 = `[now - 30 分钟, now + N 小时)`，判据是行的 `start`。
+    """
+
+    NOW = datetime(2026, 9, 22, 18, 26, 0)
+
+    @staticmethod
+    def _events(*specs):
+        from agent.core.scheduler import ScheduleEvent
+        return [ScheduleEvent.from_config(spec, i) for i, spec in enumerate(specs)]
+
+    def _titles(self, events, hours=24, facts=None):
+        return [row["title"] for _, rows in cli.window_days(events, self.NOW, hours, facts=facts)
+                for row in rows]
+
+    def test_window_range_includes_the_tail(self):
+        begin, end = cli.window_range(self.NOW, 24)
+        self.assertEqual(begin, datetime(2026, 9, 22, 17, 56))
+        self.assertEqual(end, datetime(2026, 9, 23, 18, 26))
+
+    def test_a_daily_event_only_shows_its_next_occurrence(self):
+        """每天 08:30 的条目在 18:26 看：**今天早上那条在窗口外，明天早上那条在**。
+
+        这就是窗口与"今天/明天整天"的根本区别 —— 不是"今天的不显示"，而是
+        "只显示接下来 24 小时里那一次"。
+        """
+        events = self._events({"title": "晨间计划", "start": "08:30"})
+        days = cli.window_days(events, self.NOW, 24)
+        self.assertEqual([(d.isoformat(), [r["title"] for r in rs]) for d, rs in days],
+                         [("2026-09-23", ["晨间计划"])])
+
+    def test_tail_keeps_what_just_passed(self):
+        events = self._events({"title": "刚好过去", "date": "2026-09-22", "start": "18:10"})
+        days = cli.window_days(events, self.NOW, 24)
+        self.assertEqual([(d.isoformat(), [r["title"] for r in rs]) for d, rs in days],
+                         [("2026-09-22", ["刚好过去"])])
+
+    def test_before_the_tail_is_dropped(self):
+        events = self._events({"title": "更早", "date": "2026-09-22", "start": "17:50"})
+        self.assertEqual(self._titles(events), [], "尾巴从 17:56 起, 17:50 已经在外面")
+
+    def test_start_decides_visibility_not_trigger_at(self):
+        """`remind_before_min` 把触发点推到 start 之前 —— 仍按 **start** 判可见性。
+
+        trigger_at = 18:20（已经过去了），但 start = 18:50 是"马上要来"：用 trigger_at
+        判定会让它从列表里消失，那是错的。
+        """
+        events = self._events({"title": "要提前提醒", "date": "2026-09-22", "start": "18:50",
+                               "remind_before_min": 30})
+        self.assertEqual(self._titles(events), ["要提前提醒"])
+
+    def test_hours_reach_further_and_the_heading_switches_to_a_date(self):
+        events = self._events({"title": "后天上午", "date": "2026-09-24", "start": "10:00"})
+        self.assertEqual(self._titles(events, hours=24), [],
+                         "24 小时只到明天 18:26，后天的 10:00 在外")
+        self.assertEqual(self._titles(events, hours=48), ["后天上午"])
+
+    def test_day_headings(self):
+        today = date(2026, 9, 22)
+        self.assertEqual(cli.day_heading(today, today), "今天（2026-09-22 周二）")
+        self.assertEqual(cli.day_heading(today + timedelta(days=1), today),
+                         "明天（2026-09-23 周三）")
+        self.assertEqual(cli.day_heading(today + timedelta(days=2), today),
+                         "后天（2026-09-24 周四）")
+        self.assertEqual(cli.day_heading(today + timedelta(days=5), today),
+                         "2026-09-27（周日）")
+
+    def test_window_end_text(self):
+        self.assertEqual(cli.window_end_text(datetime(2026, 9, 22, 19, 0), self.NOW),
+                         "今天 19:00")
+        self.assertEqual(cli.window_end_text(datetime(2026, 9, 23, 18, 26), self.NOW),
+                         "明天 18:26")
+        self.assertEqual(cli.window_end_text(datetime(2026, 9, 26, 18, 26), self.NOW),
+                         "09-26 18:26")
+
+    def test_limit_is_for_the_whole_window_not_per_day(self):
+        events = self._events({"title": "今晚", "start": "19:00"},
+                              {"title": "明早", "start": "08:00"})
+        text = "\n".join(cli.render_window(events, self.NOW, 24, limit=1, asked=False))
+        self.assertIn("今晚", text)
+        self.assertNotIn("明早", text)
+        self.assertIn("还有 1 项", text)
+
+    def test_empty_window_says_so(self):
+        self.assertEqual(cli.render_window([], self.NOW, 24, limit=10, asked=False),
+                         ["（窗口内没有日程）"])
+
+    def test_fired_fact_without_a_config_row_becomes_a_row(self):
+        """R3 之后一次性日程会被从配置里删掉 —— 尾巴必须靠**事实**把它画出来。"""
+        fact = {"title": "项目评审", "date": "2026-09-22",
+                "scheduled_at": "2026-09-22T18:10", "fired_at": "2026-09-22T18:10:05",
+                "actions": []}
+        self.assertEqual(cli.render_window([], self.NOW, 24, facts=[fact], limit=10,
+                                           asked=True),
+                         ["今天（2026-09-22 周二）",
+                          "  18:10  项目评审  ← 已触发 18:10:05"])
+
+    def test_a_fact_still_in_the_config_is_not_duplicated(self):
+        events = self._events({"title": "喝水", "date": "2026-09-22", "start": "18:10"})
+        fact = {"title": "喝水", "date": "2026-09-22", "scheduled_at": "2026-09-22T18:10",
+                "fired_at": "2026-09-22T18:10:02", "actions": []}
+        lines = cli.render_window(events, self.NOW, 24, facts=[fact], limit=10, asked=True)
+        self.assertEqual([line for line in lines if "喝水" in line],
+                         ["  18:10  喝水  ← 已触发 18:10:02"])
+
+    def test_a_fact_outside_the_window_is_dropped(self):
+        fact = {"title": "很久以前", "date": "2026-09-22",
+                "scheduled_at": "2026-09-22T08:30", "fired_at": "2026-09-22T08:30:02",
+                "actions": []}
+        self.assertEqual(cli.render_window([], self.NOW, 24, facts=[fact], limit=10,
+                                           asked=True),
+                         ["（窗口内没有日程）"])
+
+    def test_a_fact_with_an_unreadable_time_is_skipped(self):
+        fact = {"title": "坏的", "scheduled_at": "看不懂", "fired_at": "x"}
+        self.assertEqual(cli.window_days([], self.NOW, 24, facts=[fact]), [])
+
+    def test_row_mark_three_states(self):
+        self.assertEqual(cli.row_mark({"past": True, "fired_at": None}, False), "  ← 已过")
+        self.assertEqual(cli.row_mark({"past": True, "fired_at": None}, True),
+                         "  ← 已过（未触发）")
+        self.assertEqual(cli.row_mark({"past": False, "fired_at": None}, True), "")
+        self.assertEqual(cli.row_mark({"past": False, "fired_at": "2026-09-22T18:10:05"},
+                                      True),
+                         "  ← 已触发 18:10:05")
+
+    def test_positive_hours(self):
+        self.assertEqual(cli.positive_hours("12"), 12.0)
+        self.assertEqual(cli.positive_hours("0.5"), 0.5)
+        for bad in ("0", "-1", "abc", ""):
+            with self.subTest(bad=bad):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    cli.positive_hours(bad)
+
+
 class TestDerivationVerdict(unittest.TestCase):
     def test_no_diff_is_ok(self):
         status, detail = cli.derivation_verdict(0, "[sync] dry-run（未写文件）\n[sync] 无差异\n")
@@ -465,29 +603,55 @@ class TestScheduleCommand(unittest.TestCase):
             code = cli.main(["schedule", "--config", str(path)] + list(extra))
         return code, out.getvalue(), err.getvalue()
 
-    def test_lists_today_and_tomorrow(self):
+    def test_lists_the_window(self):
+        """R1: 默认看**接下来 24 小时**，不再有"今天/明天整天"这回事。"""
+        soon = datetime.now() + timedelta(minutes=30)      # 一定落在窗口里
         path = self._write_config(
             "scheduler:\n"
             "  recurring:\n"
             "    - title: 每天喝水\n"
-            "      start: \"10:00\"\n"
-            "    - title: 只在周一\n"
-            "      days: [mon]\n"
-            "      start: \"09:00\"\n")
+            "      start: \"%s\"\n"
+            "    - title: 更远的一条\n"
+            "      start: \"%s\"\n" % (soon.strftime("%H:%M"),
+                                     (soon + timedelta(hours=2)).strftime("%H:%M")))
         code, out, err = self._run(path)
         self.assertEqual(code, cli.EXIT_OK)
-        self.assertIn("日程（共 2 条", out)
+        self.assertIn("日程（配置共 2 条", out)
+        self.assertIn("窗口：", out)
+        self.assertIn("（24 小时", out)
         self.assertIn("每天喝水", out)
-        self.assertIn("今天（", out)
-        self.assertIn("明天（", out)
         self.assertIn("不代表", out)          # 页脚必须带上"不代表已触发"
+
+    def test_hours_flag_changes_the_window_line(self):
+        soon = datetime.now() + timedelta(minutes=30)
+        path = self._write_config(
+            "scheduler:\n  recurring:\n    - title: 每天喝水\n      start: \"%s\"\n"
+            % soon.strftime("%H:%M"))
+        code, out, err = self._run(path, ["--hours", "3"])
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("（3 小时", out)
+
+    def test_today_and_tomorrow_flags_are_gone(self):
+        """R1 把 `--today/--tomorrow` 换成了 `--hours`：旧参数必须是参数错（退出码 2）。"""
+        for flag in ("--today", "--tomorrow"):
+            with self.subTest(flag=flag):
+                with self.assertRaises(SystemExit) as ctx:
+                    cli.build_parser().parse_args(["schedule", flag])
+                self.assertEqual(ctx.exception.code, cli.EXIT_USAGE)
+
+    def test_hours_must_be_positive(self):
+        for bad in ("0", "-1", "abc"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit) as ctx:
+                    cli.build_parser().parse_args(["schedule", "--hours", bad])
+                self.assertEqual(ctx.exception.code, cli.EXIT_USAGE)
 
     def test_empty_schedule_is_not_an_error(self):
         path = self._write_config("llm:\n  mode: disabled\n")
         code, out, err = self._run(path)
         self.assertEqual(code, cli.EXIT_OK)
-        self.assertIn("共 0 条", out)
-        self.assertIn("（没有日程）", out)
+        self.assertIn("配置共 0 条", out)
+        self.assertIn("（窗口内没有日程）", out)
 
     def test_broken_schedule_is_reported_honestly(self):
         path = self._write_config("scheduler:\n  recurring:\n    - title: 坏的\n      start: \"99:99\"\n")
@@ -495,13 +659,6 @@ class TestScheduleCommand(unittest.TestCase):
         self.assertEqual(code, cli.EXIT_ERROR)
         self.assertIn("读不出来", err)
         self.assertIn("Agent 也会因此起不来", err)
-
-    def test_today_only_flag(self):
-        path = self._write_config("scheduler:\n  recurring:\n    - title: 每天\n      start: \"10:00\"\n")
-        code, out, err = self._run(path, ["--today"])
-        self.assertEqual(code, cli.EXIT_OK)
-        self.assertIn("今天（", out)
-        self.assertNotIn("明天（", out)
 
     def test_unreadable_config_is_reported_with_the_naming_hint(self):
         tmp = tempfile.mkdtemp(prefix="cli-sched-bad-")
@@ -528,8 +685,12 @@ class TestScheduleCommand(unittest.TestCase):
         """Agent 没跑: 日程照样列出来, 但"已过"必须说明是按时间算的。"""
         tmp = tempfile.mkdtemp(prefix="cli-nosock-")
         self.addCleanup(shutil.rmtree, tmp, True)
+        # ⚠ 时刻要落在窗口的**尾巴**里（最近 30 分钟）: 写死 10:00 的话, 下午跑测试
+        #    那条就在窗口外了 —— 那是新语义, 不是 bug。
+        just_passed = datetime.now() - timedelta(minutes=5)
         path = self._write_config(
-            "scheduler:\n  recurring:\n    - title: 每天喝水\n      start: \"10:00\"\n")
+            "scheduler:\n  recurring:\n    - title: 每天喝水\n      start: \"%s\"\n"
+            % just_passed.strftime("%H:%M"))
         missing = os.path.join(tmp, "nope.sock")
         code, out, err = self._run(path, ["--socket", missing, "--timeout", "0.2"])
 
@@ -537,6 +698,7 @@ class TestScheduleCommand(unittest.TestCase):
         self.assertIn("问不到 Agent 的触发记录", err)
         self.assertIn("连不上 Agent", err)
         self.assertIn("每天喝水", out)
+        self.assertIn("← 已过", out, "尾巴里那条过去了、但没有触发记录")
         self.assertIn("不代表", out)
         self.assertNotIn("已触发", out, "没问到就一条都不能标")
         self.assertNotIn("未触发", out, "没问到也不许替 Agent 说「未触发」")
@@ -882,17 +1044,23 @@ class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("连不上", why)
 
     async def test_schedule_marks_fired_through_a_real_agent(self):
-        """端到端: 真 server 应答 -> cmd_schedule 打出「已触发 HH:MM:SS」。"""
-        today = date.today()
-        fact = {"title": "站会", "date": today.isoformat(),
-                "scheduled_at": "%sT09:30" % today.isoformat(),
-                "fired_at": "%sT09:30:04" % today.isoformat(), "actions": []}
+        """端到端: 真 server 应答 -> cmd_schedule 在**尾巴**里打出「已触发 HH:MM:SS」。
+
+        ⚠ 窗口是"接下来 24 小时 + 最近 30 分钟"，所以这条日程必须落在**刚过去**的
+          那一小段里：写死 09:30 的话，下午跑测试时它就在窗口外了（新语义，不是 bug）。
+        """
+        fired_at = datetime.now() - timedelta(minutes=4)
+        start_at = fired_at - timedelta(minutes=1)
+        fact = {"title": "站会", "date": start_at.strftime("%Y-%m-%d"),
+                "scheduled_at": start_at.strftime("%Y-%m-%dT%H:%M"),
+                "fired_at": fired_at.strftime("%Y-%m-%dT%H:%M:%S"), "actions": []}
         self.agent.reply_with(COMMAND_QUERY_SCHEDULE, TOPIC_SCHEDULE,
                               lambda _payload: {"kind": "state", "now": "x", "limit": 50,
                                                 "fired": [fact]})
         path = self._write_config(
             "ipc:\n  socket_path: %s\n" % self.path +
-            "scheduler:\n  recurring:\n    - title: 站会\n      start: \"09:30\"\n")
+            "scheduler:\n  recurring:\n    - title: 站会\n      start: \"%s\"\n"
+            % start_at.strftime("%H:%M"))
 
         old = os.environ.get("AGENT_CONFIG_DIR")
         os.environ["AGENT_CONFIG_DIR"] = str(path.parent)
@@ -908,14 +1076,15 @@ class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(restore)
 
         args = cli.build_parser().parse_args(
-            ["schedule", "--config", str(path), "--today", "--timeout", "2"])
+            ["schedule", "--config", str(path), "--timeout", "2"])
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             code = await cli.cmd_schedule(args)
 
         self.assertEqual(code, cli.EXIT_OK)
         text = out.getvalue()
-        self.assertIn("09:30  站会  ← 已触发 09:30:04", text)
+        self.assertIn("%s  站会  ← 已触发 %s"
+                      % (start_at.strftime("%H:%M"), fired_at.strftime("%H:%M:%S")), text)
         self.assertIn("来自运行中的 Agent", text, "页脚要说明这份记录的出处")
         self.assertNotIn("不代表", text, "问到了就不该再用「按时间」那套免责话术")
         self.assertEqual(err.getvalue(), "", "问到了就不该有「问不到」的噪音")
@@ -923,10 +1092,11 @@ class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
     async def test_schedule_without_the_agent_still_lists_but_says_why(self):
         """同一个真 server, 但**不**应答查询: 列表照出, 页脚退回"按时间"。"""
         self.agent.record_only()
-        today = date.today()
+        start_at = datetime.now() - timedelta(minutes=4)
         path = self._write_config(
             "ipc:\n  socket_path: %s\n" % self.path +
-            "scheduler:\n  recurring:\n    - title: 站会\n      start: \"09:30\"\n")
+            "scheduler:\n  recurring:\n    - title: 站会\n      start: \"%s\"\n"
+            % start_at.strftime("%H:%M"))
 
         old = os.environ.get("AGENT_CONFIG_DIR")
         os.environ["AGENT_CONFIG_DIR"] = str(path.parent)
@@ -942,16 +1112,17 @@ class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(restore)
 
         args = cli.build_parser().parse_args(
-            ["schedule", "--config", str(path), "--today", "--timeout", "0.2"])
+            ["schedule", "--config", str(path), "--timeout", "0.2"])
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             code = await cli.cmd_schedule(args)
 
         self.assertEqual(code, cli.EXIT_OK)
         self.assertIn("站会", out.getvalue())
+        self.assertIn("← 已过", out.getvalue())
         self.assertIn("不代表", out.getvalue())
         self.assertIn("没回日程快照", err.getvalue())
-        self.assertIn(today.isoformat(), out.getvalue())
+        self.assertIn(start_at.date().isoformat(), out.getvalue())
 
 
 if __name__ == "__main__":

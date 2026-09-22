@@ -30,7 +30,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -491,6 +491,21 @@ def fired_clock(fired_at: Any) -> str:
     return clock if sep else text
 
 
+def row_mark(row: Dict[str, Any], asked: bool) -> str:
+    """一行后面的标记（三种状态 + 空）。
+
+    ⚠ 只有**问到了** Agent 才敢说「未触发」（`asked`）；没问到时只说「已过」——
+      那是纯时间比较，不掺一句关于"触发没触发"的暗示。
+    """
+    if row.get("fired_at"):
+        return "  ← 已触发 %s" % fired_clock(row["fired_at"])
+    if row["past"] and asked:
+        return "  ← 已过（未触发）"
+    if row["past"]:
+        return "  ← 已过"
+    return ""
+
+
 def render_schedule(days: List[Tuple[str, Any]], rows_of, now: datetime,
                     limit: int = 10, asked: bool = False) -> List[str]:
     """渲染成"人读的行"（不含页脚）。`rows_of(day)` 给当天的行。
@@ -498,6 +513,9 @@ def render_schedule(days: List[Tuple[str, Any]], rows_of, now: datetime,
     @param asked 是否**问到了** Agent 的触发记录（`--no-ask` / 连不上就是 False）。
                  只有问到时才敢把"过了 start 却不在记录里"的行标成「已过（未触发）」；
                  没问到时保持老样子「已过」—— 那是纯时间比较，不掺一句暗示。
+    @param limit 每天最多几行（0 = 不限）。⚠ 这个"按天"的口径是给"整天视图"用的；
+                 R 系列之后 CLI 默认走的是 `render_window()`（窗口 = 一整段连续时间，
+                 配额按**窗口**算，不是按天）。
     """
     lines = []
     weekday = "一二三四五六日"
@@ -509,17 +527,158 @@ def render_schedule(days: List[Tuple[str, Any]], rows_of, now: datetime,
             continue
         shown = rows if limit <= 0 else rows[:limit]
         for row in shown:
-            if row.get("fired_at"):
-                mark = "  ← 已触发 %s" % fired_clock(row["fired_at"])
-            elif row["past"] and asked:
-                mark = "  ← 已过（未触发）"
-            elif row["past"]:
-                mark = "  ← 已过"
-            else:
-                mark = ""
-            lines.append("  %s%s" % (row_text(row), mark))
+            lines.append("  %s%s" % (row_text(row), row_mark(row, asked)))
         if len(rows) > len(shown):
             lines.append("  …还有 %d 项（--limit 可调）" % (len(rows) - len(shown)))
+    return lines
+
+
+# ---------------------------------------------------------------------------
+#  窗口（R 系列：CLI 与 GUI 都只看"接下来 N 小时"）
+# ---------------------------------------------------------------------------
+#: 默认窗口长度（小时）。CLI 的 `--hours` 默认值；GUI 侧同一口径（见 docs/gui.md）。
+WINDOW_HOURS_DEFAULT = 24.0
+
+#: "刚触发"的尾巴（分钟）。窗口只往前看，本来不该出现已经过去的条目；但**刚刚**过去的
+#: 那一小段要留着 —— 否则"到点了、到底触发没有"在列表里完全看不见，而那恰好是 P 系列
+#: 做出来的那层信息（`← 已触发 HH:MM:SS` / `← 已过（未触发）`）。
+TAIL_MINUTES = 30
+
+
+def positive_hours(text: str) -> float:
+    """`--hours` 的解析：必须是正数。
+
+    ⚠ 用 argparse 的 `type` 而不是在命令里手检：这样 `--hours 0` / `--hours abc`
+      直接落进"参数错（退出码 2）"，与其它参数错误的待遇一致。
+    """
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("需要一个数字，得到 %r" % (text,))
+    if value <= 0:
+        raise argparse.ArgumentTypeError("必须是正数（小时），得到 %r" % (text,))
+    return value
+
+
+def window_range(now: datetime, hours: float,
+                 tail_minutes: int = TAIL_MINUTES) -> Tuple[datetime, datetime]:
+    """窗口 = `[now - tail, now + hours)`。起点把"最近 tail 分钟"也包进来。"""
+    return now - timedelta(minutes=tail_minutes), now + timedelta(hours=hours)
+
+
+def window_end_text(end: datetime, now: datetime) -> str:
+    """窗口终点的说法：`明天 18:26` / `09-25 18:26`（与段标题同一套口径）。"""
+    label = {0: "今天", 1: "明天", 2: "后天"}.get((end.date() - now.date()).days)
+    return "%s %s" % (label or end.strftime("%m-%d"), end.strftime("%H:%M"))
+
+
+def day_heading(day: date, today: date) -> str:
+    """段标题：今天/明天/后天带 ISO 日期；更远的直接给日期（那时"今天"没有意义）。"""
+    weekday = "一二三四五六日"[day.weekday()]
+    label = {0: "今天", 1: "明天", 2: "后天"}.get((day - today).days)
+    if label is None:
+        return "%s（周%s）" % (day.isoformat(), weekday)
+    return "%s（%s 周%s）" % (label, day.isoformat(), weekday)
+
+
+def _row_moment(day: date, row: Dict[str, Any]) -> datetime:
+    """行在时间轴上的位置 = 那天 `start` 的那一刻。
+
+    ⚠ 判据是**用户看到的那一刻**（start），不是 `trigger_at`：`start=14:00`、
+      `remind_before_min=10` 的条目在 13:55 看是"马上要来"，用 trigger_at 判定会
+      因为提醒时刻（13:50）已过而让它从列表里消失。
+    """
+    hour, minute = row["time"].split(":")
+    return datetime(day.year, day.month, day.day, int(hour), int(minute))
+
+
+def window_days(events: List[Any], now: datetime, hours: float,
+                facts: Optional[List[Dict[str, Any]]] = None,
+                tail_minutes: int = TAIL_MINUTES) -> List[Tuple[date, List[Dict[str, Any]]]]:
+    """窗口内的日程，按天分组（只保留**有行的天**；天与行都按时间升序）。
+
+    @param facts 运行中 Agent 的触发事实：① 给行补上 `fired_at`；② **配置里已经没有**
+                 的那些（一次性日程触发后被删掉）在这里被补成行 —— 否则"刚触发"的
+                 尾巴在配置里找不到人（那是 R3 之后的常态）。
+    """
+    begin, end = window_range(now, hours, tail_minutes)
+    by_day: Dict[date, List[Dict[str, Any]]] = {}
+    seen: Set[str] = set()
+
+    day = begin.date()
+    while day <= end.date():
+        keep = []
+        for row in schedule_rows(events, day, now, facts=facts):
+            if begin <= _row_moment(day, row) < end:
+                keep.append(row)
+                seen.add(row["trigger_at"])
+        if keep:
+            by_day[day] = keep
+        day += timedelta(days=1)
+
+    for fact in (facts or []):
+        key = fact.get("scheduled_at")
+        if not key or key in seen:
+            continue
+        try:
+            moment = datetime.strptime(str(key), "%Y-%m-%dT%H:%M")
+        except ValueError:
+            continue                      # 事实里的时刻看不懂 -> 落不到窗口上, 跳过
+        if not (begin <= moment < end):
+            continue
+        by_day.setdefault(moment.date(), []).append({
+            "time": moment.strftime("%H:%M"),
+            "end": "",
+            "title": fact.get("title") or "",
+            "past": True,
+            "day": moment.date(),
+            "trigger_at": key,
+            "fired_at": fact.get("fired_at"),
+            #: 只在事实里、配置里已经没有它了（一次性日程触发后被删）
+            "from_fact": True,
+        })
+
+    for rows in by_day.values():
+        rows.sort(key=lambda row: (row["time"], row["title"]))
+    return sorted(by_day.items())
+
+
+def render_window(events: List[Any], now: datetime, hours: float,
+                  facts: Optional[List[Dict[str, Any]]] = None,
+                  limit: int = 10, asked: bool = False,
+                  tail_minutes: int = TAIL_MINUTES) -> List[str]:
+    """渲染窗口（不含窗口说明头与页脚）。
+
+    @param limit **整个窗口**最多几行（0 = 不限）—— 不是每天几行：窗口是一段连续时间，
+                 按天各给一份配额会把近处截掉。
+    """
+    days = window_days(events, now, hours, facts=facts, tail_minutes=tail_minutes)
+    total = sum(len(rows) for _, rows in days)
+
+    left = None if limit <= 0 else limit
+    shown: List[Tuple[date, List[Dict[str, Any]]]] = []
+    for day, rows in days:
+        if left is None:
+            shown.append((day, rows))
+            continue
+        take = rows[:left]
+        if take:
+            shown.append((day, take))
+        left -= len(take)
+        if left <= 0:
+            break
+
+    lines = []
+    for day, rows in shown:
+        lines.append(day_heading(day, now.date()))
+        for row in rows:
+            lines.append("  %s%s" % (row_text(row), row_mark(row, asked)))
+
+    shown_count = sum(len(rows) for _, rows in shown)
+    if not lines:
+        lines.append("（窗口内没有日程）")
+    elif shown_count < total:
+        lines.append("  …还有 %d 项（--limit 可调）" % (total - shown_count))
     return lines
 
 
@@ -578,9 +737,12 @@ async def ask_fired(path: str, timeout: float) -> Tuple[Optional[List[Dict[str, 
 
 
 async def cmd_schedule(args: argparse.Namespace) -> int:
-    """列出今天/明天的日程（真的 `Scheduler` 语义），并标出**真的触发过**的那些。
+    """列出**接下来 N 小时**（默认 24）的日程，并标出**真的触发过**的那些。
 
-    两件事分开说清楚：
+    三件事分开说清楚：
+      · 窗口：只看 `[现在 - 30 分钟, 现在 + N 小时)`（判据是行的 `start`）。所以
+        "今天早上 08:30 那条"在下午看是**不会出现**的 —— 它已经不在"接下来"里了；
+        留着的 30 分钟只是为了让你还能看到"刚刚那一条触发没触发"。
       · 日程本身来自配置 + `ScheduleEvent` 语义（CLI 自己算，不需要 Agent 在跑）
       · 「已触发」来自运行中的 Agent（协议的 `query_schedule` 应答）—— 问不到就
         只说「已过」，并在页脚讲明"那是按时间比较的"（不留幻觉）
@@ -604,18 +766,13 @@ async def cmd_schedule(args: argparse.Namespace) -> int:
             print("问不到 Agent 的触发记录：%s" % reason, file=sys.stderr)
 
     now = datetime.now()
-    today = now.date()
-    tomorrow = today + timedelta(days=1)
-    wanted = []
-    if not args.tomorrow:
-        wanted.append(("今天", today))
-    if not args.today:
-        wanted.append(("明天", tomorrow))
+    begin, end = window_range(now, args.hours)
 
-    print("日程（共 %d 条；%s）" % (len(events), (config_path("config"))))
-    for line in render_schedule(wanted,
-                               lambda day: schedule_rows(events, day, now, facts=facts),
-                               now, limit=args.limit, asked=facts is not None):
+    print("日程（配置共 %d 条；%s）" % (len(events), (config_path("config"))))
+    print("窗口：%s → %s（%g 小时；另有最近 %d 分钟里刚过去的）"
+          % (begin.strftime("%H:%M"), window_end_text(end, now), args.hours, TAIL_MINUTES))
+    for line in render_window(events, now, args.hours, facts=facts,
+                              limit=args.limit, asked=facts is not None):
         print(line)
 
     if facts is None:
@@ -798,12 +955,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.set_defaults(func=cmd_watch)
 
     p_schedule = sub.add_parser("schedule",
-                                help="列出今天/明天的日程，并标出真的触发过的那些",
+                                help="列出接下来 N 小时（默认 24）的日程，标出真的触发过的",
                                 parents=[_common_options(suppress_defaults=True)])
-    p_schedule.add_argument("--today", action="store_true", help="只看今天")
-    p_schedule.add_argument("--tomorrow", action="store_true", help="只看明天")
+    p_schedule.add_argument("--hours", type=positive_hours, default=WINDOW_HOURS_DEFAULT,
+                            # ⚠ 这串里 %(default)g 是 argparse 的**映射**占位符, 不能再混
+                            #   位置式的 %d（混了会 TypeError: format requires a mapping）
+                            help="窗口长度（小时，必须是正数；默认 %(default)g）。"
+                                 "窗口里还带最近 " + str(TAIL_MINUTES) + " 分钟刚过去的那些")
     p_schedule.add_argument("--limit", type=int, default=10,
-                            help="每天最多列几行（0 = 不限；默认 %(default)s）")
+                            help="整个窗口最多列几行（0 = 不限；默认 %(default)s）")
     p_schedule.add_argument("--no-ask", action="store_true",
                             help="不问 Agent，只按时间比较（离线/对比用）")
     p_schedule.set_defaults(func=cmd_schedule)
