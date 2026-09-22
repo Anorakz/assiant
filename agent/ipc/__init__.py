@@ -6,14 +6,18 @@
 #      Client: local_client.py   Python 测试客户端 (**不是**生产 GUI, 那个是 C++)
 #      本文件: build_ipc()       main.py 的接入点 —— 把 server 和 bus 接起来
 #
-#  ⚠ 出方向 (Agent -> GUI 的 status/llm/wallpaper/music) 需要知道状态机与回复,
-#    所以 build_ipc() 收一个可选的 runtime (Phase 6 D4):
+#  ⚠ 出方向 (Agent -> GUI 的 status/llm/wallpaper/music/schedule) 需要知道状态机、
+#    回复与调度器, 所以 build_ipc() 收一个可选的 runtime (Phase 6 D4):
 #        build_ipc(bus, config)              只接入方向 (命令) —— 兼容旧签名
-#        build_ipc(bus, config, runtime=rt)  再推 status (状态变化) 与 llm (回复)
+#        build_ipc(bus, config, runtime=rt)  再推 status (状态变化)、llm (回复)
+#                                            与 schedule (日程真的触发, P 系列)
+#    每样都是"有就接": runtime 少了 state / on_reply / scheduler 里任何一个,
+#    只少推对应的那一类, 其余照常 —— 老 Runtime 与测试替身不用跟着改。
 # ============================================================================
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 from .local_client import (
@@ -38,6 +42,7 @@ from .protocol import (
     COMMAND_CHAT_INPUT,
     COMMAND_NEXT_BILIBILI,
     COMMAND_NEXT_WALLPAPER,
+    COMMAND_QUERY_SCHEDULE,
     COMMAND_SWITCH_MODE,
     COMMANDS,
     ENCODING,
@@ -52,6 +57,7 @@ from .protocol import (
     SOCKET_PATH,
     TOPIC_LLM,
     TOPIC_MUSIC,
+    TOPIC_SCHEDULE,
     TOPIC_STATUS,
     TOPIC_WALLPAPER,
     TOPICS,
@@ -76,14 +82,20 @@ __all__ = [
     "TOPIC_LLM",
     "TOPIC_WALLPAPER",
     "TOPIC_MUSIC",
+    "TOPIC_SCHEDULE",
     "TOPICS",
     # command (GUI -> Agent)
     "COMMAND_SWITCH_MODE",
     "COMMAND_NEXT_WALLPAPER",
     "COMMAND_CHAT_INPUT",
     "COMMAND_NEXT_BILIBILI",
+    "COMMAND_QUERY_SCHEDULE",
     "COMMANDS",
     "UNWIRED_COMMAND_NOTES",
+    "NO_SCHEDULER_NOTE",
+    # schedule.data.kind 的取值
+    "SCHEDULE_KIND_STATE",
+    "SCHEDULE_KIND_FIRED",
     "ACTION_FIELD",
     "PAYLOAD_FIELD",
     # 取值域
@@ -199,6 +211,16 @@ def _make_dispatcher(server: Any, loop: Any):
     return _dispatch
 
 
+def _scheduler_of(runtime: Any) -> Any:
+    """从 runtime 上取调度器 (取不到就 None)。
+
+    @note 用 `recent_fired` 当能力探测: 只要它能报"触发过什么"就够本层用了 ——
+          不去 isinstance(Scheduler), 那样测试替身与将来的实现都得跟着改。
+    """
+    scheduler = getattr(runtime, "scheduler", None) if runtime is not None else None
+    return scheduler if hasattr(scheduler, "recent_fired") else None
+
+
 def _status_data(state: Any) -> Dict[str, Any]:
     """status 推送的负载。
 
@@ -233,6 +255,7 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
 
     · mode 变化   -> ``status{mode, connected}``
     · 每条 LLM 回复 -> ``llm{text}``
+    · 日程真的触发 -> ``schedule{kind:"fired", event}`` (P 系列; 没有调度器就跳过)
     """
     if dispatch is None:
         dispatch = _make_dispatcher(server, _current_loop())
@@ -254,6 +277,17 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
         runtime.on_reply = _on_reply
         _log.debug("ipc: 已接上回复推送 (runtime.on_reply -> llm)")
 
+    # · 日程触发 -> schedule{kind:"fired", event}
+    # 与上面 on_reply 同款"有就接": runtime 没带调度器 (或它还没起来) 就跳过 ——
+    # 老 Runtime 与测试替身不该因为少这一样而接不上其余推送。
+    scheduler = _scheduler_of(runtime)
+    if scheduler is not None:
+        def _on_fire(fact: Dict[str, Any]) -> None:
+            dispatch(TOPIC_SCHEDULE, {"kind": SCHEDULE_KIND_FIRED, "event": fact})
+
+        scheduler.on_fire = _on_fire
+        _log.debug("ipc: 已接上日程触发推送 (scheduler.on_fire -> schedule)")
+
 
 #: 还没接下游的命令 -> 回给用户的那句话 (Phase 6 D7 / 决策 7)。
 #: 下游属 Phase 7; 现在必须**回一句说明**, 否则 GUI 上点了完全没反应, 用起来像坏了。
@@ -262,6 +296,33 @@ UNWIRED_COMMAND_NOTES: Dict[str, str] = {
     COMMAND_NEXT_WALLPAPER: "换壁纸的功能还没接入（Phase 7），这次点击先没有生效。",
     COMMAND_NEXT_BILIBILI: "B 站「下一集」还没接入（Phase 7），这次点击先没有生效。",
 }
+
+
+#: schedule.data.kind 的两个取值 (线格式见 docs/ipc-protocol.md §3)。
+#: 放在这里而不是 protocol.py: 它们只在"构造 schedule 载荷"时用到, 没有第二处
+#: 实现要对字面值 —— C++ 侧按"未知 topic 忽略"处理, 根本不认这个 topic。
+SCHEDULE_KIND_STATE = "state"    #: 应答 query_schedule 的快照
+SCHEDULE_KIND_FIRED = "fired"    #: 刚刚真的触发了一条
+
+#: 收到 query_schedule 但 Agent 侧没有调度器时回的那句话。
+#: 与 UNWIRED_COMMAND_NOTES 同款: 给**用户**看的 (会显示成助手气泡), 不能静默。
+NO_SCHEDULER_NOTE = "现在还没有可查的日程触发记录：Agent 的调度器没起来（或没接进来）。"
+
+
+def _schedule_state_data(scheduler: Any) -> Dict[str, Any]:
+    """query_schedule 的应答负载 (kind="state", 线格式见 docs §3)。
+
+    @note 与 _status_data 同样的用意: **只有这一处**构造 kind="state" 载荷; 实时那条
+          kind="fired" 也只有 _wire_outbound 里那一处 —— 两处不会各长各的。
+    @note limit 报的是**真实上限** (scheduler.history_limit), 不是这次带了几条 ——
+          客户端拿它判断"是不是被截断了"。
+    """
+    return {
+        "kind": SCHEDULE_KIND_STATE,
+        "now": datetime.now().isoformat(timespec="seconds"),
+        "limit": scheduler.history_limit,
+        "fired": list(scheduler.recent_fired()),
+    }
 
 
 def _make_command_handler(bus: Any, runtime: Any = None, push: Any = None):
@@ -280,6 +341,10 @@ def _make_command_handler(bus: Any, runtime: Any = None, push: Any = None):
 
         if action == COMMAND_SWITCH_MODE:
             _handle_switch_mode(runtime, push, payload)
+            return
+
+        if action == COMMAND_QUERY_SCHEDULE:
+            _handle_query_schedule(runtime, push)
             return
 
         if action in UNWIRED_COMMAND_NOTES:
@@ -338,6 +403,33 @@ def _handle_switch_mode(runtime: Any, push: Any, payload: dict) -> None:
     )
     if push is not None:
         push(TOPIC_STATUS, _status_data(state))
+
+
+def _handle_query_schedule(runtime: Any, push: Any) -> None:
+    """query_schedule: 把"最近触发过哪些日程"回给客户端 (docs §4)。
+
+    应答**就是**随后那条 ``schedule{kind:"state"}`` 推送 —— 与 switch_mode 的应答是
+    随后那条 status 一样, **没有请求 id** (协议里根本没有关联字段)。
+    没有调度器时回一条 llm 说明, 而不是静默: 点了没反应最难查。
+
+    @note 这条查询**不改任何东西** (只读): 日程的增删改不在这条协议里 ——
+          配置永远是唯一真源, 写配置是人在 PC 上做的事。
+    """
+    scheduler = _scheduler_of(runtime)
+    if scheduler is None:
+        _log.warning("ipc: 收到 query_schedule 但没有调度器, 回一句说明")
+        if push is not None:
+            push(TOPIC_LLM, {"text": NO_SCHEDULER_NOTE})
+        return
+
+    if push is None:
+        _log.warning("ipc: 收到 query_schedule 但没有推送入口, 已忽略")
+        return
+
+    data = _schedule_state_data(scheduler)
+    _log.debug("ipc: query_schedule -> schedule{kind=%s, %d 条}",
+               data["kind"], len(data["fired"]))
+    push(TOPIC_SCHEDULE, data)
 
 
 async def _handle_chat_input(bus: Any, payload: dict) -> None:

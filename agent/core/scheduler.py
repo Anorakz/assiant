@@ -921,6 +921,16 @@ class Scheduler:
 
     # ------------------------------------------------------ 触发事实 (查询) ---
     @property
+    def history_limit(self) -> int:
+        """触发事实的条数上限 (0 = 不记)。
+
+        @note 是**上限**不是当前条数 (当前条数看 stats["fired_history"])。IPC 的
+              schedule 快照用它告诉客户端"这份列表可能被截断", 所以要有公开口子 ——
+              让 ipc 层直接摸 _history.maxlen 是越界。
+        """
+        return self._history_limit
+
+    @property
     def on_fire(self) -> Optional[Callable[[Dict[str, Any]], Any]]:
         """触发一条日程后的回调 (没有接就是 None)。
 

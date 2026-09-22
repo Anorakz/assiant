@@ -541,7 +541,14 @@ class TestFiredHistory(unittest.IsolatedAsyncioTestCase):
 
     async def test_default_history_limit_is_the_documented_one(self):
         scheduler, _, _, _ = make_scheduler(self.CONFIG)
-        self.assertEqual(scheduler._history.maxlen, DEFAULT_HISTORY_LIMIT)
+        self.assertEqual(scheduler.history_limit, DEFAULT_HISTORY_LIMIT)
+
+    async def test_history_limit_is_the_cap_not_the_count(self):
+        scheduler, _, _, _ = make_scheduler(self.CONFIG, history_limit=7)
+        self.assertEqual(scheduler.history_limit, 7)
+        await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
+        self.assertEqual(scheduler.history_limit, 7, "上限不随条数变")
+        self.assertEqual(scheduler.stats["fired_history"], 1, "条数是另一回事")
 
     async def test_bad_history_limit_is_rejected(self):
         with self.assertRaises(SchedulerError):

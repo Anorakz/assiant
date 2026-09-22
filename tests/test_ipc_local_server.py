@@ -40,6 +40,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -47,7 +48,12 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from agent.core.state_machine import State, StateMachine  # noqa: E402
-from agent.ipc import build_ipc  # noqa: E402
+from agent.ipc import (  # noqa: E402
+    NO_SCHEDULER_NOTE,
+    SCHEDULE_KIND_FIRED,
+    SCHEDULE_KIND_STATE,
+    build_ipc,
+)
 from agent.ipc.local_server import (  # noqa: E402
     DEFAULT_QUEUE_SIZE,
     UNIX_SOCKET_SUPPORTED,
@@ -62,10 +68,12 @@ from agent.ipc.protocol import (  # noqa: E402
     COMMAND_CHAT_INPUT,
     COMMAND_NEXT_BILIBILI,
     COMMAND_NEXT_WALLPAPER,
+    COMMAND_QUERY_SCHEDULE,
     COMMAND_SWITCH_MODE,
     MAX_LINE_BYTES,
     SOCKET_PATH,
     TOPIC_LLM,
+    TOPIC_SCHEDULE,
     TOPIC_STATUS,
     IpcProtocolError,
     decode,
@@ -699,6 +707,212 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
                 with contextlib.suppress(Exception):
                     await writer.wait_closed()
             await server.stop()
+
+    # ---- P 系列: 日程触发事实 (schedule topic / query_schedule) ----
+
+    class _StubScheduler:
+        """只带 ipc 层真正用到的那三样: recent_fired() / history_limit / on_fire。
+
+        @note 故意**不是**真 Scheduler: 这一层只依赖"能报触发过什么"这个能力,
+              所以用替身才能证明"换个实现也接得上"。真 Scheduler 另有一条用例。
+        """
+
+        def __init__(self, facts=None, limit=50):
+            self._facts = list(facts or [])
+            self.history_limit = limit
+            self.on_fire = None
+
+        def recent_fired(self, limit=None):
+            if limit is None:
+                return [dict(f) for f in self._facts]
+            return [dict(f) for f in self._facts[-limit:]]
+
+    class _RuntimeWithScheduler:
+        """state + on_reply + scheduler (后两个可以有, 也可以没有)。"""
+
+        def __init__(self, scheduler=None, connected=True):
+            self.state = StateMachine(connected_check=lambda: connected)
+            self.on_reply = None
+            self.scheduler = scheduler
+
+    FACT = {
+        "title": "午休",
+        "date": "2026-09-22",
+        "scheduled_at": "2026-09-22T13:00",
+        "fired_at": "2026-09-22T13:00:03",
+        "actions": [{"type": "message", "text": "日程提醒：午休", "timestamp": 1.0}],
+    }
+
+    async def test_scheduler_gets_the_on_fire_hook(self):
+        runtime = self._RuntimeWithScheduler(self._StubScheduler())
+        server = build_ipc(None, {"ipc": {"socket_path": _tmp_socket_path()}},
+                           runtime=runtime)
+        try:
+            self.assertTrue(callable(runtime.scheduler.on_fire),
+                            "接上 runtime.scheduler 就要挂 on_fire")
+        finally:
+            await server.stop()
+
+    async def test_fired_event_reaches_a_connected_client(self):
+        """实时那条: 日程真的触发 -> 客户端收到 schedule{kind:"fired"}。"""
+        if not UNIX_SOCKET_SUPPORTED:
+            self.skipTest("需要 AF_UNIX")
+        scheduler = self._StubScheduler()
+        runtime = self._RuntimeWithScheduler(scheduler)
+        server = build_ipc(None, {"ipc": {"socket_path": _tmp_socket_path()}},
+                           runtime=runtime)
+        await server.start()
+        writer = None
+        try:
+            reader, writer = await asyncio.open_unix_connection(server.path)
+            await _wait_until(lambda: server.client_count == 1, what="GUI 连上")
+
+            scheduler.on_fire(dict(self.FACT))     # 调度器触发了一条
+
+            topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+            self.assertEqual(topic, TOPIC_SCHEDULE)
+            self.assertEqual(data["kind"], SCHEDULE_KIND_FIRED)
+            self.assertEqual(data["event"], self.FACT)
+        finally:
+            if writer is not None:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+            await server.stop()
+
+    async def test_query_schedule_pushes_the_snapshot(self):
+        from agent.ipc import _make_command_handler
+
+        scheduler = self._StubScheduler([self.FACT], limit=7)
+        runtime = self._RuntimeWithScheduler(scheduler)
+        pushed = []
+        handler = _make_command_handler(
+            None, runtime=runtime, push=lambda topic, data: pushed.append((topic, data))
+        )
+
+        await handler(COMMAND_QUERY_SCHEDULE, {})
+
+        self.assertEqual(len(pushed), 1)
+        topic, data = pushed[0]
+        self.assertEqual(topic, TOPIC_SCHEDULE)
+        self.assertEqual(data["kind"], SCHEDULE_KIND_STATE)
+        self.assertEqual(data["fired"], [self.FACT])
+        self.assertEqual(data["limit"], 7, "limit 报的是上限, 不是这次带了几条")
+        # now 要能被客户端解析回来 (它按这个显示"这是什么时候问的")
+        datetime.strptime(data["now"], "%Y-%m-%dT%H:%M:%S")
+
+    async def test_query_schedule_snapshot_is_a_copy(self):
+        from agent.ipc import _make_command_handler
+
+        scheduler = self._StubScheduler([self.FACT])
+        runtime = self._RuntimeWithScheduler(scheduler)
+        pushed = []
+        handler = _make_command_handler(
+            None, runtime=runtime, push=lambda topic, data: pushed.append((topic, data))
+        )
+        await handler(COMMAND_QUERY_SCHEDULE, {})
+        pushed[0][1]["fired"][0]["title"] = "改坏了"
+        self.assertEqual(scheduler.recent_fired()[0]["title"], "午休")
+
+    async def test_query_schedule_without_scheduler_replies_with_a_note(self):
+        from agent.ipc import _make_command_handler
+
+        pushed = []
+        handler = _make_command_handler(
+            None, runtime=self._RuntimeWithScheduler(None),
+            push=lambda topic, data: pushed.append((topic, data)),
+        )
+
+        with self.assertLogs("agent.ipc", level="WARNING") as caught:
+            await handler(COMMAND_QUERY_SCHEDULE, {})
+
+        self.assertEqual(pushed, [(TOPIC_LLM, {"text": NO_SCHEDULER_NOTE})],
+                         "没有调度器要回一句说明, 不能静默")
+        self.assertIn("没有调度器", "\n".join(caught.output))
+
+    async def test_query_schedule_without_push_is_harmless(self):
+        from agent.ipc import _make_command_handler
+
+        handler = _make_command_handler(
+            None, runtime=self._RuntimeWithScheduler(self._StubScheduler())
+        )
+        await handler(COMMAND_QUERY_SCHEDULE, {})      # 不该抛
+
+    async def test_no_scheduler_does_not_break_the_other_pushes(self):
+        """"有就接" 的意思: 少了调度器只少推一类, status/llm 照旧。"""
+        runtime = self._RuntimeWithScheduler(None)
+        server = build_ipc(None, {"ipc": {"socket_path": _tmp_socket_path()}},
+                           runtime=runtime)
+        try:
+            self.assertEqual(runtime.state.callback_count, 1)
+            self.assertTrue(callable(runtime.on_reply))
+        finally:
+            await server.stop()
+
+    async def test_query_schedule_round_trip_over_a_real_socket(self):
+        """验收形态: 发 query_schedule -> 收到 schedule{kind:"state"}。
+
+        这条把三件事串起来: server 的 COMMANDS 白名单 (认这条命令)、命令处理分支、
+        push 到线上 —— 任何一环漏了它都会红。
+        """
+        if not UNIX_SOCKET_SUPPORTED:
+            self.skipTest("需要 AF_UNIX")
+        scheduler = self._StubScheduler([self.FACT])
+        runtime = self._RuntimeWithScheduler(scheduler)
+        server = build_ipc(None, {"ipc": {"socket_path": _tmp_socket_path()}},
+                           runtime=runtime)
+        await server.start()
+        writer = None
+        try:
+            reader, writer = await asyncio.open_unix_connection(server.path)
+            await _wait_until(lambda: server.client_count == 1, what="GUI 连上")
+
+            writer.write(encode_command(COMMAND_QUERY_SCHEDULE, {}))
+            await writer.drain()
+
+            topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+            self.assertEqual(topic, TOPIC_SCHEDULE)
+            self.assertEqual(data["kind"], SCHEDULE_KIND_STATE)
+            self.assertEqual(data["fired"], [self.FACT])
+        finally:
+            if writer is not None:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+            await server.stop()
+
+    async def test_snapshot_uses_a_real_scheduler(self):
+        """真 Scheduler -> 真 fact -> 真快照 (P1 的产出与 P3 的壳不漂移)。"""
+        from agent.core import Scheduler
+        from agent.ipc import _make_command_handler
+
+        class _Bus:
+            async def push(self, source, text):
+                return {"source": source, "text": text, "timestamp": 1.0}
+
+        runtime = self._RuntimeWithScheduler(None)
+        scheduler = Scheduler(
+            state=runtime.state, bus=_Bus(),
+            config={"recurring": [{"title": "站会", "start": "09:30"}]},
+        )
+        runtime.scheduler = scheduler
+        pushed = []
+        handler = _make_command_handler(
+            None, runtime=runtime, push=lambda topic, data: pushed.append((topic, data))
+        )
+
+        await handler(COMMAND_QUERY_SCHEDULE, {})          # 还没触发过
+        self.assertEqual(pushed[-1][1]["fired"], [])
+        self.assertEqual(pushed[-1][1]["limit"], scheduler.history_limit)
+
+        await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 4))
+        await handler(COMMAND_QUERY_SCHEDULE, {})
+
+        data = pushed[-1][1]
+        self.assertEqual([f["title"] for f in data["fired"]], ["站会"])
+        self.assertEqual(data["fired"][0]["fired_at"], "2026-09-16T09:30:04")
+        self.assertEqual(data["fired"][0]["date"], "2026-09-16")
+        self.assertEqual(data["fired"][0]["actions"][0]["type"], "message")
 
 
 # ===========================================================================
