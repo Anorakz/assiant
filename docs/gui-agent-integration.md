@@ -115,7 +115,8 @@ GUI 在**未连接 / 主机未就绪**时不会发这些命令（会先在界面
 另外两件事**本来就该 Agent 负责**（GUI 只发命令/显示结果）：模式（SLEEP/STUDY/GAME）的实际行为、
 LLM 调用与降级。配置真源只有一份：GUI 的"模型测试页"写 `config/config.yaml` 的 `llm` 段
 （规范词只认 `edge`／`cloud`／`disabled`，`local`／`board` 是历史别名），再由它**派生**出
-`llm/config/llm.env` 喂 llama-server。**Agent 只读 `config/config.yaml`** —— 不要读派生文件，
+`llm/config/llm.env` 喂 llama-server。**Agent 读 `config/config.yaml`**（唯一被允许的写是
+"删掉已触发的一次性日程"，见 [`config-sources.md`](config-sources.md) §3.1）—— 不要读派生文件，
 也不要自己另存一份。约定见 [`config-sources.md`](config-sources.md)。
 
 ---

@@ -71,6 +71,8 @@ STALE_CLAIMS = [
     (r"同步到[^\n]{0,40}llm\.env",
      "llm/config/llm.env 是**派生**文件, 不是被同步的真源 —— "
      "方向只有 config.yaml → llm.env 一个"),
+    (r"--today\b|--tomorrow\b",
+     "R1 起 CLI 的 schedule 只有 --hours 窗口, 没有'整天'开关了 (--today/--tomorrow 已删)"),
 ]
 
 

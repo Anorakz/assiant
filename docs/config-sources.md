@@ -5,8 +5,9 @@
 
 ## 1. 一句话
 
-**`config/config.yaml` 是唯一的配置真源。** Agent 只读它；GUI 读它的 `gui:` 段、
-读写它的 `llm:` 段、**只读**它的 `scheduler:` 段（画日程区，见 §5）；
+**`config/config.yaml` 是唯一的配置真源。** Agent 读它，并且**只在一件事上写它**：
+`remove_fired_oneoff` 打开时，把**已经触发过的一次性日程**从 `oneoff:` 里删掉（§3.1）；
+GUI 读它的 `gui:` 段、读写它的 `llm:` 段、**只读**它的 `scheduler:` 段（画日程区，见 §5）；
 喂 llama-server 的 `llm/config/llm.env` 是**派生**文件，不是真源。
 
 ```
@@ -14,10 +15,11 @@
                     │  config/config.yaml       │   ← 唯一真源（板端本地，不入库）
                     │    llm:       推理位置与参数 │
                     │    gui:       界面参数      │
-                    │    scheduler: 日程（只读展示）│
+                    │    scheduler: 日程（谁读都行 │
+                    │               写只允许删已触发的 oneoff）│
                     │    sunshine / ipc / …      │
                     └───────┬───────────┬───────┘
-         只读（llm/scheduler）│           │  读写（gui: 读、llm: 读+写）
+     只读 / 删已触发的 oneoff │           │  读写（gui: 读、llm: 读+写）
                     ┌───────▼───┐   ┌───▼────────────────────┐
                     │  Agent    │   │  GUI (Qt5, 板端)        │
                     │ agent/    │   │  gui/src/**             │
@@ -34,7 +36,7 @@
 
 | 文件 | 角色 | 进 git？ | 谁写 | 谁读 |
 |---|---|---|---|---|
-| `config/config.yaml` | **唯一真源** | 否（只提交 `config.example.yaml`） | 人 / GUI（设置页、模型测试页） | Agent、GUI |
+| `config/config.yaml` | **唯一真源** | 否（只提交 `config.example.yaml`） | 人 / GUI（设置页、模型测试页）/ **Agent（只在"删掉已触发的一次性日程"这一件事上，见 §3.1）** | Agent、GUI |
 | `llm/config/llm.env` | **派生**（喂 llama-server） | 否 | `ConfigSyncer`（GUI 保存时、或 `gui_config_sync` CLI） | llama-server 启动脚本 |
 | `config/config.example.yaml` | 模板 | **是** | 人 | 人（`cp` 起步） |
 
@@ -54,6 +56,36 @@
   不是应用配置。
 - 于是"改了不生效"只剩一种原因：改错了文件。先看真源。
 
+### 3.1 Agent 唯一被允许的写：删掉已触发的一次性日程（R3）
+
+`scheduler.remove_fired_oneoff: true` 时（**默认 false**），一条 **oneoff** 触发之后，
+Agent 会把它**从那一条所在的 `oneoff:` 序列里删掉**。规则与边界（都在代码与单测里钉着）：
+
+| 项 | 做法 | 为什么 |
+| --- | --- | --- |
+| 删哪些 | **只删 oneoff**；`recurring` 一条不动 | recurring 删了明天就不响了 |
+| 怎么写 | **文本级**：只删属于那条的行区间，其余**逐字节**不变（`agent/core/schedule_config.py`） | 本文件的注释就是各字段的事实约定来源，整体重排 + 丢注释不可接受 |
+| 原子性 | `agent/config.py::write_text_atomic()`（同目录临时文件 + `os.replace`）—— **全仓唯一实现**，`save_config()` 也走它 | "临时文件必须与目标同文件系统"这条细节只写一遍 |
+| 备份 | 原文件旁留 `config.yaml.bak`（覆盖上一份），与 GUI 的 ConfigStore 同一约定 | 出问题能回退 |
+| 核对 | 写前**重新读盘**，`title` + `date` + `start` 三者都要对上，对不上就**不删** | 配置可能被人/GUI 改过，宁可不动也不误删 |
+| 失败 | **只记 WARNING**（写不进配置绝不影响这次触发） | 只读挂载 / 权限 / 磁盘满都不该让日程失效 |
+| 认不出的写法 | flow 风格（`oneoff: [{...}]`）**给理由、不改文件** | 一行里塞多个条目，文本级改它风险太大 |
+| 注释 | 紧贴**下一条**的注释与空行**留着**（只删属于那条的行） | 宁可留一行悬空注释，也不误删可能描述下一条的注释 |
+
+两条**如实写下的限制**：
+
+1. **竞争窗口**：读盘到 `os.replace` 之间有毫秒级窗口，另一个写入者（GUI 的设置页/模型页）
+   可能正好插进来 —— 最后写入者赢。用 `.bak` 兜着，**不引入锁**（同刻两个写入者的概率极低，
+   锁的复杂度不划算）。
+2. **触发与写回之间进程崩了**：那条不会被删，下次启动若还在同一时间窗内会**再触发一次** ——
+   这与 `agent/core/scheduler.py` 模块头既有的约定一致（"重启后同一时间窗内会再触发一次"），
+   不是新问题。
+
+> ⚠ 打开它意味着 **Agent 成为 `config.yaml` 的第二个写入者**。默认关就是这个原因：
+> 这是"程序自动改真源"的行为，该由人显式决定。
+> **守卫**：`tests/test_config_source_guard.py::TestWhoWritesTheConfig` —— `agent/` 里出现写入原语的
+> 只能是 `agent/config.py`（唯一实现）与 `agent/core/schedule_config.py`（唯一调用方）。
+
 ## 4. Agent 只认一份配置
 
 `agent/config.py` 加载的就是 `config/config.yaml`（`--config` 可覆盖路径），
@@ -64,12 +96,13 @@
 
 GUI 的**日程区**显示的内容来自 `config.yaml` 的 `scheduler.recurring` / `scheduler.oneoff`
 —— 与 Agent 的 `Scheduler._load_events()` **同一处**，连"某个键在 scheduler 段里找不到就
-**逐键**回落到顶层"这条都一致。GUI 不写这一段，也不新增 IPC topic。
+**逐键**回落到顶层"这条都一致。GUI 不写这一段（删已触发 oneoff 的是 Agent，见 §3.1），
+也不新增 IPC topic。
 
 | | 谁 | 做什么 |
 |---|---|---|
-| 触发 | Agent（`agent/core/scheduler.py`） | 按 `window_min` / `late_grace_min` / `remind_before_min` 真正触发日程动作 |
-| 展示 | GUI（`gui/src/core/schedule_model.cpp`） | 只读同一段，展开成"今天 / 明天"两段给日程区 |
+| 触发 | Agent（`agent/core/scheduler.py`） | 按 `window_min` / `late_grace_min` / `remind_before_min` 真正触发日程动作；开关打开时删掉已触发的那条 oneoff |
+| 展示 | GUI（`gui/src/core/schedule_model.cpp`） | 只读同一段，展开成"今天 / 明天"两段，再按**窗口**（`[现在, 现在+24h)`）筛出"接下来 24 小时"给日程区 |
 
 **代价（写清楚，别当它是免费的）**：这等于在 C++ 里镜像了一份 Python 的日程语义
 （`parse_clock` / `_weekday_index` / `date.fromisoformat` / `occurs_on`）。

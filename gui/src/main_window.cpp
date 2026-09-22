@@ -49,7 +49,7 @@ namespace {
 /// 日程区默认最多显示几行（配置键 gui.schedule.max_rows；两段合计上限）
 constexpr int kDefaultScheduleRows = 6;
 
-/// 日程区刷新间隔（S5）：跨零点翻页 + "已过"的变暗跟着时间走
+/// 日程区刷新间隔（S5）：让窗口往前滑（新条目进来、已过的滑出去）+ 跨零点翻页
 constexpr int kScheduleRefreshMs = 60 * 1000;
 
 /// 方案 §8 配色：底 #1E1F22 / 面板 #2B2D31 / 分隔 #3A3D42 / 主文字 #E6E6E6 /
@@ -395,7 +395,7 @@ MainWindow::MainWindow(QWidget* parent)
     monitorTimer_->setInterval(1000);   // applyConfig() 里会按配置改写
     monitorTimer_->start();
 
-    // S5：日程区每 60 秒重读一次（跨零点翻页 / 已过的行变暗跟着走）。
+    // S5：日程区每 60 秒重读一次（窗口往前滑 / 跨零点翻页）。
     // 启动时的那一次在 applyConfig() 末尾（main.cpp 会调它）。
     scheduleTimer_ = new QTimer(this);
     connect(scheduleTimer_, &QTimer::timeout, this, [this]() { reloadSchedule(); });

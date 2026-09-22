@@ -675,6 +675,18 @@ CLI（C 系列：板端控制 CLI `assistant`，C1–C4 已验收；C5 排在 P 
      ① 以 root 跑时目录权限拦不住写入 → 那两条用例在 root 下**显式跳过**（不把断言放宽成"抛不抛都行"）；
      ② `load_config` 按 `AGENT_CONFIG_DIR` 找文件且有缓存 → 不设它就会去读板端 live config
      （PC 上因为退回 example 模板、恰好 0 条而蒙对）。现在显式指到临时目录 + 清缓存。
+☑ R4 文档统一改口径 + 新守卫：`docs/cli.md` 的 `schedule` 一节整段重写（窗口与 `--hours`、30 分钟尾巴、
+     三种标记"基本只出现在尾巴上"、一次性日程被删后列表里就没有它、`--hours 30` 的新例子）；
+     `Readme.md`（CLI 示例 + "只显示接下来 N 小时"）；`docs/config-sources.md` 改**边界** —— §1 的一句话与
+     示意图、§2 的"谁写"表都写上"Agent 只在一件事上写"，新增 **§3.1** 把八条规则（只删 oneoff / 文本级 /
+     原子写 / `.bak` / 写前核对 / 失败只 WARNING / flow 风格拒绝 / 注释归属）与**两条如实写下的限制**
+     （竞争窗口、崩溃窗口）落成表格，§5 的"展示"行改成"展开 + 窗口筛选"；`docs/gui.md`（窗口写在副标题、
+     GUI 无尾巴、"已过变暗"不再出现、刷新时机改成"窗口往前滑"）；`docs/architecture.md` 新增 **§6.2 窗口**
+     一节 + 文件表与 §6.1 的措辞；`docs/gui-agent-integration.md` 那句"Agent 只读"。
+     顺带改掉三处**代码注释**里同样过时的"已过变暗跟着时间走"（`gui/src/main_window.{h,cpp}`）。
+     `tests/test_docs.py` 的 STALE_CLAIMS 加一条 `--today|--tomorrow`（R1 已删这两个开关），并**做了反证**：
+     往 `docs/` 放一个写着 `--today` 的临时文档 → 守卫 FAILED；删掉 → 恢复 OK（证明新黑名单真的会咬）。
+     证据：PC `python tests OK`；板 `test_docs` 4 OK + `python tests OK (19 files)`。
 
 Phase 7 — 工具层
 □ tools/base.py：工具基类（name、schema、execute、权限、allowed_states）

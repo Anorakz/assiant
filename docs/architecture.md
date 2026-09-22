@@ -145,7 +145,7 @@ agent/
 | --- | --- |
 | `core/state_machine.py` | 状态机 `SLEEP ⇄ IDLE ⇄ STUDY ⇄ GAME`（内部**小写**；IPC 上用大写，转换只在 ipc 层做） |
 | `core/tool_router.py` | 工具注册、权限控制、执行调度（JSON Schema 子集校验） |
-| `core/scheduler.py` | 日程检查、定时触发、触发监听 |
+| `core/scheduler.py` | 日程检查、定时触发、触发监听、触发事实（R 系列）与"删掉已触发的一次性日程"（R3，默认关） |
 | `io/chat_bus.py` | Chat Input Bus：把多个输入源汇成一条 `asyncio.Queue`（单消费者 + `subscribe()` 旁观） |
 | `io/_native.py` | native 解析 + **每个子系统一个专属单线程执行器**（SPSC 要求，见 §11） |
 | `ipc/` | Unix socket server 与协议；接入点是 `ipc/__init__.py` 的 `build_ipc()` |
@@ -215,13 +215,26 @@ gui/src/
 
 | 事实 | 在哪 | 谁看 |
 | --- | --- | --- |
-| 日程**表**（哪天几点该做什么） | `config/config.yaml` 的 `scheduler:` 段，语义在 `agent/core/scheduler.py` | GUI 日程区（只读）、CLI `assistant schedule` 自己展开 |
+| 日程**表**（哪天几点该做什么） | `config/config.yaml` 的 `scheduler:` 段，语义在 `agent/core/scheduler.py` | GUI 日程区（只读 + 窗口筛选）、CLI `assistant schedule` 自己展开 |
 | 日程**真的触发过**（本进程内触发过哪条、什么时候） | `Scheduler._history`（有界内存，重启即清零）→ 经 IPC `schedule` 推出去 | CLI「已触发 HH:MM:SS」、`assistant watch`；GUI 目前**不认**这个 topic |
 
 两条通路：`Scheduler.on_fire` → `topic:"schedule"`/`kind:"fired"`（**实时**，每次真的触发一条就推一次）；
 命令 `query_schedule` → `kind:"state"`（**快照**，问一次答一次，无请求 id）。
 `agent/ipc/__init__.py` 里"有就接"：runtime 没有 `scheduler` 时只少推这一类，其余照常。
 命令与 topic 的字段定义**只在** [`docs/ipc-protocol.md` §3/§4](ipc-protocol.md)。
+
+### 6.2 显示窗口：只显示"接下来 N 小时"（R 系列）
+
+两侧（CLI `assistant schedule` 与 GUI 日程区）都只看 **`[现在, 现在 + N 小时)`**，
+默认 `N = 24`（CLI 的 `--hours`；GUI 是 `core::kWindowHours`）。判据是**行的 `start`** ——
+不是提前量算出的提醒时刻，否则 `14:00` + `remind_before_min=10` 的条目在 13:55 看会消失。
+
+- **CLI 多留 30 分钟尾巴**（`[现在-30min, ...)`）：否则「已触发 / 已过（未触发）」这两层信息
+  在列表里完全看不见（窗口只往前看）。**GUI 没有尾巴** —— 它拿不到 Agent 的触发事实。
+- **展开层不动**：`ScheduleModel::parse()` / CLI 的 `schedule_rows()` 仍是"今天/明天逐条展开"，
+  被 parity 夹具盯着；窗口是**独立一层**（`applyWindow()` / `window_days()`），显示规则不混进去。
+- 一次性日程触发后被 Agent 从配置里删掉（见 §6.1 与 [config-sources.md](config-sources.md) §3）时，
+  两个列表下一轮刷新就都没有它了 —— CLI 的尾巴靠**事实**把它画出来。
 
 ---
 
