@@ -1,11 +1,12 @@
 # ============================================================================
 #  agent/llm/__init__.py — LLM 层: 三模式分发 + 规则兜底
 #
-#      edge      板端 RKNN 0.6B 小模型 (⚠ 当前是 mock, 真实现待接)
+#      edge      板端本地模型: llama.cpp GGUF, 经本机 llama-server (T2 起是真的,
+#                不再是 mock); 与 cloud 共用同一套 OpenAI 兼容客户端与工具循环
 #      cloud     OpenAI 兼容 API
 #      disabled  不调模型, 走 RuleEngine 规则兜底
 #
-#  ⚠ 本包不在 import 时加载 openai SDK (宿主/板端都没装)。只有 cloud 模式
+#  ⚠ 本包不在 import 时加载 openai SDK (宿主/板端都可能没装)。只有 edge / cloud
 #    真正发起请求时才会 import, 缺包会给出带安装提示的 OpenAIClientError。
 # ============================================================================
 

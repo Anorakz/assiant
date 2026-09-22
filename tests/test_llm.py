@@ -115,6 +115,11 @@ def make_cloud(script, **kwargs):
     return CloudBackend(client=_FakeOpenAI(script), **kwargs)
 
 
+def make_edge(script, **kwargs):
+    """edge 后端 + 假 client —— 与 make_cloud 同一套替身, 所以工具循环是**同一份代码**。"""
+    return EdgeBackend(client=_FakeOpenAI(script), **kwargs)
+
+
 # ===========================================================================
 #  RuleEngine
 # ===========================================================================
@@ -359,28 +364,84 @@ class TestModeSelection(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await provider.chat("anything", {}), "from rules")
 
     async def test_edge_uses_edge_backend(self):
-        edge = EdgeBackend(reply="from edge")
+        edge = make_edge([text_response("from edge")])
         provider = LLMProvider(mode="edge", edge_backend=edge)
         self.assertEqual(await provider.chat("hi", {}), "from edge")
-        self.assertEqual(len(edge.calls), 1)
+        self.assertEqual(len(edge.client.requests), 1)
 
-    async def test_edge_mock_default_reply_mentions_not_wired(self):
-        provider = LLMProvider(mode="edge")
-        reply = await provider.chat("hi", {})
-        self.assertIn("mock", reply)
-        self.assertFalse(provider.edge_backend.is_ready())
-
-    async def test_edge_backend_custom_responder(self):
-        edge = EdgeBackend(responder=lambda text, ctx: "echo:" + text)
+    async def test_edge_plain_chat_carries_config_values_and_no_think(self):
+        # T2: edge 的纯文本调用也要走真后端, 并且把 llm.max_tokens/temperature 带上
+        edge = make_edge([text_response("好")], model="qwen3-0.6b", max_tokens=512,
+                         temperature=0.7)
         provider = LLMProvider(mode="edge", edge_backend=edge)
-        self.assertEqual(await provider.chat("ping", {}), "echo:ping")
+        self.assertEqual(await provider.chat("hi", {}), "好")
+
+        request = edge.client.requests[0]
+        self.assertEqual(request["model"], "qwen3-0.6b")
+        self.assertEqual(request["max_tokens"], 512)
+        self.assertEqual(request["temperature"], 0.7)
+        # Qwen3 的软开关: 不加它, 0.6B 会把 token 预算烧在思考上, 正文是空的
+        self.assertIn("/no_think", request["messages"][0]["content"])
+        # 纯文本调用不带工具
+        self.assertNotIn("tools", request)
+
+    async def test_edge_without_no_think_does_not_add_it(self):
+        edge = make_edge([text_response("x")], no_think=False)
+        provider = LLMProvider(mode="edge", edge_backend=edge)
+        await provider.chat("hi", {})
+        self.assertNotIn("/no_think", edge.client.requests[0]["messages"][0]["content"])
+
+    async def test_edge_default_backend_points_at_local_llama_server(self):
+        # 不注入后端时按 config 的 llm: 段造 (llm.port / model_name / local_api_key)
+        provider = LLMProvider(
+            mode="edge",
+            config_loader=lambda: {
+                "llm": {
+                    "mode": "edge",
+                    "port": 9123,
+                    "model_name": "qwen3-0.6b",
+                    "local_api_key": "sk-local",
+                    "max_tokens": 256,
+                    "temperature": 0.2,
+                    "model_path": "/home/kickpi/model/qwen3.gguf",
+                }
+            },
+        )
+        backend = provider.edge_backend
+        self.assertEqual(backend.base_url, "http://127.0.0.1:9123/v1")
+        self.assertEqual(backend.model, "qwen3-0.6b")
+        self.assertEqual(backend.api_key, "sk-local")
+        self.assertEqual(backend.max_tokens, 256)
+        self.assertEqual(backend.temperature, 0.2)
+        self.assertEqual(backend.model_path, "/home/kickpi/model/qwen3.gguf")
+
+    async def test_edge_config_gaps_fall_back_to_defaults(self):
+        # 键写漏/写坏不该让 provider 起不来, 各自退回默认值
+        provider = LLMProvider(
+            mode="edge",
+            config_loader=lambda: {"llm": {"mode": "edge", "port": "not a port",
+                                           "max_tokens": "很多", "temperature": None}},
+        )
+        backend = provider.edge_backend
+        self.assertEqual(backend.base_url, "http://127.0.0.1:9000/v1")
+        self.assertEqual(backend.model, "qwen3-0.6b")
+        self.assertIsNone(backend.max_tokens)
+        self.assertIsNone(backend.temperature)
+
+    async def test_edge_request_failure_propagates_in_chat(self):
+        # chat() 的约定: 失败照抛 (调用方要能知道模型挂了)
+        provider = LLMProvider(
+            mode="edge", edge_backend=make_edge([ConnectionError("connection refused")])
+        )
+        with self.assertRaises(ConnectionError):
+            await provider.chat("hi", {})
 
     async def test_switching_mode_switches_backend(self):
         engine = RuleEngine(rules=[Rule("r", r".*", lambda m, t, c: "rules")])
         provider = LLMProvider(
             mode="disabled",
             rule_engine=engine,
-            edge_backend=EdgeBackend(reply="edge"),
+            edge_backend=make_edge([text_response("edge")]),
             cloud_backend=make_cloud([text_response("cloud")]),
         )
         self.assertEqual(await provider.chat("x", {}), "rules")
@@ -390,14 +451,14 @@ class TestModeSelection(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await provider.chat("x", {}), "cloud")
 
     async def test_disabled_never_touches_cloud_or_edge(self):
-        edge = EdgeBackend(reply="edge")
+        edge = make_edge([text_response("edge")])
         cloud = make_cloud([text_response("cloud")])
         provider = LLMProvider(
             mode="disabled", edge_backend=edge, cloud_backend=cloud
         )
         await provider.chat("x", {})
         await provider.chat_with_tools("x", {})
-        self.assertEqual(edge.calls, [])
+        self.assertEqual(edge.client.requests, [])
         self.assertEqual(cloud.client.requests, [])
 
 
@@ -511,7 +572,11 @@ class TestCloudWithTools(unittest.IsolatedAsyncioTestCase):
     async def test_result_shape(self):
         provider = LLMProvider(mode="cloud", cloud_backend=make_cloud([text_response("x")]))
         result = await provider.chat_with_tools("hi", {})
-        self.assertEqual(set(result), {"ok", "text", "tool_calls", "error", "mode"})
+        # degraded 是 T2 加的: 非空 = 这条是规则兜底的, 不是模型答的
+        self.assertEqual(
+            set(result), {"ok", "text", "tool_calls", "error", "mode", "degraded"}
+        )
+        self.assertIsNone(result["degraded"])
 
     async def test_tools_are_advertised_to_model(self):
         cloud = make_cloud([text_response("ok")])
@@ -712,7 +777,7 @@ class TestCloudWithTools(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(ticks), 1, "云端调用期间事件循环应当还在跑")
 
 
-class TestCloudWithToolsDisabledAndEdge(unittest.IsolatedAsyncioTestCase):
+class TestDisabledPath(unittest.IsolatedAsyncioTestCase):
     async def test_disabled_chat_with_tools_uses_rules(self):
         engine = RuleEngine(rules=[Rule("r", r".*", lambda m, t, c: "规则答复")])
         provider = LLMProvider(mode="disabled", rule_engine=engine)
@@ -721,22 +786,6 @@ class TestCloudWithToolsDisabledAndEdge(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["text"], "规则答复")
         self.assertEqual(result["tool_calls"], [], "disabled 不该假装调了工具")
         self.assertEqual(result["mode"], "disabled")
-
-    async def test_edge_chat_with_tools(self):
-        provider = LLMProvider(mode="edge", edge_backend=EdgeBackend(reply="edge 回复"))
-        result = await provider.chat_with_tools("hi", {})
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["text"], "edge 回复")
-        self.assertEqual(result["tool_calls"], [])
-
-    async def test_edge_error_is_captured(self):
-        def boom(text, ctx):
-            raise RuntimeError("模型崩了")
-
-        provider = LLMProvider(mode="edge", edge_backend=EdgeBackend(responder=boom))
-        result = await provider.chat_with_tools("hi", {})
-        self.assertFalse(result["ok"])
-        self.assertIn("模型崩了", result["error"])
 
     async def test_rule_engine_error_is_captured(self):
         class _BadEngine:
@@ -747,6 +796,149 @@ class TestCloudWithToolsDisabledAndEdge(unittest.IsolatedAsyncioTestCase):
         result = await provider.chat_with_tools("hi", {})
         self.assertFalse(result["ok"])
         self.assertIn("规则引擎也炸了", result["error"])
+
+class TestEdgeWithTools(unittest.IsolatedAsyncioTestCase):
+    """T2: edge 走**同一个**工具循环 (你选的 b —— 给 edge 补 function-call 解析)。
+
+    替身是同一套假 openai client, 所以这里验的其实是"循环对 edge 也成立":
+    工具被真执行、结果回喂模型、状态权限照旧、轮数照旧。
+    """
+
+    def _router(self):
+        router = ToolRouter(state_provider=StateMachine())  # 初始 IDLE
+        router.register(Tool(
+            name="get_time",
+            description="取当前时间",
+            schema={"type": "object", "properties": {}, "additionalProperties": False},
+            handler=lambda **k: "12:00",
+            allowed_states={State.IDLE},
+        ))
+        return router
+
+    async def test_edge_plain_reply_without_tools(self):
+        provider = LLMProvider(mode="edge", edge_backend=make_edge([text_response("edge 回复")]))
+        result = await provider.chat_with_tools("hi", {})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["text"], "edge 回复")
+        self.assertEqual(result["tool_calls"], [])
+        self.assertIsNone(result["degraded"])
+        self.assertEqual(result["mode"], "edge")
+
+    async def test_edge_runs_the_tool_loop(self):
+        edge = make_edge([
+            tool_response("call_1", "get_time", "{}"),
+            text_response("现在是 12:00"),
+        ])
+        provider = LLMProvider(mode="edge", tools=self._router(), edge_backend=edge)
+        result = await provider.chat_with_tools("几点了", {})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["text"], "现在是 12:00")
+        self.assertEqual(len(result["tool_calls"]), 1)
+        self.assertEqual(result["tool_calls"][0]["result"], {"ok": True, "result": "12:00"})
+        # 两轮: 第一轮要工具, 第二轮给答复; 而且第一轮就带了工具清单
+        self.assertEqual(len(edge.client.requests), 2)
+        self.assertEqual(edge.client.requests[0]["tools"][0]["function"]["name"], "get_time")
+        self.assertEqual(edge.client.requests[0]["tool_choice"], "auto")
+        # 第二轮要把工具结果回喂回去
+        roles = [m.get("role") for m in edge.client.requests[1]["messages"]]
+        self.assertIn("tool", roles)
+
+    async def test_edge_tool_round_limit_is_the_same(self):
+        edge = make_edge([tool_response("c%d" % i, "get_time", "{}") for i in range(10)])
+        provider = LLMProvider(
+            mode="edge", tools=self._router(), edge_backend=edge, max_tool_rounds=3
+        )
+        result = await provider.chat_with_tools("x", {})
+        self.assertFalse(result["ok"])
+        self.assertIn("exceeded 3 rounds", result["error"])
+        self.assertEqual(len(result["tool_calls"]), 3)
+
+    async def test_edge_backend_down_degrades_to_rules_and_says_so(self):
+        # 板端 llama-server 没起来时: 答复照给 (规则兜底), 但必须标出这是降级
+        engine = RuleEngine(rules=[Rule("r", r".*", lambda m, t, c: "规则答复")])
+        provider = LLMProvider(
+            mode="edge",
+            tools=self._router(),
+            edge_backend=make_edge([ConnectionError("connection refused")]),
+            rule_engine=engine,
+        )
+        result = await provider.chat_with_tools("几点了", {})
+
+        self.assertTrue(result["ok"], "降级是为了还能答话, 不是让整轮失败")
+        # 正文里必须带那句说明 —— GUI 只看正文, 看不到日志
+        self.assertTrue(result["text"].startswith("（板端模型没有响应"), result["text"])
+        self.assertIn("规则答复", result["text"])
+        self.assertEqual(result["tool_calls"], [], "后端都没答上, 不该有工具调用")
+        self.assertIsNone(result["error"])
+        self.assertIn("ConnectionError", result["degraded"])
+        self.assertIn("connection refused", result["degraded"])
+
+    async def test_edge_degrade_also_reports_when_rules_fail(self):
+        class _BadEngine:
+            async def respond(self, text, ctx):
+                raise RuntimeError("规则引擎也炸了")
+
+        provider = LLMProvider(
+            mode="edge",
+            edge_backend=make_edge([ConnectionError("refused")]),
+            rule_engine=_BadEngine(),
+        )
+        result = await provider.chat_with_tools("hi", {})
+        self.assertFalse(result["ok"])
+        self.assertIn("ConnectionError", result["error"])
+        self.assertIn("规则兜底也失败", result["error"])
+
+    async def test_edge_empty_text_with_thinking_degrades_with_a_reason(self):
+        # 板端实测的坑: Qwen3 把预算烧在思考上 -> content 空 + finish_reason=length
+        def _thinking_only():
+            response = _FakeResponse(content=None)
+            response.choices[0].finish_reason = "length"
+            response.choices[0].message.reasoning_content = "嗯" * 40
+            return response
+
+        engine = RuleEngine(rules=[Rule("r", r".*", lambda m, t, c: "规则答复")])
+        provider = LLMProvider(
+            mode="edge", edge_backend=make_edge([_thinking_only()]), rule_engine=engine
+        )
+        result = await provider.chat_with_tools("你好", {})
+
+        self.assertTrue(result["ok"])
+        self.assertIn("规则答复", result["text"])
+        self.assertIn("finish_reason=length", result["degraded"])
+        self.assertIn("思考", result["degraded"])
+
+    async def test_edge_empty_text_without_thinking_degrades_too(self):
+        engine = RuleEngine(rules=[Rule("r", r".*", lambda m, t, c: "规则答复")])
+        provider = LLMProvider(
+            mode="edge",
+            edge_backend=make_edge([_FakeResponse(content="")]),
+            rule_engine=engine,
+        )
+        result = await provider.chat_with_tools("你好", {})
+        self.assertIn("规则答复", result["text"])
+        self.assertIn("没有给出正文", result["degraded"])
+
+    async def test_cloud_empty_text_keeps_the_old_behaviour(self):
+        # 明确记一条边界: cloud 的空正文**不降级**(保持既有行为), 只有 edge 会
+        provider = LLMProvider(
+            mode="cloud",
+            cloud_backend=make_cloud([_FakeResponse(content="")]),
+            rule_engine=RuleEngine(rules=[Rule("r", r".*", lambda m, t, c: "规则答复")]),
+        )
+        result = await provider.chat_with_tools("你好", {})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["text"], "")
+        self.assertIsNone(result["degraded"])
+
+    async def test_edge_is_ready_is_offline_but_honest(self):
+        # 注入了 client -> 能发请求; 缺 base_url/model -> 明确不可用
+        self.assertTrue(make_edge([text_response("x")]).is_ready())
+        self.assertFalse(EdgeBackend(base_url="", model="").is_ready())
+        # 描述里要有"连哪儿 + 哪个模型", 板端排障就看这一行
+        described = make_edge([text_response("x")], model="m").describe()
+        self.assertIn("model=m", described)
+        self.assertIn("llama-server", described)
 
 
 class TestProviderDiagnostics(unittest.TestCase):

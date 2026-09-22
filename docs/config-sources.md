@@ -46,6 +46,26 @@ GUI 读它的 `gui:` 段、读写它的 `llm:` 段、**只读**它的 `scheduler
 其余布局类键 —— `LLM_HOST`、`LLM_LOG_DIR`、`LLM_RUN_DIR`、`LLM_PID_FILE`、`LLM_LOG_FILE`
 —— 由板端自己维护，派生**不碰**。
 
+### 2.1 `llm:` 段不只是"给 llama-server 用的"（T2 起）
+
+`edge` 模式接上真模型之后，Agent **自己也读**这一段里的几个键 —— 它要去连本机的
+llama-server。这张表是"哪个键有第二个读者"的唯一说明（改键名时两边都要改）：
+
+| 键 | Agent（`agent/llm/provider.py::EdgeBackend.from_config`）怎么用 | llama-server（派生 `llm.env`） |
+| --- | --- | --- |
+| `port` | `base_url = http://127.0.0.1:<port>/v1` | `LLM_PORT` |
+| `model_name` | 请求里的 `model` | `LLM_MODEL_NAME` |
+| `local_api_key` | 请求带的 key（**不是**云端的 `api_key`） | `LLM_API_KEY` |
+| `max_tokens` | 每次请求的 `max_tokens` | 不用 |
+| `temperature` | 每次请求的 `temperature` | 不用 |
+| `timeout_s` | 单次请求超时（edge 与 cloud 共用） | 不用 |
+| `model_path` | **只打进日志**，不读文件 | `LLM_MODEL_PATH` |
+| `ctx_size` / `batch_size` / `threads` / `threads_batch` | 不读 | 对应 4 个 `LLM_*` |
+
+读不到的键各自退回默认值（`port=9000`、`model_name=qwen3-0.6b`），**不抛异常** ——
+配置写漏了不该让 Agent 起不来。⚠ 但"能发请求"≠"llama-server 活着"：
+`EdgeBackend.is_ready()` 只查配置与 SDK，**不联网**；真活着的证据是一次成功的请求。
+
 ## 3. 单向性（最容易踩的一条）
 
 派生是**单向**的，所以：

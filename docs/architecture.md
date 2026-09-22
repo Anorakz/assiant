@@ -134,7 +134,7 @@ agent/
 ├── config.py          配置加载（白名单 + 不做 schema 校验）
 ├── core/              state_machine.py / tool_router.py / scheduler.py
 ├── io/                chat_bus.py / image_reader.py / input_sender.py / _native.py
-├── llm/               provider.py（edge / cloud / disabled）/ rule_engine.py
+├── llm/               provider.py（edge / cloud / disabled；细节见 docs/llm.md）/ rule_engine.py
 ├── vision/            roi.py / siglip_encoder.py（当前 mock）
 ├── ipc/               protocol.py / local_server.py / local_client.py
 ├── net/               sunshine_client.py（HTTPS 47984 握手）
@@ -180,8 +180,23 @@ agent/
 | 权限 | `Tool.allowed_states` **默认空集 = 任何状态都不允许**（fail closed）；不在允许状态里只回绝，handler 一次都不跑 |
 | 给模型看的说明 | `DESCRIPTION` 要写清**副作用与不确定性** —— 例如 `back_to_desktop` 明说"是开关动作、没有回执、别连着调"。CLI 那边"不假装调了工具"是同一条口径 |
 
-只有 `cloud` 模式的 LLM 会走真正的工具循环（多轮，见 `llm/provider.py`）；`disabled`
-是规则引擎，**不假装调过工具**。
+工具**只在真会调模型的模式下才有意义**：`edge` 与 `cloud` 都走同一个工具循环
+（T2 起 edge 也接进来了，见 §4.2），`disabled` 是规则引擎，**不假装调过工具**。
+
+### 4.2 LLM 层：edge / cloud / disabled（T2）
+
+| 模式 | 谁答 | 说明 |
+| --- | --- | --- |
+| `edge` | 板端 llama-server（llama.cpp + GGUF） | Agent **不加载模型**，只连本机 `127.0.0.1:<llm.port>` 的 OpenAI 兼容接口 |
+| `cloud` | 远端 OpenAI 兼容 API | 同一套客户端（`_OpenAICompatibleBackend`） |
+| `disabled` | RuleEngine | 不联网、不调模型 |
+
+**工具循环只写一份**（`LLMProvider._chat_with_tools(backend)`）：edge 与 cloud 的差别只有
+"连哪儿 + 每次请求带什么参数"，所以板端小模型也能 function call。
+
+edge 挂了**不装作答过**：`chat()` 照抛；`chat_with_tools()` 退回规则兜底，正文前缀说明
+这不是模型答的（GUI 只看正文），结果里另有 `degraded` 写原因，`main.py` 记 warning。
+板端实测数据（`/no_think`、耗时、降级）与验证步骤见 [`llm.md`](llm.md)。
 
 ---
 

@@ -23,23 +23,24 @@
 llm:
   # 推理位置。三个合法值 (见 agent/llm/provider.py 的 MODES):
   #   edge     板端本地模型 —— **llama.cpp GGUF**, 经 OpenAI 兼容接口访问本机 llama-server
-  #            (默认 base_url = http://127.0.0.1:9000/v1; 与 cloud 共用一套客户端)
+  #            (base_url = http://127.0.0.1:<port>/v1, 端口就是下面的 port; 与 cloud 共用
+  #             一套客户端与**同一个工具循环**, 所以 edge 也能 function call)
   #            别名 board / local
   #   cloud    调远端 OpenAI 兼容 API
   #   disabled 不调模型, 走 RuleEngine 规则兜底 (只回问候/时间/状态)
-  # ⚠ 当前 EdgeBackend 仍是 mock(只记录 model_path, 不做真推理); 真正加载模型的是
-  #    llama-server 进程, 它的参数见下面"板端 llama-server"一组键。
+  # ⚠ Agent **不加载 GGUF、不跑推理**: 真正加载模型的是 llama-server 进程。
+  # ⚠ edge 挂了怎么办: 请求失败时**退回规则兜底**并在日志里记一条 warning
+  #    ("LLM 降级为规则兜底: ..."), 不假装是模型答的。
   # ⚠ 模型还没装好之前保持 disabled, 系统照样起得来
   mode: disabled
 
   # ---- mode=edge: 本地模型 ----
-  # GGUF 路径 —— **由 llama-server 加载**; Agent 只记录它 (不自己读模型文件)
+  # GGUF 路径 —— **由 llama-server 加载**; Agent 只把它打进日志 (不自己读模型文件)
   model_path: /home/kickpi/model/Qwen3-0.6B-Q4_K_M.gguf
   # 单次回复的 token 上限 —— **不是**上下文长度 (上下文由 llama-server 的 --ctx-size 决定)
-  # ⚠ 当前 agent/ 里还没有人读这个键
+  # ⚠ 设太小会把 Qwen3 的思考内容截断成"正文为空"(finish_reason=length); 详见 local_api_key 下面的说明
   max_tokens: 512
   # 采样温度
-  # ⚠ 当前 agent/ 里还没有人读这个键
   temperature: 0.7
 
   # ---- mode=cloud: 远端 API ----
@@ -47,20 +48,25 @@ llm:
   # ⚠ 这是**云端**的 key (Agent 用); 本地 llama-server 的 key 见下面的 local_api_key
   api_key: ""
   model: gpt-4o-mini
-  # 单次请求超时(秒)
+  # 单次请求超时(秒) —— edge / cloud 都用它
   timeout_s: 30
 
   # ---- 板端 llama-server (edge 模式) ----
-  # 这一组**只**用于派生 llm/config/llm.env (喂 llama-server 进程), Agent 自己不读
-  # (agent/config.py 不做 schema 校验, 多余键没有副作用)。
-  model_name: qwen3-0.6b
-  port: 9000
-  ctx_size: 2048
-  batch_size: 256
-  threads: 4
-  threads_batch: 4
-  # llama-server 自己的 API key (派生到 llm.env 的 LLM_API_KEY)
+  # ⚠ 这一组**两边都用**: 一边派生 llm/config/llm.env 喂 llama-server 进程,
+  #    另一边 Agent (edge 模式) 自己读这几个键去连它 —— 见下面对每个键的标注。
+  #    (agent/config.py 不做 schema 校验, 多余键没有副作用)
+  model_name: qwen3-0.6b     # Agent 读: 请求里的 model (llama-server 的 --alias)
+  port: 9000                 # Agent 读: base_url = http://127.0.0.1:<port>/v1
+  ctx_size: 2048             # 只给 llama-server
+  batch_size: 256            # 只给 llama-server
+  threads: 4                 # 只给 llama-server
+  threads_batch: 4           # 只给 llama-server
+  # llama-server 自己的 API key (派生到 llm.env 的 LLM_API_KEY; Agent 读: 请求带的 key)
   local_api_key: ***REMOVED-LLM-KEY***
+  #
+  # ⚠ Qwen3 的思考模式: Agent 在 edge 模式的 system 提示末尾加 `/no_think` 把它关掉。
+  #    板端实测 (Qwen3-0.6B-Q4_K_M + llama-server build 10677): 不关的时候普通提问会把
+  #    token 预算全烧在思考上, 正文是空字符串 —— 0.6B 上思考并不换来更好的答复。
   #
   # ⚠ llm.env 里另有 5 个与部署布局有关的键 (LLM_HOST / LLM_LOG_DIR / LLM_RUN_DIR /
   #    LLM_PID_FILE / LLM_LOG_FILE) **不在**映射表里 —— 它们由 llm.env 自己维护。

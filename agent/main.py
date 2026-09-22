@@ -570,6 +570,13 @@ class Runtime:
             self.log.info("LLMProvider 就绪 (mode=%s)", self.llm.mode())
             if self.llm.mode() == "disabled":
                 self.log.info("llm: 规则兜底模式 —— 只回问候/时间/状态, 接入模型请改 llm.mode")
+            if self.llm.mode() == "edge":
+                # 说清"连哪儿、哪个模型、参数是什么" —— 板端排障第一眼看的就是这一行
+                self.log.info("llm: edge 后端 = %s", self.llm.edge_backend.describe())
+                if not self.llm.edge_backend.is_ready():
+                    self.log.warning(
+                        "llm: edge 后端配置不完整或缺 openai SDK —— 请求会失败并退到规则兜底"
+                    )
 
         await self._guarded(_Component("llm_provider", _start))
 
@@ -789,6 +796,12 @@ class Runtime:
             self.log.error("LLM 返回失败 (mode=%s): %s", result.get("mode"), result.get("error"))
             self.stats["llm_errors"] += 1
             return None
+
+        # edge 后端挂了/没给出正文时 provider 会退回规则兜底: 答复照给, 但必须**说清**
+        # 这不是模型答的 (也算一次模型失败)。
+        if result.get("degraded"):
+            self.log.warning("LLM 降级为规则兜底: %s", result["degraded"])
+            self.stats["llm_errors"] += 1
 
         reply = result.get("text") or ""
         self.stats["replies"] += 1

@@ -67,7 +67,7 @@ agent/
 │   ├── test_config.py           # 配置模块单测 (unittest)
 │   ├── test_state_machine.py    # 状态机单测
 │   ├── test_tool_router.py      # 工具注册/权限/参数校验/超时/异常单测
-│   ├── test_llm.py              # LLM 三模式切换 / cloud mock / 规则匹配
+│   ├── test_llm.py              # LLM 三模式切换 / edge 真后端 / 工具循环 / 规则匹配
 │   ├── test_vision.py           # ROI 解析 / SigLIP mock (有无 numpy 两条路径)
 │   ├── test_main.py             # 进程装配: 启停顺序 / 异常隔离 / 主循环
 │   ├── test_ipc_protocol.py     # IPC 线格式契约 (字节级)
@@ -84,6 +84,7 @@ agent/
 │   ├── deploy.md                # 部署与双机同步规则
 │   ├── config-sources.md        # 配置来源: 谁写 / 谁读 / 谁派生
 │   ├── cli.md                   # 板端控制 CLI (assistant) 使用手册
+│   ├── llm.md                   # LLM 三模式 / edge 接 llama-server / 工具循环 / 降级
 │   ├── ipc-protocol.md          # Agent ⇄ GUI 协议 (线上格式唯一真源)
 │   ├── gui.md                   # GUI 构建与使用
 │   ├── gui-agent-integration.md # GUI 那一端实际收/发什么
@@ -385,7 +386,7 @@ emb = encoder.encode(frame)          # (768,) float32；encoder.ready 为 False
 ## LLM 三模式
 
 ```
-edge      板端 RKNN 0.6B 小模型   ⚠ 当前是 mock，真实现待接
+edge      板端本地模型: llama.cpp GGUF, 经本机 llama-server（OpenAI 兼容接口）
 cloud     OpenAI 兼容 API          (openai SDK，按需 import)
 disabled  不调模型，走 RuleEngine 规则兜底
 ```
@@ -403,13 +404,19 @@ provider.set_mode("cloud")     # 运行时切换；set_mode(None) 重新读配�
 约定：
 
 - **两条入口的错误语义不同**：`chat()` 返回 str、失败**抛出**（终端/GUI 要知道模型挂了）；
-  `chat_with_tools()` 是自动循环入口，**永不抛**，错误收进 `{"ok", "text", "tool_calls", "error", "mode"}`。
+  `chat_with_tools()` 是自动循环入口，**永不抛**，错误收进
+  `{"ok", "text", "tool_calls", "error", "mode", "degraded"}`。
 - 模式从 `llm.mode` 读；非法模式名**降级到 disabled**（记在 `mode_errors`），
   配置写错时系统应该降级可用而不是起不来。默认模式是 `disabled`——
   默认值不该在用户没配置的时候就去调模型/发网络请求。
-- `edge` 目前是 mock（`EdgeBackend.is_ready()` 恒为 False），接口先定死，真实现只需替换 `respond()`。
-- `openai` SDK **只在 cloud 模式真正请求时**才 import；缺包会给带安装提示的
-  `OpenAIClientError`。宿主/板端都没装它，所以 disabled/edge 完全不依赖。
+- `edge` 是**真后端**：Agent 不加载 GGUF，它只连本机 llama-server
+  （`llm.port` / `llm.model_name` / `llm.local_api_key`）。edge 与 cloud **共用同一个
+  工具循环**，所以板端小模型也能 function call。
+- edge 挂了不会装作答过：`chat()` 照抛，`chat_with_tools()` **退回规则兜底**，
+  正文前面带一句"（板端模型没有响应，这条是规则兜底）"，结果里另有 `degraded` 写原因。
+- `openai` SDK **只在真正要发请求时**才 import；缺包会给带安装提示的
+  `OpenAIClientError`。只有 `disabled` 完全不依赖它。
+- 细节（板端实测数据、`/no_think`、怎么验）：[`docs/llm.md`](docs/llm.md)。
 
 ---
 

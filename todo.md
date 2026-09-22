@@ -765,8 +765,9 @@ Phase 7 — 工具层
 ☑ 每个工具的单元测试（mock 外部依赖）—— back_to_desktop 已覆盖
 ☑ tests/test_tools.py：工具注册、状态权限、参数校验（17 项）
 ☑ 工具在正确状态下才允许执行 / 权限控制生效（如回到桌面仅 STUDY）
-□ LLM 能调用工具完成任务 ← **T2**：edge 后端接真模型（现在 edge 还是 mock）
-      **T2 决定（你选的 b）**：给 edge 补 function-call 解析，把工具循环共享给 edge/cloud
+☑ LLM 能调用工具完成任务 ← **T2 已完成**：edge 接上真模型，且与 cloud 共用同一个工具循环
+      ⚠ 如实记一条限制：Qwen3-0.6B 很小，工具调用的**可靠性有限** —— 板端探针里它调对了
+      `get_board_time`，但别指望它像大模型那样稳定挑工具、填参数。
 □ 工具层端到端验收（T5：真板 + 真模型 + 真工具）
 
 T1 记录（已完成，等验收）：工具层骨架 + 第一个真工具
@@ -785,6 +786,63 @@ T1 记录（已完成，等验收）：工具层骨架 + 第一个真工具
      也只记 error 并跳过（与 main.py"单组件失败不影响其他组件"同一口径）。
 ☑ 权限 fail-closed 有测试钉住：IDLE 下调 `back_to_desktop` 被拒且 `sender.calls == 0`（handler 一次没跑）。
 ☑ 文档：`docs/architecture.md` §4.1 新增"工具层"（约定表 + 依赖来源 + fail-closed + 只有 cloud 走工具循环）。
+
+T2 记录（已完成，等验收）：edge 接真模型 + 工具循环共享
+☑ 代码：`agent/llm/provider.py` 重构成"一个底座 + 两个后端"：
+     `_OpenAICompatibleBackend`（client 惰性创建 + `create(messages, tools)`）／
+     `EdgeBackend`（真后端：连本机 llama-server）／`CloudBackend`（行为不变）。
+     `LLMProvider._chat_with_tools(backend)` 与 `_plain_chat(backend)` **两边共用** ——
+     edge 与 cloud 的差别只剩"连哪儿 + 每次请求带什么参数"。
+☑ **删掉了 EdgeBackend 的 mock**（`reply=` / `responder=` / `is_ready()` 恒 False）。
+     替身改成"注入假 openai client"（与 cloud 完全同一套），于是"edge 也走工具循环"是
+     **真事**而不是 provider 里的一个特例分支。`tests/test_llm.py` 相应重写 5 条、新增 12 条
+     （切后端 / edge 真循环 / 轮数上限 / 配置派生 / 降级 / 空正文 / `is_ready` 离线语义）。
+☑ 读配置：`EdgeBackend.from_config()` 读 `llm.port` → `http://127.0.0.1:<port>/v1`、
+     `model_name` → model、`local_api_key` → key（**不是**云端的 `api_key`），
+     另外 `max_tokens` / `temperature` / `timeout_s` / `model_path`（只进日志）。
+     读不到就各自退回默认值（9000 / qwen3-0.6b），**不抛异常**。
+     ⚠ 这两个键（`max_tokens` / `temperature`）以前 **agent/ 里没人读**，模板里也这么写着 —— 现在读了，
+     `config.example.yaml` 与 `docs/config-sources.md` §2.1 都改了（"哪些键有第二个读者"落成一张表）。
+☑ Qwen3 的思考坑 + `/no_think`：edge 默认在 system 提示末尾加 `/no_think`。
+     板端实测（RK3568 + Qwen3-0.6B-Q4_K_M + llama-server build 10677，温度 0，同一句话）：
+     | | 耗时 | reasoning_content | 正文 |
+     | 不关思考 | 27.0 s | 281 字 | 8 字 |
+     | 关思考（默认） | **2.3 s** | 0 字 | 14 字 |
+     （早先的探针里还见过更糟的：思考把预算烧完 → `finish_reason=length` + 正文空字符串。）
+☑ 降级（你批的方案里那条"llama-server down → 退 RuleEngine + warning"）：
+     · `chat()` **照抛**（调用方要知道模型挂了）
+     · `chat_with_tools()` 退回规则兜底：`ok=True`、结果里多一个 `degraded` 写原因、
+       `agent/main.py` 记一条 `LLM 降级为规则兜底: <原因>` 并计入 `llm_errors`
+     · **正文前面加一句"（板端模型没有响应，这条是规则兜底）"** —— 因为 **GUI 只显示正文**，
+       只写日志的话，界面上那条兜底回复看起来与模型答的一模一样（这条是板端探针跑完才补的）
+     · 模型"没给正文"也算降级，理由里写清是 `finish_reason` 还是思考吃掉了预算
+     · `cloud` **不降级**（保持原样：ok=False + 原因），这条边界有专门的测试钉着
+☑ 板端实测（真 llama-server，不碰主机、不碰配置）：
+     · `provider.chat("你好，你是谁？")` → `我是RK3568开发板上的桌面助手。`（2.6 s）
+     · `chat_with_tools("现在板子上几点？用工具查一下。")` → 模型自己调 `get_board_time`，
+       工具返回 `2026-09-22 20:05:31`，模型据此作答（`tool_calls` 里看得到）
+     · 端口指向没人听的 9099：`chat()` 抛 `APIConnectionError`；
+       `chat_with_tools()` 降级，`degraded="APIConnectionError: Connection error."`
+☑ live config 切成 edge（你之前定的"验完把 live 切成 edge"）：
+     `llm.mode: disabled` → `edge`，指纹 `3662d089…` → `598a9d70…`；派生文件 `llm.env` **没动**
+     （仍 `2d8bcac5…`，`assistant doctor` 那条"派生 llm.env 与 config.yaml 一致"依旧 OK）。
+     顺手把 live config 里 3 处**已经过期**的注释改掉（"EdgeBackend 仍是 mock"、
+     两处"当前 agent/ 里还没有人读这个键"、"这一组只用于派生、Agent 自己不读"）。
+☑ 端到端（Agent 真跑在 live config 上）：启动日志同时出现
+     `LLMProvider 就绪 (mode=edge)` 与
+     `llm: edge 后端 = llama-server http://127.0.0.1:9000/v1 model=qwen3-0.6b max_tokens=512 temperature=0.7 no_think=True`；
+     `assistant chat` 三轮都是真答复；把 llama-server 停掉再问 → 回复带降级前缀 + 日志 warning；
+     再起回 llama-server → 又是真答复（恢复得了）。
+☑ 文档：新增 `docs/llm.md`（三模式 / edge 怎么接 / 工具循环 / `/no_think` 实测表 /
+     降级表 / 怎么验 / 边界）；`docs/architecture.md` 加 §4.2 并修 §4.1 那句"只有 cloud 走工具循环"；
+     `config.example.yaml` 的 llm 段重写；`docs/config-sources.md` 加 §2.1；`Readme.md` 的 LLM 一节与目录树。
+☑ 测试：PC `test_llm.py` 90 项、板端同一份 90 项；PC 全套 `python tests OK`；板端 20 个文件 OK。
+     ⚠ 教训（板端运维）：`pkill -f 'agent[/]main[.]py'` 会连**自己所在的 ssh shell** 一起杀掉
+     （那条命令行里也含这个模式），于是"kill 完顺手启动"的写法会静默什么都不做 ——
+     把 kill 与 start 拆成两条命令。
+     ⚠ 板端现在的状态：仓库里 T2 的 4 个文件（`agent/llm/provider.py`、`agent/llm/__init__.py`、
+     `agent/main.py`、`tests/test_llm.py`）**临时超前于 HEAD**（等 push 后 reset）；
+     live config 已是 `edge`；`llama-server` 在跑；Agent 没在跑。
 
 下一个任务列表（**草案，等你审核**）：音乐 / 视频两个工具
 □ tools/netease_music.py：cloud-music-mcp 集成 —— 动态歌单、批量加歌、URL Scheme
