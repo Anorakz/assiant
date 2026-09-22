@@ -37,15 +37,28 @@
 #  但"到点该触发"这件事只能生效一次。所以按 (日期, 事件, 起始分钟) 记录已触发,
 #  同一时间窗内重复调用不会重复触发。窗口宽度由 window_min 控制 (默认 1 分钟,
 #  即"起始那一分钟")。
+#
+#  触发事实 (回答"到底触发过没有、什么时候")
+#  ---------------------------------------------------------------------------
+#  去重集合 _fired 只回答"这条触发过没" (而且是 (日期, key) 的集合), 说不出
+#  "什么时候触发的"。所以 _fire() 成功后再往 _history 记一条**事实** (有界 deque,
+#  默认 DEFAULT_HISTORY_LIMIT 条): title / date / scheduled_at / fired_at / actions。
+#  它是给 IPC 的 "schedule" topic 与 CLI 的 `assistant schedule` 看的 —— 即
+#  "本进程内真的发生过的事", 与"按时间比较出来的 已过"是两回事 (后者与 Agent
+#  有没有跑、有没有触发完全无关)。
+#
+#  ⚠ 历史是**旁路**: 满了丢最旧的, 回调坏了只记一行日志 —— _fired / _prune_fired /
+#    _in_window 的语义一个都没动, 触发判定不受它影响。
 # ============================================================================
 
 from __future__ import annotations
 
 import asyncio
 import time as _time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 from .state_machine import State, StateMachine
 
@@ -61,12 +74,17 @@ __all__ = [
     "WEEKDAYS",
     "DEFAULT_INTERVAL_MIN",
     "DEFAULT_WINDOW_MIN",
+    "DEFAULT_HISTORY_LIMIT",
 ]
 #: 日程检查的默认间隔 (分钟) —— 需求: 根据 config 配置的时间间隔单位 min
 DEFAULT_INTERVAL_MIN = 1
 
 #: 触发窗口默认宽度 (分钟)。窗口内第一次 check 触发, 之后不再重复。
 DEFAULT_WINDOW_MIN = 1
+
+#: 触发事实保留条数上限。只是"给客户端看最近真发生了什么", 满了丢最旧的 ——
+#: 它**不是**去重依据 (那个是 _fired), 也不参与任何触发判定。
+DEFAULT_HISTORY_LIMIT = 50
 
 #: 允许的星期缩写 (与 schedule.example.yaml 一致)
 WEEKDAYS: Tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -431,6 +449,7 @@ class Scheduler:
         clock: Optional[Callable[[], datetime]] = None,
         monotonic: Optional[Callable[[], float]] = None,
         sleep: Optional[Callable[[float], Any]] = None,
+        history_limit: Optional[int] = None,
     ) -> None:
         """
         @param state      状态机 (触发动作里可以切状态)
@@ -439,6 +458,8 @@ class Scheduler:
         @param clock      取当前时间 (测试注入)
         @param monotonic  取单调时钟 (测试注入, 用来做检查间隔)
         @param sleep      异步 sleep (测试注入)
+        @param history_limit 触发事实保留条数 (默认 DEFAULT_HISTORY_LIMIT;
+                          0 表示不记)。只影响查询/推送, 不影响触发与去重。
         """
         if state is None:
             raise SchedulerError("state (StateMachine) is required")
@@ -470,6 +491,14 @@ class Scheduler:
         # ---- 运行态 ----
         self._tasks: List[asyncio.Task] = []
         self._fired: Set[Tuple[date, str]] = set()
+        #: 触发事实 (有界, 只供查询/推送; 见模块头 "触发事实")
+        self._history_limit = (
+            DEFAULT_HISTORY_LIMIT if history_limit is None
+            else self._non_negative_int(history_limit, "history_limit")
+        )
+        self._history: Deque[Dict[str, Any]] = deque(maxlen=self._history_limit)
+        #: 每次真的触发一条日程后调一次 (IPC 用它做实时推送)。默认没接。
+        self._on_fire: Optional[Callable[[Dict[str, Any]], Any]] = None
         self._last_check_at: Optional[float] = None
         self._checks = 0
         self._triggers = 0
@@ -717,6 +746,7 @@ class Scheduler:
         pushed = await self._bus.push("scheduler", text)
         detail["actions"].append({"type": "message", "text": text, "timestamp": pushed["timestamp"]})
 
+        self._record_fired(detail)
         self._triggers += 1
         return detail
 
@@ -889,6 +919,61 @@ class Scheduler:
         self._triggers += 1
         return detail
 
+    # ------------------------------------------------------ 触发事实 (查询) ---
+    @property
+    def on_fire(self) -> Optional[Callable[[Dict[str, Any]], Any]]:
+        """触发一条日程后的回调 (没有接就是 None)。
+
+        @note 回调是**旁路**: 它抛异常只打一行日志, 不影响这次触发算不算成功,
+              也不影响去重 —— 推送坏了不该让日程失效 (与 on_change/on_reply 同口径)。
+        """
+        return self._on_fire
+
+    @on_fire.setter
+    def on_fire(self, callback: Optional[Callable[[Dict[str, Any]], Any]]) -> None:
+        if callback is not None and not callable(callback):
+            raise SchedulerError("on_fire must be callable or None, got %r" % (callback,))
+        self._on_fire = callback
+
+    def recent_fired(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """最近触发过的日程事实 (时间正序, 只含**本进程内真的触发过**的)。
+
+        @param limit 只要最后 limit 条 (None = 全部, 最多 history_limit 条)
+        @return 事实 dict: title / date / scheduled_at / fired_at / actions
+        @note 与"按时间算出来的 已过"不是一回事: 这个是"真发生过", 且**重启即清零**
+              (触发记录只在内存里, 见模块头)。
+        """
+        if limit is None:
+            return [dict(item) for item in self._history]
+        count = self._non_negative_int(limit, "limit")
+        if count == 0:
+            return []
+        return [dict(item) for item in list(self._history)[-count:]]
+
+    def _record_fired(self, detail: Dict[str, Any]) -> None:
+        """把一条触发详情记成"事实", 并通知 on_fire。
+
+        @note 事实里把 detail 的 now 改名成 fired_at: 对客户端来说 "now" 没有意义
+              (它是这次检查的时刻, 可能比 scheduled_at 晚几秒), 而"什么时候真的
+              触发了"才是它要的。其余字段一一对应, 不改语义。
+        """
+        fact = {
+            "title": detail.get("title"),
+            "date": detail.get("date"),
+            "scheduled_at": detail.get("scheduled_at"),
+            "fired_at": detail.get("now"),
+            "actions": list(detail.get("actions") or []),
+        }
+        self._history.append(fact)
+
+        if self._on_fire is None:
+            return
+        try:
+            self._on_fire(dict(fact))
+        except Exception as exc:  # noqa: BLE001
+            # 与 _log_task_exception 同款口径: 旁路坏了只报告, 绝不往上抛
+            print("Scheduler: on_fire callback raised: %r" % (exc,))
+
     # ------------------------------------------------------------ 诊断 ---
     @property
     def stats(self) -> Dict[str, Any]:
@@ -900,6 +985,7 @@ class Scheduler:
             "events": len(self._events),
             "bindings": len(self._bindings),
             "fired_keys": len(self._fired),
+            "fired_history": len(self._history),
             "last_command": dict(self._last_command) if self._last_command else None,
             "subscribed": self._unsubscribe is not None,
             "warnings": list(self._warnings),

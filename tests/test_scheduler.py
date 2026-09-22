@@ -12,6 +12,8 @@ tests/test_scheduler.py — Scheduler 单测
              提前量 (remind_before_min)、oneoff 只在指定日期、
              recurring 只看配置的星期、跨天的提前量
   触发动作   状态转换 (含非法转换被记下)、发消息到 bus (source="scheduler")
+  触发事实   只记真的触发过的、条数有界、拿到的是副本、on_fire 收到事实、
+             回调抛异常不影响触发与去重、历史与去重集合的生命周期不同
   终端命令   整行匹配 (去首尾空白 + 大小写不敏感)、中文命令、只认 source=="terminal"、
              其它来源忽略、认不出来的文本跳过、敲两次生效两次、
              配置两种写法 (list / dict)
@@ -31,6 +33,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from agent.core import (  # noqa: E402
+    DEFAULT_HISTORY_LIMIT,
     DEFAULT_INTERVAL_MIN,
     DEFAULT_WINDOW_MIN,
     Scheduler,
@@ -454,6 +457,150 @@ class TestCheckSchedule(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["checks"], 1)
         self.assertEqual(stats["triggers"], 1)
         self.assertEqual(stats["events"], 1)
+
+
+# ===========================================================================
+#  触发事实 (history / on_fire)
+# ===========================================================================
+class TestFiredHistory(unittest.IsolatedAsyncioTestCase):
+    """P1: 记下"真的触发过什么、什么时候" —— 给 IPC/CLI 查询用。
+
+    ⚠ 这组用例要钉死的边界是"历史是旁路": 它坏了、满了、被读走了, 都不该影响
+      触发判定与去重 (_fired)。
+    """
+
+    CONFIG = {"recurring": [{"title": "站会", "start": "09:30"}]}
+
+    async def test_empty_before_any_fire(self):
+        scheduler, _, _, _ = make_scheduler(self.CONFIG)
+        self.assertEqual(scheduler.recent_fired(), [])
+        self.assertEqual(scheduler.stats["fired_history"], 0)
+
+    async def test_records_the_fact_after_fire(self):
+        scheduler, _, bus, _ = make_scheduler(self.CONFIG)
+        await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 10))
+
+        facts = scheduler.recent_fired()
+        self.assertEqual(len(facts), 1)
+        fact = facts[0]
+        self.assertEqual(fact["title"], "站会")
+        self.assertEqual(fact["date"], "2026-09-16")
+        self.assertEqual(fact["scheduled_at"], "2026-09-16T09:30")
+        # fired_at 是**真的触发时刻** (检查那一刻), 不是日程写的时刻
+        self.assertEqual(fact["fired_at"], "2026-09-16T09:30:10")
+        self.assertEqual(len(fact["actions"]), 1)
+        self.assertEqual(fact["actions"][0]["type"], "message")
+        self.assertEqual(fact["actions"][0]["text"], bus.events[0]["text"])
+
+    async def test_no_fire_no_history(self):
+        scheduler, _, _, _ = make_scheduler(self.CONFIG)
+        # 窗口外看一眼: 什么都没触发, 历史就该是空的 (不能记"看过了")
+        await scheduler.check_schedule(datetime(2026, 9, 16, 9, 29, 0))
+        self.assertEqual(scheduler.recent_fired(), [])
+        self.assertEqual(scheduler.stats["fired_history"], 0)
+
+    async def test_dedup_does_not_add_a_second_fact(self):
+        scheduler, _, _, _ = make_scheduler(self.CONFIG)
+        await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 5))
+        await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 40))  # 同窗, 被去重
+        self.assertEqual(len(scheduler.recent_fired()), 1)
+
+    async def test_history_is_bounded_and_drops_the_oldest(self):
+        scheduler, _, _, _ = make_scheduler(self.CONFIG, history_limit=2)
+        for day in (16, 17, 18):
+            await scheduler.check_schedule(datetime(2026, 9, day, 9, 30, 0))
+        facts = scheduler.recent_fired()
+        self.assertEqual(len(facts), 2, "maxlen=2 就该只留最近两条")
+        self.assertEqual([f["date"] for f in facts], ["2026-09-17", "2026-09-18"])
+
+    async def test_history_limit_zero_records_nothing_but_still_fires(self):
+        scheduler, _, bus, _ = make_scheduler(self.CONFIG, history_limit=0)
+        fired = await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
+        self.assertEqual(len(fired), 1, "关掉历史不该影响触发")
+        self.assertEqual(len(bus.events), 1)
+        self.assertEqual(scheduler.recent_fired(), [])
+
+    async def test_recent_fired_limit_takes_the_tail(self):
+        scheduler, _, _, _ = make_scheduler(self.CONFIG, history_limit=5)
+        for day in (16, 17, 18):
+            await scheduler.check_schedule(datetime(2026, 9, day, 9, 30, 0))
+        self.assertEqual(len(scheduler.recent_fired()), 3)
+        self.assertEqual(len(scheduler.recent_fired(limit=2)), 2)
+        self.assertEqual(
+            [f["date"] for f in scheduler.recent_fired(limit=2)],
+            ["2026-09-17", "2026-09-18"],
+        )
+        self.assertEqual(scheduler.recent_fired(limit=0), [])
+
+    async def test_recent_fired_returns_copies(self):
+        scheduler, _, _, _ = make_scheduler(self.CONFIG)
+        await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
+        scheduler.recent_fired()[0]["title"] = "改坏了"
+        self.assertEqual(scheduler.recent_fired()[0]["title"], "站会",
+                         "拿到的应是副本, 改不动真源")
+
+    async def test_default_history_limit_is_the_documented_one(self):
+        scheduler, _, _, _ = make_scheduler(self.CONFIG)
+        self.assertEqual(scheduler._history.maxlen, DEFAULT_HISTORY_LIMIT)
+
+    async def test_bad_history_limit_is_rejected(self):
+        with self.assertRaises(SchedulerError):
+            make_scheduler(self.CONFIG, history_limit=-1)
+        with self.assertRaises(SchedulerError):
+            make_scheduler(self.CONFIG, history_limit="50")
+
+    async def test_on_fire_gets_the_fact(self):
+        scheduler, _, _, _ = make_scheduler(self.CONFIG)
+        seen = []
+        scheduler.on_fire = seen.append
+        await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 7))
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["title"], "站会")
+        self.assertEqual(seen[0]["fired_at"], "2026-09-16T09:30:07")
+
+    async def test_on_fire_sees_what_recent_fired_keeps(self):
+        scheduler, _, _, _ = make_scheduler(self.CONFIG)
+        seen = []
+        scheduler.on_fire = seen.append
+        await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
+        self.assertEqual(seen, scheduler.recent_fired())
+
+    async def test_on_fire_rejects_non_callable(self):
+        scheduler, _, _, _ = make_scheduler(self.CONFIG)
+        with self.assertRaises(SchedulerError):
+            scheduler.on_fire = "不是函数"
+        scheduler.on_fire = None          # 允许清掉
+        self.assertIsNone(scheduler.on_fire)
+
+    async def test_broken_on_fire_does_not_break_the_fire(self):
+        """旁路坏了: 这次触发仍然算数, 去重照旧, 历史照记。"""
+        scheduler, _, bus, _ = make_scheduler(self.CONFIG)
+
+        def explode(_fact):
+            raise RuntimeError("推送炸了")
+
+        scheduler.on_fire = explode
+        first = await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 3))
+        again = await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 30))
+
+        self.assertEqual(len(first), 1)
+        self.assertEqual(again, [], "回调炸了不能把去重一起炸掉")
+        self.assertEqual(len(bus.events), 1)
+        self.assertEqual(scheduler.stats["triggers"], 1)
+        self.assertEqual(len(scheduler.recent_fired()), 1)
+
+    async def test_history_outlives_the_dedup_prune(self):
+        """两个集合的生命周期不同: _fired 只留今天/昨天, 历史按条数留。"""
+        scheduler, _, _, _ = make_scheduler(self.CONFIG)
+        await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
+        await scheduler.check_schedule(datetime(2026, 9, 20, 9, 30, 0))
+        self.assertEqual(len(scheduler.recent_fired()), 2, "历史跨天还在")
+        self.assertEqual(scheduler.stats["fired_keys"], 1, "去重集合只留今天/昨天")
+
+    async def test_stats_reports_history_size(self):
+        scheduler, _, _, _ = make_scheduler(self.CONFIG)
+        await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
+        self.assertEqual(scheduler.stats["fired_history"], 1)
 
 
 # ===========================================================================

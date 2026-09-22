@@ -10,6 +10,7 @@
 
 from .state_machine import INITIAL_STATE, LEGAL_TRANSITIONS, State, StateMachine
 from .scheduler import (
+    DEFAULT_HISTORY_LIMIT,
     DEFAULT_INTERVAL_MIN,
     DEFAULT_WINDOW_MIN,
     TERMINAL_SOURCE,
@@ -48,6 +49,7 @@ __all__ = [
     "parse_command_config",
     "DEFAULT_INTERVAL_MIN",
     "DEFAULT_WINDOW_MIN",
+    "DEFAULT_HISTORY_LIMIT",
     # 工具路由
     "Tool",
     "ToolRouter",
