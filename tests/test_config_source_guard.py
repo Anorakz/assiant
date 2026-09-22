@@ -206,5 +206,55 @@ class TestNoGuiConfigLeftovers(unittest.TestCase):
                         "%s 不见了" % EXAMPLE_CONFIG)
 
 
+#: 写文件的**原语**（不是"读"，也不是"提到路径"）。
+#: ⚠ 这是 R3 新增的边界：在那之前 agent/ **一个字节都不写配置**，现在多了一条
+#:   "一次性日程触发后把它从 config.yaml 里删掉"。写入者每多一处，都该是一次明确的决定。
+WRITE_PRIMITIVES = r"(os\.replace|mkstemp|\.write_text\(|write_text_atomic\()"
+
+#: 允许出现写入原语的文件（**只有**这两个）。
+ALLOWED_WRITERS = {
+    "agent/config.py",               # write_text_atomic: 全仓唯一的"原子写文本"实现
+    "agent/core/schedule_config.py", # 唯一被允许的调用方: 删掉已触发的一次性日程
+}
+
+
+class TestWhoWritesTheConfig(unittest.TestCase):
+    """写 config.yaml 的地方必须是**数得出来**的（R3）。
+
+    R3 之前 `docs/config-sources.md` 写的是"Agent 只读它"；现在 Agent 会在
+    "一次性日程触发后"删掉那一条 —— 这条守卫把"写入者只有这一处"钉成机械可查的事实，
+    免得哪天有人再加一处偷偷写配置。
+    """
+
+    def test_only_the_sanctioned_files_contain_write_primitives(self):
+        offenders = []
+        for path in _agent_python_files():
+            rel = path.relative_to(_PROJECT_ROOT).as_posix()
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if not re.search(WRITE_PRIMITIVES, line):
+                    continue
+                if rel not in ALLOWED_WRITERS:
+                    offenders.append("%s:%d\n      %s" % (rel, lineno, line.strip()))
+        if offenders:
+            self.fail("agent/ 里出现了新的写入者（写配置只允许 %s）:\n  %s\n"
+                      "  要新增写入者, 请先想清楚边界并把它加进 ALLOWED_WRITERS 的说明里。"
+                      % (", ".join(sorted(ALLOWED_WRITERS)), "\n  ".join(offenders)))
+
+    def test_the_writer_scan_is_not_vacuous(self):
+        """反空转：白名单里那两个文件**真的**命中了写入原语，否则这条守卫什么都没查。"""
+        hits = {}
+        for path in _agent_python_files():
+            rel = path.relative_to(_PROJECT_ROOT).as_posix()
+            if rel not in ALLOWED_WRITERS:
+                continue
+            text = path.read_text(encoding="utf-8")
+            hits[rel] = len(re.findall(WRITE_PRIMITIVES, text))
+        self.assertEqual(sorted(hits), sorted(ALLOWED_WRITERS),
+                         "白名单里的文件没扫到（路径写错了？）")
+        for rel, count in hits.items():
+            self.assertGreater(count, 0,
+                               "%s 里一个写入原语都没有 —— 正则或路径不对, 守卫是假的" % rel)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

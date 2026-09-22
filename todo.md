@@ -651,6 +651,30 @@ CLI（C 系列：板端控制 CLI `assistant`，C1–C4 已验收；C5 排在 P 
      **并发负载下的抖动**（它与日程无关），不是 R2 引起的。
      ⚠ 我在窗口用例里**连续三次**把"没写 days 的 recurring 当成只在那一天"（其实那是**每天**）：
      R1 两次、R2 一次。改法是把窗口用例里的日程全写成 `oneoff`（指定日期），语义才唯一。
+☑ R3 触发后把那条一次性日程从 **config.yaml 里删掉**（默认关）：新增
+     `agent/core/schedule_config.py` —— **文本级**外科删除（找 `oneoff:` 序列里那一条的行区间，
+     只删属于它的行，其余**逐字节**不变；注释与顺序都保住）+ 写前**重新读盘**核对
+     （title + date + start 三者都要对上，对不上就不删）+ 原子写 + 原文件旁留 `.bak`。
+     匹配靠**注入的 predicate**：文件里抽出来的裸标量交给 Scheduler 判断（它懂 `parse_clock` /
+     `date.fromisoformat`），本模块只懂文本 —— 顺带避免 `scheduler ↔ schedule_config` 循环依赖。
+     `Scheduler` 新增 `config_path` 参数与 `remove_fired_oneoff` 开关（**默认 false**，非布尔值
+     记 warning 并按 false 处理）；触发后调用，**失败只记 WARNING**（写不了配置绝不能影响触发）。
+     只对 **oneoff** 生效，recurring 一条都不动。`agent/config.py` 的原子写抽成
+     `write_text_atomic()`（**全仓唯一实现**，`save_config` 也改走它）。
+     明确不做并在测试里钉住的：flow 风格（`oneoff: [{...}]`）给理由、不改文件；紧贴**下一条**的
+     注释与空行**留着**（只删属于那条的行）；序列空了就把 `oneoff:` 写成 `[]`。
+     新增 `tests/test_schedule_config.py`（28 项：文本形状 16 + 文件级 4 + Scheduler 集成 8）并登记进
+     两个 test-python 脚本（PC 19 项 / 板 19 文件都跑到了）。新守卫
+     `tests/test_config_source_guard.py::TestWhoWritesTheConfig`：`agent/` 里出现写入原语的**只能是**
+     `agent/config.py`（唯一实现）与 `agent/core/schedule_config.py`（唯一调用方），带反空转。
+     板端端到端（临时配置 + 开关 true）：18:48:02 触发 → 配置里那一条**真的没了**
+     （另一条与紧邻的注释原样保留）、`config.yaml.bak` 里两条都在、Agent 日志有"已从 … 删掉…"，
+     随后 `assistant schedule` 里那条**靠触发事实**还在（`← 已触发 18:48:02`）—— R1 的尾巴 + R3 的删除
+     正好接上。live config 指纹 `789b14b7…` 全程未变。
+     ⚠ 测试自身的两个错（都是"没考虑运行环境"，且第一个在 PC 上**假绿**、板端才暴露）：
+     ① 以 root 跑时目录权限拦不住写入 → 那两条用例在 root 下**显式跳过**（不把断言放宽成"抛不抛都行"）；
+     ② `load_config` 按 `AGENT_CONFIG_DIR` 找文件且有缓存 → 不设它就会去读板端 live config
+     （PC 上因为退回 example 模板、恰好 0 条而蒙对）。现在显式指到临时目录 + 清缓存。
 
 Phase 7 — 工具层
 □ tools/base.py：工具基类（name、schema、execute、权限、allowed_states）

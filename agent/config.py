@@ -46,7 +46,7 @@ import copy
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 try:
     import yaml
@@ -62,6 +62,7 @@ __all__ = [
     "ConfigNotFoundError",
     "load_config",
     "save_config",
+    "write_text_atomic",
     "get",
     "config_path",
     "config_dir",
@@ -248,6 +249,32 @@ def load_config(name: str = DEFAULT_CONFIG_NAME) -> Dict[str, Any]:
     return copy.deepcopy(data)
 
 
+def write_text_atomic(path: Union[str, Path], text: str, encoding: str = "utf-8") -> None:
+    """把文本**原子地**写进 path（同目录临时文件 + `os.replace`）。
+
+    @note 全仓只有这一处实现"原子写文本"：`save_config()` 与核心侧的"删掉已触发的
+          一次性日程"（agent/core/schedule_config.py）都走它 —— "临时文件必须落在目标
+          同目录（同一文件系统才能原子换入）"这条细节只写一遍。
+    @raise OSError 写盘失败（权限、磁盘满……）—— 原样抛出, 不吞
+    """
+    target = Path(path)
+    base = target.parent
+    base.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_name = tempfile.mkstemp(prefix=".%s." % target.name, suffix=".tmp", dir=str(base))
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as fh:
+            fh.write(text)
+        os.replace(tmp_name, target)
+    except BaseException:
+        # 失败时别把临时文件留在目录里
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 def save_config(name: str, data: Dict[str, Any]) -> None:
     """把配置写到 <name>.yaml, 并同步刷新缓存。
 
@@ -276,22 +303,7 @@ def save_config(name: str, data: Dict[str, Any]) -> None:
 
     # sort_keys=False: 保持调用方给的顺序, 落盘后的可读性和 example 模板一致
     text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
-
-    # 临时文件必须落在**目标所在目录** (dir=str(base)):
-    #   · 同一文件系统才能用 os.replace 原子换入; 跨设备会抛 OSError(EXDEV)
-    #   · 前缀的点号让它默认隐藏, 一眼能看出是临时文件
-    fd, tmp_name = tempfile.mkstemp(prefix=".%s." % stem, suffix=".tmp", dir=str(base))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.replace(tmp_name, target)
-    except BaseException:
-        # 失败时别把临时文件留在 config/ 里
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+    write_text_atomic(target, text)
 
     # 写盘成功才更新缓存 —— 失败时缓存保持旧值, 与磁盘一致
     _CACHE[stem] = copy.deepcopy(data)

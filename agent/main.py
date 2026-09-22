@@ -563,7 +563,10 @@ class Runtime:
     # ---- 5) scheduler ----
     async def _start_scheduler(self) -> None:
         async def _start() -> None:
-            self.scheduler = Scheduler(state=self.state, bus=self.bus, config=self.config)
+            self.scheduler = Scheduler(state=self.state, bus=self.bus, config=self.config,
+                                       # R3: 一次性日程触发后从**这个文件**里删掉它
+                                       # （开关默认关，见 config.example.yaml）
+                                       config_path=self.config_path_used)
             await self.scheduler.start()
             self.log.info(
                 "Scheduler 就绪 (%d 条日程, %d 条命令, 每 %g 分钟检查)",
@@ -571,6 +574,10 @@ class Runtime:
                 len(self.scheduler.bindings),
                 self.scheduler.interval_min,
             )
+            if self.scheduler.remove_fired_oneoff:
+                self.log.info("scheduler: 一次性日程触发后会自动从配置里移除（"
+                              "remove_fired_oneoff=true, 文件 %s）",
+                              self.config_path_used or "(未指定路径)")
             for warning in self.scheduler.warnings:
                 self.log.warning("scheduler: %s", warning)
 

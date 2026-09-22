@@ -54,13 +54,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time as _time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
+from . import schedule_config
 from .state_machine import State, StateMachine
+
+#: 本模块的日志器。⚠ 有别于文件里那几处 `print()`（后台订阅协程的报错）：**改配置**这件事
+#: 必须能在 logs/agent.log 里查到 —— print 只进 stdout，不进日志文件。
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "Scheduler",
@@ -450,6 +456,7 @@ class Scheduler:
         monotonic: Optional[Callable[[], float]] = None,
         sleep: Optional[Callable[[float], Any]] = None,
         history_limit: Optional[int] = None,
+        config_path: Optional[Any] = None,
     ) -> None:
         """
         @param state      状态机 (触发动作里可以切状态)
@@ -460,6 +467,8 @@ class Scheduler:
         @param sleep      异步 sleep (测试注入)
         @param history_limit 触发事实保留条数 (默认 DEFAULT_HISTORY_LIMIT;
                           0 表示不记)。只影响查询/推送, 不影响触发与去重。
+        @param config_path 配置文件路径 (Path/str)：只有 `remove_fired_oneoff` 打开时才用得上。
+                          给 None 就只是"不删" —— 老调用方不用改。
         """
         if state is None:
             raise SchedulerError("state (StateMachine) is required")
@@ -468,6 +477,8 @@ class Scheduler:
         self._state = state
         self._bus = bus
         self._config = config or {}
+        #: 配置文件路径（只有"删掉已触发的一次性日程"用得上；None = 不删）
+        self._config_path = config_path
 
         self._clock = clock or datetime.now
         self._monotonic = monotonic or _time.monotonic
@@ -509,6 +520,19 @@ class Scheduler:
         self._unsubscribe: Optional[Callable[[], bool]] = None
         #: 最近一次命中的命令 (诊断用)
         self._last_command: Optional[Dict[str, Any]] = None
+
+        #: 一次性日程触发后，把它从 config.yaml 里删掉（R3）。默认 **关** ——
+        #: 这是"程序自动改真源"的行为：默认打开会让每个新环境都遇到"配置自己变了"，
+        #: 写失败（只读挂载/权限）也会变成新噪音。开关的说明见 config.example.yaml。
+        #: ⚠ 这段必须放在 `_warnings` 初始化之后（它可能往里记一条警告）。
+        remove_fired = section.get("remove_fired_oneoff", False)
+        if not isinstance(remove_fired, bool):
+            self._warnings.append(
+                "scheduler.remove_fired_oneoff 必须是 true/false（得到 %r），按 false 处理"
+                % (remove_fired,)
+            )
+            remove_fired = False
+        self.remove_fired_oneoff = remove_fired
 
         # 旧键名 (hotkeys) 已改名为 commands。板端实盘配置里可能还留着它 ——
         # 静默忽略会让"我配了命令却没生效"变成难查的问题, 所以记一条 warning。
@@ -747,8 +771,50 @@ class Scheduler:
         detail["actions"].append({"type": "message", "text": text, "timestamp": pushed["timestamp"]})
 
         self._record_fired(detail)
+        self._remove_fired_oneoff(event)
         self._triggers += 1
         return detail
+
+    def _remove_fired_oneoff(self, event: ScheduleEvent) -> None:
+        """一次性日程触发后，把它从配置文件里删掉（R3，默认关）。
+
+        · **只对 oneoff 做**：recurring 删了明天就不响了
+        · 失败**只记 WARNING**：写配置失败（只读挂载 / 权限 / 磁盘满）绝不能影响这次触发
+          —— 与 `on_fire` 回调同一口径
+        · 匹配用 `title` + `date` + `start` 三者（start 按 `parse_clock` 归一，所以
+          `9:30` 与 `"09:30"` 都认）；对不上就不删（可能配置已经被人改过）
+        """
+        if not self.remove_fired_oneoff or event.on is None or self._config_path is None:
+            return
+
+        def matches(fields: Dict[str, str]) -> bool:
+            if (fields.get("title") or "").strip() != event.title:
+                return False
+            try:
+                if date.fromisoformat((fields.get("date") or "").strip()) != event.on:
+                    return False
+            except ValueError:
+                return False
+            try:
+                if parse_clock(fields.get("start") or "") != event.start:
+                    return False
+            except SchedulerError:
+                return False
+            return True
+
+        try:
+            removed = schedule_config.remove_fired_oneoff(self._config_path, matches)
+        except OSError as exc:
+            _log.warning("scheduler: 删不掉已触发的一次性日程 %r（%s）: %r",
+                         event.title, self._config_path, exc)
+            return
+        if removed:
+            _log.info("scheduler: 已从 %s 删掉已触发的一次性日程 %r（%s %02d:%02d）",
+                      self._config_path, event.title, event.on.isoformat(),
+                      event.start[0], event.start[1])
+        else:
+            _log.info("scheduler: %s 里没有匹配的一次性日程 %r（%s）—— 没删",
+                      self._config_path, event.title, event.on.isoformat())
 
     async def _apply_action(self, action: Dict[str, Any], reason: str) -> List[Dict[str, Any]]:
         """把 action dict 落到状态机/消息上。
