@@ -82,6 +82,7 @@ agent/
 │   ├── test_schedule_config.py  # 文本级删掉已触发的一次性日程
 │   ├── test_cli.py              # CLI 七条命令 / 窗口与尾巴 / cleanup
 │   ├── test_tools.py            # 工具层: 注册 / 状态权限 / 参数校验 / 缺依赖跳过 (T1)
+│   ├── test_tool_permissions.py # 状态权限表: 4 状态 × 每个工具, 禁止的组合真的被拒 (T4)
 │   ├── test_wallpaper.py        # 壁纸目录游标 / next_wallpaper 工具与命令 (T3)
 │   ├── mocks/                   # mock_agent_native: native 替身
 │   ├── host/                    # 需要 numpy 的绑定层测试 (按需手动跑)

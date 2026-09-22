@@ -58,6 +58,8 @@ for _ in range(max_tool_rounds):          # 默认 4 轮, 防止模型无限要�
 - 工具清单来自 `ToolRouter.list_tools()`；工具能不能跑由 `Tool.allowed_states` 决定
   （**fail closed**：不允许的状态下只回绝，handler 一次都不跑）。工具层见
   [`architecture.md` §4.1](architecture.md)。
+  ⚠ T4 起**丢给模型的清单是按状态过滤的**（`allowed_tools()`）：SLEEP / GAME 下模型根本
+  看不到任何工具，而不是"看得见但一调就被拒"。权限表在 `architecture.md` §4.1。
 - 轮数用尽 → `ok=False` + `tool loop exceeded N rounds`（不假装正常结束）。
 - 工具被拒/参数不合法**不会**让整轮失败：错误进 `tool_calls[].result`，循环继续。
 

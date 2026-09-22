@@ -766,6 +766,8 @@ Phase 7 — 工具层
 ☑ 每个工具的单元测试（mock 外部依赖）—— back_to_desktop 已覆盖
 ☑ tests/test_tools.py：工具注册、状态权限、参数校验（17 项）
 ☑ 工具在正确状态下才允许执行 / 权限控制生效（如回到桌面仅 STUDY）
+      → **T4 完成**：整张表钉在 `tests/test_tool_permissions.py`（含"禁止的组合真的被拒、
+        handler 一次没跑"），并且给模型的候选清单也按状态过滤
 ☑ LLM 能调用工具完成任务 ← **T2 已完成**：edge 接上真模型，且与 cloud 共用同一个工具循环
       ⚠ 如实记一条限制：Qwen3-0.6B 很小，工具调用的**可靠性有限** —— 板端探针里它调对了
       `get_board_time`，但别指望它像大模型那样稳定挑工具、填参数。
@@ -926,6 +928,37 @@ T3 记录（已完成，等验收）：壁纸工具 + 接上 next_wallpaper
      教训沿用 T2 那条: 板端套件不是"再跑一遍 PC 套件", 它是**唯一**能抓这类差异的守门人。
 ☑ 四端: PC python `python tests OK`; PC native ctest 172/172; 板端 python **21 个文件 OK**;
      板端 GUI ctest **19/19**（GUI 改动重建后再跑）。`assistant doctor` 6 项全 OK。
+
+T4 记录（已完成，等验收）：状态权限表
+☑ 先把矛盾问清（你拍的板）：我手上那份计划写的是"GAME only back_to_desktop"，而 T1 已验收的
+     决定是 back_to_desktop **只在 STUDY**（工具说明里也写着"别在 GAME/IDLE 里乱按"）——
+     两者对不上。问过你之后定的是：
+     | 状态 | back_to_desktop | next_wallpaper |
+     | SLEEP | ✗ | ✗ |
+     | IDLE | ✗ | ✓ |
+     | STUDY | ✓ | ✓ |
+     | GAME | ✗ | ✗ |
+     即 **SLEEP/GAME 一个工具都不给**（SLEEP = 什么都别动; GAME = 主区是视频, 换壁纸白换,
+     回桌面是"学习收尾"的动作）。
+☑ 代码其实已经符合这张表（T1/T3 各自定的）—— 所以 T4 主要是**把它钉住**, 外加修一处名不副实:
+     `ToolRouter.allowed_tools()` 的说明一直写着"给 LLM 看的清单按状态过滤是权限控制的一部分",
+     但 `provider._chat_with_tools()` 调的是 **`list_tools()`**（不过滤）。改成
+     `_advertised_tools()`: 有 `allowed_tools()` 就用它。于是 SLEEP/GAME 下模型**根本看不到**
+     任何工具候选（而不是"看得见、一调就被拒、白花一轮"）。执行期的 fail-closed 校验照旧 ——
+     这是**少给**, 不是放宽。
+☑ `tests/test_tool_permissions.py`（新, 14 项）: `EXPECTED` 是唯一写下来的权限矩阵,
+     双向对齐（注册得到的工具必须在表里 / 表里的工具必须注册得到 —— 加工具时忘了决定就会红）；
+     逐个状态验 `allowed_tools()`; 4 状态 × 每个工具**跑一遍** `execute()`, 要求
+     禁止的组合被拒 **且 handler 一次都没跑**（依赖换成计数替身）、允许的组合正好跑一次;
+     另验 `list_tools()` 不随状态变（"注册了什么"与"现在能用什么"别混）;
+     以及"给模型的清单"三种形态（STUDY 两个 / IDLE 只有一个 / SLEEP 与 GAME 连 `tools` 键都没有）。
+☑ 文档: `docs/architecture.md` §4.1 加权限表 + 三条理由 + "加工具先在这张表里决定";
+     `docs/llm.md` §3 注明清单按状态过滤; `Readme.md` 测试清单。
+☑ ⚠ 写测试时自己踩的坑（记下来免得再犯）: `go_to()` 一开始按"从初始状态出发的路径表"写,
+     而**状态机的初始状态是 IDLE**（不是 SLEEP）—— 于是 SLEEP 之后走到 IDLE 时原地不动,
+     三条用例红得莫名其妙。改成"先退回 IDLE 再进目标状态"就对了。
+     另外编辑时留下过一个**重名的旧 `go_to`**, Python 取后定义的那份, 表现是"新代码明明写对了
+     却还是老行为" —— 同一文件里改函数时, 先确认没有第二份定义。
 
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查

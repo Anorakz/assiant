@@ -180,6 +180,23 @@ agent/
 | 权限 | `Tool.allowed_states` **默认空集 = 任何状态都不允许**（fail closed）；不在允许状态里只回绝，handler 一次都不跑 |
 | 给模型看的说明 | `DESCRIPTION` 要写清**副作用与不确定性** —— 例如 `back_to_desktop` 明说"是开关动作、没有回执、别连着调"。CLI 那边"不假装调了工具"是同一条口径 |
 
+**权限表（T4，唯一写下来的地方是 `tests/test_tool_permissions.py::EXPECTED`）**：
+
+| 状态 | `back_to_desktop` | `next_wallpaper` |
+| --- | --- | --- |
+| `SLEEP` | ✗ | ✗ |
+| `IDLE` | ✗ | ✓ |
+| `STUDY` | ✓ | ✓ |
+| `GAME` | ✗ | ✗ |
+
+- **SLEEP / GAME 一个都不给**：SLEEP 是"别动系统里的任何东西"；GAME 的主区是视频区，
+  换壁纸等于白换，而"回到桌面"是**学习收尾**的动作（T1 的决定）。
+- **给模型的候选清单也按状态过滤**（`ToolRouter.allowed_tools()`）：不可用的工具根本不该
+  出现在候选里 —— 否则 SLEEP/GAME 下模型会看到 `back_to_desktop`、试着调、吃一个拒绝，
+  白花一轮。执行期的 fail-closed 校验照旧（是**少给**，不是放宽）。
+- **加工具时先在这张表里决定它在哪些状态可用**，否则 `test_tool_permissions.py` 会红
+  （它双向对齐：注册得到的工具必须在表里，表里的工具必须注册得到）。
+
 工具**只在真会调模型的模式下才有意义**：`edge` 与 `cloud` 都走同一个工具循环
 （T2 起 edge 也接进来了，见 §4.2），`disabled` 是规则引擎，**不假装调过工具**。
 

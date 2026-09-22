@@ -48,6 +48,7 @@ tests/test_schedule_parity.py
 tests/test_schedule_config.py
 tests/test_cli.py
 tests/test_tools.py
+tests/test_tool_permissions.py
 tests/test_wallpaper.py
 "
 

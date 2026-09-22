@@ -570,7 +570,7 @@ class LLMProvider:
         (edge), 要么把原因收进 ok=False (cloud)。
         """
         messages = _build_messages(user_input, context, no_think=_no_think(backend))
-        tool_schemas = self._tools.list_tools() if self._tools is not None else []
+        tool_schemas = _advertised_tools(self._tools)
         tool_calls: List[Dict[str, Any]] = []
         loop = asyncio.get_running_loop()
 
@@ -734,6 +734,22 @@ def _result(
 def _no_think(backend: Any) -> bool:
     """这个后端要不要关思考。只有 EdgeBackend 有这个开关 (Qwen3 专用)。"""
     return bool(getattr(backend, "no_think", False))
+
+
+def _advertised_tools(tools: Optional[ToolRouter]) -> List[Dict[str, Any]]:
+    """丢给模型的工具清单 —— **按当前状态过滤**（T4）。
+
+    为什么不是 `list_tools()`: 权限控制的另一半是"不可用的工具根本不该出现在候选里"
+    （见 `ToolRouter.allowed_tools()` 的说明）。不过滤的话, SLEEP/GAME 下模型仍会看到
+    `back_to_desktop` 并尝试调用, 然后吃一个"不允许"的拒绝 —— 白花一轮, 答复还容易
+    变成"我做不到"。执行期的 fail-closed 校验照旧（这里是**少给**, 不是**放宽**）。
+    """
+    if tools is None:
+        return []
+    allowed = getattr(tools, "allowed_tools", None)
+    if callable(allowed):
+        return allowed()
+    return tools.list_tools()
 
 
 def _build_messages(
