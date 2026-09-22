@@ -94,6 +94,18 @@ def _locally_ignored(rel_paths):
     return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
 
 
+#: 唯一允许**提到**派生文件的地方：运维 CLI。
+#:
+#: 为什么放行：`agent/cli.py` 不是 Agent 运行时，是给人用的操作工具；它的 `doctor`
+#: 要回答"派生文件跟真源一致吗"，做法是把路径交给**那份唯一的 C++ 实现**
+#: （`gui_config_sync` 的 dry-run），自己绝不把 `llm.env` 当配置读。
+#: 为了不让这个例外变成后门，下面另有一条更精确的检查：**可以提名字，不许读它**。
+CLI_EXEMPT = "agent/cli.py"
+
+#: 命中"读派生文件"的写法（在 CLI 里也要拦）
+READS_PATTERN = r"(open|read_text|readlines|read|load|loads)\s*\("
+
+
 def _agent_python_files():
     """agent/ 下要扫描的 .py（跳过 __pycache__），排序稳定。"""
     if not AGENT_DIR.is_dir():
@@ -111,14 +123,32 @@ class TestAgentCopiesOnlyOneConfig(unittest.TestCase):
             rel = path.relative_to(_PROJECT_ROOT).as_posix()
             for lineno, line in enumerate(text.splitlines(), 1):
                 for pattern, why in FORBIDDEN_IN_AGENT:
-                    if re.search(pattern, line, re.IGNORECASE):
-                        found.append("%s:%d  命中 /%s/\n      %s\n      原因: %s"
-                                     % (rel, lineno, pattern, line.strip(), why))
+                    if not re.search(pattern, line, re.IGNORECASE):
+                        continue
+                    if rel == CLI_EXEMPT and pattern == r"llm\.env":
+                        # 运维 CLI 允许**提到**它（见 CLI_EXEMPT 的说明），
+                        # 但同一行里不许有"读文件"的调用
+                        if not re.search(READS_PATTERN, line):
+                            continue
+                        why = ("运维 CLI 可以提到派生文件、但不许把它当配置**读**；"
+                               "要判一致性请交给 gui_config_sync")
+                    found.append("%s:%d  命中 /%s/\n      %s\n      原因: %s"
+                                 % (rel, lineno, pattern, line.strip(), why))
 
         if found:
             self.fail("agent/ 里出现了 %d 处不该有的配置字面量 "
                       "(Agent 只读 %s; 如果确实是注释里说明'不读它', 请改写措辞):\n  %s"
                       % (len(found), TRUTH_PATH, "\n  ".join(found)))
+
+    def test_cli_exemption_cannot_hide_a_real_read(self):
+        """反空转：证明"放行 cli.py"没有把"读派生文件"也一起放过去。
+
+        直接把一段**会读文件**的样本喂给判断逻辑，它必须被拦下。
+        """
+        sample = 'with open(env_path) as handle:  # llm.env'
+        self.assertTrue(re.search(r"llm\.env", sample, re.IGNORECASE))
+        self.assertTrue(re.search(READS_PATTERN, sample),
+                        "READS_PATTERN 没抓住 open(...) —— 例外就成了后门")
 
     def test_the_scan_actually_covers_something(self):
         """防止路径写错导致"零命中"这种假绿灯。"""

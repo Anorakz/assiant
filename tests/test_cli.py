@@ -27,7 +27,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from agent import cli  # noqa: E402
+from datetime import date, datetime  # noqa: E402
+
+from agent import cli, config  # noqa: E402
 from agent.ipc.local_server import LocalServer, UNIX_SOCKET_SUPPORTED  # noqa: E402
 from agent.ipc.protocol import (  # noqa: E402
     COMMAND_CHAT_INPUT,
@@ -137,7 +139,7 @@ class TestTopicFilter(unittest.TestCase):
 class TestPushFormatting(unittest.TestCase):
     def test_compact_line(self):
         line = cli.format_push("status", {"mode": "STUDY", "connected": True},
-                               cli.datetime(2026, 9, 21, 23, 51, 2))
+                               datetime(2026, 9, 21, 23, 51, 2))
         self.assertEqual(line, "23:51:02  status    mode=STUDY connected=true")
 
     def test_values_are_readable(self):
@@ -159,8 +161,204 @@ class TestPushFormatting(unittest.TestCase):
         self.assertIn("共 10 字", out)
 
     def test_empty_data_still_prints_topic(self):
-        self.assertTrue(cli.format_push("music", {}, cli.datetime(2026, 9, 21, 1, 2, 3))
+        self.assertTrue(cli.format_push("music", {}, datetime(2026, 9, 21, 1, 2, 3))
                         .startswith("01:02:03  music"))
+
+
+class TestScheduleRendering(unittest.TestCase):
+    """日程渲染用的是**真的** ScheduleEvent（不是替身）。"""
+
+    @staticmethod
+    def _events():
+        from agent.core.scheduler import ScheduleEvent
+        return [
+            ScheduleEvent.from_config({"title": "每天喝水", "start": "10:00"}, 0),
+            ScheduleEvent.from_config({"title": "周一学习", "days": ["mon"], "start": "09:00"}, 1),
+            ScheduleEvent.from_config({"title": "周二站会", "days": ["tue"],
+                                       "start": "09:30", "end": "09:45"}, 2),
+            ScheduleEvent.from_config({"title": "项目评审", "date": "2026-09-22",
+                                       "start": "14:00"}, 3),
+        ]
+
+    def test_rows_only_for_that_day_and_sorted(self):
+        events = self._events()
+        monday = date(2026, 9, 21)
+        rows = cli.schedule_rows(events, monday, datetime(2026, 9, 21, 8, 0))
+        # 周一：每天喝水 + 周一学习；项目评审与周二站会不该出现
+        self.assertEqual([row["title"] for row in rows], ["周一学习", "每天喝水"])
+
+    def test_row_text_matches_the_gui_format(self):
+        """⚠ 与 GUI 的行格式一致，才能"CLI 的日程"和"界面上的日程"直接 diff。"""
+        events = self._events()
+        tuesday = date(2026, 9, 22)
+        rows = cli.schedule_rows(events, tuesday, datetime(2026, 9, 22, 8, 0))
+        texts = [cli.row_text(row) for row in rows]
+        self.assertEqual(texts, ["09:30-09:45  周二站会", "10:00  每天喝水",
+                                 "14:00  项目评审"])
+
+    def test_past_is_a_plain_time_comparison(self):
+        events = self._events()
+        day = date(2026, 9, 21)
+        rows = cli.schedule_rows(events, day, datetime(2026, 9, 21, 9, 30))
+        past = {row["title"]: row["past"] for row in rows}
+        self.assertTrue(past["周一学习"])       # 09:00 已过
+        self.assertFalse(past["每天喝水"])      # 10:00 还没到
+
+    def test_render_marks_empty_day_and_truncates(self):
+        events = self._events()
+        now = datetime(2026, 9, 21, 7, 0)
+        lines = cli.render_schedule(
+            [("今天", date(2026, 9, 21)), ("明天", date(2026, 9, 22))],
+            lambda day: cli.schedule_rows(events, day, now),
+            now, limit=1)
+        text = "\n".join(lines)
+        self.assertIn("今天（2026-09-21 周一）", text)
+        self.assertIn("还有 1 项", text)         # limit=1 截掉了第二条
+        self.assertIn("明天（2026-09-22 周二）", text)
+
+    def test_render_says_so_when_a_day_is_empty(self):
+        from agent.core.scheduler import ScheduleEvent
+        # 只放"周一才有"的一条，这样周三那天真的是空的
+        # （用 self._events() 就不行：里面那条"每天喝水"每天都有）
+        events = [ScheduleEvent.from_config(
+            {"title": "只在周一", "days": ["mon"], "start": "09:00"}, 0)]
+        now = datetime(2026, 9, 23, 7, 0)                  # 周三
+        lines = cli.render_schedule([("今天", date(2026, 9, 23))],
+                                    lambda day: cli.schedule_rows(events, day, now), now, 10)
+        self.assertIn("（没有日程）", "\n".join(lines))
+
+    def test_footer_does_not_claim_the_agent_fired_anything(self):
+        """文案防线：不许让 CLI 的"已过"被读成"Agent 已经触发过"。"""
+        self.assertIn("按时间", cli.SCHEDULE_FOOTER)
+        self.assertIn("不代表", cli.SCHEDULE_FOOTER)
+
+
+class TestDerivationVerdict(unittest.TestCase):
+    def test_no_diff_is_ok(self):
+        status, detail = cli.derivation_verdict(0, "[sync] dry-run（未写文件）\n[sync] 无差异\n")
+        self.assertEqual(status, cli.OK)
+        self.assertIn("一致", detail)
+
+    def test_diff_is_a_warning(self):
+        status, detail = cli.derivation_verdict(0, "[sync] dry-run\n--- a\n+++ b\n-LLM_PORT=1\n")
+        self.assertEqual(status, cli.WARN)
+        self.assertIn("有差异", detail)
+
+    def test_nonzero_exit_is_a_warning_with_the_code(self):
+        status, detail = cli.derivation_verdict(2, "[sync] 文件不存在: /tmp/x.env")
+        self.assertEqual(status, cli.WARN)
+        self.assertIn("退出码 2", detail)
+
+
+class TestDerivationCheck(unittest.TestCase):
+    def test_missing_binary_is_a_warning_not_a_crash(self):
+        tmp = tempfile.mkdtemp(prefix="cli-doc-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        status, detail = cli.run_derivation_check(
+            os.path.join(tmp, "nope"), os.path.join(tmp, "config.yaml"),
+            os.path.join(tmp, "llm.env"))
+        self.assertEqual(status, cli.WARN)
+        self.assertIn("没找到", detail)
+
+    @unittest.skipUnless(UNIX_SOCKET_SUPPORTED, "需要可执行脚本（POSIX）")
+    def test_runs_the_real_binary_and_reads_its_verdict(self):
+        tmp = tempfile.mkdtemp(prefix="cli-doc-run-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        binary = os.path.join(tmp, "gui_config_sync")
+        with open(binary, "w", encoding="utf-8") as handle:
+            handle.write("#!/bin/sh\necho '[sync] dry-run（未写文件）'\necho '[sync] 无差异'\n")
+        os.chmod(binary, 0o755)
+        config_file = os.path.join(tmp, "config.yaml")
+        env_file = os.path.join(tmp, "llm.env")
+        for path in (config_file, env_file):
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("x\n")
+
+        status, detail = cli.run_derivation_check(binary, config_file, env_file)
+        self.assertEqual(status, cli.OK)
+        self.assertIn("一致", detail)
+
+
+class TestScheduleCommand(unittest.TestCase):
+    """不需要 socket：`schedule` 只读配置 + 用真的 Scheduler 展开。"""
+
+    def _write_config(self, body):
+        tmp = tempfile.mkdtemp(prefix="cli-sched-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = Path(tmp) / "config.yaml"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def _run(self, path, extra=()):
+        # ⚠ 两件事：
+        #   1) AGENT_CONFIG_DIR 是"按名字加载"用的；一个进程里只认第一次 setdefault，
+        #      所以测试里直接覆盖环境变量，跑完还原。
+        #   2) agent.config.load_config **有缓存**（生产上是对的：一个进程读一次）。
+        #      测试里必须 clear_cache()，否则第二个用例读到的还是第一份配置。
+        old = os.environ.get("AGENT_CONFIG_DIR")
+        os.environ["AGENT_CONFIG_DIR"] = str(path.parent)
+        config.clear_cache()
+
+        def restore():
+            if old is None:
+                os.environ.pop("AGENT_CONFIG_DIR", None)
+            else:
+                os.environ["AGENT_CONFIG_DIR"] = old
+            config.clear_cache()
+
+        self.addCleanup(restore)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["schedule", "--config", str(path)] + list(extra))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_lists_today_and_tomorrow(self):
+        path = self._write_config(
+            "scheduler:\n"
+            "  recurring:\n"
+            "    - title: 每天喝水\n"
+            "      start: \"10:00\"\n"
+            "    - title: 只在周一\n"
+            "      days: [mon]\n"
+            "      start: \"09:00\"\n")
+        code, out, err = self._run(path)
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("日程（共 2 条", out)
+        self.assertIn("每天喝水", out)
+        self.assertIn("今天（", out)
+        self.assertIn("明天（", out)
+        self.assertIn("不代表", out)          # 页脚必须带上"不代表已触发"
+
+    def test_empty_schedule_is_not_an_error(self):
+        path = self._write_config("llm:\n  mode: disabled\n")
+        code, out, err = self._run(path)
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("共 0 条", out)
+        self.assertIn("（没有日程）", out)
+
+    def test_broken_schedule_is_reported_honestly(self):
+        path = self._write_config("scheduler:\n  recurring:\n    - title: 坏的\n      start: \"99:99\"\n")
+        code, out, err = self._run(path)
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("读不出来", err)
+        self.assertIn("Agent 也会因此起不来", err)
+
+    def test_today_only_flag(self):
+        path = self._write_config("scheduler:\n  recurring:\n    - title: 每天\n      start: \"10:00\"\n")
+        code, out, err = self._run(path, ["--today"])
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("今天（", out)
+        self.assertNotIn("明天（", out)
+
+    def test_unreadable_config_is_reported_with_the_naming_hint(self):
+        tmp = tempfile.mkdtemp(prefix="cli-sched-bad-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = Path(tmp) / "my-config.yaml"          # 名字不对
+        path.write_text("llm: {mode: disabled}\n", encoding="utf-8")
+        code, out, err = self._run(path)
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("读不到配置", err)
+        self.assertIn("config.yaml", err)             # 提示名字要求
 
 
 class TestConnectHint(unittest.TestCase):

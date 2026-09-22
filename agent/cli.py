@@ -26,13 +26,16 @@ import contextlib
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from agent.config import ConfigError, ConfigNotFoundError, load_config
+from agent.config import ConfigError, ConfigNotFoundError, config_path, load_config
+from agent.core.scheduler import Scheduler, SchedulerError
+from agent.core.state_machine import StateMachine
 from agent.ipc.local_client import IpcClientError, LocalClient
 from agent.ipc.protocol import (
     COMMAND_CHAT_INPUT,
@@ -54,6 +57,11 @@ DEFAULT_TIMEOUT = 3.0
 #: watch 打印一条推送时，单个值最长多少字符（超出截断并标总长）
 WATCH_VALUE_LIMIT = 120
 
+#: 仓库根：**按 CLI 自己的位置**推（`<root>/agent/cli.py`）。
+#: ⚠ 不用"配置文件的上一级"推：`--config` 可以指向仓库外的临时配置（验收/沙箱常这么干），
+#:   那样就会把一堆仓库里的路径误判成"缺"。
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 # ---------------------------------------------------------------------------
 #  配置 / socket 路径（纯逻辑，可单测）
@@ -71,17 +79,24 @@ def socket_path_from(cli_value: Optional[str], config: Optional[Dict[str, Any]])
 
 
 def load_plane_config(explicit_path: Optional[str] = None) -> Tuple[Dict[str, Any], Optional[str]]:
-    """读配置（这里只为了拿 socket 路径等）。返回 `(config, 失败原因或 None)`。
+    """读配置（这里只为了拿 socket 路径、日程等）。返回 `(config, 失败原因或 None)`。
 
     与 `agent/main.py --config` 同一条路：设置 `AGENT_CONFIG_DIR` 后按名字加载。
-    读不到**不是**致命错误（socket 有默认值），调用方给一句提示就行。
+    ⚠ 所以 `--config` 给的是**路径**，但加载是按**名字**找 `config.yaml` /
+      `config.example.yaml` —— 文件叫别的名字会读不到（提示里会写明）。
+    读不到**不是**致命错误（socket 有默认值），调用方自己决定怎么处理。
     """
     if explicit_path:
         os.environ.setdefault("AGENT_CONFIG_DIR", str(Path(explicit_path).resolve().parent))
     try:
         return load_config("config"), None
     except (ConfigError, ConfigNotFoundError) as exc:
-        return {}, str(exc)
+        hint = ""
+        if explicit_path:
+            hint = ("（--config 给的是路径，但加载按**名字**找 config.yaml / "
+                    "config.example.yaml —— 与 agent/main.py 一致；"
+                    "文件叫别的名字请先改成 config.yaml）")
+        return {}, "%s%s" % (exc, hint)
     except Exception as exc:                      # noqa: BLE001 - 配置坏法很多，CLI 不该崩
         return {}, "%s: %s" % (type(exc).__name__, exc)
 
@@ -355,6 +370,226 @@ async def cmd_watch(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+class _NullBus:
+    """只为构造 `Scheduler` 用的空 bus。
+
+    CLI 是只读的：它借用 Agent 的**日程语义**（同一个 `Scheduler`），但不发消息、
+    不跑循环 —— 所以给个能 `subscribe` 的空壳就够了。
+    """
+
+    def subscribe(self, *args, **kwargs):
+        return lambda: True
+
+
+def load_events(config: Dict[str, Any]) -> List[Any]:
+    """用**真的** `Scheduler` 装载日程 —— 与 Agent 启动时同一条路。
+
+    @raise SchedulerError 配置里的日程坏到 Agent 也起不来时（这里如实抛给调用方）
+    """
+    scheduler = Scheduler(state=StateMachine(), bus=_NullBus(), config=config)
+    return list(scheduler.events)
+
+
+def row_text(row: Dict[str, Any]) -> str:
+    """一行的文本：`HH:MM[-HH:MM]  标题`。
+
+    ⚠ 与 GUI 日程区同一行格式（`SchedulePanel::rowTextOf`）—— 这样"CLI 的日程"
+      与"界面上的日程"可以直接逐行 diff，不用人眼对着两张图读。
+    """
+    clock = row["time"] if not row["end"] else "%s-%s" % (row["time"], row["end"])
+    return "%s  %s" % (clock, row["title"])
+
+
+def schedule_rows(events: List[Any], day, now: datetime) -> List[Dict[str, Any]]:
+    """某一天的日程行（按 `(时间, 标题)` 升序）。
+
+    `occurs_on()` 是**真的** Python 语义（recurring 看星期、oneoff 看日期）；
+    `past` 只是"现在时刻已经过了 start"——纯时间比较，**不代表 Agent 触发过**。
+    """
+    rows = []
+    now_minute = now.hour * 60 + now.minute
+    for event in events:
+        if not event.occurs_on(day):
+            continue
+        start = "%02d:%02d" % event.start
+        end = ("%02d:%02d" % event.end) if event.end else ""
+        rows.append({
+            "time": start,
+            "end": end,
+            "title": event.title,
+            "past": bool(now_minute > (event.start[0] * 60 + event.start[1])),
+            "day": day,
+        })
+    rows.sort(key=lambda row: (row["time"], row["title"]))
+    return rows
+
+
+def render_schedule(days: List[Tuple[str, Any]], rows_of, now: datetime,
+                    limit: int = 10) -> List[str]:
+    """渲染成"人读的行"（不含页脚）。`rows_of(day)` 给当天的行。"""
+    lines = []
+    weekday = "一二三四五六日"
+    for label, day in days:
+        rows = rows_of(day)
+        lines.append("%s（%s 周%s）" % (label, day.isoformat(), weekday[day.weekday()]))
+        if not rows:
+            lines.append("  （没有日程）")
+            continue
+        shown = rows if limit <= 0 else rows[:limit]
+        for row in shown:
+            mark = "  ← 已过" if row["past"] else ""
+            lines.append("  %s%s" % (row_text(row), mark))
+        if len(rows) > len(shown):
+            lines.append("  …还有 %d 项（--limit 可调）" % (len(rows) - len(shown)))
+    return lines
+
+
+SCHEDULE_FOOTER = ("⚠ 「已过」只是「现在过了 start 时刻」（按时间比较），"
+                   "**不代表 Agent 已经触发过** —— 那是运行中 Agent 的内存状态，"
+                   "CLI 看不到（要看先得扩协议）。")
+
+
+async def cmd_schedule(args: argparse.Namespace) -> int:
+    """列出今天/明天的日程（用真的 `Scheduler` 语义）。
+
+    不需要事件循环，但保持与其他子命令一致的签名（`main()` 统一 await）。
+    """
+    config, why = load_plane_config(args.config)
+    if why:
+        print("读不到配置（%s）——日程在 config.yaml 的 scheduler 段。" % why, file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        events = load_events(config)
+    except SchedulerError as exc:
+        print("配置里的日程读不出来：%s\n（Agent 也会因此起不来 —— 先修配置。）" % exc,
+              file=sys.stderr)
+        return EXIT_ERROR
+
+    now = datetime.now()
+    today = now.date()
+    tomorrow = today + timedelta(days=1)
+    wanted = []
+    if not args.tomorrow:
+        wanted.append(("今天", today))
+    if not args.today:
+        wanted.append(("明天", tomorrow))
+
+    print("日程（共 %d 条；%s）" % (len(events), (config_path("config"))))
+    for line in render_schedule(wanted, lambda day: schedule_rows(events, day, now),
+                               now, limit=args.limit):
+        print(line)
+    print(SCHEDULE_FOOTER)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+#  doctor
+# ---------------------------------------------------------------------------
+OK = "OK"
+WARN = "警告"
+
+
+def derivation_verdict(exit_code: int, output: str) -> Tuple[str, str]:
+    """纯逻辑：把 `gui_config_sync`（dry-run）的输出判成 OK / 警告。
+
+    ⚠ 派生一致性**不在这边重实现映射表**：映射表只有 `gui/src/core/config_sync.cpp`
+      一份，这里只是跑它、读它的结论。
+    """
+    text = (output or "").strip()
+    flat = " | ".join(line.strip() for line in text.splitlines() if line.strip())
+    if "[sync] 无差异" in text:
+        return OK, "llm.env 与 config.yaml 一致"
+    if exit_code != 0:
+        return WARN, "gui_config_sync 退出码 %d：%s" % (exit_code, flat[:200])
+    return WARN, "llm.env 与 config.yaml 有差异：%s" % flat[:200]
+
+
+def run_derivation_check(binary: str, config_file: str, env_file: str) -> Tuple[str, str]:
+    """跑一次 dry-run（不写文件）。"""
+    if not os.path.exists(binary):
+        return WARN, "没找到 %s（板端还没构建 gui/？这一步跳过）" % binary
+    if not os.path.exists(env_file):
+        return WARN, "没找到 %s（还没派生过？）" % env_file
+    try:
+        proc = subprocess.run([binary, "--config", config_file, "--env", env_file],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              universal_newlines=True, timeout=20)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return WARN, "跑不起来：%s" % exc
+    return derivation_verdict(proc.returncode, proc.stdout or "")
+
+
+async def cmd_doctor(args: argparse.Namespace) -> int:
+    """体检：配置 / socket / 派生一致性 / 日程 / 关键路径，逐项 OK 或警告。"""
+    checks: List[Tuple[str, str, str]] = []
+
+    config, why = load_plane_config(args.config)
+    config_file = None
+    root = str(REPO_ROOT)
+    if why:
+        checks.append(("配置", WARN, why))
+    else:
+        try:
+            config_file = str(config_path("config"))
+            checks.append(("配置", OK, config_file))
+        except Exception as exc:                     # noqa: BLE001
+            checks.append(("配置", WARN, str(exc)))
+
+    # socket：文件在不在 + 能不能连上（连上就等于"Agent 在跑"）
+    socket_path = socket_path_from(args.socket, config)
+    if not os.path.exists(socket_path):
+        checks.append(("Agent socket", WARN,
+                       "%s 不存在（Agent 没在跑？）" % socket_path))
+    else:
+        client = LocalClient(socket_path)
+        try:
+            await client.connect()
+            checks.append(("Agent socket", OK, "%s 可连（Agent 在跑）" % socket_path))
+        except IpcClientError as exc:
+            checks.append(("Agent socket", WARN, "连不上 %s：%s" % (socket_path, exc)))
+        finally:
+            with contextlib.suppress(Exception):
+                await client.close()
+
+    # 派生一致性：跑 C++ 那份唯一实现
+    if root:
+        status, detail = run_derivation_check(
+            os.path.join(root, "gui", "build", "gui_config_sync"),
+            config_file,
+            os.path.join(root, "llm", "config", "llm.env"),
+        )
+        checks.append(("派生 llm.env", status, detail))
+
+    # 日程
+    if config:
+        try:
+            events = load_events(config)
+            checks.append(("日程", OK, "装载 %d 条（语义来自 agent/core/scheduler.py）"
+                           % len(events)))
+        except SchedulerError as exc:
+            checks.append(("日程", WARN, "读不出来（Agent 也会起不来）：%s" % exc))
+
+    # 关键路径（板端本地资产；PC 上没有只报信息，不算错）
+    if root:
+        for name in ("config/config.yaml", "llm/config/llm.env"):
+            path = os.path.join(root, name)
+            checks.append((name, OK if os.path.exists(path) else WARN,
+                           "在" if os.path.exists(path) else "缺"))
+
+    width = max(len(name) for name, _, _ in checks)
+    for name, status, detail in checks:
+        print("%-*s  %-4s  %s" % (width, name, status, detail))
+
+    warned = [name for name, status, _ in checks if status == WARN]
+    print()
+    if warned:
+        print("体检结果：%d 项 OK，%d 项警告（%s）"
+              % (len(checks) - len(warned), len(warned), "、".join(warned)))
+        return EXIT_ERROR
+    print("体检结果：%d 项全部 OK" % len(checks))
+    return EXIT_OK
+
+
 # ---------------------------------------------------------------------------
 #  命令行
 # ---------------------------------------------------------------------------
@@ -372,7 +607,8 @@ def _common_options(*, suppress_defaults: bool) -> argparse.ArgumentParser:
     parent.add_argument("--socket", default=fallback,
                         help="Agent 的 socket 路径（默认读配置的 ipc.socket_path）")
     parent.add_argument("--config", default=fallback,
-                        help="配置文件路径（默认 config/config.yaml）")
+                        help="配置文件路径（按名字找 config.yaml/config.example.yaml，"
+                             "与 agent/main.py 一致）")
     parent.add_argument("--timeout", type=float,
                         default=argparse.SUPPRESS if suppress_defaults else DEFAULT_TIMEOUT,
                         help="等一条推送的超时秒数（默认 %s）" % DEFAULT_TIMEOUT)
@@ -412,6 +648,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--count", type=int, default=0,
                          help="收够 N 条就退出（0 = 不限；给脚本/测试用）")
     p_watch.set_defaults(func=cmd_watch)
+
+    p_schedule = sub.add_parser("schedule", help="列出今天/明天的日程（真的 Scheduler 语义）",
+                                parents=[_common_options(suppress_defaults=True)])
+    p_schedule.add_argument("--today", action="store_true", help="只看今天")
+    p_schedule.add_argument("--tomorrow", action="store_true", help="只看明天")
+    p_schedule.add_argument("--limit", type=int, default=10,
+                            help="每天最多列几行（0 = 不限；默认 %(default)s）")
+    p_schedule.set_defaults(func=cmd_schedule)
+
+    p_doctor = sub.add_parser("doctor", help="体检：配置 / socket / 派生 / 日程 / 关键路径",
+                              parents=[_common_options(suppress_defaults=True)])
+    p_doctor.set_defaults(func=cmd_doctor)
 
     return parser
 
