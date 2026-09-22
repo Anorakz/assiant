@@ -196,6 +196,15 @@ agent/
   白花一轮。执行期的 fail-closed 校验照旧（是**少给**，不是放宽）。
 - **加工具时先在这张表里决定它在哪些状态可用**，否则 `test_tool_permissions.py` 会红
   （它双向对齐：注册得到的工具必须在表里，表里的工具必须注册得到）。
+- ⚠ **同名命令也受同一张表约束**（T6）：`next_wallpaper` 既是工具名也是 GUI 命令名，
+  而"这个状态下能不能换壁纸"只有**一个**答案。命令路径（`_handle_next_wallpaper`）在调
+  `Runtime.next_wallpaper()` 之前先问 `ToolRouter.allowed_in_current_state()`，被拒时回一条
+  `llm` 说明（"换壁纸没成功：… 在当前状态（game）下不可用（可用状态: idle, study）"）。
+  否则 GUI 的按钮就成了绕过状态表的后门。工具没注册（缺依赖）时**不拦** ——
+  那是"工具没装"，不是"这个状态不允许"。
+- **"补推"不受状态表约束**（T6）：新 GUI 连上时 Agent 会补一张**当前**壁纸
+  （`Runtime.push_current_wallpaper()`）。那是"同步显示"，不是"换一张" ——
+  客户端连上时 Agent 可能正处在 SLEEP/GAME，补一张当前画面不该被拒。
 
 工具**只在真会调模型的模式下才有意义**：`edge` 与 `cloud` 都走同一个工具循环
 （T2 起 edge 也接进来了，见 §4.2），`disabled` 是规则引擎，**不假装调过工具**。

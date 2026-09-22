@@ -544,6 +544,10 @@ class Runtime:
                 · ok=False 时 error 是**给人看的**一句话（会经 llm 推送显示到界面上）
                 · pushed=True 只表示"已经交给 IPC 去推了", 不代表 GUI 收到了
         @note 目录不存在/没图片属于运行期问题: 这里报错, 不让工具在启动时消失。
+        @note **状态权限不在这里判**（T6 的决定）: 那张表挂在工具上（`allowed_states`）,
+              由 `ToolRouter` 统一回答"这个动作在当前状态下行不行"。LLM 走工具时由
+              `execute()` 拦, GUI 命令由 `agent/ipc/` 用 `ToolRouter.allowed_in_current_state()`
+              拦 —— 两处问的是同一张表。本文件因此仍然**不认识任何具体工具**。
         @note 这个方法是**同步**的: 推送入口（IPC 的 dispatcher）本身就是同步且线程安全的,
               而工具 handler 可能在线程池里跑（ToolRouter 对同步 handler 就是这么做的）。
         """
@@ -556,18 +560,41 @@ class Runtime:
             self.log.warning("wallpaper: 换不了: %s", exc)
             return {"ok": False, "error": str(exc)}
 
-        pushed = False
-        if self.on_wallpaper is not None:
-            try:
-                self.on_wallpaper(path, index)
-                pushed = True
-            except Exception as exc:        # noqa: BLE001 - 推送失败不该让"换壁纸"失败
-                self.log.warning("wallpaper: 推送失败 (已忽略): %r", exc)
-        else:
-            self.log.info("wallpaper: 没有 IPC 推送入口（没接 GUI），只更新了游标")
-
+        pushed = self._push_wallpaper(path, index)
         self.log.info("wallpaper: %s (index=%d/%d, pushed=%s)", path, index, total, pushed)
         return {"ok": True, "path": path, "index": index, "total": total, "pushed": pushed}
+
+    def push_current_wallpaper(self) -> bool:
+        """把一个 GUI 刚连上来该看到的壁纸补推一次（T6）。
+
+        @return 是否真的推了（目录用不了/没有图片/没有推送入口 -> False）
+        @note 这是"**同步显示**", 不是"换一张": 所以**不受状态表限制** ——
+              客户端连上时 Agent 可能正处在 SLEEP/GAME, 补一张当前壁纸不该被拒。
+        @note 从来没选过任何一张时, 会**顺手选第一张**当初始画面（只动游标, 不做别的）。
+        """
+        if self.wallpaper is None:
+            return False
+        snapshot = self.wallpaper.snapshot(initialise=True)
+        if snapshot is None:
+            self.log.debug("wallpaper: 没有可补推的壁纸（目录空的或读不了）")
+            return False
+        index, path, total = snapshot
+        pushed = self._push_wallpaper(path, index)
+        self.log.info("wallpaper: 给刚连上的 GUI 补推 %s (index=%d/%d, pushed=%s)",
+                      path, index, total, pushed)
+        return pushed
+
+    def _push_wallpaper(self, path: str, index: int) -> bool:
+        """把一张壁纸交给 IPC 推出去（没有 IPC 时返回 False, 不抛）。"""
+        if self.on_wallpaper is None:
+            self.log.info("wallpaper: 没有 IPC 推送入口（没接 GUI），只更新了游标")
+            return False
+        try:
+            self.on_wallpaper(path, index)
+            return True
+        except Exception as exc:        # noqa: BLE001 - 推送失败不该让"换壁纸"失败
+            self.log.warning("wallpaper: 推送失败 (已忽略): %r", exc)
+            return False
 
     def _register_tools(self, router: ToolRouter) -> int:
         """注册工具。

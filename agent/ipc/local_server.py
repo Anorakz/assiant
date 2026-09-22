@@ -488,6 +488,7 @@ class LocalServer:
         max_line_bytes: int = MAX_LINE_BYTES,
         queue_size: int = DEFAULT_QUEUE_SIZE,
         logger: Optional[logging.Logger] = None,
+        on_client_connect: Optional[Callable[[], Any]] = None,
     ) -> None:
         """
         @param path           socket 文件路径 (默认 /tmp/agent.sock)
@@ -496,6 +497,9 @@ class LocalServer:
         @param max_line_bytes 单条消息上限 (默认与 protocol.MAX_LINE_BYTES 一致)
         @param queue_size     每个连接的发送队列长度
         @param logger         注入 logger (测试用; 默认 agent.ipc.local_server)
+        @param on_client_connect 一个新 GUI 连上时的回调 (普通函数或协程函数)。
+                              用途: 补推"客户端连上时看不到、只有变化时才推"的那类状态
+                              (T6 起用它补当前壁纸)。抛异常只记 WARNING, 连接保持。
         """
         self.path = path
         self.backlog = backlog
@@ -503,6 +507,7 @@ class LocalServer:
         self.max_line_bytes = max_line_bytes
         self.queue_size = queue_size
         self.log = logger or logging.getLogger(__name__)
+        self.on_client_connect = on_client_connect
 
         self._server: Optional["asyncio.AbstractServer"] = None
         self._sessions: List[_ClientSession] = []
@@ -683,6 +688,7 @@ class LocalServer:
         )
         self._sessions.append(session)
         self.log.info("ipc: GUI 已连接 (当前 %d 个)", len(self._sessions))
+        await self._notify_client_connect()
         try:
             await session.run()
         except asyncio.CancelledError:
@@ -695,6 +701,24 @@ class LocalServer:
                 self._sessions.remove(session)
             await session.close()
             self.log.info("ipc: GUI 已断开 (剩余 %d 个)", len(self._sessions))
+
+    async def _notify_client_connect(self) -> None:
+        """叫一次 on_client_connect (有的话)。
+
+        @note 这一下**在读到任何命令之前**发生 —— 客户端连上就能收到"当前状态"
+              (T6: 当前壁纸), 不用先发一条查询。
+        @note 回调抛异常只记 WARNING: 补推失败不该把刚建立的连接弄断。
+        """
+        callback = self.on_client_connect
+        if callback is None:
+            return
+        try:
+            result = callback()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:        # noqa: BLE001 - 补推失败不是连接失败
+            self.log.warning("ipc: on_client_connect 回调出错 (已忽略): %r", exc)
+            self.log.debug("ipc: on_client_connect traceback", exc_info=True)
 
     async def _dispatch(self, topic: str, data: dict) -> None:
         """解出来的消息 -> 已注册的 on_command 回调。
@@ -822,11 +846,19 @@ class NullServer:
     (Windows 上 Agent 本来就只是开发环境, 真机是 Linux 板子。)
     """
 
-    def __init__(self, reason: str = "", logger: Optional[logging.Logger] = None) -> None:
+    def __init__(
+        self,
+        reason: str = "",
+        logger: Optional[logging.Logger] = None,
+        on_client_connect: Optional[Callable[[], Any]] = None,
+    ) -> None:
         self.reason = reason
         self.log = logger or logging.getLogger(__name__)
         self.path = SOCKET_PATH
         self.pushed = 0
+        #: 与 LocalServer 同名字段: 空实现也是"接口齐全"的一部分（永远不会被调用,
+        #  因为这里根本不会有客户端连上来）。
+        self.on_client_connect = on_client_connect
 
     def __repr__(self) -> str:
         return "<NullServer (本平台不支持 AF_UNIX)>"

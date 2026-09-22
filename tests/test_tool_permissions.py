@@ -33,6 +33,7 @@ tests/test_tool_permissions.py — 工具的状态权限表（Phase 7 T4）
 
 import asyncio
 import logging
+import os
 import sys
 import tempfile
 import unittest
@@ -63,6 +64,15 @@ EXPECTED_BY_STATE = {
 }
 
 
+def make_dir(*names):
+    """造一个临时壁纸目录（文件内容无所谓, 只看后缀）。"""
+    root = tempfile.mkdtemp(prefix="perm_wallpaper_")
+    for name in names:
+        with open(os.path.join(root, name), "w", encoding="utf-8") as handle:
+            handle.write("not really an image")
+    return root
+
+
 def go_to(machine, state):
     """走到目标状态。
 
@@ -78,8 +88,11 @@ def go_to(machine, state):
     assert machine.current() is state, machine.current()
 
 
-def make_router():
-    """真路由 + 两个真工具, 依赖换成**计数替身**（这样能验"handler 到底跑没跑"）。"""
+def make_router(machine=None):
+    """真路由 + 两个真工具, 依赖换成**计数替身**（这样能验"handler 到底跑没跑"）。
+
+    @param machine 状态源; 不给就自己建一个（初始 IDLE）
+    """
     calls = {"desktop": 0, "wallpaper": 0}
 
     class _Sender:
@@ -90,7 +103,7 @@ def make_router():
         calls["wallpaper"] += 1
         return {"ok": True, "path": "/w/1.png", "index": 0, "total": 1, "pushed": True}
 
-    machine = StateMachine()
+    machine = machine if machine is not None else StateMachine()
     router = ToolRouter(
         state_provider=machine,
         services={"input_sender": _Sender(), "next_wallpaper": _next_wallpaper},
@@ -98,6 +111,13 @@ def make_router():
     for tool in build_tools(router):
         router.register(tool)
     return machine, router, calls
+
+
+def _machine_in(state):
+    """一个**已经走到** state 的状态机（T6 的"真 Runtime"用例要拿它当 runtime.state）。"""
+    machine = StateMachine()
+    go_to(machine, state)
+    return machine
 
 
 class TestTheTable(unittest.TestCase):
@@ -264,8 +284,117 @@ class TestModelOnlySeesAllowedTools(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("tool_choice", request)
 
 
+class TestTheGuiCommandFollowsTheTableToo(unittest.IsolatedAsyncioTestCase):
+    """T6: GUI 的 `next_wallpaper` 命令也受**同一张表**约束。
+
+    理由: `next_wallpaper` 既是命令名也是工具名, 而"这个状态下能不能换壁纸"的答案是
+    一张表。GUI 的按钮与 LLM 的工具是同一个动作, 不该有两套规则 —— 否则按钮就是
+    绕过状态表的后门。这里用**真 Runtime**（真工具、真状态机、真壁纸目录）走一遍。
+    """
+
+    def _runtime(self, state):
+        from agent.main import Runtime
+
+        runtime = Runtime(config={"wallpaper": {"dir": make_dir("01_a.png", "02_b.png")}},
+                          start_native=False, start_terminal=False,
+                          log=logging.getLogger("test.permissions"))
+        runtime.wallpaper = WallpaperDeck(runtime.config["wallpaper"]["dir"])
+        # 状态机、路由、runtime 三者用**同一个** machine —— 否则"路由说不能用"与
+        # "runtime 现在是什么状态"会各说各的
+        machine = _machine_in(state)
+        _, router, _ = make_router(machine)
+        runtime.state = machine
+        runtime.tools = router
+        runtime.applied = []
+        runtime.on_wallpaper = lambda path, index: runtime.applied.append((path, index))
+        return runtime
+
+    async def _send(self, runtime):
+        from agent.ipc import _handle_next_wallpaper
+
+        pushed = []
+        _handle_next_wallpaper(runtime, lambda topic, data: pushed.append((topic, data)))
+        return pushed
+
+    async def test_refused_exactly_where_the_table_says_no(self):
+        for state in State:
+            runtime = self._runtime(state)
+            pushed = await self._send(runtime)
+            allowed = "next_wallpaper" in EXPECTED_BY_STATE[state]
+            if allowed:
+                self.assertEqual(pushed, [], "%s 允许时不该回说明" % state.value)
+                self.assertEqual(len(runtime.applied), 1,
+                                 "%s 下按钮应当真的换了一张" % state.value)
+            else:
+                self.assertEqual(len(pushed), 1, "%s 下按钮应当被拒并回一句" % state.value)
+                topic, data = pushed[0]
+                self.assertEqual(topic, "llm")
+                self.assertIn("换壁纸没成功", data["text"])
+                self.assertIn(state.value, data["text"])
+                self.assertEqual(runtime.applied, [],
+                                 "%s 下不该真的换（后门被堵住了）" % state.value)
+
+    async def test_the_refusal_names_the_allowed_states(self):
+        pushed = await self._send(self._runtime(State.GAME))
+        text = pushed[0][1]["text"]
+        self.assertIn("idle", text)
+        self.assertIn("study", text)
+
+    async def test_without_a_tool_registry_the_command_is_not_blocked(self):
+        # "工具没装"（缺依赖）不是"状态不允许": 那时不该拿状态表拦人
+        runtime = self._runtime(State.GAME)
+        runtime.tools = None
+        pushed = await self._send(runtime)
+        self.assertEqual(pushed, [])
+        self.assertEqual(len(runtime.applied), 1)
+
+
+class TestTheConnectPush(unittest.IsolatedAsyncioTestCase):
+    """T6: 新 GUI 连上时补推当前壁纸（`wallpaper` 是"变化才推", 连上不会自动收到）。"""
+
+    async def test_build_ipc_wires_the_hook(self):
+        from agent.ipc import build_ipc
+
+        runtime = self._runtime_with_deck()
+        server = build_ipc(None, {"ipc": {"socket_path": ""}}, runtime)
+        self.assertTrue(callable(getattr(server, "on_client_connect", None)),
+                        "build_ipc 该把'连上补推'挂在 server 上（空实现也要收下这个参数）")
+
+    async def test_the_hook_selects_and_pushes_the_first_one(self):
+        # 真按 server 的路径叫一次: 该把第一张选出来并推出去
+        from agent.ipc.local_server import LocalServer
+
+        runtime = self._runtime_with_deck()
+        seen = []
+        runtime.on_wallpaper = lambda path, index: seen.append((path, index))
+        server = LocalServer(path="/tmp/never-started.sock",
+                             on_client_connect=runtime.push_current_wallpaper)
+        await server._notify_client_connect()
+        self.assertEqual(len(seen), 1, "连上就该推一张")
+        self.assertEqual(os.path.basename(seen[0][0]), "01_a.png")
+
+    def _runtime_with_deck(self):
+        from agent.main import Runtime
+
+        runtime = Runtime(config={"wallpaper": {"dir": make_dir("01_a.png")}},
+                          start_native=False, start_terminal=False,
+                          log=logging.getLogger("test.permissions"))
+        runtime.wallpaper = WallpaperDeck(runtime.config["wallpaper"]["dir"])
+        return runtime
+
+    async def test_a_broken_hook_does_not_break_the_wiring(self):
+        from agent.ipc.local_server import LocalServer
+
+        def boom():
+            raise RuntimeError("补推炸了")
+
+        server = LocalServer(path="/tmp/never-started.sock", on_client_connect=boom)
+        await server._notify_client_connect()      # 不该抛
+        # 没有 hook 的 server 是空操作
+        await LocalServer(path="/tmp/never-started.sock")._notify_client_connect()
+
+
 class TestDeckAndToolsAreTheRealOnes(unittest.TestCase):
-    """这两件事容易写错, 单独钉一下（它们不是"权限"但同属这套装配）。"""
 
     def test_wallpaper_tool_needs_only_the_runtime_entry(self):
         # 壁纸目录不存在也不该让工具消失（目录问题是运行期的, 见 tools/wallpaper.py）

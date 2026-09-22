@@ -126,6 +126,26 @@ class WallpaperDeck:
         """当前那张的路径（还没选过就是 None）。"""
         return self._current
 
+    def snapshot(self, initialise: bool = False) -> Optional[Tuple[int, str, int]]:
+        """当前那张的 (index, path, total) —— **不动游标**（纯读）。
+
+        @param initialise True 时"还没选过"就选第一张（只改游标, 不推送）——
+                          给"GUI 刚连上, 补推当前壁纸"用: 一张都没选过时也得有个初始画面。
+        @return None = 目录用不了/没有图片（读不到就当没有, 不抛 —— 调用方是补推, 不是换图）
+        """
+        try:
+            images = self.scan()
+        except WallpaperError:
+            return None
+        if not images:
+            return None
+        if self._current in images:
+            return images.index(self._current), self._current, len(images)
+        if not initialise:
+            return None
+        self._current = images[0]
+        return 0, images[0], len(images)
+
     def count(self) -> int:
         """目录里能用的图片数。**目录坏了算 0** —— 它只用于日志/诊断, 不该抛。
 

@@ -183,7 +183,8 @@ router.register(Tool(
     allowed_states={State.GAME, State.STUDY},
 ))
 
-router.list_tools()                       # 给 LLM 的 schema 列表
+router.list_tools()                       # 注册了什么（与状态无关）
+router.allowed_tools()                    # 当前**状态**下能用的那些（给 LLM 的候选）
 await router.execute("screenshot", {})    # {"ok": True, "result": ...}
                                           # 或 {"ok": False, "error": "..."}
 ```
@@ -194,6 +195,18 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
 约定：
 
 - 状态不允许时工具**绝不执行**；拿不到当前状态时 **fail closed**（拒绝而不是放行）。
+  **Phase 7 起丢给模型的候选也按状态过滤**（`allowed_tools()`）—— 不可用的工具不该出现在
+  候选里。当前这张权限表（`tests/test_tool_permissions.py::EXPECTED` 是唯一真源）：
+
+  | 状态 | `back_to_desktop` | `next_wallpaper` |
+  | --- | --- | --- |
+  | `SLEEP` / `GAME` | ✗ | ✗ |
+  | `IDLE` | ✗ | ✓ |
+  | `STUDY` | ✓ | ✓ |
+
+  **同名命令走同一张表**（T6）：GUI 的 `next_wallpaper` 命令与 LLM 的工具是同一个动作，
+  命令路径在调 `Runtime.next_wallpaper()` 之前先问 `ToolRouter.allowed_in_current_state()`，
+  被拒时回一条 `llm` 说明 —— 否则按钮就成了绕过状态表的后门。
 - 同步 handler 会被丢到线程池，不阻塞事件循环；超时后线程仍在跑（Python 无法强杀线程），
   调用方需自行考虑幂等。异步 handler 会被真正 cancel。
 - 参数校验用的是**自己实现的 JSON Schema 子集**（`SUPPORTED_KEYWORDS`）——实测宿主/WSL/板端
@@ -265,8 +278,10 @@ AGENT_RUN_SECONDS=5 python3 agent/main.py   # 跑 5 秒自动退出 (冒烟)
   正常跑只有 INFO + 少量自解释的 WARNING；**完整 traceback 只进 DEBUG**，
   免得正常日志看起来像崩了。排查时把级别调到 DEBUG 即可。
 - 关闭：`SIGINT` / `SIGTERM` 都会触发干净退出（systemd 停服务发的是 SIGTERM）。
-- 尚未实现、启动时跳过并记一条 WARNING 的组件：`agent/tools/`（工具为空）、
-  `agent/ipc.py`（GUI 连不上）。它们**不算失败**，放到位即自动接入，不用改 `main.py`。
+- 尚未实现、启动时跳过并记一条 WARNING 的组件：`agent/tools/` 里某个工具**缺依赖**时只跳过
+  那一个（Phase 7 起 `agent/tools/` 本身有真工具了：`back_to_desktop` / `next_wallpaper`）、
+  `agent/ipc/` 缺失或没有 `build_ipc()`（GUI 连不上）。它们**不算失败**，放到位即自动接入，
+  不用改 `main.py`。
 
 systemd 管理（不做 daemon 化）：
 

@@ -165,6 +165,41 @@ class TestStep(unittest.TestCase):
         self.assertIn("WallpaperDeck", repr(WallpaperDeck("/no/such/dir")))
 
 
+class TestSnapshot(unittest.TestCase):
+    """`snapshot()` —— 不换图、只看"现在是哪张"(T6: 给"连上补推"用)。"""
+
+    def test_nothing_selected_and_no_initialise_is_none(self):
+        deck = WallpaperDeck(make_dir("01_a.png"))
+        self.assertIsNone(deck.snapshot(), "还没选过就不该瞎编一张")
+        self.assertIsNone(deck.current())
+
+    def test_initialise_picks_the_first_and_sets_the_cursor(self):
+        root = make_dir("02_b.png", "01_a.png")
+        deck = WallpaperDeck(root)
+        self.assertEqual(deck.snapshot(initialise=True),
+                         (0, os.path.join(root, "01_a.png"), 2))
+        self.assertEqual(deck.current(), os.path.join(root, "01_a.png"),
+                         "初始化要真的落下游标, 否则下次'下一张'会重复第一张")
+
+    def test_reports_the_index_of_the_current_one(self):
+        root = make_dir("01_a.png", "02_b.png", "03_c.png")
+        deck = WallpaperDeck(root)
+        deck.step(2)                                    # -> 02_b
+        self.assertEqual(deck.snapshot(), (1, os.path.join(root, "02_b.png"), 3))
+
+    def test_broken_or_empty_dir_is_none_not_an_exception(self):
+        self.assertIsNone(WallpaperDeck("/no/such/dir").snapshot(initialise=True))
+        self.assertIsNone(WallpaperDeck(make_dir()).snapshot(initialise=True))
+
+    def test_current_file_removed_falls_back_to_the_first_when_initialising(self):
+        root = make_dir("01_a.png", "02_b.png")
+        deck = WallpaperDeck(root)
+        deck.step()
+        os.remove(os.path.join(root, "01_a.png"))
+        self.assertIsNone(deck.snapshot(), "不初始化时: 当前那张没了就是没有")
+        self.assertEqual(os.path.basename(deck.snapshot(initialise=True)[1]), "02_b.png")
+
+
 # ===========================================================================
 #  2) 工具
 # ===========================================================================
@@ -377,6 +412,56 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
         root = make_dir("01_a.jpg")
         runtime = self._runtime(root=root)
         self.assertEqual(runtime.wallpaper.directory, root)
+
+    # ---- T6: GUI 刚连上时补推当前壁纸 ----
+
+    async def test_push_current_repeats_the_current_one(self):
+        root = make_dir("01_a.png", "02_b.png")
+        runtime = self._runtime(root=root)
+        seen = []
+        runtime.on_wallpaper = lambda path, index: seen.append((path, index))
+        runtime.next_wallpaper()                       # -> 01_a
+        seen.clear()
+        self.assertTrue(runtime.push_current_wallpaper())
+        self.assertEqual(seen, [(os.path.join(root, "01_a.png"), 0)],
+                         "补推的是**当前**那张, 不是下一张")
+
+    async def test_push_current_initialises_when_nothing_was_selected(self):
+        root = make_dir("01_a.png", "02_b.png")
+        runtime = self._runtime(root=root)
+        seen = []
+        runtime.on_wallpaper = lambda path, index: seen.append((path, index))
+        self.assertTrue(runtime.push_current_wallpaper())
+        self.assertEqual(seen, [(os.path.join(root, "01_a.png"), 0)],
+                         "一张都没选过时给个初始画面（第一张）")
+
+    async def test_push_current_does_not_advance_on_the_second_call(self):
+        root = make_dir("01_a.png", "02_b.png")
+        runtime = self._runtime(root=root)
+        seen = []
+        runtime.on_wallpaper = lambda path, index: seen.append((path, index))
+        runtime.push_current_wallpaper()
+        runtime.push_current_wallpaper()               # 两个 GUI 先后连上
+        self.assertEqual([os.path.basename(p) for p, _ in seen], ["01_a.png", "01_a.png"])
+
+    async def test_push_current_is_false_when_there_is_nothing_to_push(self):
+        runtime = self._runtime(root=os.path.join(tempfile.mkdtemp(), "nope"))
+        runtime.on_wallpaper = lambda path, index: None
+        self.assertFalse(runtime.push_current_wallpaper())
+        self.assertFalse(self._runtime().push_current_wallpaper(),
+                         "没有 IPC 推送入口时也返回 False")
+
+    async def test_push_current_is_not_gated_by_the_state_table(self):
+        # 补推是"同步显示", 不是"换一张": SLEEP/GAME 下也该能补
+        from agent.core.state_machine import State
+
+        root = make_dir("01_a.png")
+        runtime = self._runtime(root=root)
+        runtime.state = _state_machine(State.SLEEP)      # _runtime() 没 start(), 自己摆一个
+        seen = []
+        runtime.on_wallpaper = lambda path, index: seen.append((path, index))
+        self.assertTrue(runtime.push_current_wallpaper())
+        self.assertEqual(len(seen), 1)
 
 
 class TestRuntimeStartBuildsTheDeck(unittest.IsolatedAsyncioTestCase):

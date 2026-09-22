@@ -131,10 +131,11 @@ GUI 收到后按 `topic` 分发。**不认识的 topic 忽略**。
 | `wallpaper` | `path` | string | 壁纸文件绝对路径 |
 | | `index` | number | 该壁纸在列表里的序号（从 0 开始） |
 
-> ⚠ `wallpaper` 是**变化时推**（T3 起 Agent 真的会推了）：只在"换了一张"的那一刻发，
-> 客户端**连上时不会**补一条当前壁纸（与 `status` 同一条约定）。
-> 所以刚连上的 GUI 在主区看到的是兜底底色，按一下「下一张」就会来一张
-> （或者等下一次切换）。想"连上就补一条"需要新加一条查询命令，目前**没有**。
+> ⚠ `wallpaper` 是**变化时推**（T3 起 Agent 真的会推了）：只在"换了一张"的那一刻发。
+> **T6 起客户端连上时会补推一条当前壁纸**（`server.on_client_connect` -> `wallpaper{path,index}`）——
+> 所以刚打开的 GUI 主区不再是兜底底色，直接就是当前那张。补推**不受状态权限表约束**
+> （它是"同步显示"，不是"换一张"）：Agent 正处在 SLEEP/GAME 时也照补。
+> 从来没换过任何一张时，补推会**顺手选第一张**当初始画面。
 | `music` | `title` | string | 当前曲目标题 |
 | | `playing` | bool | 是否正在播放 |
 | `schedule` | `kind` | string | `"state"`（应答 `query_schedule` 的快照）或 `"fired"`（刚刚真的触发了一条） |
@@ -207,9 +208,13 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
   该条命令被丢弃，并记一条**点名字段**的 warning。
 - **`next_wallpaper` 从 Phase 7 T3 起有下游了**：Agent 从配置的壁纸目录（`wallpaper.dir`）
   里按文件名翻下一张，然后推 §3 的 `wallpaper{path,index}`。**成功时不额外回话**（界面的
-  反馈就是壁纸变了）；**失败时回一条 `llm` 说明**（目录不存在 / 没有图片 / 壁纸模块没接进来）。
+  反馈就是壁纸变了）；**失败时回一条 `llm` 说明**（状态不允许 / 目录不存在 / 没有图片 /
+  壁纸模块没接进来）。
   同一个动作 LLM 也能发起：`agent/tools/wallpaper.py` 的工具与这条命令走**同一个入口**
   （`Runtime.next_wallpaper()`）。
+  ⚠ **T6 起这条命令也受工具那张状态权限表约束**：`SLEEP` / `GAME` 下按钮会被拒并回一句
+  「换壁纸没成功：next_wallpaper 在当前状态（game）下不可用（可用状态: idle, study）」。
+  理由与表见 [`architecture.md` §4.1](architecture.md)。
 - **`next_bilibili` 还没接下游**（属 Phase 7）：Agent 收到后会回推一条
   `llm{"text": "…还没接入（Phase 7）…"}` —— 让"点了"有反馈，而不是毫无动静
   （文案见 `agent/ipc/__init__.py` 的 `UNWIRED_COMMAND_NOTES`）。

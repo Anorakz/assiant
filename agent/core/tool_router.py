@@ -414,6 +414,27 @@ class ToolRouter:
             if current in self._tools[name].allowed_states
         ]
 
+    def allowed_in_current_state(self, name: str) -> Optional[str]:
+        """`name` 这个动作在**当前状态**下允许吗?
+
+        @return None = 允许; 否则返回一句**给人看**的原因（会推到界面上）
+        @note 给"不经过 execute() 的调用方"用（T6: GUI 的 `next_wallpaper` 命令）。
+              `execute()` 自己会拦, 这里只是把**同一张表**的答案借出去, 免得 GUI 命令
+              变成绕过状态表的后门。
+        @note 名字没注册（工具缺依赖没装）时返回 None（= 不拦）: 那是"工具没装",
+              不是"这个状态不允许", 两件事别混。
+        """
+        tool = self._tools.get(name)
+        if tool is None or not tool.allowed_states:
+            return None
+        current = self.current_state()
+        if current in tool.allowed_states:
+            return None
+        allowed = ", ".join(sorted(state.value for state in tool.allowed_states))
+        return "%s 在当前状态（%s）下不可用（可用状态: %s）" % (
+            name, getattr(current, "value", "?"), allowed,
+        )
+
     def current_state(self) -> Optional[State]:
         """当前状态 (来自 state_provider); 拿不到时返回 None。
 

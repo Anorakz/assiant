@@ -930,6 +930,66 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["fired"][0]["date"], "2026-09-16")
         self.assertEqual(data["fired"][0]["actions"][0]["type"], "message")
 
+    async def test_client_connect_hook_fires_before_any_command(self):
+        """T6: 新 GUI 连上 -> 立刻补推当前壁纸（`wallpaper` 只在变化时推, 连上收不到）。
+
+        这条只在板端真跑（PC 上没有 AF_UNIX 会 skip）—— 端到端就靠它。
+        """
+        if not UNIX_SOCKET_SUPPORTED:
+            self.skipTest("需要 AF_UNIX")
+
+        pushed = []
+
+        def on_connect():
+            pushed.append("called")
+
+        server = LocalServer(path=_tmp_socket_path(), on_client_connect=on_connect)
+        await server.start()
+        writer = None
+        try:
+            reader, writer = await asyncio.open_unix_connection(server.path)
+            await _wait_until(lambda: server.client_count == 1, what="GUI 连上")
+            await _wait_until(lambda: pushed, what="连上回调被叫")
+            self.assertEqual(pushed, ["called"], "连上就该叫一次, 不用等客户端发命令")
+        finally:
+            if writer is not None:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+            await server.stop()
+
+    async def test_a_broken_connect_hook_keeps_the_connection(self):
+        """补推炸了不该把刚建立的连接弄断（也不该影响后续命令）。
+
+        走**真装配**（build_ipc）: 这样补推回调、命令分发、推送入口都是生产路径。
+        """
+        if not UNIX_SOCKET_SUPPORTED:
+            self.skipTest("需要 AF_UNIX")
+
+        class _BrokenRuntime:
+            def push_current_wallpaper(self):
+                raise RuntimeError("补推炸了")
+
+        server = build_ipc(None, {"ipc": {"socket_path": _tmp_socket_path()}},
+                           runtime=_BrokenRuntime())
+        await server.start()
+        writer = None
+        try:
+            reader, writer = await asyncio.open_unix_connection(server.path)
+            await _wait_until(lambda: server.client_count == 1, what="GUI 连上")
+            # 连接仍然活着: 发一条未接线命令, 该收到那句"还没接入"的说明
+            writer.write(encode_command(COMMAND_NEXT_BILIBILI, {}))
+            await writer.drain()
+            topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+            self.assertEqual(topic, TOPIC_LLM, "后续命令照常处理")
+            self.assertIn("接入", data["text"])
+        finally:
+            if writer is not None:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+            await server.stop()
+
 
 # ===========================================================================
 #  切帧 / 错误容忍 / 背压 (跨平台: 假 stream)

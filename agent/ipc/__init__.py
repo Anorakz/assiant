@@ -287,6 +287,17 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
         runtime.on_wallpaper = _on_wallpaper
         _log.debug("ipc: 已接上壁纸推送 (runtime.on_wallpaper -> wallpaper)")
 
+    # · 新 GUI 连上 -> 补推当前壁纸（T6）
+    # `wallpaper` 与 `status` 一样是"变化时才推"：客户端连上时不会自动收到一条,
+    # 于是刚打开的界面主区是兜底底色。这里在**读到第一条命令之前**补一张当前壁纸。
+    if hasattr(runtime, "push_current_wallpaper"):
+        def _on_client_connect() -> None:
+            pushed = runtime.push_current_wallpaper()
+            _log.debug("ipc: 新客户端连上 -> 补推当前壁纸: %s", pushed)
+
+        server.on_client_connect = _on_client_connect
+        _log.debug("ipc: 已接上'连上补推壁纸' (server.on_client_connect)")
+
     # · 日程触发 -> schedule{kind:"fired", event}
     # 与上面 on_reply 同款"有就接": runtime 没带调度器 (或它还没起来) 就跳过 ——
     # 老 Runtime 与测试替身不该因为少这一样而接不上其余推送。
@@ -456,9 +467,14 @@ def _handle_next_wallpaper(runtime: Any, push: Any) -> None:
     动作本身在 ``Runtime.next_wallpaper()`` 里 —— 与 LLM 的 next_wallpaper 工具
     **同一个入口**, 所以"下一张是哪张"只有一份实现（agent/core/wallpaper.py）。
 
+    ⚠ **T6: 这条命令也受工具那张状态权限表约束**。`next_wallpaper` 既是命令名也是工具名,
+    而"这个状态下能不能换壁纸"的答案是**一张表**（`Tool.allowed_states`）: GUI 的按钮与 LLM
+    的工具是同一个动作, 不该有两套规则 —— 否则按钮就成了绕过状态表的后门。
+    判据由 `ToolRouter.allowed_in_current_state()` 给（工具没装时不拦）。
+
     · 成功: 只推 ``wallpaper{path,index}``, **不**往对话区写一句话 ——
       点一次按钮就多一条助手气泡太吵; 界面上的反馈就是壁纸本身变了。
-    · 失败: 推一条 ``llm`` 说明（目录不存在/没有图片/模块没接进来）——
+    · 失败: 推一条 ``llm`` 说明（状态不允许/目录不存在/没有图片/模块没接进来）——
       点了完全没反应最难查。
     """
     advance = getattr(runtime, "next_wallpaper", None) if runtime is not None else None
@@ -466,6 +482,13 @@ def _handle_next_wallpaper(runtime: Any, push: Any) -> None:
         _log.warning("ipc: 收到 next_wallpaper 但 runtime 没有壁纸入口, 回一句说明")
         if push is not None:
             push(TOPIC_LLM, {"text": NO_WALLPAPER_NOTE})
+        return
+
+    refusal = _state_refusal(runtime, COMMAND_NEXT_WALLPAPER)
+    if refusal is not None:
+        _log.warning("ipc: next_wallpaper 被状态权限表拒绝: %s", refusal)
+        if push is not None:
+            push(TOPIC_LLM, {"text": "换壁纸没成功：%s" % refusal})
         return
 
     result = advance()
@@ -477,6 +500,20 @@ def _handle_next_wallpaper(runtime: Any, push: Any) -> None:
     _log.warning("ipc: next_wallpaper 失败: %s", reason)
     if push is not None:
         push(TOPIC_LLM, {"text": "换壁纸没成功：%s" % reason})
+
+
+def _state_refusal(runtime: Any, action: str) -> Optional[str]:
+    """命令名与工具同名时, 借工具那张状态权限表判一下 (T6)。
+
+    @return None = 放行; 否则是一句给人看的原因
+    @note 没有工具路由 / 名字没注册 -> 放行（"工具没装"不是"状态不允许"）
+    @note 判据只有一处: `ToolRouter.allowed_in_current_state()` —— 本层不重复实现规则
+    """
+    tools = getattr(runtime, "tools", None) if runtime is not None else None
+    ask = getattr(tools, "allowed_in_current_state", None)
+    if not callable(ask):
+        return None
+    return ask(action)
 
 
 async def _handle_chat_input(bus: Any, payload: dict) -> None:

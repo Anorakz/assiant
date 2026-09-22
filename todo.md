@@ -740,7 +740,7 @@ R 系列到此结束：**日程显示重构**（R1 CLI 窗口 / R2 GUI 同一套
      `_run_cli_with_config()` 显式覆盖 + 清缓存 + 还原。② 两个用例的临时目录里已经有 `config.yaml`，
      加载器当然先找到它，测不到"模板"那条分支 —— 各改用**独立空目录**。
 
-Phase 7 — 工具层
+Phase 7 — 工具层（**T1–T5 全部完成**：骨架 / edge 真后端 / 壁纸工具 / 权限表 / 端到端验收）
 ☑ tools/__init__.py：工具注册入口（`TOOL_MODULES` + `build_tools(router)`）
       **没有** `tools/base.py`：工具的形状就是 `core/tool_router.py` 里的 `Tool` dataclass
       （name/description/schema/handler/allowed_states），再包一层基类只是多一层没人用的壳。
@@ -771,7 +771,7 @@ Phase 7 — 工具层
 ☑ LLM 能调用工具完成任务 ← **T2 已完成**：edge 接上真模型，且与 cloud 共用同一个工具循环
       ⚠ 如实记一条限制：Qwen3-0.6B 很小，工具调用的**可靠性有限** —— 板端探针里它调对了
       `get_board_time`，但别指望它像大模型那样稳定挑工具、填参数。
-□ 工具层端到端验收（T5：真板 + 真模型 + 真工具）
+☑ 工具层端到端验收（T5：真板 + 真模型 + 真工具）→ **完成，见下面 T5 记录**
 
 T1 记录（已完成，等验收）：工具层骨架 + 第一个真工具
 ☑ 落地的文件：`agent/tools/__init__.py`、`agent/tools/back_to_desktop.py`、
@@ -843,6 +843,9 @@ T2 记录（已完成，等验收）：edge 接真模型 + 工具循环共享
      ⚠ 教训（板端运维）：`pkill -f 'agent[/]main[.]py'` 会连**自己所在的 ssh shell** 一起杀掉
      （那条命令行里也含这个模式），于是"kill 完顺手启动"的写法会静默什么都不做 ——
      把 kill 与 start 拆成两条命令。
+     ⚠ 同一个坑的**另一种表现**（T5 又踩一次）：`pgrep -af 'python3 agent/main' && echo 在跑`
+     也会命中自己那个 shell —— 于是"Agent 已停"的画面里报出"Agent: 在跑"（**假阳性**,
+     比假阴性更坏: 你会以为它还活着）。可靠的写法是 `ps -eo pid,args | grep -e agent/main | grep -v grep`。
      ⚠ 板端现在的状态：仓库里 T2 的 4 个文件（`agent/llm/provider.py`、`agent/llm/__init__.py`、
      `agent/main.py`、`tests/test_llm.py`）**临时超前于 HEAD**（等 push 后 reset）；
      live config 已是 `edge`；`llama-server` 在跑；Agent 没在跑。
@@ -959,6 +962,81 @@ T4 记录（已完成，等验收）：状态权限表
      三条用例红得莫名其妙。改成"先退回 IDLE 再进目标状态"就对了。
      另外编辑时留下过一个**重名的旧 `go_to`**, Python 取后定义的那份, 表现是"新代码明明写对了
      却还是老行为" —— 同一文件里改函数时, 先确认没有第二份定义。
+
+T5 记录（已完成，等验收）：Phase 7 端到端验收 + 文档收口
+☑ 一段脚本跑完的端到端验收（`logs/t5_accept.sh`, 板端 /tmp 里跑的, 输出见验收报告）:
+     [0] 前置: live 配置指纹 `34482331…`; llama-server /health = ok
+     [1] 起 Agent（**真跑**, 连真主机）: `io 层就绪` → **`ToolRouter 就绪 (2 个工具)`** →
+         **`壁纸目录 = /home/kickpi/wallpapers (8 张)`** → `LLMProvider 就绪 (mode=edge)` →
+         `llm: edge 后端 = llama-server http://127.0.0.1:9000/v1 model=qwen3-0.6b
+         max_tokens=512 temperature=0.7 no_think=True` → `Scheduler 就绪 (4 条日程)`
+     [2] 起 GUI（DISPLAY=:0）: Agent 侧 `ipc: GUI 已连接 (当前 1 个)`
+     [3] **GUI 按钮那条路**: 真 IPC 客户端发 `next_wallpaper` → 收到
+         `wallpaper{"01_landscape_1280x800.png", 0}` → 面板截图确认主区换色
+     [4] **LLM 工具那条路**: `assistant chat` → `工具 next_wallpaper({'step': 1}) -> ok`,
+         模型答复引用**真实路径**（"壁纸已更新为 "/home/kickpi/wallpapers/02_portrait_800x1280.png""）,
+         面板截图确认壁纸真的换了
+     [5] **权限表**（真 Runtime、真配置、真目录）: sleep/idle/study/game 四行的"能用"与"给模型的
+         候选"都与 T4 那张表一致（SLEEP/GAME 两边都是空）
+     [6] **降级**: 停 llama-server → 答复带「（板端模型没有响应，这条是规则兜底）」+
+         日志 `WARNING LLM 降级为规则兜底: APIConnectionError`; 起回 llama-server → 又是真答复
+     [7] 收尾: Agent/GUI 已停, llama-server 留着（edge 要用）; live 配置指纹与 [0] **完全一致**
+         （全程没人写配置）; 板端仓库在 HEAD 上干净
+☑ 文档收口（这一轮把"说 Phase 7 还没做"的旧话清干净）:
+     · `Readme.md`: §"工具路由"补 `allowed_tools()` 与权限表、把"`agent/tools/`（工具为空）"
+       改成真现状（有 2 个工具, 缺依赖只跳过那一个）
+     · `docs/architecture.md` §4.1: 补一条**边界** —— 这张权限表管的是"模型能做什么",
+       不管"人点了什么": GUI 的 `next_wallpaper` 命令**不做状态校验**（按钮在 GAME 下本来就藏起来,
+       且"人显式点的"与"模型自己决定的"是两回事）。要收紧只改 `_handle_next_wallpaper` 一处
+     · `docs/llm.md` / `docs/gui-agent-integration.md` / `docs/ipc-protocol.md` 已在 T2/T3 收过,
+       这一轮通读确认没有"还没接入"的残留（`STALE_CLAIMS` 那条守卫也盯着）
+☑ Phase 7 剩下的（**明确记下来, 不藏着**）:
+     · `tools/netease_music.py` / `tools/bilibili.py` —— 你主动往后放的那两项（下一个任务列表）
+     · **标签化 / 按内容挑图**: 现在壁纸工具只能"按文件名翻页"; 要"挑一张适合现在心情的图"
+       得先给图片打标签（视觉层），那是独立的一块
+
+T6 记录（已完成，等验收）：把 T5 列的两个"可选收口"做掉
+☑ ① **GUI 命令也受状态权限表约束**。`next_wallpaper` 既是工具名也是命令名, 而"这个状态下
+     能不能换壁纸"只有**一个**答案 —— 否则按钮就是绕过状态表的后门。
+     做法: `ToolRouter.allowed_in_current_state(name)`（新, 通用小接口: 返回 None 或一句给人看的
+     原因）; 命令路径 `_handle_next_wallpaper` 在调 `Runtime.next_wallpaper()` **之前**问一次,
+     被拒就回一条 `llm` 说明。
+     · ⚠ **没有**把这层判断写进 `Runtime.next_wallpaper()`: 那会让 main.py 必须知道
+       "哪个工具对应这个动作"（本文件一直坚持不认识具体工具）。判据仍然只有一处
+       （工具上的 `ALLOWED_STATES`）, 只是"借出去给命令用"。
+     · 工具没注册（缺依赖没装）时**不拦** —— 那是"工具没装", 不是"这个状态不允许"。
+     · "补推"（下面那条）**不受**这张表约束: 它是"同步显示", 不是"换一张"。
+☑ ② **新 GUI 连上就补推当前壁纸**。做法:
+     · `LocalServer(on_client_connect=...)`（新参数, 普通/协程函数都行）在 `_on_client` 里
+       **读到第一条命令之前**叫一次; 回调抛异常只记 WARNING（补推失败不该弄断刚建立的连接）。
+       `NullServer` 也收下这个参数（接口齐全）。
+     · `build_ipc` 里把 `runtime.push_current_wallpaper` 挂上去（与 `on_reply`/`on_wallpaper`
+       同款"有就接"）。
+     · `WallpaperDeck.snapshot(initialise=False)`（新, 纯读不换图）+ `Runtime.push_current_wallpaper()`:
+       有当前那张就补那张; **从来没换过就顺手选第一张**当初始画面（只动游标）。
+       目录空的/读不了 → 返回 False, 不抛。
+☑ 板端验收（`logs/t6_accept.sh`）:
+     · GUI 一连上, Agent 侧立刻出现 `wallpaper: 给刚连上的 GUI 补推
+       /home/kickpi/wallpapers/01_landscape_1280x800.png (index=0/40, pushed=True)`,
+       GUI 自己打 `[ui] 壁纸: …/01_landscape_1280x800.png (1280x800, index=0)` —— **没点任何按钮**
+     · 切 SLEEP 后发 `next_wallpaper`: 收到 `llm{"text": "换壁纸没成功：next_wallpaper 在当前
+       状态（sleep）下不可用（可用状态: idle, study）"}` + 日志
+       `WARNING ipc: next_wallpaper 被状态权限表拒绝: …`, **没有**新的 wallpaper 推送
+     · 切回 IDLE 再发: 真的换到 `02_portrait_800x1280.png (index=1/40)`
+     · live 配置指纹全程没变（`34482331…`）; Agent/GUI 收尾已停, llama-server 留着
+     · ⚠ 顺带发现: 你的壁纸目录里现在有 **40 张**（你自己放的那批）, 所以 index 是 0/40 ——
+       工具按文件名排序翻页, 所以"01_…"那几张仍排在最前面
+☑ 测试: `test_tool_permissions.py` 加 `TestTheGuiCommandFollowsTheTableToo`（4 个状态逐个走
+     **真 Runtime**: 表说不行就必须被拒且**真的没换**）+ `TestTheConnectPush`;
+     `test_wallpaper.py` 加 `TestSnapshot`(5) + 5 条补推用例; `test_ipc_local_server.py` 加
+     两条**真 socket**用例（连上就触发回调 / 回调炸了连接照样活着）。
+     ⚠ 板端又抓到一条只在真 socket 上才复现的问题: 第二条用例我一开始给命令处理器传了
+     空 push（什么都不写回客户端）→ 客户端等到超时。改成走 `build_ipc` 真装配就对了 ——
+     "用手搓的替身替换真装配"这类测试, 容易把**被测的那条链**也替掉。
+☑ 文档: `architecture.md` §4.1（同名命令受同一张表 + 补推不受限, 把 T5 写的"不管人点了什么"
+     那条**改掉**）、`ipc-protocol.md`（§3 补推说明、§4 命令受状态表约束）、
+     `gui-agent-integration.md`（连上就有一张 + 受状态表约束）、`Readme.md` 工具路由一节。
+     `STALE_CLAIMS` 那条守卫继续盯着"还没接入"的旧话。
 
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
