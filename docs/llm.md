@@ -46,6 +46,33 @@ Agent 只是它的 OpenAI 兼容客户端：
 ⚠ `EdgeBackend.is_ready()` **不联网**：它只查"配置齐不齐 + openai SDK 在不在"。
 `True` 不代表 llama-server 活着 —— 真活着的证据是一次成功的请求。
 
+### 2.1 让 Agent 管这个进程的启停（T7-4）
+
+默认**不管**（服务由你或 GUI 的「启动服务」按钮管）。在 `config.yaml` 里打开：
+
+```yaml
+llm:
+  mode: edge
+  manage_service: true     # 只在 mode=edge 时有效
+```
+
+打开后（`agent/llm/service.py`）：
+
+| 时机 | 动作 |
+| --- | --- |
+| Agent 启动 | 跑 `llm/scripts/start.sh` |
+| 离开 SLEEP（SLEEP → IDLE） | 跑 `llm/scripts/start.sh` |
+| 进入 SLEEP | 跑 `llm/scripts/stop.sh` |
+| Agent 退出 | **不停**（退出不等于"睡觉"；要停就进 SLEEP 或手动停） |
+
+- 只调 `llm/scripts/{start,stop}.sh`（**与 GUI 那个按钮同一条路**，PID 文件/日志/端口都在
+  脚本里维护）—— 不自己 fork，免得出现"GUI 说在跑、Agent 说没跑"。
+- 起完**不等**模型加载：后台探 `/v1/models`（带 key，**200 且带 data** 才算就绪），
+  只写一行日志 `llm_service: llama-server 就绪 (等了 23.4 s)`。没就绪时 edge 照旧降级。
+- 脚本失败**不 fatal**：记一条 warning，Agent 照常起（服务没起来只该让 edge 降级）。
+- 起停动作在**后台线程**里做（状态回调是同步的，不能让 subprocess 卡住状态切换与 GUI 推送）。
+- 配置开关认 `true/yes/on/1` 与 `"true"` 这类手写字符串；`mode` 大小写与空格都容错。
+
 ## 3. 工具循环：edge 与 cloud 共用一份
 
 ```python
@@ -62,6 +89,11 @@ for _ in range(max_tool_rounds):          # 默认 4 轮, 防止模型无限要�
   看不到任何工具，而不是"看得见但一调就被拒"。权限表在 `architecture.md` §4.1。
 - 轮数用尽 → `ok=False` + `tool loop exceeded N rounds`（不假装正常结束）。
 - 工具被拒/参数不合法**不会**让整轮失败：错误进 `tool_calls[].result`，循环继续。
+- ⚠ **工具失败一定会出现在正文里**（T7-4）：板端实测 0.6B 会**谎报成功** —— 工具返回
+  `{"ok": false, "error": "scene 轴上没有 'darkness'…"}`，它却回"已更换为宁静的深色风景"。
+  工具结果只有模型看得见，所以 `_result()` 把失败追加到 `text` 末尾
+  （`⚠ 换壁纸没有成功：…`，工具给的 `tell_user` 原句优先，否则 `⚠ <工具名> 没有成功：<error>`），
+  另外在结果里留一份 `tool_failures` 给测试与上层查。成功时**一个字都不加**。
 
 ## 4. Qwen3 的思考模式：`/no_think`（板端实测）
 

@@ -64,6 +64,19 @@ llm:
   # llama-server 自己的 API key (派生到 llm.env 的 LLM_API_KEY; Agent 读: 请求带的 key)
   local_api_key: ***REMOVED-LLM-KEY***
   #
+  # ---- 让 Agent 管 llama-server 的启停 (T7-4) ----
+  # false (默认) = Agent **不碰**这个进程: 服务由你/GUI 的「启动服务」按钮管
+  # true         = mode=edge 时由 Agent 管:
+  #                  · Agent 启动 / 离开 SLEEP -> 跑 llm/scripts/start.sh
+  #                  · 进入 SLEEP            -> 跑 llm/scripts/stop.sh（睡觉不占 CPU/内存）
+  #                ⚠ 只调 llm/scripts/ 里那两个脚本（PID 文件/日志都在那儿维护, 与 GUI 的
+  #                  「启动服务」按钮**同一条路**）, 不自己 fork 进程。
+  #                ⚠ 起完**不等**模型加载完: 后台探一次 /v1/models 只写日志
+  #                  （"llama-server 就绪 (等了 23.4 s)"）; 没就绪时 edge 照旧降级到规则兜底。
+  #                ⚠ mode 不是 edge 时这个开关**无效**（cloud/disabled 没有本机服务这回事）。
+  #                ⚠ Agent **退出时不停服务**（退出不等于"睡觉"）; 要停就进 SLEEP 或手动停。
+  manage_service: false
+  #
   # ⚠ Qwen3 的思考模式: Agent 在 edge 模式的 system 提示末尾加 `/no_think` 把它关掉。
   #    板端实测 (Qwen3-0.6B-Q4_K_M + llama-server build 10677): 不关的时候普通提问会把
   #    token 预算全烧在思考上, 正文是空字符串 —— 0.6B 上思考并不换来更好的答复。

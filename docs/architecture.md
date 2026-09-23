@@ -179,6 +179,7 @@ agent/
 | 缺依赖 | `build()` 返回 `None` 并自己记一条 warning（"跳过这个工具"），**不抛异常**；少一个工具不该让工具层起不来 |
 | 权限 | `Tool.allowed_states` **默认空集 = 任何状态都不允许**（fail closed）；不在允许状态里只回绝，handler 一次都不跑 |
 | 给模型看的说明 | `DESCRIPTION` 要写清**副作用与不确定性** —— 例如 `back_to_desktop` 明说"是开关动作、没有回执、别连着调"。CLI 那边"不假装调了工具"是同一条口径 |
+| 说明可以是**动态的** | T7-4 起 `next_wallpaper` 在 `build()` 时把**当前词表**拼进 description（"可用标签: scene=…；tone=…；mood=…"，超 320 字符就截断并指向 `list_wallpaper_tags`）。理由：板端实测小模型会编造标签名，而词表只有配置/代码知道 |
 
 **权限表（T4，唯一写下来的地方是 `tests/test_tool_permissions.py::EXPECTED`）**：
 
@@ -208,6 +209,10 @@ agent/
 
 工具**只在真会调模型的模式下才有意义**：`edge` 与 `cloud` 都走同一个工具循环
 （T2 起 edge 也接进来了，见 §4.2），`disabled` 是规则引擎，**不假装调过工具**。
+
+⚠ **工具失败不会被模型的嘴盖住**（T7-4）：`LLMProvider` 会把失败追加到最终正文
+（`⚠ <工具> 没有成功：…`，工具给的 `tell_user` 原句优先），并在结果里留 `tool_failures`。
+起因是板端实测 0.6B **谎报成功**（工具报错、它回"已更换"）。见 [`llm.md` §3](llm.md)。
 
 ⚠ **换壁纸只有一条路（T7-3 起）**：对话 → LLM → `next_wallpaper` 工具 →
 `Runtime.next_wallpaper(step, match)` → `core/wallpaper.py`（目录 + 游标）。

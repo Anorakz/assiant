@@ -63,6 +63,9 @@ EXPECTED_ORDER = [
     "io",
     "state_machine",
     "tool_router",
+    # T7-4: 本机 llama-server 的启停（mode 不是 edge 或开关没开时这一步**什么都不做**,
+    # 但组件照旧注册 —— 组件列表是"步骤"的清单, 不是"真跑了什么"的清单）
+    "llm_service",
     "llm_provider",
     "scheduler",
     "ipc",

@@ -74,6 +74,16 @@ llama-server。这张表是"哪个键有第二个读者"的唯一说明（改键
 配置写漏了不该让 Agent 起不来。⚠ 但"能发请求"≠"llama-server 活着"：
 `EdgeBackend.is_ready()` 只查配置与 SDK，**不联网**；真活着的证据是一次成功的请求。
 
+**T7-4 新增的 `manage_service`（谁**写**这个进程的生命周期）**：
+
+| 键 | 谁读 | 行为 |
+| --- | --- | --- |
+| `manage_service` | `agent/llm/service.py::LlamaService.from_config`（`agent/main.py` 装配） | `false`（默认）= Agent **不碰** llama-server 进程；`true` 且 `mode=edge` 时：Agent 启动 / 离开 SLEEP → `llm/scripts/start.sh`，进入 SLEEP → `llm/scripts/stop.sh`（Agent 退出**不停**） |
+
+⚠ 这条改的是**进程**, 不是配置：Agent 只会去调 `llm/scripts/` 里那两个脚本
+（与 GUI 的「启动服务」按钮同一条路），脚本本身仍由人/GUI 用同一份 PID 文件与日志管理。
+`mode` 不是 edge 时这个开关无效。
+
 ### 2.2 `vision:` 段只给**离线**打标签用（T7-1）
 
 | 键 | 谁读 | 说明 |

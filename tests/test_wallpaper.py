@@ -47,6 +47,7 @@ from agent.core.wallpaper import (  # noqa: E402
 from agent.ipc import UNWIRED_COMMAND_NOTES  # noqa: E402
 from agent.ipc import protocol as p  # noqa: E402
 from agent.tools import wallpaper as wallpaper_tool  # noqa: E402
+from agent.tools import wallpaper_tags as wallpaper_tags_tool  # noqa: E402
 from agent.tools import build_tools  # noqa: E402
 
 logging.disable(logging.CRITICAL)          # 让"跳过工具"那条 warning 别刷屏
@@ -293,6 +294,105 @@ class TestToolBuild(unittest.TestCase):
         self.assertNotIn("required", tool.schema)
 
 
+class TestVocabHint(unittest.TestCase):
+    """T7-4（b）: 把**当前词表**写进 description（堵住模型编造标签那条路）。"""
+
+    def _services(self, config=None):
+        return {"next_wallpaper": lambda step=1, match=None: {"ok": True},
+                "config": config if config is not None else {}}
+
+    def test_description_lists_every_axis_and_label(self):
+        tool = wallpaper_tool.build(self._services())
+        text = tool.description
+        self.assertIn("可用标签", text)
+        for axis in ("scene=", "tone=", "mood="):
+            self.assertIn(axis, text)
+        # 抽查两个真标签（词表在 tag_vocab.py 里，改了词表这里也该跟着对）
+        from agent.vision import tag_vocab
+        for label in (tag_vocab.SCENE.texts[0], tag_vocab.TONE.texts[0]):
+            self.assertIn(label, text, "每个轴上的标签都要列出来")
+
+    def test_config_overrides_are_appended(self):
+        config = {"wallpaper": {"tagging": {"vocab": {"scene": ["cyberpunk", "mecha"]}}}}
+        tool = wallpaper_tool.build(self._services(config))
+        self.assertIn("cyberpunk", tool.description)
+        self.assertIn("mecha", tool.description)
+
+    def test_without_config_it_still_lists_the_default_vocabulary(self):
+        # 词表默认值在代码里（tag_vocab.py），配置只是"按轴追加" ——
+        # 所以没有 config 时**照样**该把默认词表告诉模型（少一个信息来源而已）
+        tool = wallpaper_tool.build({"next_wallpaper": lambda step=1, match=None: {}})
+        self.assertIn("可用标签", tool.description)
+        self.assertIn("scene=", tool.description)
+        self.assertIn("只改显示", tool.description, "基础说明一个字都不能少")
+
+    def test_a_broken_config_value_is_ignored(self):
+        # 配置里 vocab 写成了字符串: 当作没有追加（不该抛）
+        config = {"wallpaper": {"tagging": {"vocab": "oops"}}}
+        tool = wallpaper_tool.build(self._services(config))
+        self.assertIn("可用标签", tool.description)
+
+    def test_a_long_vocabulary_is_truncated_with_a_pointer(self):
+        original = wallpaper_tool.VOCAB_TEXT_LIMIT
+        wallpaper_tool.VOCAB_TEXT_LIMIT = 60
+        try:
+            tool = wallpaper_tool.build(self._services())
+            self.assertIn("list_wallpaper_tags", tool.description,
+                          "截断了就要告诉模型去哪儿看完整清单")
+            self.assertLessEqual(len(tool.description),
+                                 len(wallpaper_tool.DESCRIPTION) + 60 + 40)
+        finally:
+            wallpaper_tool.VOCAB_TEXT_LIMIT = original
+
+    def test_hint_helper_is_quiet_on_nonsense(self):
+        # 配置形状不对 = 没有追加项，但**默认词表照旧**（这是对的：词表主要活在代码里）
+        self.assertIn("可用标签", wallpaper_tool.vocab_hint(None))
+        self.assertEqual(wallpaper_tool.vocab_hint(None),
+                         wallpaper_tool.vocab_hint("not a mapping"))
+
+
+class TestWallpaperTagsTool(unittest.TestCase):
+    """`list_wallpaper_tags`（T7-3）—— 只读的清单工具；T7-4 收紧了 ip_query 的说法。"""
+
+    def _services(self, calls):
+        def lookup(ip_query=None, limit=5):
+            calls.append((ip_query, limit))
+            return {"ok": True, "count": 3, "axes": {}}
+
+        return {"wallpaper_tags": lookup}
+
+    def test_missing_service_skips_the_tool(self):
+        self.assertIsNone(wallpaper_tags_tool.build({}))
+        self.assertIsNone(wallpaper_tags_tool.build({"wallpaper_tags": "nope"}))
+
+    def test_builds_and_registers(self):
+        tool = wallpaper_tags_tool.build(self._services([]))
+        self.assertEqual(tool.name, "list_wallpaper_tags")
+        router = ToolRouter(services=self._services([]))
+        self.assertIn("list_wallpaper_tags", [t.name for t in build_tools(router)])
+
+    def test_ip_query_description_says_it_is_a_work_name_only(self):
+        # T7-4: 板端实测模型会把**问句**填进 ip_query（"这个作品最像哪几张"），
+        # 失败后又把"可用的 IP 名"当成壁纸标签答给用户 —— 说明必须写死"只填作品名"
+        tool = wallpaper_tags_tool.build(self._services([]))
+        description = tool.schema["properties"]["ip_query"]["description"]
+        self.assertIn("作品名", description)
+        self.assertIn("不要填问句", description)
+        self.assertIn("作品名", tool.description)
+        self.assertIn("不是问题", tool.description)
+
+    def test_handler_forwards_the_arguments(self):
+        calls = []
+        tool = wallpaper_tags_tool.build(self._services(calls))
+        result = tool.handler(ip_query="EVA", limit=2)
+        self.assertEqual(calls, [("EVA", 2)])
+        self.assertTrue(result["ok"])
+
+    def test_idle_and_study_only(self):
+        tool = wallpaper_tags_tool.build(self._services([]))
+        self.assertEqual(tool.allowed_states, {State.IDLE, State.STUDY})
+
+
 class TestToolExecution(unittest.IsolatedAsyncioTestCase):
     def _router(self, state=State.IDLE):
         calls = []
@@ -479,6 +579,9 @@ class TestRuntimePickByMatch(unittest.IsolatedAsyncioTestCase):
         result = runtime.next_wallpaper(1, match="scene=xxx")
         self.assertFalse(result["ok"])
         self.assertIn("没有", result["error"])
+        self.assertIn("换壁纸没有成功", result["tell_user"],
+                      "T7-4 (c): 失败要有一句**给用户看**的现成话（provider 会追加进正文）")
+        self.assertIn("如实", result["instruction"])
         self.assertIsNone(runtime.wallpaper.current(), "失败时不该动游标")
 
     async def test_an_empty_pool_is_an_honest_failure(self):
@@ -487,6 +590,7 @@ class TestRuntimePickByMatch(unittest.IsolatedAsyncioTestCase):
         result = runtime.next_wallpaper(1, match="ip=Nier")
         self.assertFalse(result["ok"])
         self.assertIn("没有符合条件", result["error"])
+        self.assertIn("换壁纸没有成功", result["tell_user"])
 
     async def test_without_tag_data_it_says_what_to_run(self):
         runtime, root = self._runtime()
@@ -495,6 +599,13 @@ class TestRuntimePickByMatch(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         self.assertIn("assistant tag", result["error"],
                       "要给出**能照做**的下一步")
+        self.assertIn("换壁纸没有成功", result["tell_user"])
+
+    async def test_a_broken_directory_failure_also_carries_tell_user(self):
+        runtime, root = self._runtime(root=os.path.join(tempfile.mkdtemp(), "nope"))
+        result = runtime.next_wallpaper()
+        self.assertFalse(result["ok"])
+        self.assertIn("换壁纸没有成功", result["tell_user"])
 
     async def test_wallpaper_tags_reports_the_summary(self):
         runtime, root = self._runtime()

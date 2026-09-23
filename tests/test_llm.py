@@ -573,10 +573,13 @@ class TestCloudWithTools(unittest.IsolatedAsyncioTestCase):
         provider = LLMProvider(mode="cloud", cloud_backend=make_cloud([text_response("x")]))
         result = await provider.chat_with_tools("hi", {})
         # degraded 是 T2 加的: 非空 = 这条是规则兜底的, 不是模型答的
+        # tool_failures 是 T7-4 加的: 失败过的工具（已经写进 text 末尾）
         self.assertEqual(
-            set(result), {"ok", "text", "tool_calls", "error", "mode", "degraded"}
+            set(result),
+            {"ok", "text", "tool_calls", "error", "mode", "degraded", "tool_failures"}
         )
         self.assertIsNone(result["degraded"])
+        self.assertEqual(result["tool_failures"], [])
 
     async def test_tools_are_advertised_to_model(self):
         cloud = make_cloud([text_response("ok")])
@@ -775,6 +778,107 @@ class TestCloudWithTools(unittest.IsolatedAsyncioTestCase):
         text, _ = await asyncio.gather(provider.chat("x", {}), ticker())
         self.assertEqual(text, "slow")
         self.assertGreater(len(ticks), 1, "云端调用期间事件循环应当还在跑")
+
+
+class TestToolFailuresAreToldToTheUser(unittest.IsolatedAsyncioTestCase):
+    """T7-4 (c): 工具失败了, **正文里必须有一句**。
+
+    为什么非做不可（板端实测, 2026-09-22）: 工具明明返回
+    `{"ok": false, "error": "scene 轴上没有 'darkness'…"}`, 0.6B 模型回给用户的却是
+    "已更换为宁静的深色风景"。工具结果只有模型看得见, 所以失败得由**机制**保证出现
+    （追加进 `text`）, 不能指望模型转述。
+    """
+
+    FAILURE = {"ok": False, "error": "scene 轴上没有 'darkness' 这条标签",
+               "tell_user": "换壁纸没有成功：scene 轴上没有 'darkness' 这条标签"}
+
+    def _router(self, handler=None, states=(State.IDLE,)):
+        router = ToolRouter(state_provider=StateMachine())     # 初始 IDLE
+        router.register(Tool(
+            name="next_wallpaper",
+            description="换壁纸",
+            schema={"type": "object", "properties": {}, "additionalProperties": False},
+            handler=handler if handler is not None else (lambda **k: dict(self.FAILURE)),
+            allowed_states=set(states),
+        ))
+        return router
+
+    async def test_a_handler_failure_is_appended_to_the_reply(self):
+        cloud = make_cloud([
+            tool_response("call_1", "next_wallpaper", "{}"),
+            text_response("已更换为宁静的深色风景。"),
+        ])
+        provider = LLMProvider(mode="cloud", tools=self._router(), cloud_backend=cloud)
+        result = await provider.chat_with_tools("换一张安静的深色风景", {})
+
+        self.assertIn("已更换", result["text"], "模型自己的话照旧留着")
+        self.assertIn("换壁纸没有成功", result["text"], "机制补的那句必须在正文里")
+        self.assertEqual(result["tool_failures"],
+                         ["⚠ 换壁纸没有成功：scene 轴上没有 'darkness' 这条标签"])
+
+    async def test_a_router_level_failure_is_appended_too(self):
+        # 工具只在 STUDY 允许, 当前 IDLE -> 路由层拒绝（这正是"SLEEP/GAME 下换不了"那条路）
+        cloud = make_cloud([
+            tool_response("call_1", "next_wallpaper", "{}"),
+            text_response("好的，已经换好了。"),
+        ])
+        provider = LLMProvider(mode="cloud", tools=self._router(states=(State.STUDY,)),
+                               cloud_backend=cloud)
+        result = await provider.chat_with_tools("换一张", {})
+        self.assertIn("没有成功", result["text"])
+        self.assertIn("not allowed", result["text"], "路由层的原因也要带上")
+
+    async def test_unknown_tool_is_covered(self):
+        cloud = make_cloud([
+            tool_response("call_1", "definitely_not_a_tool", "{}"),
+            text_response("好。"),
+        ])
+        provider = LLMProvider(mode="cloud", tools=self._router(), cloud_backend=cloud)
+        result = await provider.chat_with_tools("x", {})
+        self.assertIn("unknown tool", result["text"])
+
+    async def test_success_adds_nothing(self):
+        cloud = make_cloud([
+            tool_response("call_1", "next_wallpaper", "{}"),
+            text_response("好，换了。"),
+        ])
+        provider = LLMProvider(
+            mode="cloud", tools=self._router(handler=lambda **k: {"ok": True, "path": "/w/1.png"}),
+            cloud_backend=cloud)
+        result = await provider.chat_with_tools("换一张", {})
+        self.assertEqual(result["tool_failures"], [])
+        self.assertEqual(result["text"], "好，换了。", "成功时一个字都不该多加")
+
+    async def test_the_note_is_the_whole_text_when_the_model_said_nothing(self):
+        # 正文为空时, text 就该只剩那句如实说明, 不是 "None\n\n⚠ …"
+        cloud = make_cloud([
+            tool_response("call_1", "next_wallpaper", "{}"),
+            text_response(None),
+        ])
+        provider = LLMProvider(mode="cloud", tools=self._router(), cloud_backend=cloud)
+        result = await provider.chat_with_tools("换一张", {})
+        self.assertTrue(result["text"].startswith("⚠ "), result["text"])
+        self.assertNotIn("None", result["text"])
+
+    def test_duplicate_failures_are_collapsed(self):
+        from agent.llm.provider import _result
+
+        calls = [
+            {"name": "next_wallpaper", "args": {},
+             "result": {"ok": True, "result": dict(self.FAILURE)}},
+            {"name": "next_wallpaper", "args": {},
+             "result": {"ok": True, "result": dict(self.FAILURE)}},
+        ]
+        result = _result(True, "好", calls, None, "cloud")
+        self.assertEqual(len(result["tool_failures"]), 1, "同一句说一遍就够")
+
+    def test_notes_fall_back_to_error_when_there_is_no_tell_user(self):
+        from agent.llm.provider import _result
+
+        calls = [{"name": "list_wallpaper_tags", "args": {},
+                  "result": {"ok": True, "result": {"ok": False, "error": "还没有标签数据"}}}]
+        result = _result(True, "", calls, None, "cloud")
+        self.assertEqual(result["text"], "⚠ list_wallpaper_tags 没有成功：还没有标签数据")
 
 
 class TestDisabledPath(unittest.IsolatedAsyncioTestCase):

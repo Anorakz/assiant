@@ -1248,11 +1248,71 @@ T7-3 记录（已完成，等验收）：标签索引 + 两个挑图工具 + 删
         (a)(c) 暂不做（先看 (b) 能不能把"编造标签"这条堵住）。
 
 T7-4（进行中）：**先做你选的 (b)**，再做板端对话验收 + 文档收口
-☐ (b) 把**当前词表**写进 `next_wallpaper` 的 description（词表在 `wallpaper.tagging.vocab`
-      与 `tag_vocab.py`，工具 build 时从 services['config'] 拿到；要求: 轴名 + 每轴标签全列,
-      写不下就截断并说明"完整清单用 list_wallpaper_tags"）—— **这一笔与 T7-4 一起提交**
-☐ 板端对话验收: 三轴命中率 / IP 锚点检索 / 对话挑图 / 如实拒绝（含"SLEEP/GAME 下换不了"）
-☐ 文档收口（tagging.md §6 的措辞按 (b) 之后的实际行为复核）
+☑ (b) 已实现（**未提交, 按你说的留到下次提交**）:
+      `agent/tools/wallpaper.py::vocab_hint(config)` —— 从 `services['config']` 的
+      `wallpaper.tagging.vocab`（按轴追加）叠加默认词表, 拼成
+      "可用标签: scene=…；tone=…；mood=…"（默认词表实测 **272 字符**, 上限 320;
+      超限就截断并指向 `list_wallpaper_tags`）; 拿不到词表（导入失败）就整段不写,
+      没有 config 就用默认词表（词表主要活在代码里）。`build()` 把它接在基础说明后面。
+      测试: `TestVocabHint`（6 项）—— 每轴每标签都在、配置追加项在、没有 config 也有默认词表、
+      vocab 写错不抛、超限截断并带指针、`vocab_hint()` 对乱输入不炸
+      文档: `docs/tagging.md` §6 + `docs/architecture.md` §4.1（"说明可以是动态的"）
+☑ **效果（一次对比, 不是统计结论, 如实说）**:
+      (b) 之前: 同一句"换一张安静的深色风景" → 模型编了 `scene=darkness`（不存在的标签）
+      → 工具报错, 它照样说"已更换"（假成功, 壁纸没变）
+      (b) 之后: 同一句 → 模型给 `mood=calm`（**真标签**）→ 壁纸**真的换了**
+      （`07_square_1024x1024.png`, 日志 `match=mood=calm, index=16/40`）
+☑ 板端三轴/检索复测（`tests/board/tag_quality.py`，与 T7-2 基线**逐项一致**）:
+      scene top-1 7/12、top-2 10/12; tone 5/12、7/12; mood 5/12、7/12;
+      预处理 A/B: 压扁 7/5/5 vs 中心裁切 7/4/4（保持压扁）;
+      IP LOO: EVA 3/40 & 5/40、Nier 15/40 & 10/40、GitS 3/40; 跨 IP precision 0.2–0.4（own 排最前）
+⚑ 对话验收里**模型层**仍有三处不可靠（机制没错, 都在模型侧, 要不要治请你定）:
+      ① `list_wallpaper_tags(ip_query="这个作品最像哪几张")` —— 又把**问句**当参数
+         （两次都这样）。修法: 把那个参数的说明写死成"作品名, 例如 EVA"，或干脆去掉它、
+         只回清单（IP 检索改由 next_wallpaper 的 match 承担）
+      ② 5 轮里有 **2 轮根本没调工具**（SLEEP 那轮是"没工具可选", IDLE 那轮不该）
+         却仍然回"请稍等，正在为您切换…" —— 就是 (c) 想治的"假成功"
+      ③ 有一次**动作成功但回话像失败**: 工具真的换了壁纸（12:26:08 推送 07_square），
+         随后那次 LLM 请求 `APITimeoutError: Request timed out.`（`llm.timeout_s: 30`）
+         → 回退成规则兜底话术。**纯配置可调**: 把 `llm.timeout_s` 调大（30 → 90）再试
+
+T7-4 收尾（**你的三条决定都已实现, 未提交**）
+☑ **① `ip_query` 的说明写死"作品名"**: schema 的 description 改成
+      「作品名，例如 EVA、Nier、GitS（只能填名字，不要填问句或句子）」, `maxLength` 64 → 32,
+      工具 description 里也写了"ip_query 不是问题、不是句子"
+☑ **② (c) 工具失败必须出现在正文里**（`agent/llm/provider.py`）:
+      · `_result()` 把失败追加到 `text` 末尾: 工具给了 `tell_user` 就用那句原话
+        （`⚠ 换壁纸没有成功：…`）, 否则 `⚠ <工具名> 没有成功：<error>`; 去重、成功时一个字不加
+      · 结果里多一个 `tool_failures`（给测试/上层查）; `Runtime.next_wallpaper` /
+        `wallpaper_tags` 的失败都带上了 `tell_user` + `instruction`（"请把这句话如实告诉用户"）
+      · **板端实测（真 0.6B）**: 一句"换一张赛博朋克风格的壁纸" → 模型把一串标签
+        用斜杠拼成 `scene=space/technology/…`（工具如实拒绝）**而且它这一轮根本没答上来**
+        （降级成规则兜底）, 但用户在对话区看到的是:
+        `…（板端模型没有响应…）` + `⚠ 换壁纸没有成功：scene 轴上没有 '…' 这条标签：可用的有 …`
+        —— 机制把"没成功"钉在了用户看得见的地方
+☑ **③ 配置管 llama-server 的启停**（`agent/llm/service.py` 新 + `agent/main.py` 接线）:
+      · 新配置 `llm.manage_service`（**默认 false**）; 只认 `mode=edge` + 开关为真
+      · Agent 启动 / 离开 SLEEP → `llm/scripts/start.sh`; 进入 SLEEP → `llm/scripts/stop.sh`;
+        **Agent 退出不停**（退出≠睡觉）; 起停走**后台线程**（状态回调是同步的）;
+        起完不等加载, 后台探 `/v1/models`（**200 且带 data** 才算就绪）只写一行日志
+      · **板端实测**: 起 Agent → 日志 `已启动 llama-server` + `就绪 (等了 9.1 s)`;
+        `assistant mode sleep` → `进入 SLEEP -> 停 llama-server` + 进程数 **0**;
+        `assistant mode idle` → `离开 SLEEP -> 起 llama-server` + `就绪 (等了 7.5 s)`
+      · 测试: `tests/test_llm_service.py`（新, 25 项: 该不该管/退出码解释/探活三种情形/
+        Runtime 真状态机接线）; 真跑 shell 脚本那条**只在非 Windows 跑**（开发机的 bash
+        是 WSL/Git Bash, `C:/…` 映射不可靠 —— 实测踩到）
+☑ 测试与文档: `tests/test_llm.py` 加 `TestToolFailuresAreToldToTheUser`(7) 并把
+      `_result` 的形状断言补上 `tool_failures`; `tests/test_wallpaper.py` 加 `TestWallpaperTagsTool`(5)
+      + 三条失败都断言 `tell_user`; `tests/test_main.py` 的装配顺序加 `llm_service`;
+      `docs/llm.md` §2.1 + §3、`docs/config-sources.md` §2.1、`docs/architecture.md` §4.1、
+      `docs/tagging.md` §6、`config/config.example.yaml`
+⚑ **新发现（模型层, 还没治）**: 模型会把**多个标签用斜杠拼在一起**当一条标签
+      （`scene=space/technology/fantasy/anime/park/…`）。可选修法: `match` 接受
+      `a/b/c` 与 `a,b,c` 当"任一命中"（多标签 OR）—— 要不要做你说一声（一行解析 + 测试）
+⚑ 仍建议: `llm.timeout_s` 30 → 90（这次那条"模型没响应"很可能就是它）
+⚑ 环境: **板端约 11:57 重启过**（X 起来了, `config/config.yaml` 没丢）, 但 llama-server
+      **没有开机自启**。现在 Agent 管启停（`manage_service: true` 已写进板端 live 配置）
+      正好补上这一环 —— 不过 Agent 自己的开机自启仍是 Phase 8 的 `systemd/agent.service`。
 
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查

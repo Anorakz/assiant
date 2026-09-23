@@ -49,6 +49,7 @@ import logging.handlers
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -64,7 +65,7 @@ from agent.io import (
     ImageReader,
     InputSender,
 )
-from agent.llm import DEFAULT_MODE, LLMProvider, RuleEngine
+from agent.llm import DEFAULT_MODE, LLMProvider, LlamaService, RuleEngine
 from agent.core.wallpaper import DEFAULT_WALLPAPER_DIR, WallpaperDeck, WallpaperError
 
 __all__ = ["Runtime", "run", "main", "setup_logging", "DEFAULT_LOG_PATH"]
@@ -273,6 +274,8 @@ class Runtime:
         self.state: Optional[StateMachine] = None
         self.tools: Optional[ToolRouter] = None
         self.llm: Optional[LLMProvider] = None
+        #: 本机 llama-server 的启停（T7-4）—— **None = 不管**（mode 不是 edge 或开关没开）
+        self.llm_service: Optional[LlamaService] = None
         self.scheduler: Optional[Scheduler] = None
         self.image_reader: Optional[ImageReader] = None
         self.input_sender: Optional[InputSender] = None
@@ -324,6 +327,7 @@ class Runtime:
         "_start_native",
         "_start_bus_and_io",
         "_start_state_and_tools",
+        "_start_llm_service",
         "_start_llm",
         "_start_scheduler",
         "_start_ipc",
@@ -611,6 +615,7 @@ class Runtime:
         presets = self._cfg("wallpaper", "tagging", "ip_presets", default={}) or {}
         if not index.count():
             return {"ok": False, "data_file": index.data_file,
+                    "tell_user": "还没有壁纸标签数据 —— 先在板端跑 assistant tag --apply。",
                     "error": "还没有壁纸标签数据（%s）—— 先在板端跑 "
                              "assistant tag --apply（要 NPU，40 张约 3 分钟）"
                              % index.data_file}
@@ -621,7 +626,11 @@ class Runtime:
             result = index.match("ip=%s" % ip_query, presets=presets,
                                  wallpaper_dir=self._wallpaper_dir(), limit=limit)
             if not result.ok:
+                # ⚠ 板端实测: 模型会把**问句**填进 ip_query（"这个作品最像哪几张"），
+                #    失败后它还会把"可用的 IP 名"当成"壁纸标签"答给用户 —— 所以除了
+                #    error, 再给一句现成的**给用户看的话**（provider 会追加进正文）
                 return {"ok": False, "error": result.error,
+                        "tell_user": "没找到这个作品的锚点：%s" % result.error,
                         "presets": preset_names(presets)}
             return {"ok": True, "kind": result.kind, "ip": str(ip_query),
                     "note": result.note, "count": len(result.pool),
@@ -659,7 +668,7 @@ class Runtime:
               而工具 handler 可能在线程池里跑（ToolRouter 对同步 handler 就是这么做的）。
         """
         if self.wallpaper is None:
-            return {"ok": False, "error": "壁纸还没初始化（Agent 的 tools 步骤没起来？）"}
+            return self._wallpaper_failure("壁纸还没初始化（Agent 的 tools 步骤没起来？）")
 
         pool = None
         picked: Dict[str, Any] = {}
@@ -674,7 +683,7 @@ class Runtime:
             index, path, total = self.wallpaper.step(step, pool=pool)
         except WallpaperError as exc:
             self.log.warning("wallpaper: 换不了: %s", exc)
-            return {"ok": False, "error": str(exc)}
+            return self._wallpaper_failure(str(exc))
 
         pushed = self._push_wallpaper(path, index)
         self.log.info("wallpaper: %s (index=%d/%d%s, pushed=%s)", path, index, total,
@@ -690,22 +699,38 @@ class Runtime:
                 out["score"] = score
         return out
 
+    def _wallpaper_failure(self, reason: str, **extra: Any) -> Dict[str, Any]:
+        """换壁纸失败的统一返回（T7-4 (c)）。
+
+        @param reason 给人看的原因
+        @return {"ok": False, "error": reason, "tell_user": "换壁纸没有成功：…", **extra}
+        @note `tell_user` 是**工具给模型的一句现成话**（祈使句），`agent/llm/provider.py`
+              还会把失败追加进最终正文 —— 因为板端实测 0.6B 会**谎报成功**
+              （工具明明失败了, 它回"已更换为宁静的深色风景"）。用户看不到工具结果,
+              所以这句必须由机制保证出现。
+        """
+        out: Dict[str, Any] = {"ok": False, "error": reason,
+                               "tell_user": "换壁纸没有成功：%s" % reason,
+                               "instruction": "请把这句如实告诉用户，不要说已经换好了。"}
+        out.update(extra)
+        return out
+
     def _resolve_match(self, match: str) -> Dict[str, Any]:
         """把 match 解析成候选路径（按相关度降序）。失败时返回 {"ok": False, "error"}。"""
         index = self.tag_index()
         if not index.count():
-            return {"ok": False, "data_file": index.data_file,
-                    "error": "还没有壁纸标签数据（%s）—— 先在板端跑 "
-                             "assistant tag --apply，之后才能按内容挑图"
-                             % index.data_file}
+            return self._wallpaper_failure(
+                "还没有壁纸标签数据（%s）—— 先在板端跑 assistant tag --apply，"
+                "之后才能按内容挑图" % index.data_file,
+                data_file=index.data_file)
         presets = self._cfg("wallpaper", "tagging", "ip_presets", default={}) or {}
         resolved = index.match(match, presets=presets, wallpaper_dir=self._wallpaper_dir())
         if not resolved.ok:
             self.log.warning("wallpaper: match=%r 用不了: %s", match, resolved.error)
-            return {"ok": False, "error": resolved.error}
+            return self._wallpaper_failure(resolved.error)
         if not resolved.pool:
-            return {"ok": False,
-                    "error": "没有符合条件的壁纸（%s）" % (resolved.note or match)}
+            return self._wallpaper_failure("没有符合条件的壁纸（%s）"
+                                           % (resolved.note or match))
         return {"ok": True, "pool": resolved.pool, "kind": resolved.kind,
                 "note": resolved.note, "scores": resolved.detail.get("scores") or {}}
 
@@ -778,6 +803,87 @@ class Runtime:
             except Exception as exc:  # noqa: BLE001
                 self.log.error("tools: 注册 %r 失败: %r", getattr(item, "name", item), exc)
         return count
+
+    # ---- 3.5) 本机 llama-server 的启停 (T7-4) ----
+    async def _start_llm_service(self) -> None:
+        """按配置管本机 llama-server：Agent 启动 / 离开 SLEEP 起服务, 进入 SLEEP 停服务。
+
+        ⚠ **默认不管**（`llm.manage_service` 缺省 false）: 管启停意味着"Agent 可能把你
+          手动起的服务停掉", 这是明确的行为改变, 要人在 config.yaml 里打开。
+        ⚠ 起服务的脚本是 `llm/scripts/start.sh`（nohup + 立刻返回）, 所以这一步**不等**
+          模型加载完 —— 之后在后台探一次"到底能用了没", 只写日志（不阻塞启动）。
+        ⚠ 脚本失败**不 fatal**: 服务没起来只该让 edge 降级（provider 本来就会记一条
+          "LLM 降级为规则兜底"）, 不该让整个 Agent 起不来。
+        """
+
+        async def _start() -> None:
+            service = LlamaService.from_config(self.config, log=self.log)
+            if service is None:
+                mode = self._cfg("llm", "mode", default="?")
+                self.log.info("llm_service: 不管 llama-server 的启停"
+                              "（mode=%s, manage_service=%s）",
+                              mode, self._cfg("llm", "manage_service", default=False))
+                return
+            self.llm_service = service
+            ok, message = service.start()
+            if ok:
+                self.log.info("llm_service: 已启动 llama-server (%s)", message)
+            else:
+                self.log.warning("llm_service: 启动 llama-server 没成功: %s", message)
+            # 状态回调：进 SLEEP 停、离开 SLEEP 起
+            if self.state is not None:
+                self.state.on_change(self._on_state_change)
+                self.log.info("llm_service: 已挂上 SLEEP 的启停回调")
+            # 后台探活（只写日志: "什么时候真的能用了"对排障最有用）
+            asyncio.get_running_loop().run_in_executor(None, self._log_when_ready)
+
+        await self._guarded(_Component("llm_service", _start), fatal=False)
+
+    def _log_when_ready(self) -> None:
+        """（线程里跑）等到服务真的应答，记一行日志。"""
+        service = self.llm_service
+        if service is None:
+            return
+        ready, waited = service.wait_ready()
+        if ready:
+            self.log.info("llm_service: llama-server 就绪 (等了 %.1f s)", waited)
+        else:
+            self.log.warning("llm_service: 等了 %.1fs 还没就绪（模型没加载完 / key 不对?）"
+                             "—— edge 模式下这会儿会降级到规则兜底", waited)
+
+    def _on_state_change(self, old: State, new: State) -> None:
+        """进入 SLEEP 停服务、离开 SLEEP 起回来（T7-4 的要求）。
+
+        @note 只在 `llm_service` 存在时动（= mode=edge 且 manage_service 打开）
+        @note 状态机要求**任何切换都经过 IDLE**, 所以"离开 SLEEP"就是 SLEEP→IDLE
+        @note 这个回调在状态机调用栈里跑（同步）: 起停都是 subprocess, 所以丢到
+              **后台线程**去做, 不卡状态切换与 GUI 的状态推送
+        """
+        service = self.llm_service
+        if service is None:
+            return
+        if new is State.SLEEP and old is not State.SLEEP:
+            self.log.info("llm_service: 进入 SLEEP -> 停 llama-server")
+            self._run_service_op(service.stop, "停")
+        elif old is State.SLEEP and new is not State.SLEEP:
+            self.log.info("llm_service: 离开 SLEEP -> 起 llama-server")
+            self._run_service_op(service.start, "起")
+
+    def _run_service_op(self, operation: Callable[[], Tuple[bool, str]], what: str) -> None:
+        """在后台线程里跑一次起/停（失败只记日志, 不抛给状态机）。"""
+
+        def run() -> None:
+            try:
+                ok, message = operation()
+            except Exception as exc:                  # noqa: BLE001
+                self.log.warning("llm_service: %s llama-server 时出错: %r", what, exc)
+                return
+            level = logging.INFO if ok else logging.WARNING
+            self.log.log(level, "llm_service: %s llama-server -> %s", what, message)
+            if ok and what == "起":
+                self._log_when_ready()
+
+        threading.Thread(target=run, name="llm-service", daemon=True).start()
 
     # ---- 4) llm ----
     async def _start_llm(self) -> None:

@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from ..core.tool_router import ToolRouter
 from .rule_engine import RuleEngine
@@ -720,7 +720,12 @@ def _result(
     """chat_with_tools 的结果 (形状固定 —— 见 chat_with_tools 的 @return)。
 
     `degraded` 非空 = 这条不是模型答的: 后端挂了/没给出正文, 已退回规则兜底。
+    `tool_failures` = 本次**失败过**的工具（T7-4）: 那几句已经追加在 `text` 末尾,
+    这里再单独留一份给测试/上层查。
     """
+    failures = _tool_failure_notes(tool_calls)
+    if failures:
+        text = ("%s\n\n%s" % (text, "\n".join(failures))) if text else "\n".join(failures)
     return {
         "ok": ok,
         "text": text,
@@ -728,7 +733,64 @@ def _result(
         "error": error,
         "mode": mode,
         "degraded": degraded,
+        "tool_failures": failures,
     }
+
+
+#: 工具失败时追加在正文前的那句（给**用户**看的, 所以是中文整句）
+_TOOL_FAILED_PREFIX = "⚠ "
+
+
+def _tool_failure_notes(tool_calls: Optional[List[Dict[str, Any]]]) -> List[str]:
+    """把"失败过的工具"变成几句**必须让用户看到**的话（T7-4 (c)）。
+
+    为什么要在**这里**做（而不是只靠工具结果里那句提示）: 板端实测 0.6B 会
+    **谎报成功** —— 工具明明返回 `{"ok": false, "error": "scene 轴上没有 darkness…"}`,
+    它回给用户的却是"已更换为宁静的深色风景"。工具结果只有模型看得见,
+    用户看不到; 所以失败必须在**最终正文**里出现, 不能指望模型转述。
+
+    @return ["⚠ 换壁纸没有成功：…", …]（去重、保持调用顺序）; 没有失败就是 []
+    """
+    notes: List[str] = []
+    seen = set()
+    for call in tool_calls or ():
+        if not isinstance(call, Mapping):
+            continue
+        line = _tool_failure_note(call)
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        notes.append(line)
+    return notes
+
+
+def _tool_failure_note(call: Mapping[str, Any]) -> str:
+    """一次工具调用 -> "一句给人看的失败说明"；没失败就返回 ""。
+
+    两种失败都要认:
+      · 路由层的失败 —— `{"ok": false, "error": "…"}`（未知工具 / 状态不允许 /
+        参数不合法 / 超时）
+      · handler 自己的失败 —— `{"ok": true, "result": {"ok": false, …}}`
+        （例如"还没有标签数据, 先跑 assistant tag"）; 这时优先用 `tell_user`
+        —— 那是工具**已经写好的整句**（"换壁纸没有成功：…"），别再套一层前缀
+    """
+    if not isinstance(call, Mapping):
+        return ""
+    name = str(call.get("name") or "工具")
+    result = call.get("result")
+    if not isinstance(result, Mapping):
+        return ""
+    if result.get("ok") is False:
+        return "%s%s 没有成功：%s" % (_TOOL_FAILED_PREFIX, name,
+                                     result.get("error") or "原因不明")
+    payload = result.get("result")
+    if isinstance(payload, Mapping) and payload.get("ok") is False:
+        tell_user = payload.get("tell_user")
+        if tell_user:
+            return "%s%s" % (_TOOL_FAILED_PREFIX, tell_user)
+        return "%s%s 没有成功：%s" % (_TOOL_FAILED_PREFIX, name,
+                                     payload.get("error") or "原因不明")
+    return ""
 
 
 def _no_think(backend: Any) -> bool:

@@ -38,8 +38,8 @@ ALLOWED_STATES = (State.IDLE, State.STUDY)
 
 DESCRIPTION = (
     "看看壁纸库里有哪些标签、各有几张 —— 挑图之前先看一眼，免得猜错标签名。"
-    "给了 ip_query（例如 \"EVA\"）就换成\"这个作品最像哪几张\"的排名。"
-    "⚠ 只读，不换壁纸；分数是余弦（只能排序，不是准确率）。"
+    "给了 ip_query（**只填作品名**，例如 \"EVA\"）就换成\"这个作品最像哪几张\"的排名。"
+    "⚠ 只读，不换壁纸；ip_query 不是问题、不是句子；分数是余弦（只能排序，不是准确率）。"
 )
 
 SCHEMA: Dict[str, Any] = {
@@ -48,8 +48,8 @@ SCHEMA: Dict[str, Any] = {
         "ip_query": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 64,
-            "description": "想找的作品名（配置里配过锚点图的那种，例如 EVA / Nier）",
+            "maxLength": 32,
+            "description": "作品名，例如 EVA、Nier、GitS（只能填名字，不要填问句或句子）",
         },
         "limit": {
             "type": "integer",
