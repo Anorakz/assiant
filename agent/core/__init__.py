@@ -9,6 +9,7 @@
 # ============================================================================
 
 from .state_machine import INITIAL_STATE, LEGAL_TRANSITIONS, State, StateMachine
+from .music import DEFAULT_POLL_INTERVAL_S, MusicError, MusicPlayer
 from .scheduler import (
     DEFAULT_HISTORY_LIMIT,
     DEFAULT_INTERVAL_MIN,
@@ -58,4 +59,8 @@ __all__ = [
     "validate_schema",
     "SUPPORTED_KEYWORDS",
     "DEFAULT_TIMEOUT_S",
+    # 播放内核（音乐, T8-4）
+    "MusicPlayer",
+    "MusicError",
+    "DEFAULT_POLL_INTERVAL_S",
 ]

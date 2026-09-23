@@ -125,9 +125,25 @@ music:
   timeout_s: 45
   library_file: config/music_library.jsonl
   count_after_s: 30
+  poll_interval_s: 3      # 多久问一次 PC 的真实进度（走 ssh，别太密）
 ```
 
 `enabled: false` = 音乐工具全部不装（与其它工具"缺依赖就跳过"同一条口径）。
+
+### 5.1 GUI 那边怎么联动（T8-4）
+
+**推送**（Agent → GUI，topic `music`）—— 每 `poll_interval_s` 一次，**变化才推**：
+
+| 字段 | 含义 |
+| --- | --- |
+| `title` / `artist` / `album` | 当前曲目（空 = 没在放） |
+| `position_s` / `duration_s` | 进度/时长（**真实值 + 本地外推**: 每次轮询重新对齐） |
+| `playing` | 在放 / 暂停 / 停了 |
+| `track_id` / `plays` / `tags` | 库里那条记录（GUI 现在只显示前两个 + 状态） |
+
+**命令**（GUI → Agent，`payload` 必须是 `{}`）：`music_play_pause` / `music_next` /
+`music_prev` / `music_stop`。⚠ 这四个**不决定放什么** —— `next/prev` 只在"chat 上次挑出来的
+候选顺序"里走；失败（音乐没开 / PC 上没在放 / 还没有队列）会回一条 `llm` 说明。
 
 ## 6. 失败都要"能照做"（板端排障四类）
 

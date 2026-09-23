@@ -199,6 +199,15 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
 | `chat_input` | `text` | string | 用户在 GUI 里敲的一行输入，等价于终端输入 |
 | `next_bilibili` | — | — | 播放下一集 B 站视频；`payload` 必须是 `{}` |
 | `query_schedule` | — | — | 问一句"你最近触发过哪些日程"；`payload` 必须是 `{}`。应答是随后那条 §3 的 `schedule`（`kind:"state"`） |
+| `music_play_pause` | — | — | 暂停/继续**当前这首**（T8-4）。应答是随后那条 `music` 推送（§3） |
+| `music_next` / `music_prev` | — | — | 在 **chat 上次挑出来的候选顺序**里前后走一格；还没有候选队列时回一条 `llm` 说明（"先从对话里挑一次歌"） |
+| `music_stop` | — | — | 停止播放（**不改**本地库） |
+
+> ⚠ **音乐按钮不决定放什么**：`music_next/prev` 走的队列，是"对话挑完之后 Agent 记下的候选
+> 顺序"（`agent/core/music.py::MusicPlayer.step()`）。"下一首听哪首"由**对话**决定
+> （chat 看本地库的 tag + 播放次数 → 挑 → `play_track`）。见 [`music.md`](music.md) §4.2。
+> 这三个按钮失败时（音乐没开 / PC 上没在放 / 还没有队列）都会回一条 `llm` 说明 ——
+> 不假装换了一首。
 
 注意：
 
@@ -394,6 +403,10 @@ while b"\n" in buf:
 | `COMMAND_CHAT_INPUT` | `"chat_input"` |
 | `COMMAND_NEXT_BILIBILI` | `"next_bilibili"` |
 | `COMMAND_QUERY_SCHEDULE` | `"query_schedule"` |
+| `COMMAND_MUSIC_PLAY_PAUSE` | `"music_play_pause"` |
+| `COMMAND_MUSIC_NEXT` | `"music_next"` |
+| `COMMAND_MUSIC_PREV` | `"music_prev"` |
+| `COMMAND_MUSIC_STOP` | `"music_stop"` |
 
 > ⚠ T7-3 删掉了 `COMMAND_NEXT_WALLPAPER`（`"next_wallpaper"`）：换壁纸只走对话，
 > 不再有这条命令 —— 见 §4 的说明。C++ 侧也请把对应分支删掉（留着也不会有人发）。

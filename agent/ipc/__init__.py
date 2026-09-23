@@ -40,6 +40,10 @@ from .local_server import (
 from .protocol import (
     ACTION_FIELD,
     COMMAND_CHAT_INPUT,
+    COMMAND_MUSIC_NEXT,
+    COMMAND_MUSIC_PLAY_PAUSE,
+    COMMAND_MUSIC_PREV,
+    COMMAND_MUSIC_STOP,
     COMMAND_NEXT_BILIBILI,
     COMMAND_QUERY_SCHEDULE,
     COMMAND_SWITCH_MODE,
@@ -91,6 +95,7 @@ __all__ = [
     "COMMANDS",
     "UNWIRED_COMMAND_NOTES",
     "NO_SCHEDULER_NOTE",
+    "NO_MUSIC_NOTE",
     # schedule.data.kind 的取值
     "SCHEDULE_KIND_STATE",
     "SCHEDULE_KIND_FIRED",
@@ -292,9 +297,22 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
         def _on_client_connect() -> None:
             pushed = runtime.push_current_wallpaper()
             _log.debug("ipc: 新客户端连上 -> 补推当前壁纸: %s", pushed)
+            # T8-4: 音乐条同理 —— 连上就该看到"现在在放什么", 而不是空条
+            current = getattr(runtime, "push_current_music", None)
+            if callable(current):
+                _log.debug("ipc: 新客户端连上 -> 补推当前音乐状态: %s", current())
 
         server.on_client_connect = _on_client_connect
-        _log.debug("ipc: 已接上'连上补推壁纸' (server.on_client_connect)")
+        _log.debug("ipc: 已接上'连上补推壁纸/音乐' (server.on_client_connect)")
+
+    # · 换歌/进度 -> music{title, artist, album, position_s, duration_s, playing}
+    # 与 on_wallpaper 同款"有就接": MusicPlayer 只交出快照 dict, 线格式字段由本层决定。
+    if hasattr(runtime, "on_music"):
+        def _on_music(snapshot: Dict[str, Any]) -> None:
+            dispatch(TOPIC_MUSIC, dict(snapshot))
+
+        runtime.on_music = _on_music
+        _log.debug("ipc: 已接上音乐推送 (runtime.on_music -> music)")
 
     # · 日程触发 -> schedule{kind:"fired", event}
     # 与上面 on_reply 同款"有就接": runtime 没带调度器 (或它还没起来) 就跳过 ——
@@ -317,6 +335,9 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
 UNWIRED_COMMAND_NOTES: Dict[str, str] = {
     COMMAND_NEXT_BILIBILI: "B 站「下一集」还没接入（Phase 7），这次点击先没有生效。",
 }
+
+#: 收到音乐按钮但 Agent 侧没有音乐入口（`music.enabled=false`）时回的那句话 (给用户看)。
+NO_MUSIC_NOTE = "音乐还没开：在 config.yaml 的 music 段里把 enabled 打开、填上 PC 地址。"
 
 
 #: schedule.data.kind 的两个取值 (线格式见 docs/ipc-protocol.md §3)。
@@ -368,6 +389,10 @@ def _make_command_handler(bus: Any, runtime: Any = None, push: Any = None):
             _handle_query_schedule(runtime, push)
             return
 
+        if action in _MUSIC_ACTIONS:
+            _handle_music(runtime, push, _MUSIC_ACTIONS[action])
+            return
+
         if action in UNWIRED_COMMAND_NOTES:
             # Phase 6 D7 (决策 7): 下游在 Phase 7, 但**必须回一句** —— 否则 GUI 上
             # 点了完全没反应, 用起来像坏了。回的是 llm (用户看得见的那条通道)。
@@ -379,6 +404,41 @@ def _make_command_handler(bus: Any, runtime: Any = None, push: Any = None):
         _log.warning("ipc: 命令 %s 没有处理分支, 已忽略", action)
 
     return _on_command
+
+
+#: 音乐命令 -> `Runtime.music_control()` 的动作名（T8-4）。
+#: ⚠ 这里**只映射动作, 不决定放什么**: `next`/`prev` 走的是"chat 上次挑出来的候选顺序"
+#:   （`MusicPlayer.step()`）; 语义说明见 protocol.py 里那三个常量的注释。
+_MUSIC_ACTIONS: Dict[str, str] = {
+    COMMAND_MUSIC_PLAY_PAUSE: "play_pause",
+    COMMAND_MUSIC_NEXT: "next",
+    COMMAND_MUSIC_PREV: "prev",
+    COMMAND_MUSIC_STOP: "stop",
+}
+
+
+def _handle_music(runtime: Any, push: Any, action: str) -> None:
+    """音乐按钮（播放/暂停、上一首、下一首、停止）—— **按钮不决定放什么, 对话才决定**。
+
+    · 成功: 状态由 `Runtime` 推 `music{...}`（按钮的反馈就是音乐条自己变了）——
+      **不往对话区写话**（与旧壁纸按钮同一条口径: 点一下多一条气泡太吵）。
+    · 失败: 推一条 `llm` 说明（音乐没开 / PC 上没在放 / 还没有候选队列）——
+      点了完全没反应最难查。
+    """
+    control = getattr(runtime, "music_control", None) if runtime is not None else None
+    if not callable(control):
+        _log.warning("ipc: 收到 %s 但 runtime 没有音乐入口, 回一句说明", action)
+        if push is not None:
+            push(TOPIC_LLM, {"text": NO_MUSIC_NOTE})
+        return
+    result = control(action) or {}
+    if result.get("ok"):
+        _log.debug("ipc: music %s -> ok", action)
+        return
+    reason = result.get("tell_user") or result.get("error") or "原因不明"
+    _log.warning("ipc: music %s 失败: %s", action, reason)
+    if push is not None:
+        push(TOPIC_LLM, {"text": str(reason)})
 
 
 def _handle_switch_mode(runtime: Any, push: Any, payload: dict) -> None:

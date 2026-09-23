@@ -67,6 +67,8 @@ EXPECTED_ORDER = [
     # 但组件照旧注册 —— 组件列表是"步骤"的清单, 不是"真跑了什么"的清单）
     "llm_service",
     "llm_provider",
+    # T8-4: 音乐（music.enabled=false 时同样什么都不做, 组件照旧注册）
+    "music",
     "scheduler",
     "ipc",
     "terminal_input",

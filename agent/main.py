@@ -304,6 +304,16 @@ class Runtime:
         #: 同一个条件再来一次就"往下翻一名"（再换一张同类的）; 换了条件就从第 1 名重挑。
         self._last_match_pick: Dict[str, str] = {}
 
+        #: 音乐（T8-4）: `agent/core/music.py::MusicPlayer` + 在 PC 上跑的 neteasecli。
+        #: **None = 没开音乐**（配置 music.enabled=false 或没配 pc_host）——
+        #: 与其它工具"缺依赖就跳过"同一条口径。
+        self.music: Optional[Any] = None
+        #: music 推送钩子（与 on_wallpaper 同款"有就接"）—— IPC 层把它接到 topic `music`
+        self.on_music: Optional[Callable[[Dict[str, Any]], Any]] = None
+        self._music_task: Optional[asyncio.Task] = None
+        #: 上次推过的 (title, playing)，用来决定"这次要不要推"（进度每次都推）
+        self._last_music_push: Tuple[str, bool] = ("", False)
+
         self._components: List[_Component] = []
         self._terminal_task: Optional[asyncio.Task] = None
         self.failures: List[Tuple[str, str]] = []
@@ -333,6 +343,7 @@ class Runtime:
         "_start_state_and_tools",
         "_start_llm_service",
         "_start_llm",
+        "_start_music",
         "_start_scheduler",
         "_start_ipc",
         "_start_terminal_input",
@@ -747,6 +758,214 @@ class Runtime:
                                            % (resolved.note or match))
         return {"ok": True, "pool": resolved.pool, "kind": resolved.kind,
                 "note": resolved.note, "scores": resolved.detail.get("scores") or {}}
+
+    # ---- 3.6) 音乐 (T8-4) ----
+    async def _start_music(self) -> None:
+        """按配置接上"在 PC 上跑的 neteasecli" + 本地音乐库（`music.enabled`）。
+
+        ⚠ 关掉时**什么都不做**（`self.music is None`）—— 工具会自己跳过, 与其它工具同款。
+        ⚠ 轮询放在一个后台任务里: 每 `poll_interval_s` 问一次 PC 的真实进度, 推给 GUI。
+          走 ssh 要 0.5–1.5 s, 所以丢线程池, 不卡事件循环。
+        """
+
+        async def _start() -> None:
+            from agent.core.music import MusicPlayer
+            from agent.media.music_library import resolve_library_file
+            from agent.net.netease_cli import NeteaseCli
+
+            cli = NeteaseCli.from_config(self.config, log=self.log)
+            if cli is None:
+                self.log.info("music: 没开（config 的 music.enabled/pc_host）—— 音乐工具不装")
+                return
+            library_file = resolve_library_file(self._cfg("music", "library_file"))
+            self.music = MusicPlayer(
+                cli, library_file,
+                count_after_s=int(self._cfg("music", "count_after_s", default=30) or 30),
+                log=self.log)
+            self.log.info("music: 就绪 (PC=%s@%s, 本地库=%s)",
+                          getattr(cli, "user", "?"), getattr(cli, "host", "?"), library_file)
+            self._music_task = asyncio.ensure_future(self._music_loop())
+
+        async def _stop() -> None:
+            if self._music_task is not None:
+                self._music_task.cancel()
+                self._music_task = None
+
+        await self._guarded(_Component("music", _start, _stop), fatal=False)
+
+    async def _music_loop(self) -> None:
+        """每 `poll_interval_s` 问一次 PC 的真实进度, 变化就推给 GUI。"""
+        from agent.core.music import DEFAULT_POLL_INTERVAL_S
+
+        interval = float(self._cfg("music", "poll_interval_s",
+                                   default=DEFAULT_POLL_INTERVAL_S) or DEFAULT_POLL_INTERVAL_S)
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                snapshot = await loop.run_in_executor(None, self.music.refresh)
+                self._push_music(snapshot)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:        # noqa: BLE001 - 轮询失败不该把任务搞死
+                self.log.warning("music: 轮询失败 (已忽略): %r", exc)
+
+    def _push_music(self, snapshot: Dict[str, Any]) -> bool:
+        """把状态推给 GUI（**变化才推**: 曲目/播放状态一变必推, 播放中每次带新进度推）。"""
+        if self.on_music is None:
+            return False
+        key = (str(snapshot.get("title") or ""), bool(snapshot.get("playing")))
+        previous = self._last_music_push
+        if key == previous and not key[1]:
+            return False                       # 没在放、曲目也没变 -> 不重复推
+        try:
+            self.on_music(dict(snapshot))
+            self._last_music_push = key
+            return True
+        except Exception as exc:                # noqa: BLE001 - 推送失败不该让轮询停
+            self.log.warning("music: 推送失败 (已忽略): %r", exc)
+            return False
+
+    def push_current_music(self) -> bool:
+        """GUI 刚连上时补推一次当前状态（与 `push_current_wallpaper` 同款）。"""
+        if self.music is None:
+            return False
+        return self._push_music(self.music.snapshot())
+
+    # ---- 音乐动作（GUI 命令与工具都走这里）----
+    def music_state(self) -> Dict[str, Any]:
+        """当前播放状态（**不碰 PC**: 缓存真值 + 本地外推）。"""
+        if self.music is None:
+            return {"ok": False, "error": "音乐没开（config.yaml 的 music.enabled）"}
+        return self.music.snapshot()
+
+    def music_control(self, action: str, **kwargs: Any) -> Dict[str, Any]:
+        """播放控制（play_pause / pause / resume / stop / next / prev / seek / volume）。
+
+        @return {"ok", ...} —— ok=False 时 error 是**给人看的**一句话
+        """
+        if self.music is None:
+            return {"ok": False, "error": "音乐没开（config.yaml 的 music.enabled）"}
+        from agent.core.music import MusicError
+
+        try:
+            if action in ("play_pause", "toggle"):
+                out = self.music.toggle()
+            elif action == "pause":
+                out = self.music.pause()
+            elif action == "resume":
+                out = self.music.resume()
+            elif action == "stop":
+                out = self.music.stop()
+            elif action == "next":
+                out = self.music.step(1)
+            elif action == "prev":
+                out = self.music.step(-1)
+            elif action == "seek":
+                out = self.music.seek(float(kwargs.get("seconds") or 0),
+                                      absolute=bool(kwargs.get("absolute")))
+            elif action == "volume":
+                out = self.music.set_volume(int(kwargs.get("level") or 0))
+            else:
+                return {"ok": False, "error": "不认识的动作 %r" % action}
+        except (MusicError, Exception) as exc:  # noqa: BLE001 - 失败一律如实回话
+            if isinstance(exc, MusicError):
+                self.log.warning("music: %s 失败: %s", action, exc)
+            else:
+                self.log.warning("music: %s 出错: %r", action, exc)
+            return {"ok": False, "error": str(exc), "tell_user": str(exc)}
+        result = {"ok": True, "action": action}
+        result.update(out)
+        self._push_music(self.music.snapshot())
+        return result
+
+    def music_search(self, keyword: str, limit: int = 5,
+                     kind: str = "track") -> Dict[str, Any]:
+        """在 PC 上搜歌（返回候选 id/名字, **不播**）—— 给 chat 挑。"""
+        if self.music is None:
+            return {"ok": False, "error": "音乐没开（config.yaml 的 music.enabled）"}
+        from agent.net.netease_cli import NeteaseCliError
+
+        try:
+            data = self.music.cli.search(kind, keyword, limit=int(limit))
+        except NeteaseCliError as exc:
+            return {"ok": False, "error": str(exc), "tell_user": str(exc)}
+        tracks = data.get("tracks") or []
+        return {"ok": True, "keyword": keyword, "count": len(tracks),
+                "tracks": [{"id": str(t.get("id")), "name": t.get("name"),
+                            "artists": ", ".join(str(a.get("name"))
+                                                 for a in (t.get("artists") or [])
+                                                 if isinstance(a, dict)),
+                            "album": (t.get("album") or {}).get("name"),
+                            "duration_ms": t.get("duration")}
+                           for t in tracks if isinstance(t, dict)]}
+
+    def music_play(self, track_id: Any = None, keyword: Optional[str] = None,
+                   tag: Optional[str] = None, axis: Optional[str] = None,
+                   sort: str = "plays_asc", limit: int = 10,
+                   queue_from_search: bool = True) -> Dict[str, Any]:
+        """放一首：给 `track_id` 直接放；给 `keyword` 先搜（PC 上）再放第一条。
+
+        @param tag 给 keyword 搜出来的第一条打上这个 tag（chat 说"这首很燃"那种）
+        @return {"ok", ...}
+        """
+        if self.music is None:
+            return {"ok": False, "error": "音乐没开（config.yaml 的 music.enabled）"}
+        from agent.core.music import MusicError
+
+        queue: List[str] = []
+        meta: Dict[str, Any] = {}
+        if not track_id:
+            if not keyword:
+                return {"ok": False, "error": "要么给 track_id, 要么给 keyword"}
+            found = self.music_search(keyword, limit=limit)
+            if not found.get("ok"):
+                return found
+            tracks = found.get("tracks") or []
+            if not tracks:
+                return {"ok": False, "error": "PC 上没搜到 %r" % keyword,
+                        "tell_user": "没搜到这首歌（换几个关键词试试）"}
+            first = tracks[0]
+            track_id = first["id"]
+            meta = {"name": first.get("name"), "artists": first.get("artists"),
+                    "album": first.get("album"), "duration_ms": first.get("duration_ms"),
+                    "source": "search:%s" % keyword}
+            if queue_from_search:
+                queue = [t["id"] for t in tracks]
+        try:
+            record = self.music.play(track_id, queue=queue or None, meta=meta or None)
+        except MusicError as exc:
+            return {"ok": False, "error": str(exc), "tell_user": str(exc)}
+        self._push_music(self.music.snapshot())
+        return {"ok": True, "track_id": str(track_id), "name": record.get("name"),
+                "artists": record.get("artists"), "queue": queue,
+                "state": self.music.snapshot()}
+
+    def music_candidates(self, tag: Optional[str] = None, axis: Optional[str] = None,
+                         sort: str = "plays_asc", limit: int = 10) -> Dict[str, Any]:
+        """从**本地库**挑候选（"下一首由 chat 决定"就看这个清单）。"""
+        if self.music is None:
+            return {"ok": False, "error": "音乐没开（config.yaml 的 music.enabled）"}
+        picked = self.music.candidates(tag=tag, axis=axis, sort=sort, limit=limit)
+        return {"ok": True, "count": len(picked), "sort": sort, "tag": tag,
+                "tracks": [{"id": t.get("id"), "name": t.get("name"),
+                            "artists": t.get("artists"), "plays": t.get("plays"),
+                            "tags": t.get("tags"), "matched": t.get("matched")}
+                           for t in picked],
+                "summary": self.music.summary()}
+
+    def music_tag(self, tags: Dict[str, Any], track_id: Optional[str] = None,
+                  remove: bool = False) -> Dict[str, Any]:
+        """chat 补充（或删掉）tag（不给 id 就作用于当前这首）。"""
+        if self.music is None:
+            return {"ok": False, "error": "音乐没开（config.yaml 的 music.enabled）"}
+        from agent.core.music import MusicError
+
+        try:
+            record = self.music.tag_track(tags, track_id=track_id, remove=remove)
+        except MusicError as exc:
+            return {"ok": False, "error": str(exc), "tell_user": str(exc)}
+        return {"ok": True, "track_id": record.get("id"), "tags": record.get("tags")}
 
     def push_current_wallpaper(self) -> bool:
         """把一个 GUI 刚连上来该看到的壁纸补推一次（T6）。

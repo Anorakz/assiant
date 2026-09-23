@@ -56,7 +56,19 @@ class TestConstants(unittest.TestCase):
         self.assertEqual(p.COMMAND_QUERY_SCHEDULE, "query_schedule")
         self.assertEqual(p.COMMANDS,
                          ("switch_mode", "chat_input",
-                          "next_bilibili", "query_schedule"))
+                          "next_bilibili", "query_schedule",
+                          "music_play_pause", "music_next", "music_prev", "music_stop"))
+
+    def test_music_commands(self):
+        # T8-4: 音乐按钮。⚠ 它们**不决定放什么**（那是对话的事）—— 只做"暂停/继续"和
+        # "在 chat 挑出来的候选顺序里前后走"（语义见 protocol.py 那几个常量的注释）。
+        self.assertEqual(p.COMMAND_MUSIC_PLAY_PAUSE, "music_play_pause")
+        self.assertEqual(p.COMMAND_MUSIC_NEXT, "music_next")
+        self.assertEqual(p.COMMAND_MUSIC_PREV, "music_prev")
+        self.assertEqual(p.COMMAND_MUSIC_STOP, "music_stop")
+        for name in (p.COMMAND_MUSIC_PLAY_PAUSE, p.COMMAND_MUSIC_NEXT,
+                     p.COMMAND_MUSIC_PREV, p.COMMAND_MUSIC_STOP):
+            self.assertIn(name, p.COMMANDS)
 
     def test_the_manual_wallpaper_command_is_gone(self):
         # T7-3: 换壁纸只走对话, 这条命令连同 GUI 的「下一张」按钮一起删了
@@ -373,9 +385,9 @@ class TestWireContract(unittest.TestCase):
                                  (topic, data))
 
     def test_every_documented_topic_and_command_is_covered(self):
-        # 防止"文档加了条目但测试漏了"（5 个 topic + 4 条命令 = 9）
+        # 防止"文档加了条目但测试漏了"（5 个 topic + 8 条命令 = 13）
         documented = set(p.TOPICS) | set(p.COMMANDS)
-        self.assertEqual(len(documented), 9)
+        self.assertEqual(len(documented), 13)
 
     def test_one_message_is_exactly_one_line(self):
         # NDJSON 的前提: 消息里不能出现裸换行

@@ -66,6 +66,10 @@ from agent.ipc.local_server import (  # noqa: E402
 )
 from agent.ipc.protocol import (  # noqa: E402
     COMMAND_CHAT_INPUT,
+    COMMAND_MUSIC_NEXT,
+    COMMAND_MUSIC_PLAY_PAUSE,
+    COMMAND_MUSIC_PREV,
+    COMMAND_MUSIC_STOP,
     COMMAND_NEXT_BILIBILI,
     COMMAND_QUERY_SCHEDULE,
     COMMAND_SWITCH_MODE,
@@ -645,6 +649,71 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         )
         await handler("next_wallpaper", {})
         self.assertEqual(pushed, [])
+
+    # ---- T8-4: 音乐按钮（播放/暂停、上一首、下一首、停止）----
+
+    async def test_music_without_a_runtime_says_it_is_not_enabled(self):
+        from agent.ipc import NO_MUSIC_NOTE, _make_command_handler
+
+        pushed = []
+        handler = _make_command_handler(
+            None, runtime=None, push=lambda topic, data: pushed.append((topic, data))
+        )
+        await handler(COMMAND_MUSIC_PLAY_PAUSE, {})
+        self.assertEqual(len(pushed), 1)
+        self.assertEqual(pushed[0][0], TOPIC_LLM)
+        self.assertEqual(pushed[0][1]["text"], NO_MUSIC_NOTE)
+
+    async def test_music_success_pushes_nothing_extra(self):
+        from agent.ipc import _make_command_handler
+
+        calls = []
+
+        class _Runtime(object):
+            def music_control(self, action, **kwargs):
+                calls.append(action)
+                return {"ok": True, "action": action, "paused": True}
+
+        pushed = []
+        handler = _make_command_handler(
+            None, runtime=_Runtime(), push=lambda topic, data: pushed.append(topic))
+        await handler(COMMAND_MUSIC_PLAY_PAUSE, {})
+        self.assertEqual(calls, ["play_pause"])
+        self.assertEqual(pushed, [], "按钮的反馈是音乐条自己变, 不往对话区写话")
+
+    async def test_music_failure_is_told_to_the_user(self):
+        from agent.ipc import _make_command_handler
+
+        class _Runtime(object):
+            def music_control(self, action, **kwargs):
+                return {"ok": False, "error": "PC 上现在没有在放的歌",
+                        "tell_user": "PC 上现在没有在放的歌"}
+
+        pushed = []
+        handler = _make_command_handler(
+            None, runtime=_Runtime(),
+            push=lambda topic, data: pushed.append((topic, data)))
+        await handler(COMMAND_MUSIC_NEXT, {})
+        self.assertEqual(len(pushed), 1)
+        self.assertEqual(pushed[0][0], TOPIC_LLM)
+        self.assertIn("没有在放", pushed[0][1]["text"])
+
+    async def test_every_music_command_maps_to_an_action(self):
+        from agent.ipc import _make_command_handler
+
+        seen = []
+
+        class _Runtime(object):
+            def music_control(self, action, **kwargs):
+                seen.append(action)
+                return {"ok": True}
+
+        handler = _make_command_handler(None, runtime=_Runtime())
+        pairs = [(COMMAND_MUSIC_PLAY_PAUSE, "play_pause"), (COMMAND_MUSIC_NEXT, "next"),
+                 (COMMAND_MUSIC_PREV, "prev"), (COMMAND_MUSIC_STOP, "stop")]
+        for command, action in pairs:
+            await handler(command, {})
+        self.assertEqual(seen, [action for _command, action in pairs])
 
     async def test_unknown_action_does_not_spam_llm(self):
         # 不认识的 action 只记 warning: 它是版本不一致的正常现象, 不该往聊天里塞话

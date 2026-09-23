@@ -48,6 +48,10 @@ __all__ = [
     "COMMAND_CHAT_INPUT",
     "COMMAND_NEXT_BILIBILI",
     "COMMAND_QUERY_SCHEDULE",
+    "COMMAND_MUSIC_PLAY_PAUSE",
+    "COMMAND_MUSIC_NEXT",
+    "COMMAND_MUSIC_PREV",
+    "COMMAND_MUSIC_STOP",
     "COMMANDS",
     # 命令方向的信封字段名 (GUI 实际实现为准)
     "ACTION_FIELD",
@@ -125,12 +129,27 @@ COMMAND_NEXT_BILIBILI = "next_bilibili"
 #: 的应答是随后那条 status 一样, **没有请求 id** (协议没有版本号与关联字段)。
 COMMAND_QUERY_SCHEDULE = "query_schedule"
 
+# ---- 音乐（T8-4）----
+#: ⚠ 这三个按钮**不决定放什么**: "下一首放哪首"由**对话**决定（chat 挑候选 → play）。
+#: 这里的语义分别是:
+#:   `music_play_pause` 暂停/继续**当前这首**（无参）;
+#:   `music_next` / `music_prev` 在**chat 上次挑出来的候选顺序**里前后走一格;
+#:   还没有候选队列时回一句说明（"先从对话里挑一次歌"）—— 不假装换了一首。
+COMMAND_MUSIC_PLAY_PAUSE = "music_play_pause"
+COMMAND_MUSIC_NEXT = "music_next"
+COMMAND_MUSIC_PREV = "music_prev"
+COMMAND_MUSIC_STOP = "music_stop"
+
 #: 全部 command (GUI -> Agent)
 COMMANDS = (
     COMMAND_SWITCH_MODE,
     COMMAND_CHAT_INPUT,
     COMMAND_NEXT_BILIBILI,
     COMMAND_QUERY_SCHEDULE,
+    COMMAND_MUSIC_PLAY_PAUSE,
+    COMMAND_MUSIC_NEXT,
+    COMMAND_MUSIC_PREV,
+    COMMAND_MUSIC_STOP,
 )
 
 # 命令方向的信封字段名。**以 GUI 的实际实现为准** (Phase 6 决策 1):
