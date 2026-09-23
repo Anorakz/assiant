@@ -1,22 +1,26 @@
 # ============================================================================
-#  agent/tools/wallpaper.py — "换壁纸" 工具（Phase 7 T3）
+#  agent/tools/wallpaper.py — "换壁纸" 工具（Phase 7 T3；T7-3 起能按内容挑）
 #
-#  它做什么: 让板子屏幕上的背景图换成**下一张** —— 从配置的壁纸目录里按文件名顺序
-#            翻, 然后把结果推给 GUI（topic `wallpaper`, 线格式见 docs/ipc-protocol.md §3）。
+#  它做什么: 让板子屏幕上的背景图换一张 —— 默认按文件名翻下一页；给了 `match`
+#            就**先按内容筛**（标签 / IP），再在筛出来的候选里翻（相关度最高的在前）。
+#            最后把结果推给 GUI（topic `wallpaper`, 线格式见 docs/ipc-protocol.md §3）。
 #
-#  同一个动作有**两条入口**, 共用同一份实现
+#  ⚠ T7-3 的入口变化: **手动换壁纸都删掉了**
 #  ---------------------------------------------------------------------------
-#      GUI 主区右下角「下一张」（命令 next_wallpaper）  ┐
-#                                                      ├─▶ Runtime.next_wallpaper(step)
-#      LLM 调工具 next_wallpaper(step)                 ┘        └─ WallpaperDeck.step()
-#  所以工具这里不自己挑图、不自己推 IPC: 它只是把 LLM 的入参转给同一个入口。
-#  这样"下一张是哪张"只有一个地方说了算（agent/core/wallpaper.py）。
+#      T3   GUI 主区「下一张」按钮 ┐
+#           LLM 工具 next_wallpaper ├─▶ Runtime.next_wallpaper(step)
+#      T6   + 同名 IPC 命令受状态权限表约束
+#      T7-3 GUI 按钮、IPC 命令**删掉**；工具加上 `match=`
+#                                      └─▶ Runtime.next_wallpaper(step, match)
+#                                              └─ WallpaperDeck.step(step, pool)
+#  也就是说: 现在**只有对话**能换壁纸（"换一张安静的深色风景"），
+#  因为"换成什么样"这件事只有自然语言说得清，按钮只能按文件名翻。
 #
 #  ⚠ 让 LLM 知道的三件事（都写进 description）
 #  ---------------------------------------------------------------------------
 #    1. 只改**显示**, 不动任何文件（不是删除/移动壁纸）
-#    2. 是"翻页"不是"指定某张": 想要特定图得先知道目录里有什么 —— 那属于**标签化**
-#       之后的事（见 todo.md 的"按内容挑图"）
+#    2. match 的三条写法（轴=标签 / 只写标签 / ip=名字）—— 写错了会**如实报错**,
+#       不会"随便换一张糊弄过去"
 #    3. 推给 GUI 之后**没有回执**（GUI 是否真的画上去了, Agent 不知道）
 # ============================================================================
 
@@ -39,9 +43,12 @@ NAME = "next_wallpaper"
 ALLOWED_STATES = (State.IDLE, State.STUDY)
 
 DESCRIPTION = (
-    "把板子屏幕上的背景图换成下一张（壁纸目录里按文件名翻页）。"
-    "step=1 下一张、-1 上一张、0 重推当前这张。"
-    "⚠ 只改显示, 不动任何文件; 它按顺序翻页, 不能指定某一张; 推给界面后没有回执。"
+    "把板子屏幕上的背景图换成另一张。"
+    "step=1 往后翻、-1 往前翻、0 重推当前这张。"
+    "想按内容挑就给 match：\"scene=anime\"（场景轴上的某条标签）、"
+    "\"anime\"（只写标签名，各轴里找）、\"ip=EVA\"（某个作品，按锚点图检索）。"
+    "不知道库里有什么标签时，先用 list_wallpaper_tags 看一眼。"
+    "⚠ 只改显示, 不动任何文件; 推给界面后没有回执。"
 )
 
 SCHEMA: Dict[str, Any] = {
@@ -51,7 +58,14 @@ SCHEMA: Dict[str, Any] = {
             "type": "integer",
             "minimum": -50,
             "maximum": 50,
-            "description": "往前翻几张（负数=往回翻, 0=重推当前这张）; 默认 1",
+            "description": "在候选里往前翻几张（负数=往回翻, 0=重推当前这张）; 默认 1",
+        },
+        "match": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "挑图条件（不写=按文件名翻下一页）: "
+                           "\"scene=anime\" / \"anime\" / \"ip=EVA\"",
         },
     },
     "additionalProperties": False,
@@ -73,8 +87,8 @@ def build(services: Dict[str, Any]) -> Optional[Tool]:
         _log.warning("tools: services['next_wallpaper'] 不是可调用的 —— 跳过 next_wallpaper")
         return None
 
-    def handler(step: int = 1) -> Dict[str, Any]:
-        return advance(step)
+    def handler(step: int = 1, match: Optional[str] = None) -> Dict[str, Any]:
+        return advance(step, match)
 
     return Tool(
         name=NAME,

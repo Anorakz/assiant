@@ -73,18 +73,14 @@ public:
     /// 下区域（T7）：非游戏=音乐条，游戏=B站封面（互斥）
     BottomBar* bottomBar() const { return bottomBar_; }
 
-    /// 主区（T8/T9）：非游戏 = 完全留给壁纸（右下角一个"下一张"）；游戏 = T9 的视频区
-    QPushButton* nextWallpaperButton() const { return nextWallpaper_; }
+    /// 主区（T8/T9）：非游戏 = 完全留给壁纸；游戏 = T9 的视频区
+    /// ⚠ T7-3：主区那个「下一张」按钮**已删除** —— 换壁纸只走对话（见 docs/gui.md）
     QLabel* mainHintLabel() const { return mainHint_; }
     VideoPanel* videoPanel() const { return videoPanel_; }
     /// 主区那行提示。**空字符串 = 藏起来**（T3：壁纸来了以后占位文字要让位）；
     /// warn=true 用橙色（壁纸读不到这类"要看得出来"的情况）
     void setMainHint(const QString& text, bool warn = false);
     void setGameMode(bool game);
-
-signals:
-    /// 用户点了主区右下角的"下一张"（T8：发给 Agent 的 next_wallpaper）
-    void nextWallpaperRequested();
 
 private:
     RegionHost* bottomRegion_ = nullptr;
@@ -95,7 +91,6 @@ private:
     QWidget* chatFrame_ = nullptr;
     QWidget* scheduleFrame_ = nullptr;
     BottomBar* bottomBar_ = nullptr;
-    QPushButton* nextWallpaper_ = nullptr;
     QLabel* mainHint_ = nullptr;
     /// 当前是不是游戏模式（主区是视频区那页）。T3：给 setMainHint 判断可见性用
     bool isGameMode_ = false;

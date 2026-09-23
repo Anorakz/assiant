@@ -67,7 +67,6 @@ from agent.ipc.local_server import (  # noqa: E402
 from agent.ipc.protocol import (  # noqa: E402
     COMMAND_CHAT_INPUT,
     COMMAND_NEXT_BILIBILI,
-    COMMAND_NEXT_WALLPAPER,
     COMMAND_QUERY_SCHEDULE,
     COMMAND_SWITCH_MODE,
     MAX_LINE_BYTES,
@@ -437,7 +436,8 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         await handler(COMMAND_SWITCH_MODE, {"value": "STUDY"})     # 还没接线
         await handler(COMMAND_SWITCH_MODE, {"value": "banana"})    # 非法模式
         await handler(COMMAND_SWITCH_MODE, {})
-        await handler(COMMAND_NEXT_WALLPAPER, {})
+        await handler(COMMAND_NEXT_BILIBILI, {})                  # 未接线的命令
+        await handler("next_wallpaper", {})                       # T7-3 已删除的命令
         await handler("something_new", {})
 
         self.assertEqual(bus.qsize(), 0, "未接线的命令不能变成聊天输入")
@@ -624,8 +624,8 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
             None, runtime=None, push=lambda topic, data: pushed.append((topic, data))
         )
 
-        # ⚠ T3 起 next_wallpaper **接上下游了**, 所以它不再走"未接线"这条路 ——
-        #   它有自己的处理器 (见 tests/test_wallpaper.py 的 TestIpcCommand)。
+        # ⚠ T7-3 起这张表里只剩 next_bilibili: next_wallpaper 命令连同 GUI 的
+        #   「下一张」按钮一起删掉了（换壁纸只走对话）。
         await handler(COMMAND_NEXT_BILIBILI, {})
 
         self.assertEqual(len(pushed), 1, "未接线的命令要回一句")
@@ -634,19 +634,17 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         self.assertIn("接入", data["text"], "说明要讲清没接入")
         self.assertIn("Phase 7", data["text"])
 
-    async def test_next_wallpaper_without_a_runtime_replies_too(self):
-        # 老 factory 不给 runtime 时: 不是"未接线", 而是"模块没接进来" —— 同样要回话
-        from agent.ipc import NO_WALLPAPER_NOTE, _make_command_handler
+    async def test_the_deleted_wallpaper_command_gets_no_reply_at_all(self):
+        # T7-3: 这条命令**不存在**了 —— 老客户端发过来只记一条 warning,
+        # 既不回话、也不崩（别假装"已经换好了"）。
+        from agent.ipc import _make_command_handler
 
         pushed = []
         handler = _make_command_handler(
             None, runtime=None, push=lambda topic, data: pushed.append((topic, data))
         )
-        await handler(COMMAND_NEXT_WALLPAPER, {})
-
-        self.assertEqual(len(pushed), 1)
-        self.assertEqual(pushed[0][0], TOPIC_LLM)
-        self.assertEqual(pushed[0][1]["text"], NO_WALLPAPER_NOTE)
+        await handler("next_wallpaper", {})
+        self.assertEqual(pushed, [])
 
     async def test_unknown_action_does_not_spam_llm(self):
         # 不认识的 action 只记 warning: 它是版本不一致的正常现象, 不该往聊天里塞话
@@ -663,7 +661,8 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         from agent.ipc import _make_command_handler
 
         handler = _make_command_handler(None)
-        await handler(COMMAND_NEXT_WALLPAPER, {})   # 不该抛
+        await handler(COMMAND_NEXT_BILIBILI, {})   # 不该抛
+        await handler("next_wallpaper", {})        # 已删除的命令也不该抛
 
     async def test_unwired_command_note_reaches_a_real_client(self):
         if not UNIX_SOCKET_SUPPORTED:

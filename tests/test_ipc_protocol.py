@@ -51,13 +51,17 @@ class TestConstants(unittest.TestCase):
 
     def test_commands(self):
         self.assertEqual(p.COMMAND_SWITCH_MODE, "switch_mode")
-        self.assertEqual(p.COMMAND_NEXT_WALLPAPER, "next_wallpaper")
         self.assertEqual(p.COMMAND_CHAT_INPUT, "chat_input")
         self.assertEqual(p.COMMAND_NEXT_BILIBILI, "next_bilibili")
         self.assertEqual(p.COMMAND_QUERY_SCHEDULE, "query_schedule")
         self.assertEqual(p.COMMANDS,
-                         ("switch_mode", "next_wallpaper", "chat_input",
+                         ("switch_mode", "chat_input",
                           "next_bilibili", "query_schedule"))
+
+    def test_the_manual_wallpaper_command_is_gone(self):
+        # T7-3: 换壁纸只走对话, 这条命令连同 GUI 的「下一张」按钮一起删了
+        self.assertFalse(hasattr(p, "COMMAND_NEXT_WALLPAPER"))
+        self.assertNotIn("next_wallpaper", p.COMMANDS)
 
     def test_topics_and_commands_do_not_overlap(self):
         # 同一条连接双向都用 topic 字段, 名字重了就没法区分方向
@@ -143,7 +147,7 @@ class TestEncode(unittest.TestCase):
                     p.encode(p.TOPIC_LLM, bad)
 
     def test_empty_data_object_is_fine(self):
-        _, data = p.decode(p.encode(p.COMMAND_NEXT_WALLPAPER, {}))
+        _, data = p.decode(p.encode(p.COMMAND_QUERY_SCHEDULE, {}))
         self.assertEqual(data, {})
 
     def test_nested_data_allowed(self):
@@ -359,7 +363,6 @@ class TestWireContract(unittest.TestCase):
             (p.TOPIC_SCHEDULE, {"kind": "state", "now": "2026-09-22T13:05:00",
                                 "limit": 50, "fired": []}),
             (p.COMMAND_SWITCH_MODE, {"value": "GAME"}),
-            (p.COMMAND_NEXT_WALLPAPER, {}),
             (p.COMMAND_CHAT_INPUT, {"text": "帮我看看现在几点了"}),
             (p.COMMAND_NEXT_BILIBILI, {}),
             (p.COMMAND_QUERY_SCHEDULE, {}),
@@ -370,9 +373,9 @@ class TestWireContract(unittest.TestCase):
                                  (topic, data))
 
     def test_every_documented_topic_and_command_is_covered(self):
-        # 防止"文档加了条目但测试漏了"
+        # 防止"文档加了条目但测试漏了"（5 个 topic + 4 条命令 = 9）
         documented = set(p.TOPICS) | set(p.COMMANDS)
-        self.assertEqual(len(documented), 10)
+        self.assertEqual(len(documented), 9)
 
     def test_one_message_is_exactly_one_line(self):
         # NDJSON 的前提: 消息里不能出现裸换行
@@ -433,8 +436,8 @@ class TestCommandEnvelope(unittest.TestCase):
         self.assertEqual(set(payload), {"action", "payload"})
 
     def test_none_payload_becomes_empty_object(self):
-        self.assertEqual(p.encode_command(p.COMMAND_NEXT_WALLPAPER),
-                         b'{"action":"next_wallpaper","payload":{}}\n')
+        self.assertEqual(p.encode_command(p.COMMAND_QUERY_SCHEDULE),
+                         b'{"action":"query_schedule","payload":{}}\n')
 
     def test_round_trip_every_documented_command(self):
         for action in p.COMMANDS:

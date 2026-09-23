@@ -16,6 +16,9 @@
 #  ⚠ 本包不强制依赖 numpy / rknnlite / tokenizers: 没有它们时 encode() 退化成
 #    list[float]（mock 路径）, 或者真模型在**调用时**才报带安装提示的错
 #    （真模型那条路是三样都延迟导入的, 所以宿主机上照样能 import 本包）。
+#
+#  T7-3 起这里还多了一条**不碰 NPU** 的路: `tag_index.TagIndex` —— 读数据文件里
+#  已经存好的向量做挑图（纯 Python 点积, 开发机也能跑）。它只读、不写、不读配置。
 # ============================================================================
 
 from .roi import DEFAULT_ROI, ROI_SPACE, RoiError, is_valid_roi, parse_roi
@@ -26,6 +29,7 @@ from .siglip_encoder import (
     SigLIPError,
 )
 from .siglip import SiglipConfig, SiglipError, SiglipModel
+from .tag_index import MatchResult, TagIndex, TagIndexError
 
 __all__ = [
     # ROI
@@ -43,4 +47,8 @@ __all__ = [
     "SiglipModel",
     "SiglipConfig",
     "SiglipError",
+    # 标签索引（T7-3）—— 读 config/wall_data.jsonl，纯 Python 挑图
+    "TagIndex",
+    "TagIndexError",
+    "MatchResult",
 ]

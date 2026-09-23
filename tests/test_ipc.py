@@ -45,7 +45,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from agent.ipc import (  # noqa: E402
     COMMAND_CHAT_INPUT,
-    COMMAND_NEXT_WALLPAPER,
+    COMMAND_QUERY_SCHEDULE,
     TOPIC_STATUS,
     UNIX_SOCKET_SUPPORTED,
     IpcClientError,
@@ -274,9 +274,9 @@ async def test_command_without_payload_becomes_empty_object(server, sock_path):
     async with connected(sock_path, server, 1) as client:
         # payload 省略; 注意 action 必须是 protocol.COMMANDS 里的 ——
         # server 只分发已知命令 (未知 topic 一律忽略, 见下面那个用例)
-        await client.send_command(COMMAND_NEXT_WALLPAPER)
+        await client.send_command(COMMAND_QUERY_SCHEDULE)
         await wait_for(lambda: seen, what="无参数命令")
-        assert seen == [(COMMAND_NEXT_WALLPAPER, {})]   # 协议要求 data 是 object
+        assert seen == [(COMMAND_QUERY_SCHEDULE, {})]   # 协议要求 data 是 object
 
 
 @needs_unix

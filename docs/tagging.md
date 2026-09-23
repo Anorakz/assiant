@@ -109,7 +109,39 @@ assistant tag --dir /path --data-file /path --top-k 3   # 覆盖配置
   开发机上 `--apply` 会明确说缺什么（dry-run 不需要这些，哪儿都能跑）。
 - **Agent 不会自动打标签**（`wallpaper.tagging.auto` 默认 false）—— 它可能会占 NPU 一两分钟。
 
-## 6. 已知边界（如实写下来）
+## 6. 怎么挑图（在**对话里**说）
+
+⚠ **T7-3 起换壁纸只有对话这一条路**：主区那个「下一张」按钮与同名的 `next_wallpaper`
+IPC 命令都删掉了（理由见 `agent/core/wallpaper.py` 模块头）。挑图**不过 NPU** ——
+用数据文件里已经存好的向量做纯 Python 点积（`agent/vision/tag_index.py`），毫秒级。
+
+对 Agent 说一句人话，模型自己决定调哪个工具：
+
+| 你说 | 模型会调 | 干什么 |
+| --- | --- | --- |
+| "换一张安静的深色风景" | `next_wallpaper(match="scene=landscape")` | 挑最像的几张里翻 |
+| "有哪些风格？" | `list_wallpaper_tags` | 先看清单（每轴各标签几张） |
+| "换一张像 EVA 的" | `next_wallpaper(match="ip=EVA")` | 锚点原型检索（纯 CPU） |
+| "换一张壁纸" | `next_wallpaper()` | 按文件名翻下一页（老行为） |
+
+**`match` 的三条写法**（写错**如实报错**，不会随便换一张糊弄过去）：
+
+| 写法 | 含义 |
+| --- | --- |
+| `scene=anime` | 某个轴上的某条标签（轴名必须是真轴：`scene`/`tone`/`mood`） |
+| `anime` | 只写标签名 → 在所有轴里找同名标签（命中多个轴时按分数合并且去重） |
+| `ip=EVA` | 配置里那个 IP 的**锚点原型**最像的图（名字大小写不敏感） |
+
+- **候选按相关度排序，所以 `step=1` = "最像的那张"**；再调一次就往下一名走（会回绕）。
+  `total` 报的是**候选数**，不是目录里的张数。
+- **分数是余弦**（不是概率）：排序可信，绝对值不要当置信度（阈值还没标定，见 §7）。
+- **按标签算分不受 top-k 截断**：数据文件第一行存着全部标签向量，所以
+  "`scene=anime` 第 4 名"也能算出来（图片记录里只存了 top-3）。
+- **失败都有一句能照做的话**：不认识的轴会列出真轴、不认识的标签会列词表、
+  没配置锚点的 IP 会说去 `ip_presets` 加、锚点没打过标签会说"先跑 `assistant tag`"、
+  整个库还没打标签会说去跑 `assistant tag --apply`。
+
+## 7. 已知边界（如实写下来）
 
 - **分数是余弦，不是概率**：`logit_scale/bias` 没随模型导出，拿不到标定过的 sigmoid。
   所以**每轴的阈值要实测标定**，而且不同轴的分数不可比（不要做"总分"）。
@@ -122,9 +154,9 @@ assistant tag --dir /path --data-file /path --top-k 3   # 覆盖配置
   不要"改成等比 letterbox"：那会跑到模型训练分布之外（`preprocessor_config.json` 就是
   256×256 压扁，归一化已烧进 rknn）。
 
-## 7. 实测数字（板端，2026-09-22，人工真值 12 张）
+## 8. 实测数字（板端，2026-09-22，人工真值 12 张）
 
-这些数字**照实记录**（包括不好看的那些），跑法见 §8。⚠ 真值是我按 4×3 联系表
+这些数字**照实记录**（包括不好看的那些），跑法见 §9。⚠ 真值是我按 4×3 联系表
 （`logs/eval_sheet.png`）逐张标的，**待你复核**——改真值就等于改基线。
 
 | 指标 | 结果 |
@@ -158,14 +190,16 @@ assistant tag --dir /path --data-file /path --top-k 3   # 覆盖配置
 Nier 那两张锚点本身差异大（黑底徽记 vs 黑白人影），均值原型被冲淡。
 **每个 IP 给 3–5 张锚点会明显更稳**（现在多数只有 1–2 张）。
 
-## 8. 怎么验
+## 9. 怎么验
 
 ```bash
 python tests/test_wall_data.py        # 词表 / 数据文件 / 增量计划（开发机也能跑）
+python tests/test_tag_index.py        # 标签索引 / 锚点检索 / match 语法（开发机也能跑）
 python tests/test_cli.py              # assistant tag 的计划逻辑（dry-run）
+python tests/test_wallpaper.py        # 游标 / 工具 / match 透传（开发机也能跑）
 python tests/test_siglip.py           # SigLIP 双塔（板端才跑模型那几条）
 python tests/board/siglip_align.py    # 搬运对齐（仓库版 vs 板端实验树 sig/）
-python tests/board/tag_quality.py     # 命中率 / 预处理 A/B / IP 检索（板端，§7 的数字出自它）
+python tests/board/tag_quality.py     # 命中率 / 预处理 A/B / IP 检索（板端，§8 的数字出自它）
 ```
 
 板端验收用 `tests/data/wallpaper_tags/truth.json` 里的人工真值算每轴 top-1/top-2

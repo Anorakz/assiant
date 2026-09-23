@@ -17,18 +17,25 @@ tests/test_tool_permissions.py — 工具的状态权限表（Phase 7 T4）
       · 给 LLM 看的清单也要按状态过滤（T4 顺手修的那一处, 见
         `agent/llm/provider.py::_advertised_tools`）
 
-这张表（你 T4 拍的板）:
+这张表（你 T4 拍的板；T7-3 加了 list_wallpaper_tags）:
 
-    | 状态  | back_to_desktop | next_wallpaper |
-    | SLEEP |        ✗        |       ✗        |
-    | IDLE  |        ✗        |       ✓        |
-    | STUDY |        ✓        |       ✓        |
-    | GAME  |        ✗        |       ✗        |
+    | 状态  | back_to_desktop | next_wallpaper | list_wallpaper_tags |
+    | SLEEP |        ✗        |       ✗        |          ✗          |
+    | IDLE  |        ✗        |       ✓        |          ✓          |
+    | STUDY |        ✓        |       ✓        |          ✓          |
+    | GAME  |        ✗        |       ✗        |          ✗          |
 
 为什么 SLEEP / GAME 一个都不给
     · SLEEP = "睡眠": 不让模型动系统里的任何东西, 最保守的一档
     · GAME  = 主区是视频区, 换壁纸等于白换; 而"回到桌面"是**学习收尾**的动作
       （T1 的决定, 工具说明里也写着"别在 GAME/IDLE 里乱按"）
+
+⚠ T7-3 撤掉了 T6① 的一半
+    T6① 曾规定"GUI 的 `next_wallpaper` **命令**也受这张表约束"（靠
+    `ToolRouter.allowed_in_current_state()`）。T7-3 按需求删掉了手动换壁纸 ——
+    按钮、同名 IPC 命令、以及那个只服务于它的路由方法**一起**下线了。
+    现在这张表只管**工具**（而工具只有对话这一条路能调到, 见
+    `agent/main.py::Runtime.next_wallpaper`）。
 """
 
 import asyncio
@@ -55,6 +62,8 @@ logging.disable(logging.CRITICAL)
 EXPECTED = {
     "back_to_desktop": {State.STUDY},
     "next_wallpaper": {State.IDLE, State.STUDY},
+    # T7-3: 只读的"看看库里有什么标签", 与 next_wallpaper 同一套状态
+    "list_wallpaper_tags": {State.IDLE, State.STUDY},
 }
 
 #: 四个状态各自**应该**看到哪些工具（由 EXPECTED 推出来, 不手写第二份）
@@ -89,24 +98,29 @@ def go_to(machine, state):
 
 
 def make_router(machine=None):
-    """真路由 + 两个真工具, 依赖换成**计数替身**（这样能验"handler 到底跑没跑"）。
+    """真路由 + 三个真工具, 依赖换成**计数替身**（这样能验"handler 到底跑没跑"）。
 
     @param machine 状态源; 不给就自己建一个（初始 IDLE）
     """
-    calls = {"desktop": 0, "wallpaper": 0}
+    calls = {"desktop": 0, "wallpaper": 0, "tags": 0}
 
     class _Sender:
         async def show_desktop(self):
             calls["desktop"] += 1
 
-    def _next_wallpaper(step=1):
+    def _next_wallpaper(step=1, match=None):
         calls["wallpaper"] += 1
         return {"ok": True, "path": "/w/1.png", "index": 0, "total": 1, "pushed": True}
+
+    def _wallpaper_tags(ip_query=None, limit=5):
+        calls["tags"] += 1
+        return {"ok": True, "count": 1, "axes": {}}
 
     machine = machine if machine is not None else StateMachine()
     router = ToolRouter(
         state_provider=machine,
-        services={"input_sender": _Sender(), "next_wallpaper": _next_wallpaper},
+        services={"input_sender": _Sender(), "next_wallpaper": _next_wallpaper,
+                  "wallpaper_tags": _wallpaper_tags},
     )
     for tool in build_tools(router):
         router.register(tool)
@@ -134,7 +148,7 @@ class TestTheTable(unittest.TestCase):
         table_names = set(EXPECTED)
         self.assertEqual(
             table_names,
-            {"back_to_desktop", "next_wallpaper"},
+            {"back_to_desktop", "next_wallpaper", "list_wallpaper_tags"},
             "权限表少了一行或多了一行: %s" % sorted(table_names),
         )
         self.assertEqual(len(TOOL_MODULES), len(table_names),
@@ -196,11 +210,11 @@ class TestForbiddenCombinationsAreReallyRefused(unittest.IsolatedAsyncioTestCase
                 result = await router.execute(name, {})
                 self.assertFalse(result["ok"], "%s/%s 应当被拒" % (state.value, name))
                 self.assertIn("not allowed", result["error"])
-                self.assertEqual(calls, {"desktop": 0, "wallpaper": 0},
+                self.assertEqual(calls, {"desktop": 0, "wallpaper": 0, "tags": 0},
                                  "%s/%s 被拒时 handler 不该跑" % (state.value, name))
                 checked += 1
-        # 反空转: 真的验到了组合（SLEEP 与 GAME 各 2 个, IDLE 1 个 = 5）
-        self.assertEqual(checked, 5, "遍历到的禁止组合数不对: %d" % checked)
+        # 反空转: 真的验到了组合（SLEEP 3 + GAME 3 + IDLE 1 = 7）
+        self.assertEqual(checked, 7, "遍历到的禁止组合数不对: %d" % checked)
 
     async def test_every_allowed_pair_really_runs(self):
         checked = 0
@@ -214,8 +228,8 @@ class TestForbiddenCombinationsAreReallyRefused(unittest.IsolatedAsyncioTestCase
                 self.assertEqual(sum(calls.values()), 1,
                                  "%s/%s 放行时 handler 应当正好跑一次" % (state.value, name))
                 checked += 1
-        # 反空转: 真的验到了允许的组合（STUDY 两个 + IDLE 一个 = 3）
-        self.assertEqual(checked, 3, "遍历到的允许组合数不对: %d" % checked)
+        # 反空转: 真的验到了允许的组合（STUDY 3 + IDLE 2 = 5）
+        self.assertEqual(checked, 5, "遍历到的允许组合数不对: %d" % checked)
 
 
 class TestModelOnlySeesAllowedTools(unittest.IsolatedAsyncioTestCase):
@@ -260,19 +274,20 @@ class TestModelOnlySeesAllowedTools(unittest.IsolatedAsyncioTestCase):
 
         return _Client()
 
-    async def test_study_sees_both_tools(self):
+    async def test_study_sees_three_tools(self):
         provider, backend = self._provider(State.STUDY)
         await provider.chat_with_tools("x", {})
         request = backend.client.chat.completions.requests[0]
         self.assertEqual({t["function"]["name"] for t in request["tools"]},
-                         {"back_to_desktop", "next_wallpaper"})
+                         {"back_to_desktop", "next_wallpaper", "list_wallpaper_tags"})
 
-    async def test_idle_sees_only_the_wallpaper_tool(self):
+    async def test_idle_sees_only_the_wallpaper_tools(self):
         provider, backend = self._provider(State.IDLE)
         await provider.chat_with_tools("x", {})
         request = backend.client.chat.completions.requests[0]
         self.assertEqual([t["function"]["name"] for t in request["tools"]],
-                         ["next_wallpaper"])
+                         ["list_wallpaper_tags", "next_wallpaper"],
+                         "清单按名字排序, 顺序也要稳定")
 
     async def test_sleep_and_game_advertise_no_tools_at_all(self):
         for state in (State.SLEEP, State.GAME):
@@ -284,69 +299,35 @@ class TestModelOnlySeesAllowedTools(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("tool_choice", request)
 
 
-class TestTheGuiCommandFollowsTheTableToo(unittest.IsolatedAsyncioTestCase):
-    """T6: GUI 的 `next_wallpaper` 命令也受**同一张表**约束。
+class TestTheRevertedT6Rule(unittest.IsolatedAsyncioTestCase):
+    """T7-3: "GUI 命令也受这张表约束"这条(T6①)**按要求撤掉了**。
 
-    理由: `next_wallpaper` 既是命令名也是工具名, 而"这个状态下能不能换壁纸"的答案是
-    一张表。GUI 的按钮与 LLM 的工具是同一个动作, 不该有两套规则 —— 否则按钮就是
-    绕过状态表的后门。这里用**真 Runtime**（真工具、真状态机、真壁纸目录）走一遍。
+    手动换壁纸（GUI 按钮 + 同名 IPC 命令）已删除, 换壁纸只剩对话一条路 ——
+    所以那个只服务于 GUI 命令的路由方法也一起删除。这条测试把"删除"钉成机械可查的
+    事实: 方法没了、命令没了、命令处理器对它是未知命令（只记日志, 不假装成功）。
+
+    ⚠ 这不是权限被削弱: 工具那张表**照旧**是唯一判据, 而工具只能从对话调到
+      （`ToolRouter.execute()` 拦），所以"能不能在这个状态换壁纸"仍然只有一个答案。
     """
 
-    def _runtime(self, state):
-        from agent.main import Runtime
+    def test_the_router_method_is_gone(self):
+        from agent.core.tool_router import ToolRouter
 
-        runtime = Runtime(config={"wallpaper": {"dir": make_dir("01_a.png", "02_b.png")}},
-                          start_native=False, start_terminal=False,
-                          log=logging.getLogger("test.permissions"))
-        runtime.wallpaper = WallpaperDeck(runtime.config["wallpaper"]["dir"])
-        # 状态机、路由、runtime 三者用**同一个** machine —— 否则"路由说不能用"与
-        # "runtime 现在是什么状态"会各说各的
-        machine = _machine_in(state)
-        _, router, _ = make_router(machine)
-        runtime.state = machine
-        runtime.tools = router
-        runtime.applied = []
-        runtime.on_wallpaper = lambda path, index: runtime.applied.append((path, index))
-        return runtime
+        self.assertFalse(hasattr(ToolRouter, "allowed_in_current_state"),
+                         "它唯一的调用方（GUI 命令）已删除, 方法也该删除而不是留着当摆设")
+        # 但工具权限本身照旧
+        _, router, _ = make_router()
+        self.assertFalse(router.is_allowed("back_to_desktop"), "IDLE 下不给回到桌面")
+        self.assertTrue(router.is_allowed("next_wallpaper"))
 
-    async def _send(self, runtime):
-        from agent.ipc import _handle_next_wallpaper
+    async def test_the_old_command_is_now_unknown(self):
+        from agent.ipc import _make_command_handler
 
         pushed = []
-        _handle_next_wallpaper(runtime, lambda topic, data: pushed.append((topic, data)))
-        return pushed
-
-    async def test_refused_exactly_where_the_table_says_no(self):
-        for state in State:
-            runtime = self._runtime(state)
-            pushed = await self._send(runtime)
-            allowed = "next_wallpaper" in EXPECTED_BY_STATE[state]
-            if allowed:
-                self.assertEqual(pushed, [], "%s 允许时不该回说明" % state.value)
-                self.assertEqual(len(runtime.applied), 1,
-                                 "%s 下按钮应当真的换了一张" % state.value)
-            else:
-                self.assertEqual(len(pushed), 1, "%s 下按钮应当被拒并回一句" % state.value)
-                topic, data = pushed[0]
-                self.assertEqual(topic, "llm")
-                self.assertIn("换壁纸没成功", data["text"])
-                self.assertIn(state.value, data["text"])
-                self.assertEqual(runtime.applied, [],
-                                 "%s 下不该真的换（后门被堵住了）" % state.value)
-
-    async def test_the_refusal_names_the_allowed_states(self):
-        pushed = await self._send(self._runtime(State.GAME))
-        text = pushed[0][1]["text"]
-        self.assertIn("idle", text)
-        self.assertIn("study", text)
-
-    async def test_without_a_tool_registry_the_command_is_not_blocked(self):
-        # "工具没装"（缺依赖）不是"状态不允许": 那时不该拿状态表拦人
-        runtime = self._runtime(State.GAME)
-        runtime.tools = None
-        pushed = await self._send(runtime)
-        self.assertEqual(pushed, [])
-        self.assertEqual(len(runtime.applied), 1)
+        handler = _make_command_handler(bus=None, runtime=None,
+                                        push=lambda topic, data: pushed.append((topic, data)))
+        await handler("next_wallpaper", {})
+        self.assertEqual(pushed, [], "老客户端发老命令: 只记日志, 不假装换好了")
 
 
 class TestTheConnectPush(unittest.IsolatedAsyncioTestCase):
@@ -401,10 +382,13 @@ class TestDeckAndToolsAreTheRealOnes(unittest.TestCase):
         empty = tempfile.mkdtemp()
         deck = WallpaperDeck(empty)
         self.assertEqual(deck.count(), 0)
-        router = ToolRouter(services={"next_wallpaper": lambda step=1: {"ok": True}})
-        self.assertIn("next_wallpaper", [t.name for t in build_tools(router)])
+        router = ToolRouter(services={"next_wallpaper": lambda step=1, match=None: {"ok": True}})
+        names = [t.name for t in build_tools(router)]
+        self.assertIn("next_wallpaper", names)
+        self.assertNotIn("list_wallpaper_tags", names,
+                         "没给 wallpaper_tags 入口时它自己跳过（缺依赖不是崩）")
 
-    def test_both_tools_declare_states_explicitly(self):
+    def test_every_tool_declares_states_explicitly(self):
         # 空集合 = 任何状态都不允许（fail closed）—— 工具不该"忘了写"就变成全放行
         _, router, _ = make_router()
         for name in router.names():

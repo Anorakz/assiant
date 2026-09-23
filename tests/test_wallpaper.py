@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-tests/test_wallpaper.py — 壁纸"下一张"（Phase 7 T3）
+tests/test_wallpaper.py — 壁纸"下一张"（Phase 7 T3；T7-3 起能按内容挑）
 
 跑法:
     python tests/test_wallpaper.py
 
-覆盖三件东西（正好是 T3 那三层）:
+覆盖三件东西（正好是那三层）:
 
   1) `agent/core/wallpaper.py::WallpaperDeck` —— 列目录与游标
      后缀过滤 / 按文件名排序 / 目录不存在与空目录各自报什么 / 回绕 / step=0 /
-     游标记的是**路径**（加新图、删当前图之后"下一张"仍然合理）/ 坏 step
+     游标记的是**路径**（加新图、删当前图之后"下一张"仍然合理）/ 坏 step /
+     T7-3: `pool=` 只在候选里翻（顺序即优先级、不在目录里的候选被丢掉）
   2) `agent/tools/wallpaper.py` —— LLM 那个工具
-     缺依赖跳过 / 出现在 list_tools 里 / 状态权限（GAME 不给）/ step 参数校验 /
-     工具**只转调** Runtime 的入口（不自己挑图、不自己推 IPC）
-  3) `agent/main.py::Runtime.next_wallpaper` + IPC 命令 —— 两条入口共用一份实现
+     缺依赖跳过 / 出现在 list_tools 里 / 状态权限（GAME 不给）/ 参数校验 /
+     工具**只转调** Runtime 的入口（不自己挑图、不自己推 IPC）/ T7-3: `match` 透传
+  3) `agent/main.py::Runtime.next_wallpaper` —— **唯一**入口（T7-3 起只有对话走它）
      换一张 -> 调 on_wallpaper 钩子 / 没有 IPC 时也能算（pushed=False）/
-     目录坏了返回 ok=False + 给人看的原因 / 命令处理器把失败变成一句 llm 说明
+     目录坏了返回 ok=False + 给人看的原因 / match 解析失败如实报错 /
+     T7-3: `next_wallpaper` **IPC 命令**已删除（"手动换壁纸"按要求下线）
 
 ⚠ 不测 GUI 画得像不像（那是 `gui/tests/test_image_fit.cpp` 与板端截图的事）,
   也不测真实图片能不能解码（Agent 不解码）。
+⚠ 标签索引本身的算法（词表向量、IP 锚点、排序）在 `tests/test_tag_index.py`。
 """
 
 import asyncio
@@ -41,9 +44,8 @@ from agent.core.wallpaper import (  # noqa: E402
     WallpaperDeck,
     WallpaperError,
 )
-from agent.ipc import NO_WALLPAPER_NOTE, UNWIRED_COMMAND_NOTES  # noqa: E402
+from agent.ipc import UNWIRED_COMMAND_NOTES  # noqa: E402
 from agent.ipc import protocol as p  # noqa: E402
-from agent.ipc import _handle_next_wallpaper  # noqa: E402
 from agent.tools import wallpaper as wallpaper_tool  # noqa: E402
 from agent.tools import build_tools  # noqa: E402
 
@@ -200,13 +202,60 @@ class TestSnapshot(unittest.TestCase):
         self.assertEqual(os.path.basename(deck.snapshot(initialise=True)[1]), "02_b.png")
 
 
+class TestStepWithPool(unittest.TestCase):
+    """T7-3: `pool=` 只在挑出来的候选里翻（**顺序即优先级**）。"""
+
+    def test_pool_order_is_the_priority(self):
+        root = make_dir("01_a.png", "02_b.png", "03_c.png")
+        deck = WallpaperDeck(root)
+        best_first = [os.path.join(root, n) for n in ("03_c.png", "01_a.png")]
+        # 还没选过 + step=1 -> 候选的第一张 = 最像的那张
+        self.assertEqual(os.path.basename(deck.step(1, pool=best_first)[1]), "03_c.png")
+        self.assertEqual(os.path.basename(deck.step(1, pool=best_first)[1]), "01_a.png")
+        self.assertEqual(os.path.basename(deck.step(1, pool=best_first)[1]), "03_c.png",
+                         "候选里翻到头要绕回去")
+
+    def test_total_is_the_candidate_count_not_the_dir_count(self):
+        root = make_dir("01_a.png", "02_b.png", "03_c.png")
+        deck = WallpaperDeck(root)
+        index, path, total = deck.step(1, pool=[os.path.join(root, "02_b.png")])
+        self.assertEqual((index, os.path.basename(path), total), (0, "02_b.png", 1))
+
+    def test_candidates_outside_the_dir_are_dropped(self):
+        # 图被删了/改名了: 候选里那一条要丢掉, 而不是推出一个找不到的路径
+        root = make_dir("01_a.png", "02_b.png")
+        deck = WallpaperDeck(root)
+        pool = [os.path.join(root, "99_gone.png"), os.path.join(root, "02_b.png")]
+        self.assertEqual(os.path.basename(deck.step(1, pool=pool)[1]), "02_b.png")
+
+    def test_a_pool_with_nothing_left_says_so(self):
+        root = make_dir("01_a.png")
+        deck = WallpaperDeck(root)
+        with self.assertRaises(WallpaperError) as ctx:
+            deck.step(1, pool=[os.path.join(root, "99_gone.png")])
+        self.assertIn("一张都不在", str(ctx.exception))
+
+    def test_current_not_in_pool_starts_from_the_first_candidate(self):
+        root = make_dir("01_a.png", "02_b.png", "03_c.png")
+        deck = WallpaperDeck(root)
+        deck.step(1)                                     # 当前 = 01_a（不在候选里）
+        pool = [os.path.join(root, "03_c.png"), os.path.join(root, "01_a.png")]
+        self.assertEqual(os.path.basename(deck.step(1, pool=pool)[1]), "03_c.png",
+                         "换了 match 之后从候选第一名开始, 而不是从旧游标往后挪")
+
+    def test_no_pool_keeps_the_old_filename_order(self):
+        root = make_dir("03_c.png", "01_a.png")
+        deck = WallpaperDeck(root)
+        self.assertEqual(os.path.basename(deck.step(1)[1]), "01_a.png")
+
+
 # ===========================================================================
 #  2) 工具
 # ===========================================================================
 class TestToolBuild(unittest.TestCase):
     def _services(self, calls):
-        def advance(step=1):
-            calls.append(step)
+        def advance(step=1, match=None):
+            calls.append((step, match))
             return {"ok": True, "path": "/w/1.png", "index": 0, "total": 1, "pushed": True}
 
         return {"next_wallpaper": advance}
@@ -230,19 +279,26 @@ class TestToolBuild(unittest.TestCase):
         tool = wallpaper_tool.build(self._services([]))
         self.assertIn("只改显示", tool.description)
         self.assertIn("没有回执", tool.description)
+        self.assertIn("match", tool.description, "T7-3: 得让模型知道能按内容挑")
 
     def test_schema_forbids_extra_arguments(self):
         tool = wallpaper_tool.build(self._services([]))
         self.assertFalse(tool.schema["additionalProperties"])
         self.assertEqual(tool.schema["properties"]["step"]["type"], "integer")
+        self.assertEqual(tool.schema["properties"]["match"]["type"], "string")
+
+    def test_schema_allows_calling_without_match(self):
+        # 不传 match = 老行为（按文件名翻页），所以它不能进 required
+        tool = wallpaper_tool.build(self._services([]))
+        self.assertNotIn("required", tool.schema)
 
 
 class TestToolExecution(unittest.IsolatedAsyncioTestCase):
     def _router(self, state=State.IDLE):
         calls = []
 
-        def advance(step=1):
-            calls.append(step)
+        def advance(step=1, match=None):
+            calls.append((step, match))
             return {"ok": True, "path": "/w/%d.png" % step, "index": 0, "total": 3,
                     "pushed": True}
 
@@ -256,14 +312,20 @@ class TestToolExecution(unittest.IsolatedAsyncioTestCase):
         router, calls = self._router()
         result = await router.execute("next_wallpaper", {})
         self.assertTrue(result["ok"])
-        self.assertEqual(calls, [1], "工具只是把入参转给 Runtime 的入口")
+        self.assertEqual(calls, [(1, None)], "工具只是把入参转给 Runtime 的入口")
         self.assertEqual(result["result"]["path"], "/w/1.png")
 
     async def test_step_is_forwarded(self):
         router, calls = self._router()
         result = await router.execute("next_wallpaper", {"step": -1})
-        self.assertEqual(calls, [-1])
+        self.assertEqual(calls, [(-1, None)])
         self.assertEqual(result["result"]["path"], "/w/-1.png")
+
+    async def test_match_is_forwarded(self):
+        router, calls = self._router()
+        result = await router.execute("next_wallpaper", {"step": 1, "match": "scene=anime"})
+        self.assertEqual(calls, [(1, "scene=anime")])
+        self.assertTrue(result["ok"])
 
     async def test_bad_argument_is_refused_before_running(self):
         router, calls = self._router()
@@ -271,6 +333,12 @@ class TestToolExecution(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         self.assertIn("invalid arguments", result["error"])
         self.assertEqual(calls, [], "参数不合法时 handler 一次都不该跑")
+
+    async def test_empty_match_is_refused_before_running(self):
+        router, calls = self._router()
+        result = await router.execute("next_wallpaper", {"match": ""})
+        self.assertFalse(result["ok"])
+        self.assertEqual(calls, [])
 
     async def test_refused_in_game_mode(self):
         # 游戏模式主区是视频区, 换壁纸没意义 —— 权限表里不给 GAME
@@ -281,7 +349,7 @@ class TestToolExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [])
 
     async def test_allowed_in_idle_and_study(self):
-        tool = wallpaper_tool.build({"next_wallpaper": lambda step=1: {}})
+        tool = wallpaper_tool.build({"next_wallpaper": lambda step=1, match=None: {}})
         self.assertEqual(tool.allowed_states, {State.IDLE, State.STUDY})
 
 
@@ -301,52 +369,157 @@ def _state_machine(state):
 
 
 # ===========================================================================
-#  3) Runtime 入口 + IPC 命令
+#  3) Runtime 入口（T7-3 起只有对话走它）+ "手动换壁纸"确实下线了
 # ===========================================================================
-class _FakeRuntime:
-    """只带 next_wallpaper 的替身（够 IPC 命令处理器用）。"""
+class TestTheManualEntryPointsAreGone(unittest.IsolatedAsyncioTestCase):
+    """T7-3 的需求: **手动换壁纸删掉** —— 换壁纸只走对话。
 
-    def __init__(self, result):
-        self.result = result
-        self.calls = 0
+    这条测试是"删干净了"的机械证据: 协议里没有那条命令, 未接线说明表里也没有,
+    命令处理器收到它只会当未知命令忽略（回一句 warning, 不崩）。
+    """
 
-    def next_wallpaper(self, step=1):
-        self.calls += 1
-        return self.result
+    def test_the_command_constant_is_gone(self):
+        self.assertFalse(hasattr(p, "COMMAND_NEXT_WALLPAPER"),
+                         "next_wallpaper 命令已删除（换壁纸只走对话）")
+        self.assertNotIn("next_wallpaper", p.COMMANDS)
 
-
-class TestIpcCommand(unittest.TestCase):
-    def test_next_wallpaper_is_no_longer_unwired(self):
-        self.assertNotIn(
-            p.COMMAND_NEXT_WALLPAPER, UNWIRED_COMMAND_NOTES,
-            "T3 接上下游了, 这句'还没接入'的说明必须撤掉",
-        )
+    def test_it_is_not_in_the_unwired_table_either(self):
+        # 它既不是"已接线"也不是"未接线": 这条命令**不存在**了
+        self.assertNotIn("next_wallpaper", UNWIRED_COMMAND_NOTES)
         self.assertIn(p.COMMAND_NEXT_BILIBILI, UNWIRED_COMMAND_NOTES,
                       "B 站那条还没接, 别一起删了")
 
-    def test_success_pushes_nothing_extra(self):
-        pushed = []
-        runtime = _FakeRuntime({"ok": True, "path": "/w/1.png", "index": 0})
-        _handle_next_wallpaper(runtime, lambda topic, data: pushed.append((topic, data)))
-        self.assertEqual(runtime.calls, 1)
-        self.assertEqual(pushed, [], "成功时不往对话区写话, 界面反馈就是壁纸变了")
+    async def test_the_command_handler_ignores_it(self):
+        from agent.ipc import _make_command_handler
 
-    def test_failure_becomes_a_readable_llm_note(self):
         pushed = []
-        runtime = _FakeRuntime({"ok": False, "error": "壁纸目录不存在: /w"})
-        _handle_next_wallpaper(runtime, lambda topic, data: pushed.append((topic, data)))
-        self.assertEqual(len(pushed), 1)
-        topic, data = pushed[0]
-        self.assertEqual(topic, p.TOPIC_LLM)
-        self.assertIn("壁纸目录不存在", data["text"])
+        handler = _make_command_handler(bus=None, runtime=None,
+                                        push=lambda topic, data: pushed.append(topic))
+        await handler("next_wallpaper", {})          # 未知命令: 不该抛、不该回话
+        self.assertEqual(pushed, [], "未知命令不该假装成功（也不该回一句'已换好'）")
 
-    def test_without_a_wallpaper_module_it_still_says_something(self):
-        pushed = []
-        _handle_next_wallpaper(object(), lambda topic, data: pushed.append((topic, data)))
-        self.assertEqual(pushed[0][1]["text"], NO_WALLPAPER_NOTE)
 
-    def test_no_push_entry_does_not_crash(self):
-        _handle_next_wallpaper(_FakeRuntime({"ok": False, "error": "x"}), None)
+class _FakeIndex:
+    """标签索引的替身（Runtime 只用到这几个方法，接口与真 TagIndex 一致）。"""
+
+    def __init__(self, pool=(), kind="axis", note="note", error=None, scores=None,
+                 total=3):
+        self.pool = list(pool)
+        self.kind = kind
+        self.note = note
+        self.error = error
+        self.scores = dict(scores or {})
+        self.total = total
+        self.data_file = "/tmp/wall_data.jsonl"
+        self.calls = []
+
+    def count(self):
+        return self.total
+
+    def match(self, spec, presets=None, wallpaper_dir=None, limit=None):
+        from agent.vision.tag_index import MatchResult
+
+        self.calls.append((spec, wallpaper_dir))
+        if self.error:
+            return MatchResult(error=self.error)
+        return MatchResult(pool=list(self.pool), kind=self.kind, note=self.note,
+                           detail={"scores": dict(self.scores)})
+
+
+class TestRuntimePickByMatch(unittest.IsolatedAsyncioTestCase):
+    """`Runtime.next_wallpaper(step, match)` —— 按内容挑（T7-3 的核心）。"""
+
+    def _runtime(self, root=None):
+        from agent.main import Runtime
+
+        root = root or make_dir("01_a.png", "02_b.png", "03_c.png")
+        runtime = Runtime(config={"wallpaper": {"dir": root}},
+                          start_native=False, start_terminal=False,
+                          log=logging.getLogger("test.wallpaper.match"))
+        runtime.wallpaper = WallpaperDeck(root)
+        return runtime, root
+
+    def _with_pool(self, runtime, root, order):
+        scores = {os.path.join(root, order[0]): 0.62} if order else {}
+        index = _FakeIndex(pool=[os.path.join(root, n) for n in order], scores=scores)
+        runtime._tag_index = index
+        return index
+
+    async def test_match_picks_the_best_first(self):
+        runtime, root = self._runtime()
+        self._with_pool(runtime, root, ["03_c.png", "01_a.png"])
+        result = runtime.next_wallpaper(1, match="scene=anime")
+        self.assertTrue(result["ok"])
+        self.assertEqual(os.path.basename(result["path"]), "03_c.png",
+                         "候选已按相关度排好, step=1 就是最像的那张")
+        self.assertEqual(result["total"], 2, "total 报的是候选数, 不是目录里的张数")
+        self.assertAlmostEqual(result["score"], 0.62)
+        self.assertEqual(result["match"]["spec"], "scene=anime")
+        self.assertEqual(result["match"]["kind"], "axis")
+
+    async def test_second_call_walks_down_the_ranking(self):
+        runtime, root = self._runtime()
+        self._with_pool(runtime, root, ["03_c.png", "01_a.png"])
+        runtime.next_wallpaper(1, match="scene=anime")
+        self.assertEqual(os.path.basename(runtime.next_wallpaper(1, match="scene=anime")["path"]),
+                         "01_a.png")
+
+    async def test_without_match_it_is_still_the_old_behaviour(self):
+        runtime, root = self._runtime()
+        index = self._with_pool(runtime, root, ["03_c.png"])
+        result = runtime.next_wallpaper(1)
+        self.assertEqual(os.path.basename(result["path"]), "01_a.png",
+                         "没给 match 就按文件名翻页")
+        self.assertEqual(index.calls, [], "不给 match 时**不该**去碰标签索引")
+        self.assertNotIn("match", result)
+
+    async def test_a_broken_match_is_an_honest_failure(self):
+        runtime, root = self._runtime()
+        runtime._tag_index = _FakeIndex(error="词表里没有 'xxx' 这条标签")
+        result = runtime.next_wallpaper(1, match="scene=xxx")
+        self.assertFalse(result["ok"])
+        self.assertIn("没有", result["error"])
+        self.assertIsNone(runtime.wallpaper.current(), "失败时不该动游标")
+
+    async def test_an_empty_pool_is_an_honest_failure(self):
+        runtime, root = self._runtime()
+        self._with_pool(runtime, root, [])          # pool=[] -> 没命中
+        result = runtime.next_wallpaper(1, match="ip=Nier")
+        self.assertFalse(result["ok"])
+        self.assertIn("没有符合条件", result["error"])
+
+    async def test_without_tag_data_it_says_what_to_run(self):
+        runtime, root = self._runtime()
+        runtime._tag_index = _FakeIndex(total=0)    # 空库 = 还没打过标签
+        result = runtime.next_wallpaper(1, match="scene=anime")
+        self.assertFalse(result["ok"])
+        self.assertIn("assistant tag", result["error"],
+                      "要给出**能照做**的下一步")
+
+    async def test_wallpaper_tags_reports_the_summary(self):
+        runtime, root = self._runtime()
+        index = _FakeIndex(total=3)
+        index.summarise = lambda top=None: {"count": 3, "axes": {"scene": []},
+                                            "data_file": index.data_file}
+        runtime._tag_index = index
+        result = runtime.wallpaper_tags()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["count"], 3)
+        self.assertIn("next_wallpaper", result["note"])
+
+    async def test_wallpaper_tags_without_data_explains(self):
+        runtime, root = self._runtime()
+        runtime._tag_index = _FakeIndex(total=0)
+        result = runtime.wallpaper_tags()
+        self.assertFalse(result["ok"])
+        self.assertIn("assistant tag", result["error"])
+
+    async def test_wallpaper_tags_ip_query_without_anchors_is_honest(self):
+        runtime, root = self._runtime()
+        runtime._tag_index = _FakeIndex(error="ip_presets 里没有 'ZZZ'：可用的有 EVA")
+        result = runtime.wallpaper_tags(ip_query="ZZZ")
+        self.assertFalse(result["ok"])
+        self.assertIn("EVA", result["error"])
 
 
 class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
@@ -482,7 +655,9 @@ class TestRuntimeStartBuildsTheDeck(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(runtime.wallpaper.directory, root)
             names = [t["name"] for t in runtime.tools.list_tools()]
             self.assertIn("next_wallpaper", names)
-            self.assertEqual(len(runtime.tools), 2, "back_to_desktop + next_wallpaper")
+            self.assertIn("list_wallpaper_tags", names)
+            self.assertEqual(len(runtime.tools), 3,
+                             "back_to_desktop + next_wallpaper + list_wallpaper_tags")
         finally:
             await runtime.stop()
 

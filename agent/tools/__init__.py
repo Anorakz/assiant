@@ -38,6 +38,8 @@ _log = logging.getLogger(__name__)
 TOOL_MODULES = (
     "back_to_desktop",
     "wallpaper",
+    # T7-3: 挑图的前置查询（只读）—— 让模型先看清单再决定 match 怎么写
+    "wallpaper_tags",
 )
 
 

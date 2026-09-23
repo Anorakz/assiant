@@ -121,16 +121,10 @@ MainPage::MainPage(QWidget* parent)
     mainBox->addWidget(mainHint_, 0, Qt::AlignTop | Qt::AlignLeft);
     mainBox->addStretch(1);
 
-    auto* cornerRow = new QHBoxLayout();
-    cornerRow->setContentsMargins(0, 0, 0, 0);
-    cornerRow->addStretch(1);
-    nextWallpaper_ = new QPushButton(QStringLiteral("下一张"), mainArea);
-    nextWallpaper_->setObjectName(QStringLiteral("NextWallpaper"));
-    nextWallpaper_->setCursor(Qt::PointingHandCursor);
-    connect(nextWallpaper_, &QPushButton::clicked, this,
-            [this]() { emit nextWallpaperRequested(); });
-    cornerRow->addWidget(nextWallpaper_);
-    mainBox->addLayout(cornerRow);
+    // ⚠ T7-3：右下角那个「下一张」按钮**删掉了**（连同 nextWallpaperRequested 信号
+    //    与 --next-wallpaper-demo）。换壁纸只走对话 —— 按钮只能按文件名翻下一张，
+    //    而标签化之后"换成什么样"该由自然语言说。布局上原来那一行只剩 stretch，
+    //    所以整行一起去掉。
 
     mainStack_->addWidget(mainArea);
 
@@ -220,9 +214,6 @@ void MainPage::setGameMode(bool game)
     // 游戏模式主区换成 T9 的视频区；非游戏模式回到"完全留给壁纸"的那页
     if (mainStack_ != nullptr) {
         mainStack_->setCurrentIndex(game ? 1 : 0);
-    }
-    if (nextWallpaper_ != nullptr) {
-        nextWallpaper_->setVisible(!game);
     }
     if (mainHint_ != nullptr) {
         // 空提示在切回非游戏模式时也不该冒出来（见 setMainHint）

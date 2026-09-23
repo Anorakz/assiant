@@ -1169,6 +1169,91 @@ T7-2 记录（已完成，等验收）：打标签 + `config/wall_data.jsonl` + 
       ② 改掉那条板端本地测试的期望（它写于切换到 openai 适配器之前）。
       **T7 没碰 `agent/llm/`，这不是 T7-2 引入的**；要不要修你说一声，我按你的选择做。
 
+T7-3 记录（已完成，等验收）：标签索引 + 两个挑图工具 + 删掉手动换壁纸
+☑ `agent/vision/tag_index.py`（新, **纯 Python**: 不 import numpy、不碰 NPU、不读配置）:
+      · `TagIndex.from_file()` 读 `config/wall_data.jsonl`（文件不存在 = 空库, 不是错误）;
+        坏向量只让那一张"降级成只按标签用"，其余照旧
+      · 统计: 每轴各标签几张（`label_counts(top_k=3)`，与打标签时的 top-k 对齐）
+      · 排序: **用第一行的词表向量现场算余弦** —— 所以"没进 top-3 的标签"也能算真实分数
+        （`rank_by_label`；没有词表头时退回"只看存下来的标签"并如实说明）
+      · IP 锚点: 锚点向量求平均 → L2 归一化 → 全库余弦；**锚点没打过标签的会列出来**
+        （不假装它参与了），一个都用不上就报"先跑 assistant tag"
+      · `match` 语法: `轴=标签` / `只写标签名`（跨轴找 + 按分数去重）/ `ip=名字`
+        （大小写不敏感）；**写错一律如实报错并列出可选值**（轴名/标签名/ip_presets 名字）
+      · 措辞刻意避开"命中 N 张": 分数**没标定**（见 tagging.md §7），说成"全库按相似度排序"
+☑ 工具两个:
+      · `agent/tools/wallpaper_tags.py`（新）`list_wallpaper_tags(ip_query?, limit)` —— 只读,
+        给模型"先看清单再挑"的能力（词表是配置决定的, 模型看不见）
+      · `agent/tools/wallpaper.py` 加 `match=`（透传给 Runtime）；description 写明三条写法
+☑ `Runtime`（`agent/main.py`）: `tag_index()`（**懒建** + 缓存，启动只查文件在不在并打一行日志）、
+      `wallpaper_tags(ip_query, limit)`、`next_wallpaper(step, match)`;
+      `core/wallpaper.py::WallpaperDeck.step(step, pool=…)` —— **候选顺序即优先级**,
+      候选里已经不在目录里的会被丢掉, 一个不剩就如实报错
+☑ **删掉手动换壁纸**（你的需求）:
+      · GUI: 主区右下角「下一张」按钮、`nextWallpaperRequested` 信号、`nextWallpaperButton()`
+        访问器、`MainWindow::demoNextWallpaper()`、`--next-wallpaper-demo` 与它的 QSS 规则
+        （`gui/src/{main.cpp,main_window.cpp,main_window.h,ui/pages.cpp,ui/pages.h}`）
+      · Agent: `COMMAND_NEXT_WALLPAPER` 常量与 `COMMANDS` 里那一项、`_handle_next_wallpaper()`,
+        `NO_WALLPAPER_NOTE`, 以及只服务于它的 `_state_refusal()` / 
+        `ToolRouter.allowed_in_current_state()` —— 记明**T6① 因此被撤掉一半**
+        （现在权限表只管工具, 而工具只有对话一条路能调到, 答案仍然只有一个）
+      · 顺手修了一处误用: `gui/src/ui/sys_page.cpp` 的看门狗按钮原来借 `#NextWallpaper`
+        的样式（objectName 就写的 NextWallpaper），现在有自己的 `#WatchdogButton` 规则
+☑ 测试: `tests/test_tag_index.py`（新, **51 项**: 读文件/统计/排序/锚点/match 语法/报错文案/
+      向量小工具）; `tests/test_wallpaper.py`（64 项: 加 `pool` 与 match 透传, 把"手动入口已删除"
+      钉成断言）; `tests/test_tool_permissions.py`（表加 `list_wallpaper_tags`,
+      禁止组合 5→7、允许组合 3→5, 新增 `TestTheRevertedT6Rule`）;
+      `tests/test_ipc_protocol.py`（命令 5→4）; `tests/test_ipc_local_server.py` / `test_ipc.py`
+      改用剩下的命令; 两个测试清单脚本都加了 `test_tag_index.py`
+☑ 板端实测（真 40 张库, 真 NPU 无关）:
+      · 索引 40 张 / 三个轴 / 词表向量在, **读盘 19 ms**; `scene=anime` 排序 **34 ms**、
+        `ip=EVA` **32 ms**（锚点 2 张 → 原型检索, top-1 两张锚点各 0.927）
+      · 如实报错逐条验过: `scene=cyberpunk`（列出 16 个真标签）、`weather=sunny`
+        （列出三个真轴 + 提示 IP 怎么写）、`ip=ZZZ`（列出 8 个真 IP 名）
+      · `ip=EVA` + `step=1` → 最像的那张; 再 `step=1` → 第二张（候选按相关度翻）
+      · GUI 截图确认主区右下角**没有按钮了**（`/tmp/t73_gui.png`）; 板端 ctest **19/19**
+      · 板端 python 套件 **25 个文件全过**; PC 套件全过
+☑ 顺手修了 `tests/test_cli.py` 里**两处与 T7 无关的假红**（都是环境依赖, 不是被测代码的错）:
+      ① **跨午夜**: 用例拿 `datetime.now() - 5min` 当"今天刚过去的时间点", 本地时间在
+         00:00–00:04 跑时它会落到**昨天**, 写进配置就成了"今天的将来" → "已过"断言假红
+         （2026-09-23 00:00:46 实测踩到）。加 `_just_passed()`: 跨日就退到 00:00
+         （此刻最晚 00:04, 一定还在最近 30 分钟的尾巴里）。
+      ② **默认 socket 上正好有 Agent 在跑**: `TestScheduleCommand` 的用例不给 `--socket`,
+         板端验收现场 Agent 正跑着 → CLI 真问到了触发记录, 页脚换成"来自运行中的 Agent",
+         于是"不代表已触发"的断言假红（实测踩到）。改成默认指向一个不存在的 socket ——
+         这类用例的前提本来就是"问不到 Agent"。
+         **修完在"Agent 正跑着"的板端重跑 `test_cli.py`: 107 项全过**（之前 1 红）。
+      ⚠ 附带一条命令踩坑记录: `grep -e 'agent/mai[n]'` **匹配不到** `python3 -m agent.main`
+         （那是点不是斜杠）, 于是"进程数 0"是假的 —— 用 `agent[.]main` 才准。
+⚑ **发现一个真问题（模型层, 不是机制层）—— 直接说清, 不粉饰**:
+      用真 0.6B 模型（edge）跑了三句对话, 机制每次都对, 但模型的三个毛病:
+      ① 它把 `tone` 的标签当成 `scene` 的用（`next_wallpaper(step=0, match="scene=darkness")`
+         → 工具**如实报错**"scene 轴上没有 darkness，可用的有 …"）,
+         **但它在回复里照样说"已更换为宁静的深色风景"**（壁纸其实没变）
+      ② 它用 `step=0`（"重推当前这张"）而不是 1 → 即使 match 命中了也**推的还是当前那张**
+         （日志: `match=anime` → index=34/40 推回 01_landscape）
+      ③ 它把一句问句当参数: `list_wallpaper_tags(ip_query="这个作品最像哪几张")`
+         → 工具如实报错并列出 8 个 ip 名, 它就把那 8 个名字当成"壁纸标签"答给用户
+      **三个可行的修法（都很小, 等你拍板再动）**:
+      (a) `match` 给了时 `step=0` 改成"从头挑（最像的那张）"而不是"重推当前" ——
+          按钮删掉后 step=0 已经没有"补推"的用途, 而模型两次都用了 0
+      (b) 把**当前词表**写进 `next_wallpaper` 的 description（"可用标签: scene=landscape/city/…;
+          tone=dark/…; mood=calm/…"）—— 从源头堵住 `scene=darkness` 这种编造
+          （词表在配置里, 工具 build 时就能拿到）
+      (c) 工具失败时在结果里带一句**祈使句**（"换壁纸没有成功, 请把这句话原样告诉用户"）,
+          并且/或者由 Agent 自己再推一条 `llm` 说明（像旧命令那样）——
+          保证"失败了"一定出现在对话区, 而不是指望模型转述
+      → **你的决定: 只做 (b), 而且"先提交 T7-3, (b) 留到下次提交"**。
+        所以 T7-3 这一笔不含 (b); (b) 记在下面 T7-4 的开头, 与板端对话验收一起提交。
+        (a)(c) 暂不做（先看 (b) 能不能把"编造标签"这条堵住）。
+
+T7-4（进行中）：**先做你选的 (b)**，再做板端对话验收 + 文档收口
+☐ (b) 把**当前词表**写进 `next_wallpaper` 的 description（词表在 `wallpaper.tagging.vocab`
+      与 `tag_vocab.py`，工具 build 时从 services['config'] 拿到；要求: 轴名 + 每轴标签全列,
+      写不下就截断并说明"完整清单用 list_wallpaper_tags"）—— **这一笔与 T7-4 一起提交**
+☐ 板端对话验收: 三轴命中率 / IP 锚点检索 / 对话挑图 / 如实拒绝（含"SLEEP/GAME 下换不了"）
+☐ 文档收口（tagging.md §6 的措辞按 (b) 之后的实际行为复核）
+
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档

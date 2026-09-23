@@ -45,7 +45,6 @@ __all__ = [
     "TOPICS",
     # command (GUI -> Agent)
     "COMMAND_SWITCH_MODE",
-    "COMMAND_NEXT_WALLPAPER",
     "COMMAND_CHAT_INPUT",
     "COMMAND_NEXT_BILIBILI",
     "COMMAND_QUERY_SCHEDULE",
@@ -112,9 +111,14 @@ TOPICS = (TOPIC_STATUS, TOPIC_LLM, TOPIC_WALLPAPER, TOPIC_MUSIC, TOPIC_SCHEDULE)
 #  Command: GUI -> Agent
 # ---------------------------------------------------------------------------
 COMMAND_SWITCH_MODE = "switch_mode"
-COMMAND_NEXT_WALLPAPER = "next_wallpaper"
 COMMAND_CHAT_INPUT = "chat_input"
 COMMAND_NEXT_BILIBILI = "next_bilibili"
+
+#: ⚠ T7-3 删掉了 `next_wallpaper` 命令（T3 加的）: 换壁纸**只走对话**
+#: （LLM 工具 `next_wallpaper`, 见 agent/tools/wallpaper.py）。手动按钮"只能按文件名
+#: 翻下一张"，而标签化之后"换成什么样"该由自然语言说 —— 见 docs/ipc-protocol.md §4。
+#: GUI 侧同步删掉了主区那个「下一张」按钮与 `--next-wallpaper-demo`。
+#: 线格式上这只是一个"不再有人发的命令名" —— 老客户端发过来会被当成未知命令忽略（回一句说明）。
 
 #: 问一句"你最近触发过哪些日程" (payload 必须是 {})。
 #: 应答**就是**随后那条 topic=TOPIC_SCHEDULE / kind="state" 的推送 —— 与 switch_mode
@@ -124,7 +128,6 @@ COMMAND_QUERY_SCHEDULE = "query_schedule"
 #: 全部 command (GUI -> Agent)
 COMMANDS = (
     COMMAND_SWITCH_MODE,
-    COMMAND_NEXT_WALLPAPER,
     COMMAND_CHAT_INPUT,
     COMMAND_NEXT_BILIBILI,
     COMMAND_QUERY_SCHEDULE,

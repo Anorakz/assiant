@@ -55,6 +55,21 @@ def _run_cli(argv):
     return code, out.getvalue(), err.getvalue()
 
 
+def _just_passed(minutes=5, now=None):
+    """造一个"**今天**刚刚过去"的时刻（给"最近 30 分钟尾巴"那几条用例）。
+
+    ⚠ 跨午夜的坑（实测踩到，2026-09-23 00:00 跑的）：`now - 5min` 在午夜刚过时落到
+      **昨天** 23:55，而配置里写的是"今天的 23:55" —— 那是**将来**，于是"已过"的断言
+      假红（跟被测代码无关，是这条用例自己的时间算术）。这时改用 00:00：此刻最晚
+      00:04，它一定还在 30 分钟的尾巴里。
+    """
+    now = now or datetime.now()
+    candidate = now - timedelta(minutes=minutes)
+    if candidate.date() != now.date():
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return candidate
+
+
 def _run_cli_with_config(argv, config_path):
     """跑一次 CLI，并把 `AGENT_CONFIG_DIR` **显式**指向 `config_path` 的父目录。
 
@@ -607,11 +622,18 @@ class TestScheduleCommand(unittest.TestCase):
         return path
 
     def _run(self, path, extra=()):
-        # ⚠ 两件事：
+        # ⚠ 三件事：
         #   1) AGENT_CONFIG_DIR 是"按名字加载"用的；一个进程里只认第一次 setdefault，
         #      所以测试里直接覆盖环境变量，跑完还原。
         #   2) agent.config.load_config **有缓存**（生产上是对的：一个进程读一次）。
         #      测试里必须 clear_cache()，否则第二个用例读到的还是第一份配置。
+        #   3) **默认指向一个不存在的 socket**：这一类的用例都建立在"问不到 Agent"之上
+        #      （页脚要说"按时间算的，不代表已触发"）。不给 --socket 就用默认的
+        #      /tmp/agent.sock —— 那台机器上**恰好在跑** Agent 时（板端验收现场就是这样）
+        #      CLI 会真问到触发记录，页脚换成"来自运行中的 Agent"，于是断言假红。
+        extra = list(extra)
+        if "--socket" not in extra:
+            extra = ["--socket", str(Path(path).parent / "nope.sock")] + extra
         old = os.environ.get("AGENT_CONFIG_DIR")
         os.environ["AGENT_CONFIG_DIR"] = str(path.parent)
         config.clear_cache()
@@ -713,7 +735,7 @@ class TestScheduleCommand(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         # ⚠ 时刻要落在窗口的**尾巴**里（最近 30 分钟）: 写死 10:00 的话, 下午跑测试
         #    那条就在窗口外了 —— 那是新语义, 不是 bug。
-        just_passed = datetime.now() - timedelta(minutes=5)
+        just_passed = _just_passed(minutes=5)
         path = self._write_config(
             "scheduler:\n  recurring:\n    - title: 每天喝水\n      start: \"%s\"\n"
             % just_passed.strftime("%H:%M"))
@@ -1196,7 +1218,7 @@ class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
         ⚠ 窗口是"接下来 24 小时 + 最近 30 分钟"，所以这条日程必须落在**刚过去**的
           那一小段里：写死 09:30 的话，下午跑测试时它就在窗口外了（新语义，不是 bug）。
         """
-        fired_at = datetime.now() - timedelta(minutes=4)
+        fired_at = _just_passed(minutes=4)
         start_at = fired_at - timedelta(minutes=1)
         fact = {"title": "站会", "date": start_at.strftime("%Y-%m-%d"),
                 "scheduled_at": start_at.strftime("%Y-%m-%dT%H:%M"),
@@ -1239,7 +1261,7 @@ class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
     async def test_schedule_without_the_agent_still_lists_but_says_why(self):
         """同一个真 server, 但**不**应答查询: 列表照出, 页脚退回"按时间"。"""
         self.agent.record_only()
-        start_at = datetime.now() - timedelta(minutes=4)
+        start_at = _just_passed(minutes=4)
         path = self._write_config(
             "ipc:\n  socket_path: %s\n" % self.path +
             "scheduler:\n  recurring:\n    - title: 站会\n      start: \"%s\"\n"

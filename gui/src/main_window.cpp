@@ -172,12 +172,12 @@ QComboBox#ModelCombo {
     background: rgba(35, 36, 40, 0.9); border: 1px solid #3A3D42; border-radius: 6px;
     color: #E6E6E6; padding: 4px 8px; font-size: 15px;
 }
-/* T8：主区右下角的"下一张" */
-QPushButton#NextWallpaper {
+/* 系统页的看门狗按钮（T7-3：原先是借「下一张」那条规则的，现在自己有一条） */
+QPushButton#WatchdogButton {
     background: rgba(43, 45, 49, 0.85); border: 1px solid #3A3D42; border-radius: 8px;
     padding: 6px 14px; color: #9AA0A6; font-size: 16px;
 }
-QPushButton#NextWallpaper:hover { color: #E6E6E6; background: rgba(53, 55, 59, 0.92); }
+QPushButton#WatchdogButton:hover { color: #E6E6E6; background: rgba(53, 55, 59, 0.92); }
 /* T9：视频区 */
 QStackedWidget#VideoStage { background: transparent; }
 QLabel#VideoPlaceholder { color: #6F757C; font-size: 22px; background: transparent; }
@@ -336,19 +336,9 @@ MainWindow::MainWindow(QWidget* parent)
                 [this](bool focused) { onChatInputFocused(focused); });
     }
 
-    // T8：主区右下角"下一张" → 真实发协议 next_wallpaper
-    if (mainPage_ != nullptr) {
-        connect(mainPage_, &MainPage::nextWallpaperRequested, this, [this]() {
-            if (client_ == nullptr || !agentUp_) {
-                if (mainPage_->chatPanel() != nullptr) {
-                    mainPage_->chatPanel()->appendSystem(
-                        QStringLiteral("没发出去：与 Agent 未连接"));
-                }
-                return;
-            }
-            client_->sendCommand(QStringLiteral("next_wallpaper"), QJsonObject());
-        });
-    }
+    // ⚠ T7-3：这里原来有一条"主区右下角「下一张」→ 发协议 next_wallpaper"的连接。
+    //    按钮、信号与这条连接一起删掉了 —— 换壁纸只走对话（对 Agent 说
+    //    "换一张安静的深色风景"），Agent 侧那条同名 IPC 命令也一并删除。
 
     // T9：视频区"下一集" → 真实发协议 next_bilibili
     if (mainPage_ != nullptr && mainPage_->videoPanel() != nullptr) {
@@ -498,12 +488,7 @@ void MainWindow::paintEvent(QPaintEvent* event)
     painter.setOpacity(1.0);
 }
 
-void MainWindow::demoNextWallpaper()
-{
-    if (mainPage_ != nullptr && mainPage_->nextWallpaperButton() != nullptr) {
-        mainPage_->nextWallpaperButton()->click();     // 真实点击路径
-    }
-}
+// ⚠ T7-3：demoNextWallpaper()（验收时"点一下下一张"）随按钮一起删掉了。
 
 void MainWindow::setVideoSource(const QString& path)
 {

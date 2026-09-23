@@ -182,12 +182,12 @@ agent/
 
 **权限表（T4，唯一写下来的地方是 `tests/test_tool_permissions.py::EXPECTED`）**：
 
-| 状态 | `back_to_desktop` | `next_wallpaper` |
-| --- | --- | --- |
-| `SLEEP` | ✗ | ✗ |
-| `IDLE` | ✗ | ✓ |
-| `STUDY` | ✓ | ✓ |
-| `GAME` | ✗ | ✗ |
+| 状态 | `back_to_desktop` | `next_wallpaper` | `list_wallpaper_tags` |
+| --- | --- | --- | --- |
+| `SLEEP` | ✗ | ✗ | ✗ |
+| `IDLE` | ✗ | ✓ | ✓ |
+| `STUDY` | ✓ | ✓ | ✓ |
+| `GAME` | ✗ | ✗ | ✗ |
 
 - **SLEEP / GAME 一个都不给**：SLEEP 是"别动系统里的任何东西"；GAME 的主区是视频区，
   换壁纸等于白换，而"回到桌面"是**学习收尾**的动作（T1 的决定）。
@@ -196,12 +196,12 @@ agent/
   白花一轮。执行期的 fail-closed 校验照旧（是**少给**，不是放宽）。
 - **加工具时先在这张表里决定它在哪些状态可用**，否则 `test_tool_permissions.py` 会红
   （它双向对齐：注册得到的工具必须在表里，表里的工具必须注册得到）。
-- ⚠ **同名命令也受同一张表约束**（T6）：`next_wallpaper` 既是工具名也是 GUI 命令名，
-  而"这个状态下能不能换壁纸"只有**一个**答案。命令路径（`_handle_next_wallpaper`）在调
-  `Runtime.next_wallpaper()` 之前先问 `ToolRouter.allowed_in_current_state()`，被拒时回一条
-  `llm` 说明（"换壁纸没成功：… 在当前状态（game）下不可用（可用状态: idle, study）"）。
-  否则 GUI 的按钮就成了绕过状态表的后门。工具没注册（缺依赖）时**不拦** ——
-  那是"工具没装"，不是"这个状态不允许"。
+- ⚠ **T7-3 撤掉了 T6① 的一半**：以前 `next_wallpaper` 既是工具名也是 GUI 命令名，
+  于是命令路径要借同一张表判一次（`ToolRouter.allowed_in_current_state()`）。按你的要求
+  **手动换壁纸（GUI「下一张」按钮与同名 IPC 命令）已删除**，那个方法随之删除 ——
+  这张表现在只管工具，而工具只有**对话**一条路能调到，所以"这个状态下能不能换壁纸"
+  仍然只有一个答案（`ToolRouter.execute()` 拦）。见 `tests/test_tool_permissions.py`
+  的 `TestTheRevertedT6Rule`。
 - **"补推"不受状态表约束**（T6）：新 GUI 连上时 Agent 会补一张**当前**壁纸
   （`Runtime.push_current_wallpaper()`）。那是"同步显示"，不是"换一张" ——
   客户端连上时 Agent 可能正处在 SLEEP/GAME，补一张当前画面不该被拒。
@@ -209,9 +209,10 @@ agent/
 工具**只在真会调模型的模式下才有意义**：`edge` 与 `cloud` 都走同一个工具循环
 （T2 起 edge 也接进来了，见 §4.2），`disabled` 是规则引擎，**不假装调过工具**。
 
-⚠ **工具不是唯一的调用方**：`next_wallpaper` 这个动作既有 LLM 工具，也有 GUI 的
-`next_wallpaper` 命令（主区「下一张」）。两者**共用** `Runtime.next_wallpaper()`，
-真正的语义在 `core/wallpaper.py`（目录 + 游标）—— 工具只把入参转过去。
+⚠ **换壁纸只有一条路（T7-3 起）**：对话 → LLM → `next_wallpaper` 工具 →
+`Runtime.next_wallpaper(step, match)` → `core/wallpaper.py`（目录 + 游标）。
+`match` 的挑图逻辑在 `agent/vision/tag_index.py`（读 `config/wall_data.jsonl`，
+**纯 Python 点积、不碰 NPU**），入口见 [`tagging.md` §6](tagging.md)。
 推给 GUI 的 topic 名只有 `agent/ipc/` 知道（`Runtime.on_wallpaper` 钩子），
 `Runtime` 与工具都不认识线格式字段。
 
@@ -252,6 +253,13 @@ edge 挂了**不装作答过**：`chat()` 照抛；`chat_with_tools()` 退回规
 3. **搬运要有对齐证据**：这份实现是从板端实验树 `sig/` 搬进仓库的，
    `tests/board/siglip_align.py` 用**同一张图**分别过两条路径比 embedding ——
    实测余弦 1.000000、逐位差 0（搬运没有改变行为）。换模型/改常量后重跑它。
+
+**T7-3 的挑图不走这里**：`agent/vision/tag_index.py` 读已经打好的
+`config/wall_data.jsonl`（标签 + 向量 + 第一行的词表向量），用**纯 Python 点积**排序 ——
+不加载 rknnlite / tokenizers / numpy，也不碰 NPU（所以开发机与板端跑同一份代码）。
+两条查询：按标签（`scene=anime`）与按 **IP 锚点**（`ip=EVA`：锚点图向量取平均当原型）。
+词表向量存在数据文件第一行，所以"没进 top-k 的标签"也能算出真实分数 ——
+细节与实测数字见 [`tagging.md`](tagging.md)。
 
 ---
 

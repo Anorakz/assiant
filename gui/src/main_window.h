@@ -82,9 +82,6 @@ public:
     /// 验收辅助：触发音乐条某个占位块的说明（歌词/歌手/专辑/进度）。
     void demoPlaceholderNote(const QString& what);
 
-    /// 验收辅助：点一下主区右下角的"下一张"（走真实按钮）
-    void demoNextWallpaper();
-
     /// 验收辅助：点一下视频区的「下一集」
     void demoNextBilibili();
     /// 验收辅助：触发视频区某个占位项的说明（上一集/全屏/倍速）

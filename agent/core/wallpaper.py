@@ -1,20 +1,30 @@
 # ============================================================================
-#  agent/core/wallpaper.py — 壁纸目录的"下一张"（Phase 7 T3）
+#  agent/core/wallpaper.py — 壁纸目录的"下一张"（Phase 7 T3；T7-3 起支持"只在挑出来的
+#                            那几张里翻"）
 #
 #  它是什么: 一个目录 + 一个游标。**不碰 IPC、不碰 GUI、不读图片内容** ——
 #            只回答"下一张是哪张"。
 #
-#  谁用它（两条入口共用这一个类, 所以"下一张"的语义只有一份）
+#  谁用它（**只有一条入口**: 对话里 LLM 调 next_wallpaper 工具）
 #  ---------------------------------------------------------------------------
-#      agent/tools/wallpaper.py              LLM 调 next_wallpaper 工具
-#      agent/main.py::Runtime.next_wallpaper GUI 的 next_wallpaper 命令（主区"下一张"）
+#      agent/tools/wallpaper.py     LLM 调 next_wallpaper 工具
+#        └─ agent/main.py::Runtime.next_wallpaper(step, match)
+#             └─ WallpaperDeck.step(step, pool)   ← "下一张"的语义只有这一份
+#
+#  ⚠ T7-3 的需求变更: **手动换壁纸的入口都删掉了** —— GUI 主区那个「下一张」按钮、
+#    以及配套的 `next_wallpaper` IPC 命令（T3 加的、T6 还给它接上了状态权限表）。
+#    理由: 标签化之后"换成什么样"应该由**对话**表达（"换一张安静的深色风景"）,
+#    按钮只能"按文件名翻下一张", 反而更容易让画面和意图对不上。
+#    所以这类现在只剩一条路: 对话 -> LLM -> 工具 -> 这里。
 #
 #  游标语义（为什么不是"下标 +1"）
 #  ---------------------------------------------------------------------------
 #  · 每次调用都**重新列一遍目录** —— 你可以随时往里丢新图, 不用重启 Agent。
 #  · 因此游标记的是**当前那张的路径**, 不是下标: 新图插在前面也不会让"下一张"跳回去。
 #    当前那张不在了（删了/改名了）就从第一张重新开始。
-#  · step=0 = 重新推当前那张（GUI 连晚了想补一张时有用）; step<0 = 往前翻。
+#  · step=0 = 重新推当前那张; step<0 = 往前翻。越界**回绕**。
+#  · `pool` 给了就只在这个候选列表里翻, **列表顺序就是优先级**（T7-3 的挑图:
+#    相关度从高到低排好传进来, 于是 step=1 = "最像的那张"）。
 #
 #  读不到/解不开的图**照样算一张**
 #  ---------------------------------------------------------------------------
@@ -156,13 +166,20 @@ class WallpaperDeck:
         except WallpaperError:
             return 0
 
-    def step(self, step: int = 1) -> Tuple[int, str, int]:
+    def step(self, step: int = 1, pool: Optional[Sequence[str]] = None) -> Tuple[int, str, int]:
         """往前/往后翻 step 张, 更新游标。
 
-        @return (index, path, total) —— index 是它在**这次**列表里的下标（从 0 开始）
-        @raise WallpaperError 目录用不了, 或者一张图都没有; step 不是整数
+        @param step 正数往后、负数往前、0 = 重推当前那张
+        @param pool 只在这些图里翻（**顺序即优先级**, T7-3 的挑图用）:
+                    None = 目录里的全部图（按文件名顺序，T3 的老行为）。
+                    pool 里已经不在目录里的图会被**丢掉**（图被删了不该挑出个空路径）。
+        @return (index, path, total) —— index 是它在**这次翻的那份列表**里的下标
+        @raise WallpaperError 目录用不了 / 一张图都没有 / step 不是整数 /
+                              pool 给了但里面一张能用的都没有
         @note 越界**回绕**（最后一张的下一张 = 第一张）: 目标是"一张一张翻着看",
               翻到头停住反而要多想一步。
+        @note 当前那张不在候选里时（例如刚换了个 match），从候选的第一张开始 ——
+              于是 `step=1` 就是"最像的那张"（pool 已按相关度排好）。
         """
         if isinstance(step, bool) or not isinstance(step, int):
             raise WallpaperError("step 必须是整数（正数往后、负数往前), 得到 %r" % (step,))
@@ -174,11 +191,21 @@ class WallpaperDeck:
                 % (", ".join(self.suffixes), self.directory)
             )
 
-        # 游标是路径, 所以重列目录后仍然指着同一张; 它不在了就从头开始
-        base = images.index(self._current) if self._current in images else -1
-        target = (base + step) % len(images)
-        self._current = images[target]
-        return target, images[target], len(images)
+        candidates = images
+        if pool is not None:
+            available = set(images)
+            candidates = [str(path) for path in pool if str(path) in available]
+            if not candidates:
+                raise WallpaperError(
+                    "挑出来的图一张都不在壁纸目录里了"
+                    "（目录: %s；换一批条件试试, 或重新跑 assistant tag）" % self.directory
+                )
+
+        # 游标是路径, 所以重列目录后仍然指着同一张; 它不在候选里就从头开始
+        base = candidates.index(self._current) if self._current in candidates else -1
+        target = (base + step) % len(candidates)
+        self._current = candidates[target]
+        return target, candidates[target], len(candidates)
 
     def __repr__(self) -> str:
         return "<WallpaperDeck %s (%d 张)>" % (self.directory, self.count())

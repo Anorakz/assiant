@@ -33,8 +33,8 @@ agent/
 │   │   ├── state_machine.py     # SLEEP ⇄ IDLE ⇄ STUDY/GAME 状态机
 │   │   ├── tool_router.py       # 工具注册 / 权限控制 / 执行调度
 │   │   ├── scheduler.py         # 日程检查 + 定时触发 + 终端命令监听
-│   │   └── wallpaper.py         # 壁纸目录 + "下一张"的游标 (T3)
-│   ├── tools/                   # 具体工具 (Phase 7): back_to_desktop / next_wallpaper
+│   │   └── wallpaper.py         # 壁纸目录 + 游标（可在挑出来的候选里翻，T7-3）
+│   ├── tools/                   # 具体工具 (Phase 7): back_to_desktop / next_wallpaper / list_wallpaper_tags
 │   ├── llm/                     # LLM 三模式 + 规则兜底
 │   │   ├── provider.py          # edge / cloud / disabled 分发 (edge 连本机 llama-server)
 │   │   └── rule_engine.py       # 无 LLM 时的正则规则兜底
@@ -45,7 +45,11 @@ agent/
 │   ├── vision/                  # 视觉层
 │   │   ├── roi.py               # ROI 字符串解析 ("x,y,w,h")
 │   │   ├── siglip_encoder.py    # 实时帧那条路 (⚠ 仍是 mock)
-│   │   └── siglip/              # 真 RKNN 双塔: 离线打标签 / 图像检索 (T7-1)
+│   │   ├── siglip/              # 真 RKNN 双塔: 离线打标签 / 图像检索 (T7-1)
+│   │   ├── tag_vocab.py         # 三轴标签词表 (T7-2)
+│   │   ├── wall_data.py         # config/wall_data.jsonl 的唯一写者 (T7-2)
+│   │   ├── tagger.py            # 打标签 (板端 NPU, T7-2)
+│   │   └── tag_index.py         # 标签索引 + IP 锚点挑图 (纯 Python, T7-3)
 │   └── io/                      # native 的 asyncio 包装 + 输入汇聚
 │       ├── chat_bus.py          # ChatInputBus: 终端/GUI 统一事件流
 │       ├── image_reader.py      # ImageReader: image_rb → numpy 帧
@@ -202,15 +206,16 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
   **Phase 7 起丢给模型的候选也按状态过滤**（`allowed_tools()`）—— 不可用的工具不该出现在
   候选里。当前这张权限表（`tests/test_tool_permissions.py::EXPECTED` 是唯一真源）：
 
-  | 状态 | `back_to_desktop` | `next_wallpaper` |
-  | --- | --- | --- |
-  | `SLEEP` / `GAME` | ✗ | ✗ |
-  | `IDLE` | ✗ | ✓ |
-  | `STUDY` | ✓ | ✓ |
+  | 状态 | `back_to_desktop` | `next_wallpaper` | `list_wallpaper_tags` |
+  | --- | --- | --- | --- |
+  | `SLEEP` / `GAME` | ✗ | ✗ | ✗ |
+  | `IDLE` | ✗ | ✓ | ✓ |
+  | `STUDY` | ✓ | ✓ | ✓ |
 
-  **同名命令走同一张表**（T6）：GUI 的 `next_wallpaper` 命令与 LLM 的工具是同一个动作，
-  命令路径在调 `Runtime.next_wallpaper()` 之前先问 `ToolRouter.allowed_in_current_state()`，
-  被拒时回一条 `llm` 说明 —— 否则按钮就成了绕过状态表的后门。
+  **T7-3 撤掉了 T6① 的一半**：以前 GUI 的 `next_wallpaper` 命令与 LLM 的工具共用这张表
+  （命令路径问 `ToolRouter.allowed_in_current_state()`）。按需求**手动换壁纸已删除**
+  （GUI 按钮 + 同名 IPC 命令），那个方法随之删除 —— 这张表现在只管工具，
+  而工具只有**对话**一条路能调到，所以答案仍然只有一个。
 - 同步 handler 会被丢到线程池，不阻塞事件循环；超时后线程仍在跑（Python 无法强杀线程），
   调用方需自行考虑幂等。异步 handler 会被真正 cancel。
 - 参数校验用的是**自己实现的 JSON Schema 子集**（`SUPPORTED_KEYWORDS`）——实测宿主/WSL/板端

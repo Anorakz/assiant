@@ -196,7 +196,6 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
 | action | payload 字段 | 类型 | 说明 |
 | --- | --- | --- | --- |
 | `switch_mode` | `value` | string | 目标状态，取值同 `MODES`（`SLEEP`/`IDLE`/`STUDY`/`GAME`）。⚠ **键是 `value`，不是 `mode`**：`mode` 是 §3 里 `status` **推送**的字段，方向不同，别混 |
-| `next_wallpaper` | — | — | 切下一张壁纸；`payload` 必须是 `{}`。应答是随后那条 `wallpaper` 推送（§3） |
 | `chat_input` | `text` | string | 用户在 GUI 里敲的一行输入，等价于终端输入 |
 | `next_bilibili` | — | — | 播放下一集 B 站视频；`payload` 必须是 `{}` |
 | `query_schedule` | — | — | 问一句"你最近触发过哪些日程"；`payload` 必须是 `{}`。应答是随后那条 §3 的 `schedule`（`kind:"state"`） |
@@ -206,15 +205,12 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
 - **没有参数的 command 也必须带 `payload`**，写成 `{}`。缺 `payload` 字段会被判为非法消息。
 - 少了 `payload` 里该有的键（例如 `switch_mode` 缺 `value`）**不会**被当成"用默认值"：
   该条命令被丢弃，并记一条**点名字段**的 warning。
-- **`next_wallpaper` 从 Phase 7 T3 起有下游了**：Agent 从配置的壁纸目录（`wallpaper.dir`）
-  里按文件名翻下一张，然后推 §3 的 `wallpaper{path,index}`。**成功时不额外回话**（界面的
-  反馈就是壁纸变了）；**失败时回一条 `llm` 说明**（状态不允许 / 目录不存在 / 没有图片 /
-  壁纸模块没接进来）。
-  同一个动作 LLM 也能发起：`agent/tools/wallpaper.py` 的工具与这条命令走**同一个入口**
-  （`Runtime.next_wallpaper()`）。
-  ⚠ **T6 起这条命令也受工具那张状态权限表约束**：`SLEEP` / `GAME` 下按钮会被拒并回一句
-  「换壁纸没成功：next_wallpaper 在当前状态（game）下不可用（可用状态: idle, study）」。
-  理由与表见 [`architecture.md` §4.1](architecture.md)。
+- ⚠ **T7-3 删掉了 `next_wallpaper` 命令**（Phase 7 T3 加的，T6 还给它接上了状态权限表）：
+  **换壁纸只走对话** —— 对 Agent 说"换一张安静的深色风景"，由 LLM 调
+  `next_wallpaper` 工具（见 [`tagging.md` §6](tagging.md)）。删它的理由：按钮只能
+  "按文件名翻下一张"，而标签化之后"换成什么样"只有自然语言说得清。GUI 侧同步删掉了
+  主区那个「下一张」按钮与 `--next-wallpaper-demo`。老客户端真发这条命令过来时，
+  Agent 按"不认识的 action"处理：**记 warning、不回话**（不会假装换好了）。
 - **`next_bilibili` 还没接下游**（属 Phase 7）：Agent 收到后会回推一条
   `llm{"text": "…还没接入（Phase 7）…"}` —— 让"点了"有反馈，而不是毫无动静
   （文案见 `agent/ipc/__init__.py` 的 `UNWIRED_COMMAND_NOTES`）。
@@ -395,10 +391,12 @@ while b"\n" in buf:
 | `TOPIC_MUSIC` | `"music"` |
 | `TOPIC_SCHEDULE` | `"schedule"` |
 | `COMMAND_SWITCH_MODE` | `"switch_mode"` |
-| `COMMAND_NEXT_WALLPAPER` | `"next_wallpaper"` |
 | `COMMAND_CHAT_INPUT` | `"chat_input"` |
 | `COMMAND_NEXT_BILIBILI` | `"next_bilibili"` |
 | `COMMAND_QUERY_SCHEDULE` | `"query_schedule"` |
+
+> ⚠ T7-3 删掉了 `COMMAND_NEXT_WALLPAPER`（`"next_wallpaper"`）：换壁纸只走对话，
+> 不再有这条命令 —— 见 §4 的说明。C++ 侧也请把对应分支删掉（留着也不会有人发）。
 | `ACTION_FIELD` | `"action"`（命令信封的字段名） |
 | `PAYLOAD_FIELD` | `"payload"`（命令信封的字段名） |
 | `MODE_SLEEP` / `MODE_IDLE` / `MODE_STUDY` / `MODE_GAME` | `"SLEEP"` / `"IDLE"` / `"STUDY"` / `"GAME"` |

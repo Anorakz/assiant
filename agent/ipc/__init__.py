@@ -41,7 +41,6 @@ from .protocol import (
     ACTION_FIELD,
     COMMAND_CHAT_INPUT,
     COMMAND_NEXT_BILIBILI,
-    COMMAND_NEXT_WALLPAPER,
     COMMAND_QUERY_SCHEDULE,
     COMMAND_SWITCH_MODE,
     COMMANDS,
@@ -86,7 +85,6 @@ __all__ = [
     "TOPICS",
     # command (GUI -> Agent)
     "COMMAND_SWITCH_MODE",
-    "COMMAND_NEXT_WALLPAPER",
     "COMMAND_CHAT_INPUT",
     "COMMAND_NEXT_BILIBILI",
     "COMMAND_QUERY_SCHEDULE",
@@ -313,14 +311,12 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
 #: 还没接下游的命令 -> 回给用户的那句话 (Phase 6 D7 / 决策 7)。
 #: 下游属 Phase 7; 现在必须**回一句说明**, 否则 GUI 上点了完全没反应, 用起来像坏了。
 #: 文案是给**用户**看的 (GUI 会把 llm 的 text 显示成助手气泡), 所以不要写成日志腔。
-#: ⚠ T3 起 `next_wallpaper` **已经有下游**了, 所以从这张表里搬走了 ——
-#:   它现在走 _handle_next_wallpaper()。
+#: ⚠ T7-3 起这张表里只剩 `next_bilibili`: `next_wallpaper` 命令连同 GUI 的「下一张」
+#:   按钮一起**删掉了**（换壁纸只走对话）。所以表里不再有它 —— 老客户端真发过来时
+#:   落到下面的"没有处理分支"分支, 只记一条 warning, 不会崩。
 UNWIRED_COMMAND_NOTES: Dict[str, str] = {
     COMMAND_NEXT_BILIBILI: "B 站「下一集」还没接入（Phase 7），这次点击先没有生效。",
 }
-
-#: 收到 next_wallpaper 但 Agent 侧没有壁纸入口时回的那句话 (给用户看)。
-NO_WALLPAPER_NOTE = "现在还不能换壁纸：Agent 的壁纸模块没接进来。"
 
 
 #: schedule.data.kind 的两个取值 (线格式见 docs/ipc-protocol.md §3)。
@@ -370,10 +366,6 @@ def _make_command_handler(bus: Any, runtime: Any = None, push: Any = None):
 
         if action == COMMAND_QUERY_SCHEDULE:
             _handle_query_schedule(runtime, push)
-            return
-
-        if action == COMMAND_NEXT_WALLPAPER:
-            _handle_next_wallpaper(runtime, push)
             return
 
         if action in UNWIRED_COMMAND_NOTES:
@@ -459,61 +451,6 @@ def _handle_query_schedule(runtime: Any, push: Any) -> None:
     _log.debug("ipc: query_schedule -> schedule{kind=%s, %d 条}",
                data["kind"], len(data["fired"]))
     push(TOPIC_SCHEDULE, data)
-
-
-def _handle_next_wallpaper(runtime: Any, push: Any) -> None:
-    """next_wallpaper: 主区右下角「下一张」 -> 换一张壁纸 (T3)。
-
-    动作本身在 ``Runtime.next_wallpaper()`` 里 —— 与 LLM 的 next_wallpaper 工具
-    **同一个入口**, 所以"下一张是哪张"只有一份实现（agent/core/wallpaper.py）。
-
-    ⚠ **T6: 这条命令也受工具那张状态权限表约束**。`next_wallpaper` 既是命令名也是工具名,
-    而"这个状态下能不能换壁纸"的答案是**一张表**（`Tool.allowed_states`）: GUI 的按钮与 LLM
-    的工具是同一个动作, 不该有两套规则 —— 否则按钮就成了绕过状态表的后门。
-    判据由 `ToolRouter.allowed_in_current_state()` 给（工具没装时不拦）。
-
-    · 成功: 只推 ``wallpaper{path,index}``, **不**往对话区写一句话 ——
-      点一次按钮就多一条助手气泡太吵; 界面上的反馈就是壁纸本身变了。
-    · 失败: 推一条 ``llm`` 说明（状态不允许/目录不存在/没有图片/模块没接进来）——
-      点了完全没反应最难查。
-    """
-    advance = getattr(runtime, "next_wallpaper", None) if runtime is not None else None
-    if not callable(advance):
-        _log.warning("ipc: 收到 next_wallpaper 但 runtime 没有壁纸入口, 回一句说明")
-        if push is not None:
-            push(TOPIC_LLM, {"text": NO_WALLPAPER_NOTE})
-        return
-
-    refusal = _state_refusal(runtime, COMMAND_NEXT_WALLPAPER)
-    if refusal is not None:
-        _log.warning("ipc: next_wallpaper 被状态权限表拒绝: %s", refusal)
-        if push is not None:
-            push(TOPIC_LLM, {"text": "换壁纸没成功：%s" % refusal})
-        return
-
-    result = advance()
-    if result.get("ok"):
-        _log.debug("ipc: next_wallpaper -> %s", result.get("path"))
-        return
-
-    reason = result.get("error") or "原因不明"
-    _log.warning("ipc: next_wallpaper 失败: %s", reason)
-    if push is not None:
-        push(TOPIC_LLM, {"text": "换壁纸没成功：%s" % reason})
-
-
-def _state_refusal(runtime: Any, action: str) -> Optional[str]:
-    """命令名与工具同名时, 借工具那张状态权限表判一下 (T6)。
-
-    @return None = 放行; 否则是一句给人看的原因
-    @note 没有工具路由 / 名字没注册 -> 放行（"工具没装"不是"状态不允许"）
-    @note 判据只有一处: `ToolRouter.allowed_in_current_state()` —— 本层不重复实现规则
-    """
-    tools = getattr(runtime, "tools", None) if runtime is not None else None
-    ask = getattr(tools, "allowed_in_current_state", None)
-    if not callable(ask):
-        return None
-    return ask(action)
 
 
 async def _handle_chat_input(bus: Any, payload: dict) -> None:

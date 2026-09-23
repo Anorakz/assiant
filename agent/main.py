@@ -210,6 +210,25 @@ class _Component:
 
 
 # ---------------------------------------------------------------------------
+#  挑图结果 -> 给 LLM 看的清单
+# ---------------------------------------------------------------------------
+def _name_and_score(result: Any, limit: int) -> List[Dict[str, Any]]:
+    """把 MatchResult 的候选转成 [{name, path, score}, …]。
+
+    @note **文件名与完整路径都给**: 回话里说给用户听的是文件名（`xx.png`）,
+          排查/日志里要的是全路径; 让模型自己拼 basename 容易拼错。
+    """
+    scores = (getattr(result, "detail", None) or {}).get("scores") or {}
+    out: List[Dict[str, Any]] = []
+    for path in list(getattr(result, "pool", ()) or ())[:max(1, int(limit))]:
+        item: Dict[str, Any] = {"name": os.path.basename(path), "path": path}
+        if path in scores:
+            item["score"] = scores[path]
+        out.append(item)
+    return out
+
+
+# ---------------------------------------------------------------------------
 #  Runtime
 # ---------------------------------------------------------------------------
 class Runtime:
@@ -271,6 +290,12 @@ class Runtime:
 
         #: 壁纸目录 + 游标 (T3 起)。在 _start_state_and_tools() 里按配置建。
         self.wallpaper: Optional[WallpaperDeck] = None
+
+        #: 标签索引 (T7-3): 读 config/wall_data.jsonl 的**只读**索引, 挑图用。
+        #: **懒建** —— 数据文件可能还不存在（没跑过 assistant tag）, 而且它只在
+        #: 对话里挑图时才用得上, 不该拖慢启动（40 张的向量解码也就几十毫秒, 但
+        #: "启动路径上多一个可能出错的文件读"不划算）。
+        self._tag_index: Optional[Any] = None
 
         self._components: List[_Component] = []
         self._terminal_task: Optional[asyncio.Task] = None
@@ -523,46 +548,166 @@ class Runtime:
                     "image_reader": self.image_reader,
                     "bus": self.bus,
                     "config": self.config,
-                    # 壁纸: 工具与 GUI 命令**共用**这一个入口（见 next_wallpaper()）
+                    # 壁纸: 换一张（T7-3 起**只有对话**这一条入口, 见 next_wallpaper()）
                     "next_wallpaper": self.next_wallpaper,
+                    # 壁纸: 看看库里有什么标签 / 某个 IP 最像哪几张（只读）
+                    "wallpaper_tags": self.wallpaper_tags,
                 },
             )
             registered = self._register_tools(self.tools)
             self.log.info("ToolRouter 就绪 (%d 个工具)", registered)
             self.log.info("壁纸目录 = %s (%d 张)", self.wallpaper.directory,
                           self.wallpaper.count())
+            # 标签数据在不在，启动日志里就看得见 —— 排障时第一眼看这一行
+            # （**只查文件在不在**, 不建索引: 建索引留给第一次真挑图时）
+            from agent.vision import wall_data as _wall_data
+
+            tag_file = _wall_data.resolve_data_file(
+                self._cfg("wallpaper", "tagging", "data_file"))
+            self.log.info("壁纸标签数据 = %s (%s)", tag_file,
+                          "有" if os.path.exists(tag_file)
+                          else "还没有 —— 挑图前先在板端跑 assistant tag --apply")
 
         await self._guarded(_Component("tool_router", _start_tools))
 
     # ------------------------------------------------------------ 壁纸 ---
-    def next_wallpaper(self, step: int = 1) -> Dict[str, Any]:
-        """换一张壁纸并把结果推给 GUI（T3 的**唯一**入口）。
+    def tag_index(self, reload: bool = False) -> Any:
+        """取标签索引（`agent/vision/tag_index.TagIndex`，**只读**，懒建 + 缓存）。
 
-        两条路都走这里: GUI 的 `next_wallpaper` 命令、LLM 的 `next_wallpaper` 工具。
+        @param reload True 时强制重读数据文件（`assistant tag` 刚跑完时有用）
+        @note 数据文件读不了 / 不存在都**不抛**: 返回一个空索引, 让调用方给出
+              "还没有标签数据, 先跑 assistant tag" 这种**能照做**的提示。
+        """
+        if self._tag_index is not None and not reload:
+            return self._tag_index
 
-        @return {"ok", "path", "index", "total", "pushed", "error"}
-                · ok=False 时 error 是**给人看的**一句话（会经 llm 推送显示到界面上）
+        from agent.vision import wall_data
+        from agent.vision.tag_index import TagIndex, TagIndexError
+
+        path = wall_data.resolve_data_file(self._cfg("wallpaper", "tagging", "data_file"))
+        try:
+            index = TagIndex.from_file(path)
+        except TagIndexError as exc:
+            self.log.warning("wallpaper: 标签数据读不了 (%s) —— 挑图会按空库处理", exc)
+            index = TagIndex(data_file=path)
+        for problem in index.problems:
+            self.log.warning("wallpaper: 标签数据有问题: %s", problem)
+        self.log.info("wallpaper: 标签索引就绪 (%d 张, 轴=%s, 词表向量=%s)",
+                      index.count(), ",".join(index.axes()) or "-",
+                      index.has_vocab_vectors())
+        self._tag_index = index
+        return index
+
+    def wallpaper_tags(self, ip_query: Optional[str] = None,
+                       limit: int = 5) -> Dict[str, Any]:
+        """库里有哪些标签 / 某个 IP 最像哪几张（`list_wallpaper_tags` 工具的入口）。
+
+        @param ip_query IP 名字（配置里 `wallpaper.tagging.ip_presets` 的键）
+        @param limit    最多回几条
+        @return {"ok", ...} —— ok=False 时 error 是**给人看**的一句话
+        @note **只读**: 不换壁纸、不写任何文件（换壁纸是 next_wallpaper 的事）。
+        """
+        index = self.tag_index()
+        presets = self._cfg("wallpaper", "tagging", "ip_presets", default={}) or {}
+        if not index.count():
+            return {"ok": False, "data_file": index.data_file,
+                    "error": "还没有壁纸标签数据（%s）—— 先在板端跑 "
+                             "assistant tag --apply（要 NPU，40 张约 3 分钟）"
+                             % index.data_file}
+
+        from agent.vision.tag_index import preset_names
+
+        if ip_query:
+            result = index.match("ip=%s" % ip_query, presets=presets,
+                                 wallpaper_dir=self._wallpaper_dir(), limit=limit)
+            if not result.ok:
+                return {"ok": False, "error": result.error,
+                        "presets": preset_names(presets)}
+            return {"ok": True, "kind": result.kind, "ip": str(ip_query),
+                    "note": result.note, "count": len(result.pool),
+                    "images": _name_and_score(result, limit),
+                    "presets": preset_names(presets)}
+
+        summary = index.summarise(top=max(1, int(limit)))
+        summary["ok"] = True
+        summary["ip_presets"] = preset_names(presets)
+        summary["note"] = ("挑图用 next_wallpaper(match=\"scene=anime\") 这种写法；"
+                           "IP 用 match=\"ip=EVA\"。分数是余弦（不是概率）。")
+        return summary
+
+    def _wallpaper_dir(self) -> Optional[str]:
+        return self.wallpaper.directory if self.wallpaper is not None else None
+
+    def next_wallpaper(self, step: int = 1, match: Optional[str] = None) -> Dict[str, Any]:
+        """换一张壁纸并把结果推给 GUI（T3 起；T7-3 起支持按标签/IP 挑）。
+
+        入口只有一条: **对话**里 LLM 调 `next_wallpaper` 工具（手动按钮与
+        `next_wallpaper` IPC 命令在 T7-3 按需求**删掉了**, 见 agent/core/wallpaper.py 的模块头）。
+
+        @param step  正数往后、负数往前、0 = 重推当前这张（都在候选列表里翻）
+        @param match 挑图条件（None = 按文件名顺序翻全部）:
+                     `"scene=anime"` 某轴某标签 / `"anime"` 只写标签名 / `"ip=EVA"` 锚点检索。
+                     **候选按相关度排好**（最像的在前），所以 step=1 就是"最像的那张"。
+        @return {"ok", "path", "index", "total", "pushed", "match"?, "score"?, "error"}
+                · ok=False 时 error 是**给人看的**一句话
                 · pushed=True 只表示"已经交给 IPC 去推了", 不代表 GUI 收到了
         @note 目录不存在/没图片属于运行期问题: 这里报错, 不让工具在启动时消失。
-        @note **状态权限不在这里判**（T6 的决定）: 那张表挂在工具上（`allowed_states`）,
-              由 `ToolRouter` 统一回答"这个动作在当前状态下行不行"。LLM 走工具时由
-              `execute()` 拦, GUI 命令由 `agent/ipc/` 用 `ToolRouter.allowed_in_current_state()`
-              拦 —— 两处问的是同一张表。本文件因此仍然**不认识任何具体工具**。
+              标签数据还没打（或 match 写错）同样只是**这次失败**, 不抛异常。
+        @note **状态权限不在这里判**: 那张表挂在工具上（`allowed_states`）, 由
+              `ToolRouter.execute()` 统一拦。本文件因此仍然**不认识任何具体工具**。
         @note 这个方法是**同步**的: 推送入口（IPC 的 dispatcher）本身就是同步且线程安全的,
               而工具 handler 可能在线程池里跑（ToolRouter 对同步 handler 就是这么做的）。
         """
         if self.wallpaper is None:
             return {"ok": False, "error": "壁纸还没初始化（Agent 的 tools 步骤没起来？）"}
 
+        pool = None
+        picked: Dict[str, Any] = {}
+        if match:
+            resolved = self._resolve_match(match)
+            if not resolved.get("ok"):
+                return resolved
+            pool = resolved["pool"]
+            picked = resolved
+
         try:
-            index, path, total = self.wallpaper.step(step)
+            index, path, total = self.wallpaper.step(step, pool=pool)
         except WallpaperError as exc:
             self.log.warning("wallpaper: 换不了: %s", exc)
             return {"ok": False, "error": str(exc)}
 
         pushed = self._push_wallpaper(path, index)
-        self.log.info("wallpaper: %s (index=%d/%d, pushed=%s)", path, index, total, pushed)
-        return {"ok": True, "path": path, "index": index, "total": total, "pushed": pushed}
+        self.log.info("wallpaper: %s (index=%d/%d%s, pushed=%s)", path, index, total,
+                      ", match=%s" % match if match else "", pushed)
+        out: Dict[str, Any] = {"ok": True, "path": path, "index": index,
+                               "total": total, "pushed": pushed}
+        if match:
+            out["match"] = {"spec": match, "kind": picked.get("kind"),
+                            "note": picked.get("note"),
+                            "candidates": len(pool or ())}
+            score = (picked.get("scores") or {}).get(path)
+            if score is not None:
+                out["score"] = score
+        return out
+
+    def _resolve_match(self, match: str) -> Dict[str, Any]:
+        """把 match 解析成候选路径（按相关度降序）。失败时返回 {"ok": False, "error"}。"""
+        index = self.tag_index()
+        if not index.count():
+            return {"ok": False, "data_file": index.data_file,
+                    "error": "还没有壁纸标签数据（%s）—— 先在板端跑 "
+                             "assistant tag --apply，之后才能按内容挑图"
+                             % index.data_file}
+        presets = self._cfg("wallpaper", "tagging", "ip_presets", default={}) or {}
+        resolved = index.match(match, presets=presets, wallpaper_dir=self._wallpaper_dir())
+        if not resolved.ok:
+            self.log.warning("wallpaper: match=%r 用不了: %s", match, resolved.error)
+            return {"ok": False, "error": resolved.error}
+        if not resolved.pool:
+            return {"ok": False,
+                    "error": "没有符合条件的壁纸（%s）" % (resolved.note or match)}
+        return {"ok": True, "pool": resolved.pool, "kind": resolved.kind,
+                "note": resolved.note, "scores": resolved.detail.get("scores") or {}}
 
     def push_current_wallpaper(self) -> bool:
         """把一个 GUI 刚连上来该看到的壁纸补推一次（T6）。

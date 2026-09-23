@@ -79,7 +79,6 @@ struct Options {
     QString inputTypeDemo;         ///< 非空 = 启动后切到这个输入源（验收用）
     bool inputMenuDemo = false;    ///< 启动后展开输入源菜单（配合 scrot 抓图）
     QString musicNoteDemo;         ///< 非空 = 启动后触发音乐条某个占位说明（验收用）
-    bool nextWallpaperDemo = false; ///< 启动后点一下"下一张"（验收用）
     bool nextBilibiliDemo = false;  ///< 启动后点一下视频区"下一集"（验收用）
     bool videoPlayDemo = false;     ///< 启动后切一次播放/暂停（验收用）
     bool videoFullscreenDemo = false; ///< 启动后切一次全屏（验收用）
@@ -116,7 +115,6 @@ void printUsage()
         "  --input-type-demo <terminal|keyboard>  启动后切到该输入源（验收用）\n"
         "  --input-menu-demo    启动后展开输入源菜单（配 --scrot 抓图）\n"
         "  --music-note-demo <歌词|歌手|专辑|进度>  触发音乐条占位说明（验收用）\n"
-        "  --next-wallpaper-demo  启动后点一下主区的「下一张」（验收用）\n"
         "  --video <文件>       主区视频源（本地文件；验收用）\n"
         "  --next-bilibili-demo 启动后点一下视频区「下一集」（验收用）\n"
         "  --video-play-demo    启动后切一次播放/暂停（验收用）\n"
@@ -191,8 +189,6 @@ Options parseArgs(int argc, char** argv)
                    || arg.startsWith(QLatin1String("--music-note-demo="))) {
             opt.musicNoteDemo =
                 optionValue(arg, QStringLiteral("--music-note-demo"), i, argc, argv, opt);
-        } else if (arg == QLatin1String("--next-wallpaper-demo")) {
-            opt.nextWallpaperDemo = true;
         } else if (arg == QLatin1String("--video") || arg.startsWith(QLatin1String("--video="))) {
             opt.videoFile = optionValue(arg, QStringLiteral("--video"), i, argc, argv, opt);
         } else if (arg == QLatin1String("--next-bilibili-demo")) {
@@ -542,9 +538,6 @@ int runGuiMode(const Options& opt, int argc, char** argv)
     if (!opt.musicNoteDemo.isEmpty()) {
         const QString what = opt.musicNoteDemo;
         QTimer::singleShot(1600, &window, [&window, what]() { window.demoPlaceholderNote(what); });
-    }
-    if (opt.nextWallpaperDemo) {
-        QTimer::singleShot(1600, &window, [&window]() { window.demoNextWallpaper(); });
     }
     if (!opt.videoFile.isEmpty()) {
         window.setVideoSource(opt.videoFile);

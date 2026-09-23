@@ -133,7 +133,10 @@ void SysPage::build()
     rightBox->addStretch(1);
 
     watchdog_ = new QPushButton(QStringLiteral("看门狗：未启用"), right);
-    watchdog_->setObjectName(QStringLiteral("NextWallpaper"));
+    // ⚠ T7-3：这个 objectName 原来误用了 "NextWallpaper"（借那条 QSS 规则的外形）。
+    //    主区「下一张」按钮删掉、QSS 规则也跟着删了，所以这里改成自己的名字 +
+    //    自己的样式规则 —— 否则看门狗会掉回系统默认按钮外观。
+    watchdog_->setObjectName(QStringLiteral("WatchdogButton"));
     watchdog_->setCursor(Qt::PointingHandCursor);
     connect(watchdog_, &QPushButton::clicked, this, [this]() { triggerWatchdog(); });
     rightBox->addWidget(watchdog_);
