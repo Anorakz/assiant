@@ -250,6 +250,53 @@ class TestStepWithPool(unittest.TestCase):
         self.assertEqual(os.path.basename(deck.step(1)[1]), "01_a.png")
 
 
+class TestStepAnchor(unittest.TestCase):
+    """T7-4: `anchor=` —— "这一次把哪张当成当前"（挑图时"从第 1 名重挑"靠它）。"""
+
+    def _deck(self):
+        root = make_dir("01_a.png", "02_b.png", "03_c.png")
+        return WallpaperDeck(root), root
+
+    def test_anchor_none_starts_from_the_top(self):
+        deck, root = self._deck()
+        deck.step(1)                                   # 游标 = 01_a（候选里的第 1 张）
+        pool = [os.path.join(root, n) for n in ("03_c.png", "01_a.png")]
+        index, path, total = deck.step(1, pool=pool, anchor=None)
+        self.assertEqual((index, os.path.basename(path), total), (0, "03_c.png", 2),
+                         "anchor=None = 假装没选过 -> step=1 是候选第 1 名，而不是游标的后一张")
+
+    def test_anchor_none_with_step_zero_also_gives_the_top(self):
+        # step=0（"重推当前这张"）在"还没有当前"时给最好的那张 —— 不能给最后一名
+        deck, root = self._deck()
+        pool = [os.path.join(root, n) for n in ("03_c.png", "02_b.png")]
+        self.assertEqual(os.path.basename(deck.step(0, pool=pool, anchor=None)[1]), "03_c.png")
+
+    def test_anchor_none_with_a_negative_step_gives_the_last(self):
+        deck, root = self._deck()
+        pool = [os.path.join(root, n) for n in ("03_c.png", "02_b.png")]
+        self.assertEqual(os.path.basename(deck.step(-1, pool=pool, anchor=None)[1]), "02_b.png")
+
+    def test_an_anchor_path_continues_from_there(self):
+        deck, root = self._deck()
+        pool = [os.path.join(root, n) for n in ("03_c.png", "02_b.png", "01_a.png")]
+        index, path, _ = deck.step(1, pool=pool, anchor=pool[0])
+        self.assertEqual((index, os.path.basename(path)), (1, "02_b.png"),
+                         "给了 anchor 就从它往后翻（'再换一张同类的'）")
+
+    def test_the_cursor_is_still_updated_by_the_anchor_call(self):
+        deck, root = self._deck()
+        pool = [os.path.join(root, n) for n in ("03_c.png", "02_b.png")]
+        deck.step(1, pool=pool, anchor=None)
+        self.assertEqual(deck.current(), pool[0])
+
+    def test_without_anchor_the_cursor_decides(self):
+        deck, root = self._deck()
+        deck.step(1)                                   # 01_a
+        pool = [os.path.join(root, n) for n in ("02_b.png", "01_a.png")]
+        self.assertEqual(os.path.basename(deck.step(1, pool=pool)[1]), "02_b.png",
+                         "不给 anchor = 老行为（游标在候选里 -> 往后挪一位）")
+
+
 # ===========================================================================
 #  2) 工具
 # ===========================================================================
@@ -556,6 +603,47 @@ class TestRuntimePickByMatch(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(result["score"], 0.62)
         self.assertEqual(result["match"]["spec"], "scene=anime")
         self.assertEqual(result["match"]["kind"], "axis")
+        self.assertEqual(result["match"]["rank"], 1)
+
+    async def test_a_new_match_ignores_where_the_cursor_happens_to_be(self):
+        """T7-4 修的那处: 当前那张恰好在候选里, 也不该从它的名次往下走。
+
+        实测踩到: 当前是 01_landscape（在候选里排第 28），说"换一张动漫的"却挑回第 29 名。
+        """
+        runtime, root = self._runtime()
+        # 游标先落在候选的第 2 名上
+        self._with_pool(runtime, root, ["03_c.png", "01_a.png"])
+        runtime.wallpaper.step(1, pool=[os.path.join(root, "01_a.png")])
+        result = runtime.next_wallpaper(1, match="scene=anime")
+        self.assertEqual(os.path.basename(result["path"]), "03_c.png",
+                         "换了条件就从**第 1 名**重挑, 不看游标现在在哪")
+        self.assertEqual(result["match"]["rank"], 1)
+
+    async def test_repeating_the_same_match_walks_down_the_ranking(self):
+        runtime, root = self._runtime()
+        self._with_pool(runtime, root, ["03_c.png", "01_a.png", "02_b.png"])
+        first = runtime.next_wallpaper(1, match="scene=anime")
+        self.assertEqual(os.path.basename(first["path"]), "03_c.png")
+        second = runtime.next_wallpaper(1, match="scene=anime")
+        self.assertEqual(os.path.basename(second["path"]), "01_a.png",
+                         "同一个条件再来一次 -> 下一名（'再换一张同类的'）")
+        self.assertEqual(second["match"]["rank"], 2)
+
+    async def test_a_different_match_starts_from_the_top_again(self):
+        runtime, root = self._runtime()
+        self._with_pool(runtime, root, ["03_c.png", "01_a.png", "02_b.png"])
+        runtime.next_wallpaper(1, match="scene=anime")
+        runtime._tag_index.pool = [os.path.join(root, n) for n in ("02_b.png", "03_c.png")]
+        result = runtime.next_wallpaper(1, match="ip=EVA")
+        self.assertEqual(os.path.basename(result["path"]), "02_b.png",
+                         "换了条件 -> 又是第 1 名")
+
+    async def test_step_zero_with_a_new_match_gives_the_top_not_the_last(self):
+        runtime, root = self._runtime()
+        self._with_pool(runtime, root, ["03_c.png", "01_a.png"])
+        result = runtime.next_wallpaper(0, match="scene=anime")
+        self.assertEqual(os.path.basename(result["path"]), "03_c.png",
+                         "没选过时 step=0 给最像的那张（修前会给最后一名）")
 
     async def test_second_call_walks_down_the_ranking(self):
         runtime, root = self._runtime()

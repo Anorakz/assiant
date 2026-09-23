@@ -62,7 +62,8 @@ DESCRIPTION = (
     "把板子屏幕上的背景图换成另一张。"
     "step=1 往后翻、-1 往前翻、0 重推当前这张。"
     "想按内容挑就给 match：\"scene=anime\"（场景轴上的某条标签）、"
-    "\"anime\"（只写标签名，各轴里找）、\"ip=EVA\"（某个作品，按锚点图检索）。"
+    "\"anime\"（只写标签名，各轴里找）、\"ip=EVA\"（某个作品，按锚点图检索）；"
+    "多条标签可以写成 \"scene=anime/landscape\"（任一命中，每张取最高分）。"
     "不知道库里有什么标签时，先用 list_wallpaper_tags 看一眼。"
     "⚠ 只改显示, 不动任何文件; 推给界面后没有回执。"
 )
@@ -79,9 +80,10 @@ SCHEMA: Dict[str, Any] = {
         "match": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 64,
+            "maxLength": 96,
             "description": "挑图条件（不写=按文件名翻下一页）: "
-                           "\"scene=anime\" / \"anime\" / \"ip=EVA\"",
+                           "\"scene=anime\" / \"anime\" / \"ip=EVA\"; "
+                           "多条标签用 / 或 , 隔开 = 任一命中",
         },
     },
     "additionalProperties": False,

@@ -41,12 +41,16 @@ GUI 读它的 `gui:` 段、读写它的 `llm:` 段、**只读**它的 `scheduler
 |---|---|---|---|---|
 | `config/config.yaml` | **唯一真源** | 否（只提交 `config.example.yaml`） | 人 / GUI（设置页、模型测试页）/ **Agent（只在"删掉已触发的一次性日程"这一件事上，见 §3.1）** | Agent、GUI |
 | `config/wall_data.jsonl` | **派生数据**（第一行 = 标签向量缓存，其后一行一张图: 标签 + 图像向量，Phase 7 T7-2） | 否（`.gitignore` 里单列一行） | **只有** `assistant tag --apply` | Agent（挑图/检索）、`assistant tag` 自己（算增量 + 复用词表向量） |
+| `config/music_library.jsonl` | **本地数据**（一行一首歌: id + tags + 播放次数，Phase 7 T8-3） | 否（`.gitignore` 里单列一行） | `agent/media/music_library.py`（唯一写者）: `assistant music` 导入/打标、以及运行期"听满 30 秒计一次" | Agent（挑歌）、`assistant music` |
+| `config/netease_cookie.json` | **凭据**（网易云登录态，人手动放进去，Phase 7 T8） | 否（`.gitignore` 里单列一行） | **人**（从浏览器/客户端取一次） | Agent（加歌等写操作） |
 | `llm/config/llm.env` | **派生**（喂 llama-server） | 否 | `ConfigSyncer`（GUI 保存时、或 `gui_config_sync` CLI） | llama-server 启动脚本 |
 | `config/config.example.yaml` | 模板 | **是** | 人 | 人（`cp` 起步） |
 
-> ⚠ `config/` 下现在有**两类**东西：**真源**（`config.yaml`，人/GUI 写）与**派生数据**
-> （`wall_data.jsonl`，机器写）。别因为"都在 config 目录里"就以为都能手改 ——
-> 手改 `wall_data.jsonl` 没有意义（下次打标签会覆盖），它的格式见 [`tagging.md`](tagging.md)。
+> ⚠ `config/` 下现在有**三类**东西：**真源**（`config.yaml`，人/GUI 写）、**派生/本地数据**
+> （`wall_data.jsonl`、`music_library.jsonl`，机器写）、**凭据**（`netease_cookie.json`，人放一次）。
+> 别因为"都在 config 目录里"就以为都能手改 —— 手改 `wall_data.jsonl` 没有意义
+> （下次打标签会覆盖，见 [`tagging.md`](tagging.md)）；`music_library.jsonl` 手改**有意义**
+> （它就是"我的本地歌单"，格式见 [`music.md`](music.md)）。
 
 `llm.env` 里可推导的只有 8 个键：`LLM_MODEL_PATH`、`LLM_MODEL_NAME`、`LLM_PORT`、
 `LLM_CTX_SIZE`、`LLM_BATCH_SIZE`、`LLM_THREADS`、`LLM_THREADS_BATCH`、`LLM_API_KEY`

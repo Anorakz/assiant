@@ -42,6 +42,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from . import wall_data
@@ -373,6 +374,34 @@ class TagIndex(object):
         scored.sort(key=lambda item: (-item["score"], item["path"]))
         return scored[:limit] if limit else scored
 
+    def rank_by_labels(self, axis: str, labels: Sequence[str],
+                       limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """**多条标签的"任一命中"**排序：每张图取它在这些标签里的**最高分**。
+
+        为什么要它: 板端实测模型会把一串标签用斜杠拼在一起当一条用
+        （`scene=space/technology/fantasy/anime`）。老实报错当然也算"如实",
+        但用户的意图显然是"这几个里随便挑一张像的" —— 所以按"任一命中"算,
+        `detail["why"]` 里记下**是哪条标签**给它打的分。
+
+        @return [{"path", "score", "tags", "label"}, …]，分数降序（同分按路径）
+        """
+        wanted = [str(x) for x in labels or () if str(x).strip()]
+        if not wanted:
+            return []
+        if len(wanted) == 1:
+            hits = self.rank_by_label(axis, wanted[0], limit=limit)
+            return [dict(hit, label=wanted[0]) for hit in hits]
+
+        best: Dict[str, Dict[str, Any]] = {}
+        for label in wanted:
+            for hit in self.rank_by_label(axis, label):
+                path = str(hit["path"])
+                current = best.get(path)
+                if current is None or hit["score"] > current["score"]:
+                    best[path] = dict(hit, label=label)
+        scored = sorted(best.values(), key=lambda item: (-item["score"], item["path"]))
+        return scored[:limit] if limit else scored
+
     # ------------------------------------------------------------ 锚点 ---
     def anchor_prototype(self, anchors: Sequence[str]) -> Tuple[Optional[List[float]],
                                                                List[str], List[str]]:
@@ -429,48 +458,72 @@ class TagIndex(object):
                   % (key, "、".join(known) if known else "（数据文件里一个轴都没有）"))
 
     # ---- match 的三个分支 ----
-    def _match_axis(self, axis: str, label: str, limit: Optional[int]) -> MatchResult:
-        labels = self.labels(axis)
-        if labels and label not in labels:
-            return MatchResult(error="%s 轴上没有 %r 这条标签：可用的有 %s"
-                                     % (axis, label, "、".join(labels)))
-        hits = self.rank_by_label(axis, label, limit=limit)
-        # ⚠ 措辞要小心: 这是**排序**不是"命中" —— 分数没标定（docs/tagging.md §7），
+    def _match_axis(self, axis: str, value: str, limit: Optional[int]) -> MatchResult:
+        """`轴=标签`（**可以用 `/`、`,`、空格 写多条**，按"任一命中"算）。"""
+        known = self.labels(axis)
+        wanted, unknown = _pick_labels(value, known)
+        if not wanted:
+            return MatchResult(error="%s 轴上没有 %s 这条标签：可用的有 %s"
+                                     % (axis, value, "、".join(known)))
+        hits = self.rank_by_labels(axis, wanted, limit=limit)
+        # ⚠ 措辞要小心: 这是**排序**不是"命中" —— 分数没标定（docs/tagging.md §8），
         #   所以任何"符合/命中 N 张"的说法都会骗人。全库都有分数, 只是高低不同。
+        shown = "/".join(wanted) if len(wanted) > 1 else wanted[0]
         note = "%s=%s：全库 %d 张按相似度排序（最像的在最前；分数是余弦，没标定过）" % (
-            axis, label, len(self))
+            axis, shown, len(self))
+        if len(wanted) > 1:
+            note = "%s=%s（%d 条标签**任一命中**，每张取最高分）：全库 %d 张按相似度排序" % (
+                axis, shown, len(wanted), len(self))
+        if unknown:
+            note += "（忽略了不认识的标签: %s）" % "、".join(unknown)
         if not self.has_vocab_vectors():
             note += "（数据文件里没有词表向量，只能看打标签时存下来的 top-k）"
         return MatchResult(pool=[h["path"] for h in hits], kind="axis", note=note,
-                           detail={"axis": axis, "label": label,
+                           detail={"axis": axis, "label": wanted[0], "labels": wanted,
+                                   "unknown": unknown,
+                                   "why": {str(h["path"]): h.get("label") for h in hits
+                                           if len(wanted) > 1},
                                    "scores": _score_map(hits),
                                    "top": hits[:DEFAULT_LIMIT]})
 
-    def _match_bare_label(self, label: str, limit: Optional[int]) -> MatchResult:
+    def _match_bare_label(self, value: str, limit: Optional[int]) -> MatchResult:
+        """只写了标签名（**也可以写多条**）—— 在所有轴里找同名标签。"""
+        all_axes = self.axes() or self._vocab_axes()
+        every = sorted({x for labels in self.known_labels().values() for x in labels})
+        wanted, unknown = _pick_labels(value, every)
+        if not wanted:
+            return MatchResult(
+                error="词表里没有 %s 这条标签：有的是 %s"
+                      % (value, "、".join(every) if every else "（数据文件里没有任何标签）"))
+
         hits: List[Dict[str, Any]] = []
         used_axes: List[str] = []
-        for axis in (self.axes() or self._vocab_axes()):
-            if label not in self.labels(axis):
+        for axis in all_axes:
+            axis_labels = [label for label in wanted if label in self.labels(axis)]
+            if not axis_labels:
                 continue
             used_axes.append(axis)
-            hits.extend(self.rank_by_label(axis, label))
-        if not used_axes:
-            known = sorted({x for labels in self.known_labels().values() for x in labels})
-            return MatchResult(
-                error="词表里没有 %r 这条标签：有的是 %s"
-                      % (label, "、".join(known) if known else "（数据文件里没有任何标签）"))
+            hits.extend(self.rank_by_labels(axis, axis_labels))
         hits.sort(key=lambda item: (-item["score"], item["path"]))
-        # 同一张图可能同时命中两个轴 —— 去重（留分高的那次）
+        # 同一张图可能同时命中两个轴（或两条标签）—— 去重（留分高的那次）
         unique: Dict[str, Dict[str, Any]] = {}
         for hit in hits:
             unique.setdefault(hit["path"], hit)
         ordered = list(unique.values())
         if limit:
             ordered = ordered[:limit]
-        return MatchResult(pool=[h["path"] for h in ordered], kind="label",
-                           note="%s：全库 %d 张按相似度排序（标签在 %s 轴上；分数没标定过）"
-                                % (label, len(self), "、".join(used_axes)),
-                           detail={"label": label, "axes": used_axes,
+        shown = "/".join(wanted)
+        note = "%s：全库 %d 张按相似度排序（标签在 %s 轴上；分数没标定过）" % (
+            shown, len(self), "、".join(used_axes))
+        if len(wanted) > 1:
+            note += "；多标签按**任一命中**算"
+        if unknown:
+            note += "（忽略了不认识的标签: %s）" % "、".join(unknown)
+        return MatchResult(pool=[h["path"] for h in ordered], kind="label", note=note,
+                           detail={"label": wanted[0], "labels": wanted,
+                                   "unknown": unknown, "axes": used_axes,
+                                   "why": {str(h["path"]): h.get("label") for h in ordered
+                                           if len(wanted) > 1},
                                    "scores": _score_map(ordered),
                                    "top": ordered[:DEFAULT_LIMIT]})
 
@@ -538,6 +591,37 @@ def _split_spec(text: str) -> Tuple[Optional[str], str]:
             return None, value
         return key, value
     return None, text.strip()
+
+
+def _pick_labels(value: str, known: Sequence[str]) -> Tuple[List[str], List[str]]:
+    """把 `space/technology/fantasy` 这样的值拆成多条标签，并对上词表。
+
+    @param known 词表里真有的标签（**大小写敏感** —— 标签本身是小写英文裸串）
+    @return (认得的标签, 不认得的标签)，各自保持书写顺序、去重
+    @note 分隔符认 `/ , ; 、 ，` 与空白: 板端实测模型会用斜杠把一串标签拼起来
+          （`scene=space/technology/fantasy/anime`）, 也会用逗号或空格。词表里的标签
+          都是**不含空白**的裸串, 所以这样切不会误伤。
+    @note 认得的照用、不认得的**如实报出来**（`unknown`），不是静默丢掉。
+    """
+    parts = [part for part in _LABEL_SPLIT_RE.split(value or "") if part]
+    if not parts:
+        parts = [(value or "").strip()] if (value or "").strip() else []
+    wanted: List[str] = []
+    unknown: List[str] = []
+    table = {str(label): str(label) for label in known or ()}
+    for part in parts:
+        label = table.get(part)
+        if label is None:
+            if part not in unknown:
+                unknown.append(part)
+            continue
+        if label not in wanted:
+            wanted.append(label)
+    return wanted, unknown
+
+
+#: 拆多标签用的分隔符（半角/全角斜杠逗号分号 + 顿号 + 空白）
+_LABEL_SPLIT_RE = re.compile(r"[\/,;、，；\s]+")
 
 
 def _anchors_of(preset: Any) -> List[str]:

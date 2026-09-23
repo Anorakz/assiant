@@ -300,6 +300,10 @@ class Runtime:
         #: "启动路径上多一个可能出错的文件读"不划算）。
         self._tag_index: Optional[Any] = None
 
+        #: 上一次由 `match` 挑中的那张 ({"spec", "path"}) —— T7-4:
+        #: 同一个条件再来一次就"往下翻一名"（再换一张同类的）; 换了条件就从第 1 名重挑。
+        self._last_match_pick: Dict[str, str] = {}
+
         self._components: List[_Component] = []
         self._terminal_task: Optional[asyncio.Task] = None
         self.failures: List[Tuple[str, str]] = []
@@ -672,15 +676,23 @@ class Runtime:
 
         pool = None
         picked: Dict[str, Any] = {}
+        anchor: Any = None                 # None = "这次是新的挑选, 从第 1 名开始"
         if match:
             resolved = self._resolve_match(match)
             if not resolved.get("ok"):
                 return resolved
             pool = resolved["pool"]
             picked = resolved
+            # ⚠ 只有"上一张就是这个 match 挑的"才从它往后翻（"再换一张同类的"）;
+            #   换了条件（或者压根是第一次）就从**第 1 名**开始 —— 否则用户说
+            #   "换一张动漫的"，会从当前那张在候选里的名次往下走（实测踩到:
+            #   当前那张排第 28，于是挑回来第 29 名，根本不是"最像的"）。
+            previous = self._last_match_pick or {}
+            if previous.get("spec") == match.strip() and previous.get("path") in pool:
+                anchor = previous.get("path")
 
         try:
-            index, path, total = self.wallpaper.step(step, pool=pool)
+            index, path, total = self.wallpaper.step(step, pool=pool, anchor=anchor)
         except WallpaperError as exc:
             self.log.warning("wallpaper: 换不了: %s", exc)
             return self._wallpaper_failure(str(exc))
@@ -691,9 +703,11 @@ class Runtime:
         out: Dict[str, Any] = {"ok": True, "path": path, "index": index,
                                "total": total, "pushed": pushed}
         if match:
+            self._last_match_pick = {"spec": match.strip(), "path": path}
             out["match"] = {"spec": match, "kind": picked.get("kind"),
                             "note": picked.get("note"),
-                            "candidates": len(pool or ())}
+                            "candidates": len(pool or ()),
+                            "rank": index + 1}
             score = (picked.get("scores") or {}).get(path)
             if score is not None:
                 out["score"] = score

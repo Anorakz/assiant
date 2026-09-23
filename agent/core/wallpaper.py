@@ -38,7 +38,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 __all__ = [
     "WallpaperDeck",
@@ -48,6 +48,10 @@ __all__ = [
 ]
 
 _log = logging.getLogger(__name__)
+
+#: `step(anchor=…)` 的默认值: 代表"用游标里那张"（与显式传 `None` 区分开 ——
+#: `None` 的含义是"假装还没选过"）。用哨兵而不是 `None`, 是因为后者有意义。
+_CURSOR: Any = object()
 
 #: 认得的图片后缀（小写比较）。刻意不含 .gif —— Qt 能显示但"壁纸"要的是静态图。
 IMAGE_SUFFIXES: Tuple[str, ...] = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -166,20 +170,30 @@ class WallpaperDeck:
         except WallpaperError:
             return 0
 
-    def step(self, step: int = 1, pool: Optional[Sequence[str]] = None) -> Tuple[int, str, int]:
+    def step(self, step: int = 1, pool: Optional[Sequence[str]] = None,
+             anchor: Any = _CURSOR) -> Tuple[int, str, int]:
         """往前/往后翻 step 张, 更新游标。
 
         @param step 正数往后、负数往前、0 = 重推当前那张
         @param pool 只在这些图里翻（**顺序即优先级**, T7-3 的挑图用）:
                     None = 目录里的全部图（按文件名顺序，T3 的老行为）。
                     pool 里已经不在目录里的图会被**丢掉**（图被删了不该挑出个空路径）。
+        @param anchor **这次翻页把哪张当成"当前"**（只影响这一次的起点, 不改游标语义）:
+                    · 不给（默认）= 用游标里那张（老行为）
+                    · `None` = **假装还没选过** → 从候选头/尾开始:
+                      `step>0` → 第 1 名（挑图时就是"最像的那张"）;
+                      `step<=0` → 也是第 1 名（`step=0` 时"重推当前"没有意义, 给最好的那张）
+                      或最后一名（`step<0`）
+                    · 给一个路径 = 从它往后/往前翻（"再换一张同类的"就靠它）
         @return (index, path, total) —— index 是它在**这次翻的那份列表**里的下标
         @raise WallpaperError 目录用不了 / 一张图都没有 / step 不是整数 /
                               pool 给了但里面一张能用的都没有
         @note 越界**回绕**（最后一张的下一张 = 第一张）: 目标是"一张一张翻着看",
               翻到头停住反而要多想一步。
-        @note 当前那张不在候选里时（例如刚换了个 match），从候选的第一张开始 ——
-              于是 `step=1` 就是"最像的那张"（pool 已按相关度排好）。
+        @note ⚠ T7-4 修的一处: 以前"当前那张不在候选里"时统一按 `-1` 算,
+              于是 `step=0` 会算出 `(-1+0) % n == n-1` —— **推最后一名**（最不像的那张）。
+              现在按 `step` 的正负决定起点, 并且调图那条路会显式传 `anchor=None`
+              （"这次是新的挑选, 从第 1 名开始"）, 见 `agent/main.py::next_wallpaper`。
         """
         if isinstance(step, bool) or not isinstance(step, int):
             raise WallpaperError("step 必须是整数（正数往后、负数往前), 得到 %r" % (step,))
@@ -201,8 +215,13 @@ class WallpaperDeck:
                     "（目录: %s；换一批条件试试, 或重新跑 assistant tag）" % self.directory
                 )
 
-        # 游标是路径, 所以重列目录后仍然指着同一张; 它不在候选里就从头开始
-        base = candidates.index(self._current) if self._current in candidates else -1
+        # 游标是路径, 所以重列目录后仍然指着同一张
+        current = self._current if anchor is _CURSOR else anchor
+        base = candidates.index(current) if current in candidates else None
+        if base is None:
+            # 没有"当前"可用: step>0 从 -1 起（step=1 → 第 1 名）;
+            # step<=0 从 0 起（step=0 → 第 1 名, step=-1 → 最后一名）
+            base = -1 if step > 0 else 0
         target = (base + step) % len(candidates)
         self._current = candidates[target]
         return target, candidates[target], len(candidates)

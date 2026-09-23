@@ -48,8 +48,11 @@ llm:
   # ⚠ 这是**云端**的 key (Agent 用); 本地 llama-server 的 key 见下面的 local_api_key
   api_key: ""
   model: gpt-4o-mini
-  # 单次请求超时(秒) —— edge / cloud 都用它
-  timeout_s: 30
+  # 单次请求超时(秒) —— edge / cloud 都用它。
+  # ⚠ 板端 edge 实测（T7-4）: 调完工具**之后**那一轮请求会带上工具结果, 0.6B 在 RK3568 上
+  #    常超过 30 s（日志里就是 `APITimeoutError: Request timed out.` → 回退成规则兜底,
+  #    于是"壁纸换了但回话像失败"）。90 s 是实测够用的值; 云端可以调小。
+  timeout_s: 90
 
   # ---- 板端 llama-server (edge 模式) ----
   # ⚠ 这一组**两边都用**: 一边派生 llm/config/llm.env 喂 llama-server 进程,
@@ -110,6 +113,42 @@ vision:
   verbose: false
   # 首帧之前空跑几次: 首次推理含内存分配, 计时必须丢掉它
   warmup_runs: 1
+
+# ---------------------------------------------------------------------------
+# 音乐 (Phase 7 T8)
+# ---------------------------------------------------------------------------
+# 目标: 对话里点歌/控制播放, **声音从 PC 出**, 而 PC 上**没有任何我们写的程序**。
+#
+#   PC 侧（我们一个字都不写）            板端（我们只写这一层）
+#   ─────────────────────────────        ─────────────────────────────
+#   neteasecli （第三方 CLI, 已登录）  ◀── ssh ──  agent/net/netease_cli.py
+#   mpv         （第三方播放器, 出声）
+#
+# ⚠ 通道为什么是 ssh: PC 侧只允许"系统组件 + 第三方工具" —— Windows 自带
+#    OpenSSH Server 属于前者（一次性开好, 不是常驻程序）, 而且是**唯一能读回输出**
+#    的通道（Sunshine 的输入注入能跑命令但读不回, 那样进度只能瞎猜）。
+#    一次性配置步骤（管理员 PowerShell + 板端公钥）见 docs/music.md。
+# ⚠ 登录态在 **PC 上**（neteasecli 自己存的）, 板端不碰它; 板端只用
+#    `config/netease_cookie.json`（已进 .gitignore）做"加歌到歌单"这类写操作。
+music:
+  # 关掉它 = 音乐工具全部不装（与其它工具"缺依赖就跳过"同一条口径）
+  enabled: false
+  # neteasecli 在哪台机器上（就是那台会出声的 PC）
+  pc_host: 192.168.137.1
+  pc_user: Anorak
+  pc_port: 22
+  # PC 上那个 CLI 的名字（npm 全局装好就在 PATH 上）
+  binary: neteasecli
+  # 单次远程调用超时(秒) —— neteasecli 自己也有限制, 这里包一层
+  timeout_s: 45
+
+  # ---- 本地音乐库（**不再依赖云歌单**）----
+  # 一行一首歌: id + tags + 播放次数。云歌单只用来**导入一次 id**。
+  # 进 .gitignore（这是"这台机器听过什么"）。
+  library_file: config/music_library.jsonl
+  # 只有真的听了 N 秒才算"播放一次"（避免点开就切把次数刷上去）。
+  # 次数是"下一首由 chat 决定"的主要依据（听得最少的先）。
+  count_after_s: 30
 
 # ---------------------------------------------------------------------------
 # 壁纸 (Phase 7 T3)

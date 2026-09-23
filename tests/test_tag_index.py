@@ -294,6 +294,22 @@ class TestRanking(unittest.TestCase):
         self.assertEqual(len(hits), 1)
         self.assertNotEqual(hits[0]["path"], first)
 
+    def test_rank_by_labels_keeps_the_best_score_per_image(self):
+        hits = self.index.rank_by_labels("scene", ["anime", "landscape"])
+        self.assertEqual(os.path.basename(hits[0]["path"]), "01_anime.png")
+        self.assertEqual(hits[0]["label"], "anime", "要带上'是谁打的分'")
+        # 每张图只出现一次（取最高分那次）
+        paths = [h["path"] for h in hits]
+        self.assertEqual(len(paths), len(set(paths)))
+
+    def test_rank_by_labels_with_one_label_matches_rank_by_label(self):
+        one = self.index.rank_by_labels("scene", ["anime"])
+        two = self.index.rank_by_label("scene", "anime")
+        self.assertEqual([h["path"] for h in one], [h["path"] for h in two])
+
+    def test_rank_by_labels_with_nothing_returns_empty(self):
+        self.assertEqual(self.index.rank_by_labels("scene", []), [])
+
     def test_hits_carry_the_stored_tags(self):
         hits = self.index.rank_by_label("scene", "anime")
         self.assertEqual(hits[0]["tags"]["scene"][0][0], "anime")
@@ -458,6 +474,55 @@ class TestMatch(unittest.TestCase):
     def test_limit_is_honoured(self):
         result = self.index.match("anime", limit=1)
         self.assertEqual(len(result.pool), 1)
+
+    # ---- 多标签（板端实测: 模型会把一串标签用斜杠拼起来当一条用） ----
+    def test_multiple_labels_are_any_of(self):
+        result = self.index.match("scene=anime/landscape")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.detail["labels"], ["anime", "landscape"])
+        self.assertIn("任一命中", result.note)
+        self.assertEqual(os.path.basename(result.pool[0]), "01_anime.png",
+                         "两条标签里分数更高的那张排最前")
+        self.assertEqual(result.detail["why"][result.pool[0]], "anime",
+                         "要记下**是哪条标签**给它打的分")
+
+    def test_separators_comma_space_dunhao_semicolon(self):
+        for spec in ("scene=anime,landscape", "scene=anime landscape",
+                     "scene=anime、landscape", "scene=anime；landscape"):
+            with self.subTest(spec=spec):
+                result = self.index.match(spec)
+                self.assertTrue(result.ok, result.error)
+                self.assertEqual(result.detail["labels"], ["anime", "landscape"], spec)
+
+    def test_unknown_parts_are_reported_not_silently_dropped(self):
+        result = self.index.match("scene=anime/mecha")
+        self.assertTrue(result.ok, "认得的那条照用")
+        self.assertEqual(result.detail["labels"], ["anime"])
+        self.assertEqual(result.detail["unknown"], ["mecha"])
+        self.assertIn("忽略了不认识的标签", result.note)
+        self.assertIn("mecha", result.note)
+
+    def test_all_parts_unknown_still_refuses_honestly(self):
+        result = self.index.match("scene=mecha/cyberpunk")
+        self.assertFalse(result.ok)
+        self.assertIn("mecha/cyberpunk", result.error)
+        self.assertIn("anime", result.error, "要把真词表列出来")
+
+    def test_bare_multi_label_searches_every_axis(self):
+        result = self.index.match("anime/landscape")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.detail["labels"], ["anime", "landscape"])
+        self.assertIn("scene", result.detail["axes"])
+
+    def test_duplicate_parts_are_collapsed(self):
+        result = self.index.match("scene=anime/anime/anime")
+        self.assertEqual(result.detail["labels"], ["anime"])
+
+    def test_a_single_label_has_no_why_map(self):
+        # 单标签时"是哪条标签打的分"没有意义 —— 别塞一堆用不上的字段
+        result = self.index.match("scene=anime")
+        self.assertEqual(result.detail["why"], {})
+        self.assertEqual(result.detail["labels"], ["anime"])
 
     def test_scores_are_reported_for_the_top_hits(self):
         result = self.index.match("scene=anime", limit=2)
