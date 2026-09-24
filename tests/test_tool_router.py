@@ -598,6 +598,29 @@ class TestTimeout(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await router.execute("fast", {}),
                          {"ok": True, "result": "ok"})
 
+    async def test_tool_can_declare_its_own_timeout(self):
+        """T8-5b: 会同步走一趟 PC 的工具（音乐排队列后起播要 ssh + schtasks）声明自己的
+        超时 —— 路由的全局 5 s 会把它误判成 timed out（板端实测踩到过）。"""
+        router = ToolRouter(state_provider=_StateStub(State.IDLE), timeout_s=0.05)
+        router.register(make_tool("slow", handler=lambda **k: time.sleep(0.3)))
+        result = await router.execute("slow", {})
+        self.assertFalse(result["ok"], "路由默认 0.05 s: 照旧要超时")
+
+        patient = ToolRouter(state_provider=_StateStub(State.IDLE), timeout_s=0.05)
+        tool = make_tool("patient", handler=lambda **k: time.sleep(0.3))
+        tool.timeout_s = 3.0
+        patient.register(tool)
+        result = await patient.execute("patient", {})
+        self.assertTrue(result["ok"], "工具自己声明了 3 s -> 不该被 0.05 s 掐掉: %r" % result)
+
+    async def test_tool_timeout_is_reported_with_the_tool_value(self):
+        router = ToolRouter(state_provider=_StateStub(State.IDLE), timeout_s=0.05)
+        tool = make_tool("slow", handler=lambda **k: time.sleep(0.5))
+        tool.timeout_s = 0.1
+        router.register(tool)
+        result = await router.execute("slow", {})
+        self.assertIn("0.1s", result["error"], "报错里的秒数要用这个工具自己的值")
+
     async def test_timeout_does_not_kill_router(self):
         router = ToolRouter(state_provider=_StateStub(State.IDLE), timeout_s=0.05)
         router.register(make_tool("slow", handler=lambda **k: time.sleep(0.3)))

@@ -35,11 +35,14 @@ __all__ = ["build_tools", "TOOL_MODULES"]
 _log = logging.getLogger(__name__)
 
 #: 要装的工具模块（相对本包）。加工具时在这里加一行。
+#: ⚠ T8-5b 起**只有三个**（你定的"进一步抽象简化"）: 壁纸 / 音乐 / 回到桌面。
+#:   每个工具内部用 `action` 分派具体动作（见各自模块头）。为什么合并:
+#:   工具清单占第一轮 prompt 的 90%（6 个工具 1699 token, 用户那句话只有 6 token）,
+#:   合并后模型要认的名字从 7 个降到 3 个, 上下文与"先想清楚叫哪个名字"一起省下来。
 TOOL_MODULES = (
     "back_to_desktop",
     "wallpaper",
-    # T7-3: 挑图的前置查询（只读）—— 让模型先看清单再决定 match 怎么写
-    "wallpaper_tags",
+    "music",
 )
 
 

@@ -8,15 +8,20 @@
 #      3. native       moonlight.start_with_session() —— **失败不致命**, 只记 warning
 #      4. ChatInputBus 多源汇合点, 后面所有组件都挂在它上面
 #      5. io 层        image_reader / input_sender
-#      6. StateMachine SLEEP/IDLE/STUDY/GAME
-#      7. ToolRouter   注册工具 (agent/tools/ 还没写 -> 空路由)
-#      8. LLMProvider  edge / cloud / disabled
-#      9. Scheduler    日程 + 终端命令 (订阅 bus, 只看不取)
-#     10. IPC          当前没实现 -> 跳过并记一条日志
-#     11. 终端输入     可选 (config: terminal.enabled)
+#      6. 音乐         连 PC 的 neteasecli + 本地库 (T8-4; music.enabled=false 则什么都不做)
+#      7. StateMachine SLEEP/IDLE/STUDY/GAME
+#      8. ToolRouter   注册工具 (agent/tools/)
+#      9. llama-server 按配置管本机 llama-server 的启停 (T7-4; 不管就什么都不做)
+#     10. LLMProvider  edge / cloud / disabled
+#     11. Scheduler    日程 + 终端命令 (订阅 bus, 只看不取)
+#     12. IPC          Unix socket, GUI 接入点
+#     13. 终端输入     可选 (config: terminal.enabled)
 #
-#  stop 时**严格反向**: terminal -> ipc -> scheduler -> llm -> tools -> state
-#                        -> io -> bus -> native
+#  ⚠ 音乐(6)必须在 ToolRouter(8) 之前: 音乐四个工具**建的时候**就要知道"音乐开没开",
+#    没开就整个不装（`services[...] = None` 是在装配 services 那一刻求值的）。
+#
+#  stop 时**严格反向**: terminal -> ipc -> scheduler -> llm -> llama-server -> tools
+#                        -> state -> 音乐 -> io -> bus -> native
 #
 #  异常处理: 单个组件失败不影响其他组件
 #  ---------------------------------------------------------------------------
@@ -340,10 +345,12 @@ class Runtime:
     _STEPS = (
         "_start_native",
         "_start_bus_and_io",
+        # ⚠ 音乐在工具之前: `agent/tools/` 里的音乐四件套要**建的时候**就知道
+        #   "音乐开没开"（没开就整个不装）—— 所以 `self.music` 必须先就位。
+        "_start_music",
         "_start_state_and_tools",
         "_start_llm_service",
         "_start_llm",
-        "_start_music",
         "_start_scheduler",
         "_start_ipc",
         "_start_terminal_input",
@@ -571,6 +578,16 @@ class Runtime:
                     "next_wallpaper": self.next_wallpaper,
                     # 壁纸: 看看库里有什么标签 / 某个 IP 最像哪几张（只读）
                     "wallpaper_tags": self.wallpaper_tags,
+                    # 音乐（T8-5b: 三个工具里的 `next_music` 用这几条入口）
+                    # ⚠ **没开音乐就是 None** —— 那个工具会自己跳过
+                    "music_list": self.music_candidates if self.music else None,
+                    "music_search": self.music_search if self.music else None,
+                    "music_state": self.music_state if self.music else None,
+                    "music_enqueue": self.music_enqueue if self.music else None,
+                    "music_queue_clear": self.music_queue_clear if self.music else None,
+                    "music_queue_state": self.music_queue_state if self.music else None,
+                    "music_tag": self.music_tag if self.music else None,
+                    "music_control": self.music_control if self.music else None,
                 },
             )
             registered = self._register_tools(self.tools)
@@ -900,46 +917,115 @@ class Runtime:
                             "duration_ms": t.get("duration")}
                            for t in tracks if isinstance(t, dict)]}
 
-    def music_play(self, track_id: Any = None, keyword: Optional[str] = None,
-                   tag: Optional[str] = None, axis: Optional[str] = None,
-                   sort: str = "plays_asc", limit: int = 10,
-                   queue_from_search: bool = True) -> Dict[str, Any]:
-        """放一首：给 `track_id` 直接放；给 `keyword` 先搜（PC 上）再放第一条。
+    def music_enqueue(self, track_id: Any = None, keyword: Optional[str] = None,
+                      tag: Optional[str] = None, sort: str = "plays_asc",
+                      limit: int = 1, replace: bool = False) -> Dict[str, Any]:
+        """把歌**加进环形队列**（chat 的两个决定之一；T8-5b）。
 
-        @param tag 给 keyword 搜出来的第一条打上这个 tag（chat 说"这首很燃"那种）
-        @return {"ok", ...}
+        四种给法（都给 `limit` 首，默认 1 首）::
+
+            track_id=…              就这一首（一般来自 list/search 的清单）
+            keyword=…               在 **PC 上搜**，取前 limit 首
+            tag="mood=energetic"    在**本地库**按标签挑前 limit 首（统一语法，见 label_spec）
+            （什么都不给）          本地库里按 `sort` 挑（默认 `plays_asc` = 听得最少的）
+
+        @param replace True = 先清空队列再加（"换一批"一句话说完）
+        @return {"ok", "queued": [id…], "started", "tracks", "queue"}
+        @note **A1（你定的）**: 排完之后如果 PC 上什么都没在放 —— 顺手从新排的第一首起播
+              （否则就是"chat 安排了队列, 用户什么都听不到"）。放不起来时**如实报错**
+              （队列照旧留在那儿, 错误里说清是"已排进队列但 PC 没放起来"）。
+              ⚠ 这一步要走 ssh + schtasks（板端实测 5~8 s）, 比默认工具超时（5 s）长 ——
+                所以 `next_music` 这个工具自己声明了 `timeout_s`（见 tools/music.py）。
+        @note `track_id` 会**去 PC 校验一次**（板端实测 0.6B 会编造 id）—— 问不到就如实报错。
+        @note 这里只动**队列与播放**; 标签/播放次数不碰（那是 music_tag / 计次的事）。
         """
         if self.music is None:
             return {"ok": False, "error": "音乐没开（config.yaml 的 music.enabled）"}
+        from agent.core import label_spec
         from agent.core.music import MusicError
 
-        queue: List[str] = []
-        meta: Dict[str, Any] = {}
-        if not track_id:
-            if not keyword:
-                return {"ok": False, "error": "要么给 track_id, 要么给 keyword"}
-            found = self.music_search(keyword, limit=limit)
+        count = max(1, int(limit or 1))
+        resolved: List[Dict[str, Any]] = []
+
+        if track_id:
+            resolved = [{"id": str(track_id), "meta": {}}]
+        elif keyword:
+            found = self.music_search(keyword, limit=count)
             if not found.get("ok"):
                 return found
-            tracks = found.get("tracks") or []
+            tracks = (found.get("tracks") or [])[:count]
             if not tracks:
                 return {"ok": False, "error": "PC 上没搜到 %r" % keyword,
                         "tell_user": "没搜到这首歌（换几个关键词试试）"}
-            first = tracks[0]
-            track_id = first["id"]
-            meta = {"name": first.get("name"), "artists": first.get("artists"),
-                    "album": first.get("album"), "duration_ms": first.get("duration_ms"),
-                    "source": "search:%s" % keyword}
-            if queue_from_search:
-                queue = [t["id"] for t in tracks]
-        try:
-            record = self.music.play(track_id, queue=queue or None, meta=meta or None)
-        except MusicError as exc:
-            return {"ok": False, "error": str(exc), "tell_user": str(exc)}
+            resolved = [{"id": str(t["id"]), "meta": t} for t in tracks]
+        else:
+            axis = None
+            wanted: Any = None
+            if tag:
+                axis, values = label_spec.parse_one(tag)
+                if axis == label_spec.EMPTY_AXIS:
+                    axis = None                   # 只写了标签名 -> 所有轴里找
+                if not values:
+                    return {"ok": False, "error": "tag 是空的：要么别给, 要么写成 mood=energetic",
+                            "tell_user": "标签写法不对（要么别给, 要么写成 mood=energetic）"}
+                wanted = values[0] if len(values) == 1 else values
+            picked = self.music.candidates(tag=wanted, axis=axis, sort=sort, limit=count)
+            if not picked:
+                return {"ok": False,
+                        "error": ("本地库里没有%s的歌" % ("带 %s 标签" % tag if tag else "任何"))
+                                 + " —— 用 keyword 去 PC 上搜一首，或先导入歌单",
+                        "tell_user": "本地库里没有符合条件的歌（可以让我用别的关键词去搜）"}
+            resolved = [{"id": str(t["id"]), "meta": t} for t in picked]
+
+        queued: List[str] = []
+        records: List[Dict[str, Any]] = []
+        for index, item in enumerate(resolved):
+            try:
+                records.append(self.music.enqueue(item["id"], meta=item.get("meta") or {},
+                                                  replace=bool(replace) and index == 0))
+            except MusicError as exc:
+                if queued:
+                    break                          # 前面几首已经排进去了, 如实说清
+                return {"ok": False, "error": str(exc), "tell_user": str(exc)}
+            queued.append(str(item["id"]))
+
+        will_start = bool(queued) and not bool(self.music.snapshot().get("playing"))
+        started = False
+        if will_start:
+            try:
+                self.music.play(queued[0])
+                started = True
+            except MusicError as exc:
+                self._push_music(self.music.snapshot())
+                return {"ok": False, "queued": queued, "started": False,
+                        "queue": self.music.queue_state(),
+                        "error": "已经排进队列, 但 PC 那边没放起来: %s" % exc,
+                        "tell_user": "歌已经排进队列了，但 PC 上没放起来：%s" % exc}
         self._push_music(self.music.snapshot())
-        return {"ok": True, "track_id": str(track_id), "name": record.get("name"),
-                "artists": record.get("artists"), "queue": queue,
-                "state": self.music.snapshot()}
+        return {"ok": True, "queued": queued, "started": started,
+                "will_start": will_start, "queue": self.music.queue_state(),
+                "tracks": [{"id": r.get("id"), "name": r.get("name"),
+                            "artists": r.get("artists"), "plays": r.get("plays"),
+                            "tags": r.get("tags"), "matched": r.get("matched")}
+                           for r in records]}
+
+    def music_queue_clear(self) -> Dict[str, Any]:
+        """清空环形队列（chat 的另一个决定）。**不停播放** —— 停/放是 GUI 按钮的事。"""
+        if self.music is None:
+            return {"ok": False, "error": "音乐没开（config.yaml 的 music.enabled）"}
+        result = self.music.clear_queue()
+        return {"ok": True, "cleared": result["cleared"], "queue": result["queue"]}
+
+    def music_queue_state(self) -> Dict[str, Any]:
+        """队列现状（**只给工具/日志看**；T8-5b 你定的: 不推给 GUI）。"""
+        if self.music is None:
+            return {"ok": False, "error": "音乐没开（config.yaml 的 music.enabled）"}
+        state = self.music.queue_state()
+        names = {str(t.get("id")): t.get("name") for t in self.music.tracks()}
+        state["ok"] = True
+        state["tracks"] = [{"id": track_id, "name": names.get(track_id)}
+                           for track_id in state["ids"]]
+        return state
 
     def music_candidates(self, tag: Optional[str] = None, axis: Optional[str] = None,
                          sort: str = "plays_asc", limit: int = 10) -> Dict[str, Any]:

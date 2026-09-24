@@ -47,7 +47,6 @@ from agent.core.wallpaper import (  # noqa: E402
 from agent.ipc import UNWIRED_COMMAND_NOTES  # noqa: E402
 from agent.ipc import protocol as p  # noqa: E402
 from agent.tools import wallpaper as wallpaper_tool  # noqa: E402
-from agent.tools import wallpaper_tags as wallpaper_tags_tool  # noqa: E402
 from agent.tools import build_tools  # noqa: E402
 
 logging.disable(logging.CRITICAL)          # 让"跳过工具"那条 warning 别刷屏
@@ -301,18 +300,24 @@ class TestStepAnchor(unittest.TestCase):
 #  2) 工具
 # ===========================================================================
 class TestToolBuild(unittest.TestCase):
-    def _services(self, calls):
+    """合并后的壁纸工具（T8-5b）: 一个 `action` 管翻页/挑图/看标签。"""
+
+    def _services(self, calls, tags=None):
         def advance(step=1, match=None):
             calls.append((step, match))
             return {"ok": True, "path": "/w/1.png", "index": 0, "total": 1, "pushed": True}
 
-        return {"next_wallpaper": advance}
+        return {"next_wallpaper": advance,
+                "wallpaper_tags": tags or (lambda ip_query=None, limit=5: {"ok": True})}
 
     def test_missing_service_skips_the_tool(self):
+        # 两个入口缺一个就不装 —— 模型看到的 action 列表必须与真实可用的完全一致
         self.assertIsNone(wallpaper_tool.build({}))
         self.assertIsNone(wallpaper_tool.build({"next_wallpaper": "not callable"}))
+        self.assertIsNone(wallpaper_tool.build({"next_wallpaper": lambda step=1, match=None: {}}))
+        self.assertIsNone(wallpaper_tool.build({"wallpaper_tags": lambda **kw: {}}))
 
-    def test_builds_with_the_service(self):
+    def test_builds_with_the_services(self):
         calls = []
         tool = wallpaper_tool.build(self._services(calls))
         self.assertIsNotNone(tool)
@@ -328,17 +333,22 @@ class TestToolBuild(unittest.TestCase):
         self.assertIn("只改显示", tool.description)
         self.assertIn("没有回执", tool.description)
         self.assertIn("match", tool.description, "T7-3: 得让模型知道能按内容挑")
+        self.assertIn("action", tool.description, "T8-5b: 动作靠 action 分派")
 
     def test_schema_forbids_extra_arguments(self):
         tool = wallpaper_tool.build(self._services([]))
         self.assertFalse(tool.schema["additionalProperties"])
-        self.assertEqual(tool.schema["properties"]["step"]["type"], "integer")
+        self.assertEqual(tool.schema["properties"]["action"]["type"], "string")
         self.assertEqual(tool.schema["properties"]["match"]["type"], "string")
+        self.assertEqual(tool.schema["properties"]["action"]["enum"],
+                         list(wallpaper_tool.ACTIONS))
 
-    def test_schema_allows_calling_without_match(self):
-        # 不传 match = 老行为（按文件名翻页），所以它不能进 required
+    def test_schema_requires_action(self):
+        # T8-5b: action 必填（老版本靠 step 的默认值, 现在"干什么"必须说出来）
         tool = wallpaper_tool.build(self._services([]))
-        self.assertNotIn("required", tool.schema)
+        self.assertEqual(tool.schema["required"], ["action"])
+        self.assertNotIn("step", tool.schema["properties"],
+                         "step 已经收进 action（prev/repeat）, 不该再留一个入口")
 
 
 class TestVocabHint(unittest.TestCase):
@@ -346,6 +356,7 @@ class TestVocabHint(unittest.TestCase):
 
     def _services(self, config=None):
         return {"next_wallpaper": lambda step=1, match=None: {"ok": True},
+                "wallpaper_tags": lambda ip_query=None, limit=5: {"ok": True},
                 "config": config if config is not None else {}}
 
     def test_description_lists_every_axis_and_label(self):
@@ -368,7 +379,8 @@ class TestVocabHint(unittest.TestCase):
     def test_without_config_it_still_lists_the_default_vocabulary(self):
         # 词表默认值在代码里（tag_vocab.py），配置只是"按轴追加" ——
         # 所以没有 config 时**照样**该把默认词表告诉模型（少一个信息来源而已）
-        tool = wallpaper_tool.build({"next_wallpaper": lambda step=1, match=None: {}})
+        tool = wallpaper_tool.build({"next_wallpaper": lambda step=1, match=None: {},
+                                     "wallpaper_tags": lambda ip_query=None, limit=5: {}})
         self.assertIn("可用标签", tool.description)
         self.assertIn("scene=", tool.description)
         self.assertIn("只改显示", tool.description, "基础说明一个字都不能少")
@@ -384,7 +396,7 @@ class TestVocabHint(unittest.TestCase):
         wallpaper_tool.VOCAB_TEXT_LIMIT = 60
         try:
             tool = wallpaper_tool.build(self._services())
-            self.assertIn("list_wallpaper_tags", tool.description,
+            self.assertIn('action="tags"', tool.description,
                           "截断了就要告诉模型去哪儿看完整清单")
             self.assertLessEqual(len(tool.description),
                                  len(wallpaper_tool.DESCRIPTION) + 60 + 40)
@@ -398,30 +410,24 @@ class TestVocabHint(unittest.TestCase):
                          wallpaper_tool.vocab_hint("not a mapping"))
 
 
-class TestWallpaperTagsTool(unittest.TestCase):
-    """`list_wallpaper_tags`（T7-3）—— 只读的清单工具；T7-4 收紧了 ip_query 的说法。"""
+class TestWallpaperTagsAction(unittest.TestCase):
+    """`action="tags"`（T7-3 的 `list_wallpaper_tags` 并进来的那个只读动作）。
+
+    ⚠ T7-4 的收紧必须还在: 板端实测模型会把**问句**填进 ip_query
+      （"这个作品最像哪几张"），失败后又把"可用的 IP 名"当成壁纸标签答给用户 ——
+      所以说明里必须写死"只填作品名 / 不要填问句"。
+    """
 
     def _services(self, calls):
         def lookup(ip_query=None, limit=5):
             calls.append((ip_query, limit))
             return {"ok": True, "count": 3, "axes": {}}
 
-        return {"wallpaper_tags": lookup}
-
-    def test_missing_service_skips_the_tool(self):
-        self.assertIsNone(wallpaper_tags_tool.build({}))
-        self.assertIsNone(wallpaper_tags_tool.build({"wallpaper_tags": "nope"}))
-
-    def test_builds_and_registers(self):
-        tool = wallpaper_tags_tool.build(self._services([]))
-        self.assertEqual(tool.name, "list_wallpaper_tags")
-        router = ToolRouter(services=self._services([]))
-        self.assertIn("list_wallpaper_tags", [t.name for t in build_tools(router)])
+        return {"next_wallpaper": lambda step=1, match=None: {"ok": True},
+                "wallpaper_tags": lookup}
 
     def test_ip_query_description_says_it_is_a_work_name_only(self):
-        # T7-4: 板端实测模型会把**问句**填进 ip_query（"这个作品最像哪几张"），
-        # 失败后又把"可用的 IP 名"当成壁纸标签答给用户 —— 说明必须写死"只填作品名"
-        tool = wallpaper_tags_tool.build(self._services([]))
+        tool = wallpaper_tool.build(self._services([]))
         description = tool.schema["properties"]["ip_query"]["description"]
         self.assertIn("作品名", description)
         self.assertIn("不要填问句", description)
@@ -430,73 +436,127 @@ class TestWallpaperTagsTool(unittest.TestCase):
 
     def test_handler_forwards_the_arguments(self):
         calls = []
-        tool = wallpaper_tags_tool.build(self._services(calls))
-        result = tool.handler(ip_query="EVA", limit=2)
+        tool = wallpaper_tool.build(self._services(calls))
+        result = tool.handler(action="tags", ip_query="EVA", limit=2)
         self.assertEqual(calls, [("EVA", 2)])
         self.assertTrue(result["ok"])
 
     def test_idle_and_study_only(self):
-        tool = wallpaper_tags_tool.build(self._services([]))
+        tool = wallpaper_tool.build(self._services([]))
         self.assertEqual(tool.allowed_states, {State.IDLE, State.STUDY})
 
 
 class TestToolExecution(unittest.IsolatedAsyncioTestCase):
     def _router(self, state=State.IDLE):
         calls = []
+        tags = []
 
         def advance(step=1, match=None):
             calls.append((step, match))
             return {"ok": True, "path": "/w/%d.png" % step, "index": 0, "total": 3,
                     "pushed": True}
 
+        def lookup(ip_query=None, limit=5):
+            tags.append((ip_query, limit))
+            return {"ok": True, "count": 3, "axes": {}}
+
         router = ToolRouter(state_provider=_state_machine(state),
-                            services={"next_wallpaper": advance})
+                            services={"next_wallpaper": advance, "wallpaper_tags": lookup})
         for tool in build_tools(router):
             router.register(tool)
-        return router, calls
+        return router, calls, tags
 
-    async def test_default_step_is_one(self):
-        router, calls = self._router()
-        result = await router.execute("next_wallpaper", {})
+    async def test_next_is_the_forward_step(self):
+        router, calls, _tags = self._router()
+        result = await router.execute("next_wallpaper", {"action": "next"})
         self.assertTrue(result["ok"])
         self.assertEqual(calls, [(1, None)], "工具只是把入参转给 Runtime 的入口")
         self.assertEqual(result["result"]["path"], "/w/1.png")
 
-    async def test_step_is_forwarded(self):
-        router, calls = self._router()
-        result = await router.execute("next_wallpaper", {"step": -1})
-        self.assertEqual(calls, [(-1, None)])
-        self.assertEqual(result["result"]["path"], "/w/-1.png")
+    async def test_prev_and_repeat_map_to_the_other_steps(self):
+        router, calls, _tags = self._router()
+        await router.execute("next_wallpaper", {"action": "prev"})
+        await router.execute("next_wallpaper", {"action": "repeat"})
+        self.assertEqual(calls, [(-1, None), (0, None)])
 
-    async def test_match_is_forwarded(self):
-        router, calls = self._router()
-        result = await router.execute("next_wallpaper", {"step": 1, "match": "scene=anime"})
+    async def test_pick_forwards_match(self):
+        router, calls, _tags = self._router()
+        result = await router.execute("next_wallpaper",
+                                      {"action": "pick", "match": "scene=anime"})
         self.assertEqual(calls, [(1, "scene=anime")])
         self.assertTrue(result["ok"])
 
+    async def test_pick_without_match_is_honest(self):
+        router, calls, _tags = self._router()
+        result = await router.execute("next_wallpaper", {"action": "pick"})
+        # ⚠ 路由层只负责"跑没跑": handler 自己的失败在 result["result"] 里
+        #   （provider 的 tool_failures 就是这么认的, 优先用 tell_user）
+        self.assertTrue(result["ok"], "路由层算跑通了")
+        payload = result["result"]
+        self.assertFalse(payload["ok"])
+        self.assertIn("match", payload["error"])
+        self.assertIn("scene=anime", payload["tell_user"], "要给出能照着写的例子")
+        self.assertEqual(calls, [], "缺参数时 handler 不碰 Runtime")
+
+    async def test_tags_is_read_only_and_goes_to_the_other_entry(self):
+        router, calls, tags = self._router()
+        result = await router.execute("next_wallpaper",
+                                      {"action": "tags", "ip_query": "EVA", "limit": 2})
+        self.assertTrue(result["ok"])
+        self.assertEqual(tags, [("EVA", 2)])
+        self.assertEqual(calls, [], "看标签不该换壁纸")
+
+    async def test_unknown_action_is_refused_without_side_effects(self):
+        # enum 会在**校验**这一步就拦住（模型拿到的是"合法值列表"那句错误）
+        router, calls, tags = self._router()
+        result = await router.execute("next_wallpaper", {"action": "dance"})
+        self.assertFalse(result["ok"])
+        self.assertIn("invalid arguments", result["error"])
+        self.assertIn("next", result["error"], "报错里要带上合法值")
+        self.assertEqual(calls, [])
+        self.assertEqual(tags, [])
+
+    def test_handler_fallback_lists_the_actions(self):
+        # 直接叫 handler（绕过校验）时也要有一句能照着做的回话
+        router, _calls, _tags = self._router()
+        tool = router.get("next_wallpaper")
+        payload = tool.handler(action="dance")
+        self.assertFalse(payload["ok"])
+        self.assertIn("dance", payload["error"])
+        for name in wallpaper_tool.ACTIONS:
+            self.assertIn(name, payload["tell_user"])
+
     async def test_bad_argument_is_refused_before_running(self):
-        router, calls = self._router()
-        result = await router.execute("next_wallpaper", {"step": "next"})
+        router, calls, _tags = self._router()
+        result = await router.execute("next_wallpaper", {"action": 1})
         self.assertFalse(result["ok"])
         self.assertIn("invalid arguments", result["error"])
         self.assertEqual(calls, [], "参数不合法时 handler 一次都不该跑")
 
+    async def test_missing_action_is_refused_before_running(self):
+        router, calls, _tags = self._router()
+        result = await router.execute("next_wallpaper", {})
+        self.assertFalse(result["ok"])
+        self.assertIn("action", result["error"])
+        self.assertEqual(calls, [])
+
     async def test_empty_match_is_refused_before_running(self):
-        router, calls = self._router()
-        result = await router.execute("next_wallpaper", {"match": ""})
+        router, calls, _tags = self._router()
+        result = await router.execute("next_wallpaper", {"action": "pick", "match": ""})
         self.assertFalse(result["ok"])
         self.assertEqual(calls, [])
 
     async def test_refused_in_game_mode(self):
         # 游戏模式主区是视频区, 换壁纸没意义 —— 权限表里不给 GAME
-        router, calls = self._router(State.GAME)
-        result = await router.execute("next_wallpaper", {})
+        router, calls, _tags = self._router(State.GAME)
+        result = await router.execute("next_wallpaper", {"action": "next"})
         self.assertFalse(result["ok"])
         self.assertIn("not allowed", result["error"])
         self.assertEqual(calls, [])
 
     async def test_allowed_in_idle_and_study(self):
-        tool = wallpaper_tool.build({"next_wallpaper": lambda step=1, match=None: {}})
+        tool = wallpaper_tool.build({"next_wallpaper": lambda step=1, match=None: {},
+                                     "wallpaper_tags": lambda ip_query=None, limit=5: {}})
         self.assertEqual(tool.allowed_states, {State.IDLE, State.STUDY})
 
 
@@ -837,9 +897,9 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
 
 
 class TestRuntimeStartBuildsTheDeck(unittest.IsolatedAsyncioTestCase):
-    """启动装配真的会把 services['next_wallpaper'] 接上（不是只写在注释里）。"""
+    """启动装配真的会把 services 的壁纸/音乐入口接上（不是只写在注释里）。"""
 
-    async def test_tools_get_the_entry_point(self):
+    async def test_tools_get_the_entry_points(self):
         from agent.main import Runtime
 
         root = make_dir("01_a.png")
@@ -853,10 +913,10 @@ class TestRuntimeStartBuildsTheDeck(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(runtime.wallpaper)
             self.assertEqual(runtime.wallpaper.directory, root)
             names = [t["name"] for t in runtime.tools.list_tools()]
-            self.assertIn("next_wallpaper", names)
-            self.assertIn("list_wallpaper_tags", names)
-            self.assertEqual(len(runtime.tools), 3,
-                             "back_to_desktop + next_wallpaper + list_wallpaper_tags")
+            # T8-5b: 只有三个工具（音乐没开 -> next_music 自己跳过）
+            self.assertEqual(names, ["back_to_desktop", "next_wallpaper"],
+                             "back_to_desktop + next_wallpaper（音乐没开时没有 next_music）")
+            self.assertEqual(len(runtime.tools), 2)
         finally:
             await runtime.stop()
 

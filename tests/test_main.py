@@ -56,19 +56,21 @@ def _ipc_socket_path() -> str:
     return os.path.join(_IPC_TMP, "agent-%d.sock" % _IPC_SEQ[0])
 
 
-#: 装配顺序 (与模块头的第 1..11 步一致; 只列会注册成组件的)
+#: 装配顺序 (与模块头的第 1..13 步一致; 只列会注册成组件的)
 EXPECTED_ORDER = [
     "native",
     "chat_bus",
     "io",
+    # T8-4: 音乐（music.enabled=false 时同样什么都不做, 组件照旧注册）。
+    # ⚠ 它在 state_machine/tool_router **之前** —— 音乐四个工具建的时候就要知道
+    #   "音乐开没开"（没开整个不装）, 所以 self.music 必须先就位（T8-5）。
+    "music",
     "state_machine",
     "tool_router",
     # T7-4: 本机 llama-server 的启停（mode 不是 edge 或开关没开时这一步**什么都不做**,
     # 但组件照旧注册 —— 组件列表是"步骤"的清单, 不是"真跑了什么"的清单）
     "llm_service",
     "llm_provider",
-    # T8-4: 音乐（music.enabled=false 时同样什么都不做, 组件照旧注册）
-    "music",
     "scheduler",
     "ipc",
     "terminal_input",

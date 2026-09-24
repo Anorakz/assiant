@@ -34,10 +34,7 @@ NAME = "back_to_desktop"
 #: 只允许在 STUDY 下用：这是"学习该收尾了"的动作（按约定，别在 GAME/IDLE 里乱按）。
 ALLOWED_STATES = (State.STUDY,)
 
-DESCRIPTION = (
-    "让串流主机回到桌面（发一次 Win+D）。"
-    "⚠ 它是开关动作且没有回执：连按两次等于来回切，一次调用只发一次，不要连着调用。"
-)
+DESCRIPTION = "让串流主机回到桌面（Win+D）。⚠ 开关动作、没有回执，别连着调。"
 
 SCHEMA: Dict[str, Any] = {
     "type": "object",

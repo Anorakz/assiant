@@ -12,13 +12,15 @@ tests/test_music_player.py — 播放内核（Phase 7 T8-4）
 覆盖（都是"你定的那三条"相关的）:
 
   1) 播放/计次: **只有听到 30 s 才 +1**；同一会话只计一次；暂停期间不计（position 不走）
-  2) **曲终停下**: position 到 duration 就置 playing=False（**不自动续**——下一首由 chat 决定）
+  2) **环形队列**（T8-5b）: 内容由 chat 决定（`enqueue` / `clear_queue`）,
+     **走位由 GUI 决定**（`step(±1)`）; 到尾回第一首、到首回最后一首;
+     **曲终自动下一首**（队列空才停下）
   3) 进度: `snapshot()` 用"上次真值 + 本地外推"（播放中会走、暂停不动、不超过时长）
-  4) 队列: `play(queue=…)` 记下 chat 挑的候选顺序, `step(±1)` 在队列里走；没队列就如实报错
+  4) 队列: `enqueue()` 不碰 PC、`clear_queue()` 不停播放、`start_from_queue()` 给 GUI 的播放按钮
   5) 入库: 播一首库里没有的歌 -> 自动按元数据打 tag 加进去; 已存在的**不动 plays/tags**
   6) chat 补 tag: `tag_track()` 默认作用于当前这首；库里没有就报错
   7) PC 那边起不来: `PlayerFailure` 被翻成 `MusicError`（消息原样带上, 给人看）
-  8) 没在放时的控制（toggle/pause/resume）如实报错
+  8) 没在放时的控制: `pause()` 如实报错; `toggle()`/`resume()` 从队列起播（队列空才报错）
 """
 
 import logging
@@ -170,13 +172,54 @@ class TestPlayCount(unittest.TestCase):
 #  2) 曲终停下
 # ===========================================================================
 class TestEndOfTrack(unittest.TestCase):
-    def test_it_stops_instead_of_auto_advancing(self):
+    def test_without_a_queue_it_stops_at_the_end(self):
         player, cli, _path = make_player()
         player.play("1", meta={"name": "A", "duration_ms": 200000})
         cli.state.update({"playing": True, "paused": False, "position": 199.0, "duration": 200.0})
         snapshot = player.refresh()
-        self.assertFalse(snapshot["playing"], "到末尾就停（下一首由 chat 决定）")
+        self.assertFalse(snapshot["playing"], "没有队列 -> 到末尾就停")
         self.assertEqual([c[0] for c in cli.calls].count("play"), 1, "不许自动播下一首")
+
+    def test_with_a_queue_it_advances_to_the_next_track(self):
+        player, cli, _path = make_player()
+        player.enqueue("1", meta={"name": "A", "duration_ms": 200000})
+        player.play("1", queue=["1", "2"])
+        player.ensure_track("2", meta={"name": "B", "duration_ms": 100000})
+        cli.state.update({"playing": True, "paused": False, "position": 199.0, "duration": 200.0})
+        player.refresh()
+        self.assertEqual(player.current_id, "2", "曲终 -> 环形队列里的下一首")
+        self.assertEqual(cli.calls[-1], ("play", "2"))
+
+    def test_it_wraps_from_the_last_track_back_to_the_first(self):
+        player, cli, _path = make_player()
+        player.play("1", queue=["1", "2"], meta={"name": "A", "duration_ms": 100000})
+        player.ensure_track("2", meta={"name": "B", "duration_ms": 100000})
+        player.step(1)                                  # 光标在 "2"（最后一首）
+        cli.state.update({"playing": True, "paused": False, "position": 99.0, "duration": 100.0})
+        player.refresh()
+        self.assertEqual(player.current_id, "1", "最后一首放完 -> 回到第一首（环形）")
+        self.assertEqual(player.queue_state()["index"], 0)
+
+    def test_a_queue_of_one_replays_itself(self):
+        player, cli, _path = make_player()
+        player.play("1", queue=["1"], meta={"name": "A", "duration_ms": 100000})
+        cli.state.update({"playing": True, "paused": False, "position": 99.0, "duration": 100.0})
+        player.refresh()
+        self.assertEqual(player.current_id, "1", "只有一首时=重放这一首")
+        self.assertEqual([c[0] for c in cli.calls].count("play"), 2)
+
+    def test_playback_that_never_started_does_not_chain_through_the_queue(self):
+        """PC 上根本没放起来（duration 一直 0）时不许顺着队列一路切下去。"""
+        player, cli, _path = make_player()
+        player.enqueue("1", meta={"name": "A"})
+        player.enqueue("2", meta={"name": "B"})
+        player.play("1", queue=["1", "2"])              # 会话起点 = 现在
+        before = [c[0] for c in cli.calls].count("play")
+        cli.state = {"playing": False, "paused": False, "position": 0.0, "duration": 0.0}
+        player.refresh()                                # 立刻又读到 duration=0
+        self.assertEqual([c[0] for c in cli.calls].count("play"), before,
+                         "会话还没放够 _MIN_ADVANCE_S, 不许自动切")
+        self.assertFalse(player.snapshot()["playing"])
 
     def test_when_the_player_is_gone_it_is_also_ended(self):
         player, cli, _path = make_player()
@@ -229,6 +272,69 @@ class TestSnapshot(unittest.TestCase):
 #  4) 队列
 # ===========================================================================
 class TestQueue(unittest.TestCase):
+    """环形队列（T8-5b）: **内容**由 chat 决定（enqueue / clear_queue）, **走位**由 GUI 决定。"""
+
+    def test_enqueue_appends_and_does_not_touch_the_pc(self):
+        player, cli, _path = make_player()
+        first = player.enqueue("1", meta={"name": "A"})
+        self.assertTrue(first["added"])
+        self.assertEqual(first["queue"]["size"], 1)
+        self.assertEqual(first["queue"]["index"], 0, "第一首进队 -> 光标落在它身上")
+        second = player.enqueue("2", meta={"name": "B"})
+        self.assertTrue(second["added"])
+        self.assertEqual(second["queue"]["ids"], ["1", "2"])
+        self.assertEqual(second["queue"]["index"], 0, "进队列不改光标")
+        self.assertEqual([c[0] for c in cli.calls].count("play"), 0, "进队列**不放**歌")
+
+    def test_enqueue_the_same_song_twice_does_not_duplicate(self):
+        player, cli, _path = make_player()
+        player.enqueue("1", meta={"name": "A"})
+        again = player.enqueue("1", meta={"name": "A"})
+        self.assertFalse(again["added"])
+        self.assertEqual(again["queue"]["ids"], ["1"])
+
+    def test_replace_clears_the_queue_first(self):
+        player, cli, _path = make_player()
+        player.enqueue("1", meta={"name": "A"})
+        player.enqueue("2", meta={"name": "B"})
+        replaced = player.enqueue("3", meta={"name": "C"}, replace=True)
+        self.assertTrue(replaced["replaced"])
+        self.assertEqual(replaced["queue"]["ids"], ["3"])
+        self.assertEqual(replaced["queue"]["index"], 0)
+
+    def test_clear_queue_reports_and_keeps_playing(self):
+        player, cli, _path = make_player()
+        player.play("1", queue=["1", "2"], meta={"name": "A"})
+        result = player.clear_queue()
+        self.assertEqual(result["cleared"], 2)
+        self.assertEqual(result["queue"]["size"], 0)
+        self.assertEqual(result["queue"]["index"], -1)
+        self.assertEqual([c[0] for c in cli.calls].count("stop"), 0,
+                         "清空队列**不停播放** —— 停/放是 GUI 按钮的事")
+        self.assertTrue(player.snapshot()["playing"])
+
+    def test_queue_state_shape(self):
+        player, cli, _path = make_player()
+        player.play("1", queue=["1", "2"], meta={"name": "A"})
+        state = player.queue_state()
+        self.assertEqual(state, {"size": 2, "index": 0, "current": "1", "ids": ["1", "2"]})
+
+    def test_start_from_queue_plays_the_cursor(self):
+        player, cli, _path = make_player()
+        player.enqueue("1", meta={"name": "A"})
+        player.enqueue("2", meta={"name": "B"})
+        player.step(1)                                  # 光标到 "2"
+        record = player.start_from_queue()
+        self.assertEqual(player.current_id, "2")
+        self.assertEqual(record["name"], "B")
+
+    def test_start_from_queue_without_a_queue_says_so(self):
+        player, cli, _path = make_player()
+        with self.assertRaises(MusicError) as ctx:
+            player.start_from_queue()
+        self.assertIn("队列是空的", str(ctx.exception))
+        self.assertIn("对话", str(ctx.exception), "要告诉人怎么才能有队列")
+
     def test_step_walks_the_queue_the_chat_gave(self):
         player, cli, _path = make_player()
         player.play("1", queue=["1", "2", "3"], meta={"name": "A"})
@@ -237,13 +343,61 @@ class TestQueue(unittest.TestCase):
         player.step(1)
         self.assertEqual(player.current_id, "3")
 
-    def test_stepping_past_the_end_is_reported(self):
+    def test_stepping_past_the_end_wraps_around(self):
         player, cli, _path = make_player()
         player.play("1", queue=["1", "2"], meta={"name": "A"})
         player.step(1)
+        player.step(1)                                  # 末尾再往后 -> 回到第一首
+        self.assertEqual(player.current_id, "1")
+        self.assertEqual(player.queue_state()["index"], 0)
+
+    def test_stepping_before_the_start_wraps_to_the_last(self):
+        player, cli, _path = make_player()
+        player.play("1", queue=["1", "2"], meta={"name": "A"})
+        player.step(-1)
+        self.assertEqual(player.current_id, "2", "第一首往前 -> 最后一首")
+
+    def test_a_single_track_queue_replays_itself(self):
+        player, cli, _path = make_player()
+        player.play("1", queue=["1"], meta={"name": "A"})
+        player.step(1)
+        self.assertEqual(player.current_id, "1")
+        self.assertEqual([c[0] for c in cli.calls].count("play"), 2, "环形: 一首就重放它")
+
+    def test_enqueue_refuses_an_id_the_pc_does_not_know(self):
+        """T8-5b 板端实测: 0.6B 会**编造 id**（写过 `track1`）—— 库里没有就当场问 PC,
+        问不到就报错, 不许安静地排进队列。"""
+        class NoDetail(FakeCli):
+            def track_detail(self, track_id):
+                self.calls.append(("detail", str(track_id)))
+                raise NeteaseCliError("PC 那边网络请求失败: Unknown error (code: 400)")
+
+        cli = NoDetail()
+        player, _cli, _path = make_player(cli=cli)
         with self.assertRaises(MusicError) as ctx:
-            player.step(1)
-        self.assertIn("末尾", str(ctx.exception))
+            player.enqueue("track1")
+        self.assertIn("track1", str(ctx.exception))
+        self.assertIn("search", str(ctx.exception), "要告诉模型 id 从哪儿来")
+        self.assertEqual(player.queue_state()["size"], 0, "没通过校验就别排进队列")
+        self.assertEqual(player.tracks(), [], "也别写进本地库")
+
+    def test_enqueue_accepts_an_id_the_pc_knows(self):
+        player, cli, _path = make_player()
+        cli.detail["9"] = {"name": "残酷な天使のテーゼ", "duration": 240000,
+                           "artists": [{"name": "高橋洋子"}],
+                           "album": {"name": "新世紀エヴァンゲリオン"}}
+        result = player.enqueue("9")
+        self.assertEqual(result["name"], "残酷な天使のテーゼ", "问到的详情要用来入库")
+        self.assertEqual(result["queue"]["ids"], ["9"])
+        self.assertEqual(player.tracks()[0]["artists"], "高橋洋子")
+
+    def test_enqueue_does_not_ask_the_pc_for_a_track_already_in_the_library(self):
+        player, cli, _path = make_player()
+        player.enqueue("1", meta={"name": "A"})
+        before = [c for c in cli.calls if c[0] == "detail"]
+        player.enqueue("1")                                   # 已在库里
+        self.assertEqual([c for c in cli.calls if c[0] == "detail"], before,
+                         "库里有的歌不该再去问 PC")
 
     def test_backwards(self):
         player, cli, _path = make_player()
@@ -257,7 +411,7 @@ class TestQueue(unittest.TestCase):
         player.play("1", meta={"name": "A"})
         with self.assertRaises(MusicError) as ctx:
             player.step(1)
-        self.assertIn("候选队列", str(ctx.exception))
+        self.assertIn("队列是空的", str(ctx.exception))
         self.assertIn("对话", str(ctx.exception), "要告诉人怎么才能有队列")
 
 
@@ -339,11 +493,20 @@ class TestFailures(unittest.TestCase):
             player.play("1", meta={"name": "A"})
         self.assertIn("没人登录", str(ctx.exception))
 
-    def test_toggle_without_playback_is_reported(self):
+    def test_toggle_with_an_empty_queue_is_reported(self):
         player, cli, _path = make_player()
         with self.assertRaises(MusicError) as ctx:
             player.toggle()
-        self.assertIn("没有在放", str(ctx.exception))
+        self.assertIn("队列是空的", str(ctx.exception))
+
+    def test_toggle_starts_from_the_queue_when_nothing_is_playing(self):
+        player, cli, _path = make_player()
+        player.enqueue("1", meta={"name": "A", "duration_ms": 100000})
+        result = player.toggle()                       # GUI 的"播放"按钮
+        self.assertTrue(result["started"])
+        self.assertFalse(result["paused"])
+        self.assertEqual(player.current_id, "1")
+        self.assertEqual(cli.calls[-1], ("play", "1"))
 
     def test_pause_and_resume(self):
         player, cli, _path = make_player()
@@ -391,13 +554,13 @@ class TestFailures(unittest.TestCase):
         cli.zero_once = True
         self.assertTrue(player.toggle()["paused"], "重试之后应当真的暂停, 而不是误报")
 
-    def test_two_zero_reads_still_report_nothing_playing(self):
+    def test_two_zero_reads_with_an_empty_queue_report_it(self):
         player, cli, _path = make_player()
         player.play("1", meta={"name": "A", "duration_ms": 100000})
         cli.state = {"playing": False, "paused": False, "position": 0.0, "duration": 0.0}
         with self.assertRaises(MusicError) as ctx:
             player.toggle()
-        self.assertIn("没有在放", str(ctx.exception))
+        self.assertIn("队列是空的", str(ctx.exception))
 
 
 # ===========================================================================
@@ -463,7 +626,7 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(runtime.music)
         self.assertIsNone(runtime._music_task)
 
-    async def test_state_and_control_go_through_the_hook(self):
+    async def test_enqueue_by_keyword_queues_and_starts(self):
         tmp = tempfile.mkdtemp(prefix="music-rt-")
         self.addCleanup(__import__("shutil").rmtree, tmp, True)
         runtime = self._runtime(tmp)
@@ -471,13 +634,14 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
         runtime.on_music = lambda snapshot: pushed.append(snapshot)
         await runtime._start_music()
         try:
-            played = runtime.music_play(keyword="JANE DOE")
-            self.assertTrue(played["ok"], played)
-            self.assertEqual(played["name"], "JANE DOE", "用搜索结果里的名字入库")
-            self.assertEqual(played["track_id"], "2747166493")
-            self.assertEqual(played["queue"], ["2747166493", "2"],
-                             "搜出来的候选顺序记成队列（上一首/下一首在它里面走）")
-            self.assertTrue(pushed, "播放后要推一条 music")
+            result = runtime.music_enqueue(keyword="JANE DOE")
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["queued"], ["2747166493"],
+                             "keyword 默认只排 1 首（要几首就写 limit）")
+            self.assertTrue(result["started"], "A1: 什么都没在放 -> 顺手起播")
+            self.assertEqual(result["tracks"][0]["name"], "JANE DOE", "用搜索结果里的名字入库")
+            self.assertEqual(result["queue"]["size"], 1)
+            self.assertTrue(pushed, "起播后要推一条 music")
             self.assertIn("title", pushed[-1])
 
             state = runtime.music_state()
@@ -489,6 +653,88 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
         finally:
             await runtime.stop()
 
+    async def test_enqueue_picks_from_the_library_by_tag_and_sort(self):
+        tmp = tempfile.mkdtemp(prefix="music-rt-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = self._runtime(tmp)
+        await runtime._start_music()
+        try:
+            lib.write_tracks(os.path.join(tmp, "music_library.jsonl"), [
+                lib.make_record("1", "A", plays=9, tags={"mood": ["energetic"]}),
+                lib.make_record("2", "B", plays=0, tags={"mood": ["energetic"]}),
+                lib.make_record("3", "C", plays=1, tags={"mood": ["calm"]}),
+            ])
+            result = runtime.music_enqueue(tag="mood=energetic")     # 统一语法
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["queued"], ["2"], "听得最少的先（默认 plays_asc）")
+
+            more = runtime.music_enqueue(tag="mood=energetic", limit=2, replace=True)
+            self.assertEqual(more["queued"], ["2", "1"], "limit=2 + replace 先清空")
+            self.assertEqual(more["queue"]["ids"], ["2", "1"])
+            self.assertFalse(more["started"],
+                             "A1 只在'什么都没在放'时顺手起播 —— 换队列不打断正在放的歌")
+
+            state = runtime.music_queue_state()
+            self.assertEqual([t["name"] for t in state["tracks"]], ["B", "A"])
+
+            cleared = runtime.music_queue_clear()
+            self.assertEqual(cleared["cleared"], 2)
+            self.assertEqual(cleared["queue"]["size"], 0)
+        finally:
+            await runtime.stop()
+
+    async def test_enqueue_with_an_empty_library_says_what_to_do(self):
+        tmp = tempfile.mkdtemp(prefix="music-rt-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = self._runtime(tmp)
+        await runtime._start_music()
+        try:
+            result = runtime.music_enqueue()          # 库里什么都没有
+            self.assertFalse(result["ok"])
+            self.assertIn("keyword", result["error"] + result["tell_user"])
+        finally:
+            await runtime.stop()
+
+    async def test_enqueue_is_honest_when_the_pc_cannot_start(self):
+        tmp = tempfile.mkdtemp(prefix="music-rt-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        cli = FakeCli()
+        cli.fail_play = PlayerFailure("PC 上没人登录")
+        runtime = self._runtime(tmp, cli=cli)
+        await runtime._start_music()
+        try:
+            result = runtime.music_enqueue(keyword="JANE DOE")
+            self.assertFalse(result["ok"])
+            self.assertIn("没人登录", result["error"])
+            self.assertIn("排进队列", result["error"], "要说清队列其实已经安排了")
+            self.assertEqual(result["queued"], ["2747166493"])
+        finally:
+            await runtime.stop()
+
+    async def test_enqueue_refuses_a_hallucinated_id(self):
+        """板端实测（T8-5b）: 模型把 `track1` 当 id 填进来 —— 要当场诚实回绝。"""
+        tmp = tempfile.mkdtemp(prefix="music-rt-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        cli = FakeCli()
+        cli.detail = {}                        # detail 默认返回 T<id>（非空）—— 这里让它失败
+        original = cli.track_detail
+
+        def failing(track_id):
+            raise PlayerFailure("PC 那边网络请求失败: Unknown error (code: 400)")
+
+        cli.track_detail = failing
+        runtime = self._runtime(tmp, cli=cli)
+        await runtime._start_music()
+        try:
+            result = runtime.music_enqueue(track_id="track1")
+            self.assertFalse(result["ok"])
+            self.assertIn("track1", result["error"])
+            self.assertIn("search", result["error"] + result["tell_user"])
+            self.assertEqual(runtime.music_queue_state()["size"], 0)
+        finally:
+            cli.track_detail = original
+            await runtime.stop()
+
     async def test_control_failure_is_honest(self):
         tmp = tempfile.mkdtemp(prefix="music-rt-")
         self.addCleanup(__import__("shutil").rmtree, tmp, True)
@@ -497,7 +743,7 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
         try:
             result = runtime.music_control("next")     # 还没队列
             self.assertFalse(result["ok"])
-            self.assertIn("候选队列", result["error"])
+            self.assertIn("队列是空的", result["error"])
             self.assertEqual(result["tell_user"], result["error"])
         finally:
             await runtime.stop()

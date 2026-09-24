@@ -32,9 +32,14 @@ agent/
 │   ├── core/                    # 状态层、工具路由、调度层、壁纸游标
 │   │   ├── state_machine.py     # SLEEP ⇄ IDLE ⇄ STUDY/GAME 状态机
 │   │   ├── tool_router.py       # 工具注册 / 权限控制 / 执行调度
+│   │   ├── label_spec.py        # 标签/条件的**统一小语法**（壁纸 match= 与音乐 tag= 共用，T8-5b）
 │   │   ├── scheduler.py         # 日程检查 + 定时触发 + 终端命令监听
-│   │   └── wallpaper.py         # 壁纸目录 + 游标（可在挑出来的候选里翻，T7-3）
-│   ├── tools/                   # 具体工具 (Phase 7): back_to_desktop / next_wallpaper / list_wallpaper_tags
+│   │   ├── wallpaper.py         # 壁纸目录 + 游标（可在挑出来的候选里翻，T7-3）
+│   │   └── music.py             # 播放内核: 环形队列 / 轮询真实进度 / 30 秒计一次 (T8-4/5b)
+│   ├── media/                   # 本地媒体库 (T8-3)
+│   │   └── music_library.py     # config/music_library.jsonl: 读写/合并/打标/挑选（纯 Python）
+│   ├── tools/                   # 具体工具 (Phase 7; T8-5b 合并成三个):
+│   │                            #   back_to_desktop / next_wallpaper / next_music
 │   ├── llm/                     # LLM 三模式 + 规则兜底
 │   │   ├── provider.py          # edge / cloud / disabled 分发 (edge 连本机 llama-server)
 │   │   └── rule_engine.py       # 无 LLM 时的正则规则兜底
@@ -56,7 +61,8 @@ agent/
 │       ├── input_sender.py      # InputSender: send_key / send_hotkey / send_mouse
 │       └── _native.py           # native 解析 + 专属单线程执行器 (SPSC)
 │   └── net/                     # 对外服务客户端
-│       └── sunshine_client.py   # Sunshine 串流主机 API
+│       ├── sunshine_client.py   # Sunshine 串流主机 API
+│       └── netease_cli.py       # 板端 ssh 调 PC 上第三方 neteasecli（PC 出声，T8-2）
 ├── gui/                         # Qt5 C++ GUI (在板端编译: src/ tests/ tools/)
 ├── config/                      # 配置模板 (真实配置不入 git)
 │   ├── config.example.yaml      # 唯一真源模板: llm.* / wallpaper.* / gui.* / sunshine.* / ipc.*
@@ -91,6 +97,11 @@ agent/
 │   ├── test_tools.py            # 工具层: 注册 / 状态权限 / 参数校验 / 缺依赖跳过 (T1)
 │   ├── test_tool_permissions.py # 状态权限表: 4 状态 × 每个工具, 禁止的组合真的被拒 (T4)
 │   ├── test_wallpaper.py        # 壁纸目录游标 / next_wallpaper 工具与命令 (T3)
+│   ├── test_netease_cli.py      # ssh 调 PC 的第三方 neteasecli: 命令行 / 信封 / 四类错误 (T8-2)
+│   ├── test_music_library.py    # 本地音乐库: 读写 / 合并 / 打标 / 挑选 (T8-3)
+│   ├── test_music_player.py     # 播放内核: 环形队列 / 30 秒计一次 / 曲终自动下一首 (T8-4/5b)
+│   ├── test_label_spec.py       # 统一标签语法: 拆键 / 拆值 / 多轴 / 壁纸那边只用这一份 (T8-5b)
+│   ├── test_merged_tools.py     # 三个工具: action 分派 / 缺依赖跳过 / 统一标签语法 (T8-5b)
 │   ├── mocks/                   # mock_agent_native: native 替身
 │   ├── host/                    # 需要 numpy 的绑定层测试 (按需手动跑)
 │   └── board/                   # 板端真机验收脚本
@@ -100,6 +111,7 @@ agent/
 │   ├── config-sources.md        # 配置来源: 谁写 / 谁读 / 谁派生
 │   ├── cli.md                   # 板端控制 CLI (assistant) 使用手册
 │   ├── tagging.md               # 壁纸标签化: 词表 / wall_data.jsonl / IP 检索 / 实测数字 (T7)
+│   ├── music.md                 # 音乐: 板端 ssh 调 PC neteasecli / 本地库 / 工具四件套 (T8)
 │   ├── llm.md                   # LLM 三模式 / edge 接 llama-server / 工具循环 / 降级
 │   ├── ipc-protocol.md          # Agent ⇄ GUI 协议 (线上格式唯一真源)
 │   ├── gui.md                   # GUI 构建与使用
@@ -206,11 +218,18 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
   **Phase 7 起丢给模型的候选也按状态过滤**（`allowed_tools()`）—— 不可用的工具不该出现在
   候选里。当前这张权限表（`tests/test_tool_permissions.py::EXPECTED` 是唯一真源）：
 
-  | 状态 | `back_to_desktop` | `next_wallpaper` | `list_wallpaper_tags` |
+  | 状态 | `back_to_desktop` | `next_wallpaper` | `next_music` |
   | --- | --- | --- | --- |
   | `SLEEP` / `GAME` | ✗ | ✗ | ✗ |
   | `IDLE` | ✗ | ✓ | ✓ |
   | `STUDY` | ✓ | ✓ | ✓ |
+
+  **T8-5b 把七个工具合并成三个**（每个工具用 `action` 分派具体动作）：
+  `next_wallpaper` = 翻页/按内容挑/看标签；`next_music` = 排队列/清空/清单/搜/状态/标签/音量
+  （transport 交给 GUI 四个按钮）；`back_to_desktop` = 回桌面（无参数，只 STUDY）。
+  动机是 **prompt 预算**：T8-5 实测 7 个工具的工具清单占第一轮 prompt 的 90%
+  （1699 / 1898 token），第二轮 2131 直接撞穿 ctx。链路见
+  [`docs/music.md`](docs/music.md) 与 [`docs/tagging.md`](docs/tagging.md)。
 
   **T7-3 撤掉了 T6① 的一半**：以前 GUI 的 `next_wallpaper` 命令与 LLM 的工具共用这张表
   （命令路径问 `ToolRouter.allowed_in_current_state()`）。按需求**手动换壁纸已删除**

@@ -101,17 +101,51 @@ ssh -o BatchMode=yes Anorak@192.168.137.1 neteasecli --json player status
 > ⚠ **我们没有音频特征**（没做音乐 embedding，只有壁纸那边才有 SigLIP 向量）。
 > 所以 tag **不可能**来自"听感相似"，只能来自上表这两路 —— 这一点在对话里也要如实说。
 
-### 4.2 "下一首由 chat 决定"
+### 4.2 "下一首由 chat 决定" = chat 决定**队列内容**
 
-不做自动轮转。LLM 的流程是：**看清单 → 自己挑 → 播**：
+队列是**环形队列**（`agent/core/music.py`）。T8-5b 起分工很明确：
+
+| 谁 | 决定什么 |
+| --- | --- |
+| **chat**（工具 `next_music`） | 队列**内容**: `enqueue`（加一首/几首；`replace=true` 先清空）、`clear_queue`（清空） |
+| **GUI**（四个按钮） | **transport**: 播放 / 暂停 / 上一首 / 下一首（走 IPC，不经过工具） |
+| Runtime | 曲终**自动下一首**（环形：到尾回第一首）；队列空才停下 |
+
+模型不用"先看清单再挑 id"了 —— 给条件就行，工具自己挑并把挑中的记录回给它：
 
 ```
-list_music_library(tag="energetic", sort="plays_asc", limit=10)   # 听得最少的先
-play_track(id="2747166493")
+next_music(action="enqueue")                                   # 库里听得最少的那首
+next_music(action="enqueue", tag="mood=energetic", limit=3)    # 按标签挑 3 首
+next_music(action="enqueue", keyword="JANE DOE")               # 去 PC 上搜，排第一条
+next_music(action="clear_queue")                               # 换一批
 ```
 
 `sort` 支持 `plays_asc`（默认，听得最少优先）/ `plays_desc` / `recent` / `oldest` /
-`added` / `random`。曲终**停下**（推一条 `music{playing:false}`），等 chat 再决定。
+`added` / `random`。`enqueue` 时如果 **PC 上什么都没在放**，会顺手从新排的那首起播
+（否则"chat 安排了队列、用户却什么都听不到"）。
+
+### 4.3 三个工具里的那个 `next_music`（T8-5b；音乐只有这一条工具入口）
+
+| action | 干什么 | 落到哪 |
+| --- | --- | --- |
+| `enqueue` | 排进队列：`track_id` / `keyword`（PC 搜）/ `tag`（本地库按条件）/ 什么都不给（默认听得最少的）；`replace` 先清空 | `Runtime.music_enqueue` |
+| `clear_queue` | 清空队列（**不停播放** —— 停/放是 GUI 的事） | `Runtime.music_queue_clear` |
+| `list` | **只读**清单：id / 名字 / 歌手 / `plays` / tags；默认 `plays_asc` | `Runtime.music_candidates` |
+| `search` | **只读**：去 PC 上搜（只回候选，**不放歌**） | `Runtime.music_search` |
+| `status` | 现在在放什么 + 队列里有几首（队列**只给工具/日志看**, 不推 GUI） | `Runtime.music_state` + `music_queue_state` |
+| `tag` | 给某首（或**当前这首**）加/删标签：`set_tag="mood=燃"`（多轴用 `;`） | `Runtime.music_tag` |
+| `volume` | 调音量（`level` 0..100） | `Runtime.music_control("volume")` |
+
+- ⚠ **没有 play/pause/next/prev/stop**（T8-5b 你定的）：transport 是 GUI 四个按钮的活。
+  唯一留下的"控制"是 `volume` —— "小声点"是调节，不是换曲。
+- ⚠ **`tag` 只能打"元数据自动 + 你说过的"那两路标签**（§4.1）：我们没有音频特征，
+  工具说明里也写明这一条 —— 别说成"听起来像"。
+- 标签写法与壁纸的 `match` **同一套语法**（`agent/core/label_spec.py`）：
+  `mood=energetic` / `energetic`（所有轴）/ `mood=energetic/calm`（任一命中）/
+  多轴用 `;`（`mood=燃; style=rock`）。
+- `music.enabled: false` 时这个工具**整个不装**（`build()` 拿不到入口就返回 `None`）;
+  状态权限表见 [`tests/test_tool_permissions.py::EXPECTED`](../tests/test_tool_permissions.py)
+  （唯一真源）与 [architecture.md](architecture.md) §工具的权限表。
 
 ## 5. 板端配置（`config.yaml` 的 `music:` 段）
 
@@ -142,8 +176,35 @@ music:
 | `track_id` / `plays` / `tags` | 库里那条记录（GUI 现在只显示前两个 + 状态） |
 
 **命令**（GUI → Agent，`payload` 必须是 `{}`）：`music_play_pause` / `music_next` /
-`music_prev` / `music_stop`。⚠ 这四个**不决定放什么** —— `next/prev` 只在"chat 上次挑出来的
-候选顺序"里走；失败（音乐没开 / PC 上没在放 / 还没有队列）会回一条 `llm` 说明。
+`music_prev` / `music_stop`。T8-5b 起它们是**唯一的 transport**（工具里没有 play/pause）：
+- `music_play_pause` 在"PC 上没在放"时**从环形队列当前位置起播**（队列空就回一条
+  `llm` 说明"先让对话安排一首"）；
+- `music_next` / `music_prev` 在环形队列里走 —— **到尾回第一首、到首回最后一首**；
+- 队列是 chat 排的（`next_music`），**不推给 GUI**（T8-5b 你定的: 队列只在内部用）。
+
+### 5.2 一次点歌要等多久（板端实测）
+
+**T8-5（七个工具时）的两轮链路**：①"用户想放歌" → 工具调用"看清单" → ②带着清单再问一次
+「放哪首」→ "放这一首" → ③带着结果回话。板端 0.6B 的实测速度：
+
+| 项 | 实测（T8-5，7 个工具） |
+| --- | --- |
+| prompt 处理 | 17~23 token/s |
+| **生成** | **~1.2 token/s**（一轮 200 token 的工具调用 = 168 s） |
+| 第一轮 prompt | 1898 token（其中工具清单 1699） |
+| 第二轮 prompt | 2131 token（> 当时的 ctx 2048 → 400） |
+
+T8-5b 合并成三个工具后：**一次 `next_music(action="enqueue")` 就能放歌**（工具自己按条件
+挑），链路从三轮模型降到两轮；工具清单也从 ~1700 token 掉到 ~700（合并后的实测数字见
+[llm.md](llm.md) §5.1）。
+
+两件事因此必须留够余量（都在 `config.yaml` / `config.example.yaml`）：
+
+- `llm.ctx_size` **4096**：2048 装不下"带工具结果的那一轮"（T8-5 实测 2131），llama-server
+  会回 400 `exceed_context_size_error`，用户看到的是"听不懂这句话"（见 [llm.md](llm.md) §5.1）。
+- `llm.timeout_s`：默认 90 对"两轮往返"偏紧（一轮生成就可能上百秒）。板端把这一轮跑完需要
+  **数分钟**，这是 0.6B + RK3568 的硬现实，不是 bug；T8-5b 同时在查"工具路径上的隐藏思考"
+  （`reasoning_content`，见 [llm.md](llm.md) §5.2）。
 
 ## 6. 失败都要"能照做"（板端排障四类）
 
@@ -160,6 +221,8 @@ music:
 # 纯逻辑（开发机与板端同一份）
 python tests/test_netease_cli.py     # SSH 封装: 拼命令行 / 解信封 / 四类错误翻译
 python tests/test_music_library.py   # 本地库: 读写/合并/打标/计数/挑选
+python tests/test_music_player.py    # 播放内核: 30 秒计一次 / 曲终停 / 状态推送
+python tests/test_music_tools.py     # 四个工具: schema / 缺依赖跳过 / 只做该做的事
 ```
 
 板端实跑见 T8-1/T8-7 的验收记录（`todo.md`）。

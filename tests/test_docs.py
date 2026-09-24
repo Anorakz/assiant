@@ -76,6 +76,10 @@ STALE_CLAIMS = [
     (r"(换壁纸[^\n]{0,20}(还没接|未接)|next_wallpaper`?\s*/\s*`?next_bilibili[^\n]{0,24}(还没接|Phase 7))",
      "T3 起换壁纸真的有下游了: 命令与 LLM 工具都走 Runtime.next_wallpaper() —— "
      "只有 next_bilibili 还是'还没接入'"),
+    (r"list_wallpaper_tags|list_music_library|play_music|control_music|tag_music",
+     "T8-5b 把七个工具合并成三个（next_wallpaper / next_music / back_to_desktop）: "
+     "旧工具名已经是**历史**, 现状类文档里出现就是漂移 —— 现在写 "
+     "next_wallpaper(action=\"tags\") / next_music(action=\"enqueue\")"),
 ]
 
 

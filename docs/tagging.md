@@ -119,12 +119,12 @@ IPC 命令都删掉了（理由见 `agent/core/wallpaper.py` 模块头）。挑�
 
 | 你说 | 模型会调 | 干什么 |
 | --- | --- | --- |
-| "换一张安静的深色风景" | `next_wallpaper(match="scene=landscape")` | 挑最像的几张里翻 |
-| "有哪些风格？" | `list_wallpaper_tags` | 先看清单（每轴各标签几张） |
-| "换一张像 EVA 的" | `next_wallpaper(match="ip=EVA")` | 锚点原型检索（纯 CPU） |
-| "换一张壁纸" | `next_wallpaper()` | 按文件名翻下一页（老行为） |
+| "换一张安静的深色风景" | `next_wallpaper(action="pick", match="scene=landscape")` | 挑最像的几张里翻 |
+| "有哪些风格？" | `next_wallpaper(action="tags")` | 先看清单（每轴各标签几张） |
+| "换一张像 EVA 的" | `next_wallpaper(action="pick", match="ip=EVA")` | 锚点原型检索（纯 CPU） |
+| "换一张壁纸" | `next_wallpaper(action="next")` | 按文件名翻下一页（老行为） |
 
-⚠ **`list_wallpaper_tags` 的 `ip_query` 只填作品名**（例如 `EVA`）——板端实测模型会把
+⚠ **`action="tags"` 的 `ip_query` 只填作品名**（例如 `EVA`）——板端实测模型会把
 一句问句（"这个作品最像哪几张"）填进去，工具如实报错后它又把"可用的 IP 名"当成壁纸标签
 答给用户。所以 schema 里写死"只填名字，不要填问句或句子"（T7-4），`maxLength` 收到 32。
 另外：模型**谎报成功**时也有兜底 —— 工具失败会被追加进最终正文
@@ -154,9 +154,9 @@ IPC 命令都删掉了（理由见 `agent/core/wallpaper.py` 模块头）。挑�
 - **分数是余弦**（不是概率）：排序可信，绝对值不要当置信度（阈值还没标定，见 §8）。
 - **当前词表写进了工具的说明**（T7-4）：`next_wallpaper` 的 description 末尾带着
   `可用标签: scene=landscape/city/…；tone=dark/…；mood=calm/…`（按 `wallpaper.tagging.vocab`
-  的追加项一起算；超过 320 字符就截断并指向 `list_wallpaper_tags`）。
+  的追加项一起算；超过 320 字符就截断并指向 `action="tags"`）。
   原因：板端实测 0.6B 会**编造标签**（把 `tone` 的 `dark` 说成 `scene=darkness`），
-  第一次调用就撞错、白跑一轮。词表被加得很长时以 `list_wallpaper_tags` 的结果为准。
+  第一次调用就撞错、白跑一轮。词表被加得很长时以 `action="tags"` 的结果为准。
 - **按标签算分不受 top-k 截断**：数据文件第一行存着全部标签向量，所以
   "`scene=anime` 第 4 名"也能算出来（图片记录里只存了 top-3）。
 - **失败都有一句能照做的话**：不认识的轴会列出真轴、不认识的标签会列词表、

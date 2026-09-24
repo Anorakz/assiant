@@ -199,14 +199,15 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
 | `chat_input` | `text` | string | 用户在 GUI 里敲的一行输入，等价于终端输入 |
 | `next_bilibili` | — | — | 播放下一集 B 站视频；`payload` 必须是 `{}` |
 | `query_schedule` | — | — | 问一句"你最近触发过哪些日程"；`payload` 必须是 `{}`。应答是随后那条 §3 的 `schedule`（`kind:"state"`） |
-| `music_play_pause` | — | — | 暂停/继续**当前这首**（T8-4）。应答是随后那条 `music` 推送（§3） |
-| `music_next` / `music_prev` | — | — | 在 **chat 上次挑出来的候选顺序**里前后走一格；还没有候选队列时回一条 `llm` 说明（"先从对话里挑一次歌"） |
+| `music_play_pause` | — | — | 暂停/继续**当前这首**（T8-4）；PC 上没在放时**从环形队列当前位置起播**（T8-5b）。应答是随后那条 `music` 推送（§3） |
+| `music_next` / `music_prev` | — | — | 在**环形队列**里前后走一格 —— 到尾回第一首、到首回最后一首（T8-5b）；队列空时回一条 `llm` 说明 |
 | `music_stop` | — | — | 停止播放（**不改**本地库） |
 
-> ⚠ **音乐按钮不决定放什么**：`music_next/prev` 走的队列，是"对话挑完之后 Agent 记下的候选
-> 顺序"（`agent/core/music.py::MusicPlayer.step()`）。"下一首听哪首"由**对话**决定
-> （chat 看本地库的 tag + 播放次数 → 挑 → `play_track`）。见 [`music.md`](music.md) §4.2。
-> 这三个按钮失败时（音乐没开 / PC 上没在放 / 还没有队列）都会回一条 `llm` 说明 ——
+> ⚠ **分工（T8-5b）**：**队列内容**由**对话**决定（工具 `next_music` 的 `enqueue` / `clear_queue`），
+> **播放控制**由**四个按钮**决定（`agent/core/music.py::MusicPlayer.toggle()/step()`）。
+> 队列是**环形**的，曲终**自动下一首**；队列只在 Agent 内部用，**不推给 GUI**。
+> 工具侧因此**没有** play/pause/next/prev（只有 `volume`）。见 [`music.md`](music.md) §4.2。
+> 这三个按钮失败时（音乐没开 / PC 上没在放 / 队列是空的）都会回一条 `llm` 说明 ——
 > 不假装换了一首。
 
 注意：

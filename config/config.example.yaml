@@ -60,7 +60,16 @@ llm:
   #    (agent/config.py 不做 schema 校验, 多余键没有副作用)
   model_name: qwen3-0.6b     # Agent 读: 请求里的 model (llama-server 的 --alias)
   port: 9000                 # Agent 读: base_url = http://127.0.0.1:<port>/v1
-  ctx_size: 2048             # 只给 llama-server
+  # 上下文长度 —— **只给 llama-server** (`--ctx-size`)。
+  # ⚠ T8-5 板端实测（7 个工具, `/tokenize` + usage.prompt_tokens）:
+  #    · 第一轮 prompt 1898 token, 其中**工具清单就占 ~1700**（system 44 + 用户那句 6）;
+  #    · 模型答一条工具调用只花 ~200 token; 把工具结果喂回去的**第二轮 2131 token**。
+  #    → 2048 装不下任何一个工具往返（llama-server 报 `exceed_context_size_error` 400,
+  #      Agent 降级成规则兜底, 用户看到的是"听不懂这句话"）。4096 留了余量;
+  #      KV 缓存约多占 200+MB（板子 4GB / 可用 1.6GB 时没问题）。
+  #    ⚠ **加工具/改工具说明等于加 prompt**: 每加一个工具大约 +200~400 token,
+  #      改完记得回来看这个数（`next_wallpaper` 的说明里塞了整份标签词表, 一个就 392）。
+  ctx_size: 4096
   batch_size: 256            # 只给 llama-server
   threads: 4                 # 只给 llama-server
   threads_batch: 4           # 只给 llama-server

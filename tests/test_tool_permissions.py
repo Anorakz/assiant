@@ -17,13 +17,21 @@ tests/test_tool_permissions.py — 工具的状态权限表（Phase 7 T4）
       · 给 LLM 看的清单也要按状态过滤（T4 顺手修的那一处, 见
         `agent/llm/provider.py::_advertised_tools`）
 
-这张表（你 T4 拍的板；T7-3 加了 list_wallpaper_tags）:
+这张表（你 T4 拍的板；T7-3 加过 list_wallpaper_tags；T8-5b 合并成**三个**工具）:
 
-    | 状态  | back_to_desktop | next_wallpaper | list_wallpaper_tags |
-    | SLEEP |        ✗        |       ✗        |          ✗          |
-    | IDLE  |        ✗        |       ✓        |          ✓          |
-    | STUDY |        ✓        |       ✓        |          ✓          |
-    | GAME  |        ✗        |       ✗        |          ✗          |
+    | 状态  | back_to_desktop | next_wallpaper | next_music |
+    | SLEEP |        ✗        |       ✗        |     ✗      |
+    | IDLE  |        ✗        |       ✓        |     ✓      |
+    | STUDY |        ✓        |       ✓        |     ✓      |
+    | GAME  |        ✗        |       ✗        |     ✗      |
+
+    T8-5b 把七个工具合并成三个（每个工具用 `action` 分派具体动作）:
+      · next_wallpaper = 翻页 / 按内容挑 / 看标签（原来的 next_wallpaper + list_wallpaper_tags）
+      · next_music     = 排进队列 / 清空队列 / 看清单 / 搜 / 状态 / 打标签 / 音量
+                         （原来的音乐四件套; transport 交给 GUI 按钮）
+      · back_to_desktop = 回到桌面（无参数, 只 STUDY）
+    合并的动机是 **prompt 预算**: T8-5 实测 7 个工具的工具清单占第一轮 prompt 的 90%
+    （1699 / 1898 token）, 第二轮 2131 直接撞穿 ctx。合并后模型只认 3 个名字。
 
 为什么 SLEEP / GAME 一个都不给
     · SLEEP = "睡眠": 不让模型动系统里的任何东西, 最保守的一档
@@ -36,6 +44,8 @@ tests/test_tool_permissions.py — 工具的状态权限表（Phase 7 T4）
     按钮、同名 IPC 命令、以及那个只服务于它的路由方法**一起**下线了。
     现在这张表只管**工具**（而工具只有对话这一条路能调到, 见
     `agent/main.py::Runtime.next_wallpaper`）。
+    ⚠ 音乐按钮（T8-4 的 music_play_pause 等）**不在**这张表里: 它们是 GUI 的
+      transport（播放/暂停/上一首/下一首）, 不决定放什么; 音乐开关是 `music.enabled`。
 """
 
 import asyncio
@@ -60,10 +70,26 @@ logging.disable(logging.CRITICAL)
 
 #: 唯一写下来的权限表: 工具名 -> 允许的状态集合。加工具时**必须**在这里加一行。
 EXPECTED = {
+    # 回到桌面: 只有 STUDY（学习收尾）, 且**无参数**
     "back_to_desktop": {State.STUDY},
+    # 壁纸的一切（翻页 / 按内容挑 / 看标签）—— 都由这一个工具 + action 承担
     "next_wallpaper": {State.IDLE, State.STUDY},
-    # T7-3: 只读的"看看库里有什么标签", 与 next_wallpaper 同一套状态
-    "list_wallpaper_tags": {State.IDLE, State.STUDY},
+    # 音乐的一切（排队列 / 清空 / 清单 / 搜 / 状态 / 标签 / 音量）
+    "next_music": {State.IDLE, State.STUDY},
+}
+
+#: T8-5b: 全部工具就是这三个（几次断言要一起数）
+TOOL_NAMES = ("back_to_desktop", "next_wallpaper", "next_music")
+
+#: 对应的**模块**名（`TOOL_MODULES` 里写的是模块名, 不是工具名）
+TOOL_MODULE_NAMES = ("back_to_desktop", "wallpaper", "music")
+
+#: 有**必填**参数的工具, 给一份合法参数（回桌面没有参数）。
+#: ⚠ 这不是"权限表"的一部分, 只是让"放行"那条断言真的走到 handler;
+#:   刻意选**只碰一个入口**的动作（status 会同时问状态与队列 = 两格）。
+_SAMPLE_ARGS = {
+    "next_wallpaper": {"action": "next"},
+    "next_music": {"action": "clear_queue"},
 }
 
 #: 四个状态各自**应该**看到哪些工具（由 EXPECTED 推出来, 不手写第二份）
@@ -97,12 +123,27 @@ def go_to(machine, state):
     assert machine.current() is state, machine.current()
 
 
+#: 计数替身里的每一格（每个工具一个入口 —— 一个工具跑一次, 恰好点亮一格）
+CALL_KEYS = ("desktop", "wallpaper", "tags", "music_list", "music_search", "music_state",
+             "music_enqueue", "music_queue_clear", "music_queue_state", "music_tag",
+             "music_control")
+
+
+def _no_calls():
+    """全 0 的计数替身。"""
+    return {key: 0 for key in CALL_KEYS}
+
+
 def make_router(machine=None):
     """真路由 + 三个真工具, 依赖换成**计数替身**（这样能验"handler 到底跑没跑"）。
 
+    ⚠ 依赖给不齐是有意的**反向断言**的落点: 少了某个入口, `build_tools()` 就把那个工具
+      整个跳过（音乐没开就是这样消失的）, 于是
+      `test_every_registered_tool_is_in_the_table` 立刻红 —— 所以这里每个入口都给。
+
     @param machine 状态源; 不给就自己建一个（初始 IDLE）
     """
-    calls = {"desktop": 0, "wallpaper": 0, "tags": 0}
+    calls = _no_calls()
 
     class _Sender:
         async def show_desktop(self):
@@ -116,11 +157,49 @@ def make_router(machine=None):
         calls["tags"] += 1
         return {"ok": True, "count": 1, "axes": {}}
 
+    def _music_list(tag=None, axis=None, sort="plays_asc", limit=10):
+        calls["music_list"] += 1
+        return {"ok": True, "count": 1, "tracks": [{"id": "1", "name": "x"}]}
+
+    def _music_search(keyword, limit=10):
+        calls["music_search"] += 1
+        return {"ok": True, "count": 1, "tracks": [{"id": "1", "name": "x"}]}
+
+    def _music_state():
+        calls["music_state"] += 1
+        return {"ok": True, "track_id": "1", "playing": True}
+
+    def _music_enqueue(track_id=None, keyword=None, tag=None, sort="plays_asc",
+                       limit=1, replace=False):
+        calls["music_enqueue"] += 1
+        return {"ok": True, "queued": ["1"], "started": True}
+
+    def _music_queue_clear():
+        calls["music_queue_clear"] += 1
+        return {"ok": True, "cleared": 1}
+
+    def _music_queue_state():
+        calls["music_queue_state"] += 1
+        return {"ok": True, "size": 1, "index": 0, "ids": ["1"], "tracks": []}
+
+    def _music_tag(tags, track_id=None, remove=False):
+        calls["music_tag"] += 1
+        return {"ok": True, "id": track_id or "1"}
+
+    def _music_control(action, **kwargs):
+        calls["music_control"] += 1
+        return {"ok": True, "action": action}
+
     machine = machine if machine is not None else StateMachine()
     router = ToolRouter(
         state_provider=machine,
         services={"input_sender": _Sender(), "next_wallpaper": _next_wallpaper,
-                  "wallpaper_tags": _wallpaper_tags},
+                  "wallpaper_tags": _wallpaper_tags,
+                  "music_list": _music_list, "music_search": _music_search,
+                  "music_state": _music_state, "music_enqueue": _music_enqueue,
+                  "music_queue_clear": _music_queue_clear,
+                  "music_queue_state": _music_queue_state,
+                  "music_tag": _music_tag, "music_control": _music_control},
     )
     for tool in build_tools(router):
         router.register(tool)
@@ -148,11 +227,17 @@ class TestTheTable(unittest.TestCase):
         table_names = set(EXPECTED)
         self.assertEqual(
             table_names,
-            {"back_to_desktop", "next_wallpaper", "list_wallpaper_tags"},
+            set(TOOL_NAMES),
             "权限表少了一行或多了一行: %s" % sorted(table_names),
         )
         self.assertEqual(len(TOOL_MODULES), len(table_names),
                          "TOOL_MODULES 与权限表的条数不一样: %s" % (TOOL_MODULES,))
+        self.assertEqual(tuple(TOOL_MODULES), TOOL_MODULE_NAMES,
+                         "T8-5b: 只有三个工具模块, 且顺序稳定")
+        _machine, router, _calls = make_router()
+        # `router.names()` 是**按名字排序**的（权限表也是按名字查）, 所以这里比集合
+        self.assertEqual(set(router.names()), set(TOOL_NAMES),
+                         "模块名 -> 工具名: 三个模块正好造出三个工具")
 
     def test_each_tool_allows_exactly_the_states_in_the_table(self):
         _, router, _ = make_router()
@@ -210,7 +295,7 @@ class TestForbiddenCombinationsAreReallyRefused(unittest.IsolatedAsyncioTestCase
                 result = await router.execute(name, {})
                 self.assertFalse(result["ok"], "%s/%s 应当被拒" % (state.value, name))
                 self.assertIn("not allowed", result["error"])
-                self.assertEqual(calls, {"desktop": 0, "wallpaper": 0, "tags": 0},
+                self.assertEqual(calls, _no_calls(),
                                  "%s/%s 被拒时 handler 不该跑" % (state.value, name))
                 checked += 1
         # 反空转: 真的验到了组合（SLEEP 3 + GAME 3 + IDLE 1 = 7）
@@ -222,7 +307,9 @@ class TestForbiddenCombinationsAreReallyRefused(unittest.IsolatedAsyncioTestCase
             for name in EXPECTED_BY_STATE[state]:
                 machine, router, calls = make_router()
                 go_to(machine, state)
-                result = await router.execute(name, {})
+                # 有必填参数的工具（next_wallpaper/next_music 的 action）得给一份合法参数
+                # —— 否则会卡在 schema 校验上, 验的就不是权限了。
+                result = await router.execute(name, dict(_SAMPLE_ARGS.get(name, {})))
                 self.assertTrue(result["ok"], "%s/%s 应当放行: %r"
                                 % (state.value, name, result))
                 self.assertEqual(sum(calls.values()), 1,
@@ -274,20 +361,21 @@ class TestModelOnlySeesAllowedTools(unittest.IsolatedAsyncioTestCase):
 
         return _Client()
 
-    async def test_study_sees_three_tools(self):
+    async def test_study_sees_every_allowed_tool(self):
         provider, backend = self._provider(State.STUDY)
         await provider.chat_with_tools("x", {})
         request = backend.client.chat.completions.requests[0]
-        self.assertEqual({t["function"]["name"] for t in request["tools"]},
-                         {"back_to_desktop", "next_wallpaper", "list_wallpaper_tags"})
+        self.assertEqual([t["function"]["name"] for t in request["tools"]],
+                         ["back_to_desktop", "next_music", "next_wallpaper"],
+                         "STUDY 下三个工具都给, 按名字排序")
 
-    async def test_idle_sees_only_the_wallpaper_tools(self):
+    async def test_idle_sees_no_back_to_desktop(self):
         provider, backend = self._provider(State.IDLE)
         await provider.chat_with_tools("x", {})
         request = backend.client.chat.completions.requests[0]
         self.assertEqual([t["function"]["name"] for t in request["tools"]],
-                         ["list_wallpaper_tags", "next_wallpaper"],
-                         "清单按名字排序, 顺序也要稳定")
+                         ["next_music", "next_wallpaper"],
+                         "清单按名字排序, 顺序也要稳定; IDLE 只是少了 back_to_desktop")
 
     async def test_sleep_and_game_advertise_no_tools_at_all(self):
         for state in (State.SLEEP, State.GAME):
@@ -377,16 +465,18 @@ class TestTheConnectPush(unittest.IsolatedAsyncioTestCase):
 
 class TestDeckAndToolsAreTheRealOnes(unittest.TestCase):
 
-    def test_wallpaper_tool_needs_only_the_runtime_entry(self):
-        # 壁纸目录不存在也不该让工具消失（目录问题是运行期的, 见 tools/wallpaper.py）
+    def test_wallpaper_tool_needs_both_entries(self):
+        # 壁纸目录不存在也不该让工具消失（目录问题是运行期的, 见 tools/wallpaper.py）——
+        # 但**入口**缺一个就整个不装: 模型看到的 action 列表必须与真实可用的完全一致
         empty = tempfile.mkdtemp()
         deck = WallpaperDeck(empty)
         self.assertEqual(deck.count(), 0)
         router = ToolRouter(services={"next_wallpaper": lambda step=1, match=None: {"ok": True}})
-        names = [t.name for t in build_tools(router)]
-        self.assertIn("next_wallpaper", names)
-        self.assertNotIn("list_wallpaper_tags", names,
-                         "没给 wallpaper_tags 入口时它自己跳过（缺依赖不是崩）")
+        self.assertEqual([t.name for t in build_tools(router)], [],
+                         "少了 wallpaper_tags -> 整个 next_wallpaper 不装")
+        both = ToolRouter(services={"next_wallpaper": lambda step=1, match=None: {"ok": True},
+                                    "wallpaper_tags": lambda ip_query=None, limit=5: {}})
+        self.assertEqual([t.name for t in build_tools(both)], ["next_wallpaper"])
 
     def test_every_tool_declares_states_explicitly(self):
         # 空集合 = 任何状态都不允许（fail closed）—— 工具不该"忘了写"就变成全放行

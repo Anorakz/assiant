@@ -178,17 +178,26 @@ agent/
 | 依赖从哪来 | `router.services`（`main.py` 装配时填 `input_sender` / `image_reader` / `bus` / `config`）。**不让工厂多收参数**：挂在 router 上，`build_tools(router)` 签名与所有测试都不用改 |
 | 缺依赖 | `build()` 返回 `None` 并自己记一条 warning（"跳过这个工具"），**不抛异常**；少一个工具不该让工具层起不来 |
 | 权限 | `Tool.allowed_states` **默认空集 = 任何状态都不允许**（fail closed）；不在允许状态里只回绝，handler 一次都不跑 |
+| 超时 | 路由默认 5 s；**工具可以声明自己的**（`Tool.timeout_s`）—— 会同步走一趟 PC 的工具（`next_music` 排队列后起播要 ssh + schtasks, 板端实测 5~8 s）必须声明，否则会被误判成 `timed out`（T8-5b 板端实测踩到过） |
 | 给模型看的说明 | `DESCRIPTION` 要写清**副作用与不确定性** —— 例如 `back_to_desktop` 明说"是开关动作、没有回执、别连着调"。CLI 那边"不假装调了工具"是同一条口径 |
-| 说明可以是**动态的** | T7-4 起 `next_wallpaper` 在 `build()` 时把**当前词表**拼进 description（"可用标签: scene=…；tone=…；mood=…"，超 320 字符就截断并指向 `list_wallpaper_tags`）。理由：板端实测小模型会编造标签名，而词表只有配置/代码知道 |
+| 说明可以是**动态的** | T7-4 起 `next_wallpaper` 在 `build()` 时把**当前词表**拼进 description（"可用标签: scene=…；tone=…；mood=…"，超 320 字符就截断并指向 `action="tags"`）。理由：板端实测小模型会编造标签名，而词表只有配置/代码知道 |
 
 **权限表（T4，唯一写下来的地方是 `tests/test_tool_permissions.py::EXPECTED`）**：
 
-| 状态 | `back_to_desktop` | `next_wallpaper` | `list_wallpaper_tags` |
+| 状态 | `back_to_desktop` | `next_wallpaper` | `next_music` |
 | --- | --- | --- | --- |
 | `SLEEP` | ✗ | ✗ | ✗ |
 | `IDLE` | ✗ | ✓ | ✓ |
 | `STUDY` | ✓ | ✓ | ✓ |
 | `GAME` | ✗ | ✗ | ✗ |
+
+> **T8-5b: 七个工具合并成三个**（每个工具用 `action` 分派具体动作）。动机是 prompt 预算 ——
+> T8-5 板端实测 7 个工具的工具清单占第一轮 prompt 的 **90%**（1699 / 1898 token），
+> 第二轮 2131 直接把 `ctx_size 2048` 撞穿。合并后模型只认三个名字：
+> `next_wallpaper`（翻页/按内容挑/看标签）、`next_music`（音乐的一切，transport 交给 GUI）、
+> `back_to_desktop`（无参数）。标签写法两边共用 `agent/core/label_spec.py`。
+> ⚠ **缺一个入口就整个工具不装**（不是"少一个动作"）—— 模型看到的 action 列表必须与
+> 真实可用的完全一致。链路见 [music.md](music.md)、[tagging.md](tagging.md)。
 
 - **SLEEP / GAME 一个都不给**：SLEEP 是"别动系统里的任何东西"；GAME 的主区是视频区，
   换壁纸等于白换，而"回到桌面"是**学习收尾**的动作（T1 的决定）。
@@ -241,7 +250,7 @@ edge 挂了**不装作答过**：`chat()` 照抛；`chat_with_tools()` 退回规
 | 路径 | 是什么 | 谁用 |
 | --- | --- | --- |
 | `agent/vision/siglip_encoder.py` | **mock**（由图像内容决定的确定性伪随机向量，`ready` 恒 False） | 给"板端实时帧 → embedding"占位；**目前没有调用方** |
-| `agent/vision/siglip/` | **真实现**：SigLIP 双塔 RKNN（图像塔 + 文本塔），走 NPU | **离线**打标签 / 图像检索（`assistant tag`、`list_wallpaper_tags`） |
+| `agent/vision/siglip/` | **真实现**：SigLIP 双塔 RKNN（图像塔 + 文本塔），走 NPU | **离线**打标签 / 图像检索（`assistant tag`、`next_wallpaper(action="tags"/"pick")`） |
 
 两条路**接口不同**（前者只 encode 图像；后者是完整双塔：`encode_image` / `encode_text` /
 `similarities` / `rank`），不是同一个东西的两个实现 —— 别拿 mock 那条去算文本相似度。

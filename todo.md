@@ -1314,6 +1314,42 @@ T7-4 收尾（**你的三条决定都已实现, 未提交**）
       **没有开机自启**。现在 Agent 管启停（`manage_service: true` 已写进板端 live 配置）
       正好补上这一环 —— 不过 Agent 自己的开机自启仍是 Phase 8 的 `systemd/agent.service`。
 
+Phase 7 T8 — 音乐（对话点歌）+ 工具合并（T8-5b）
+☑ T8-1~T8-3 **板端 ssh 调 PC 上的第三方 `neteasecli`**（PC 侧零自制程序）:
+      · 约束（你定的）: 声音从 PC 出、PC 上不能有我们写的程序 → 用 Windows 自带 OpenSSH Server
+        + 第三方 `neteasecli`/`mpv`; 进度要从**输出**读回来（Sunshine 注入命令读不回，只能瞎猜）
+      · `agent/net/netease_cli.py`（33 项测试）: 拼命令行 / 解 `--json` 信封 / 四类错误翻译;
+        ⚠ 播放必须走 `schtasks /it`（Windows sshd 的子进程在 session 0，没有音频端点）
+      · `agent/media/music_library.py`（43 项）: 本地库 id/tags/播放次数; 云歌单只用来导一次
+☑ T8-4 播放内核 + Runtime 轮询 + GUI 四个按钮（39+ 项）:
+      环形队列之前的版本: 曲终停下、chat 先看清单再点歌; GUI 四个按钮走 IPC
+☑ T8-5 音乐四件套 + 壁纸 action 化（**被 T8-5b 取代，未单独提交**）:
+      板端实测发现两件真问题: ① 7 个工具的工具清单占第一轮 prompt 90%（1699 token）,
+      第二轮 2131 撞穿 `ctx_size 2048`; ② 一轮点歌要 3 次模型调用
+☑ T8-5b **工具合并成三个 + 环形队列 + 关思考**（你定的四条决定）:
+      · 工具: `next_wallpaper`（next/prev/repeat/pick/tags）/ `next_music`
+        （enqueue/clear_queue/list/search/status/tag/volume）/ `back_to_desktop`（无参数, 只 STUDY）
+      · 统一标签语法 `agent/core/label_spec.py`（壁纸 `match=` 与音乐 `tag=` 同一份实现）
+      · 队列: **环形**（到尾回第一首）; **chat 管内容**（enqueue/clear_queue）、
+        **GUI 管 transport**（播放/暂停/上一首/下一首）; **曲终自动下一首**
+      · 关思考: `/no_think` 也写进 **user 消息**（按"三条路按序试、可行即停"测了 ①,
+        实测 6 条提示词思考全为 0 字, 工具调用成功率 1/6 → 4/6, 单轮 211 s → 40 s）
+      · 工具侧宽容（板端实测逼出来的）: `action="next"` + `match`（老写法）照收;
+        `ip_query` 在翻页类动作下当 `match` 用; `track_id` 会**去 PC 校验**（模型编过 `track1`）
+      · `Tool.timeout_s`（每个工具自己的超时）: `next_music` 声明 25 s —— 排队列后同步起播
+        要 ssh + schtasks（5~8 s），默认 5 s 会把它误判成 `timed out`（实测踩到）
+      · 实测上下文: 工具清单 1699 → **1309** token（STUDY 三个工具）; 第一轮 prompt 1898 → **1495**
+      · 板端验收: 环形（next×2 回到第一首、prev 回到最后一首, 每次 PC 的 duration 都变）、
+        停止后按播放**从队列起播**、清空队列、队列空时的诚实错误;
+        四端测试全绿（PC 30 个文件 / 板端 **31 个文件**）
+⚑ **环境（卡住音乐端到端）**: PC 12:01 重启后 **OpenSSH Server 服务没了**（只剩 `ssh-agent`,
+      `sshd` 查无此服务）→ 板端连不上 PC, 音乐动作如实报"连不上 PC（Connection refused）"。
+      需要你用**管理员** PowerShell 重新装/起 OpenSSH Server（docs/music.md §3.2）
+⚑ **环境**: 板端另有一次**不明原因重启**（约 22:00, 无 OOM 痕迹）, 板端时钟也因此跳过一次
+⚑ **未解边界（模型层, 0.6B 能力问题）**: "现在在放什么"这类**读状态**的问句它不肯调 `status`
+      （直接复读问题）—— 见 docs/llm.md §5.2 的方向讨论（读操作可能不该走模型）
+⚑ 下一步（待你定方向）: T8-6（壁纸使用次数并入 `wall_data.jsonl`）/ T8-7（T8 收口验收）
+
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档

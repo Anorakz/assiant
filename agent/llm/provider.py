@@ -820,7 +820,17 @@ def _build_messages(
     """组装 messages。
 
     context 非空时塞进 system 消息 —— 不做模板管理, 就是一句 JSON。
-    no_think=True 时在 system 提示末尾加 /no_think (Qwen3 软开关, 见 _NO_THINK_SUFFIX)。
+
+    `no_think=True`（edge 默认）时在**两处**写 Qwen3 的软开关 `/no_think`:
+    **system 末尾** + **最后一条 user 消息末尾**。
+
+    ⚠ 为什么两处都写（T8-5b 板端实测）: 只写在 system 里时, 模型**时不时还是会想**
+    （6 条提示词里有 1 条产出了 339 字的 `reasoning_content`, 那一轮要 211 s）;
+    把同样的 `/no_think` 再放到 user 消息末尾后, 同一批 6 条**思考全为 0 字**、
+    单轮从 11~211 s 收到 13~54 s, 工具调用成功率也从 1/6 升到 4/6。
+    注意这不是"模板在帮我们"—— 模型的 chat 模板里**没有** `/no_think` 的处理
+    （只有 `enable_thinking` 变量）, 起作用的是模型自己学过的软开关,
+    所以位置越靠近生成点越可靠。
     """
     system = _SYSTEM_PROMPT
     if no_think:
@@ -844,6 +854,8 @@ def _build_messages(
             }
         )
 
+    if no_think:
+        user_input = "%s %s" % (user_input, _NO_THINK_SUFFIX)
     messages.append({"role": "user", "content": user_input})
     return messages
 

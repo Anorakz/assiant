@@ -272,6 +272,10 @@ class Tool:
     @param schema         参数的 JSON Schema (见 SUPPORTED_KEYWORDS 子集)
     @param handler        实际执行体; 同步或 async 都可以
     @param allowed_states 允许在哪些状态下调用 (空集合 = 任何状态都不允许)
+    @param timeout_s      这个工具自己的超时 (秒); None = 用路由的默认值。
+                          ⚠ T8-5b 加的: 有的工具会**同步走一趟 PC**（音乐排队列后起播
+                          要走 ssh + schtasks, 板端实测 5~8 s），用一个全局 5 s 会把它
+                          误判成 `timed out`（板端实测踩到过）。
     """
 
     name: str
@@ -279,6 +283,7 @@ class Tool:
     schema: Dict[str, Any]
     handler: Callable[..., Any]
     allowed_states: Set[State] = field(default_factory=set)
+    timeout_s: Optional[float] = None
 
     def __post_init__(self) -> None:
         # 允许传 list/tuple/frozenset; 统一成 set 便于查找
@@ -480,10 +485,11 @@ class ToolRouter:
 
     async def _run(self, tool: Tool, args: Dict[str, Any]) -> Dict[str, Any]:
         """真正执行 handler, 带超时与异常兜底。"""
+        timeout_s = tool.timeout_s if tool.timeout_s else self._timeout_s
         try:
             if tool.is_async:
                 result = await asyncio.wait_for(
-                    tool.handler(**args), timeout=self._timeout_s
+                    tool.handler(**args), timeout=timeout_s
                 )
             else:
                 # 同步 handler 丢到线程池, 别卡住事件循环 —— 工具里可能有
@@ -491,7 +497,7 @@ class ToolRouter:
                 loop = asyncio.get_running_loop()
                 call = functools.partial(tool.handler, **args)
                 result = await asyncio.wait_for(
-                    loop.run_in_executor(None, call), timeout=self._timeout_s
+                    loop.run_in_executor(None, call), timeout=timeout_s
                 )
         except asyncio.TimeoutError:
             # ⚠ 同步 handler 的超时只能"放弃等待", 线程本身还会跑完 (Python 没法
@@ -499,7 +505,7 @@ class ToolRouter:
             #    幂等/清理。异步 handler 则是真的被 cancel 掉。
             return {
                 "ok": False,
-                "error": "tool %r timed out after %.3gs" % (tool.name, self._timeout_s),
+                "error": "tool %r timed out after %.3gs" % (tool.name, timeout_s),
             }
         except asyncio.CancelledError:
             # 调用方被取消: 不能吞, 否则上层取消逻辑会失灵

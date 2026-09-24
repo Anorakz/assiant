@@ -382,6 +382,10 @@ class TestModeSelection(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request["temperature"], 0.7)
         # Qwen3 的软开关: 不加它, 0.6B 会把 token 预算烧在思考上, 正文是空的
         self.assertIn("/no_think", request["messages"][0]["content"])
+        # ⚠ T8-5b: **两处都写** —— user 消息末尾那份才是真正把思考压住的那份
+        #   （板端 6 条实测: 只在 system 里时有一条想了 339 字 / 211 s;
+        #    两处都写之后 6 条思考全为 0 字, 成功率 1/6 → 4/6）
+        self.assertIn("/no_think", request["messages"][-1]["content"])
         # 纯文本调用不带工具
         self.assertNotIn("tools", request)
 
@@ -390,6 +394,16 @@ class TestModeSelection(unittest.IsolatedAsyncioTestCase):
         provider = LLMProvider(mode="edge", edge_backend=edge)
         await provider.chat("hi", {})
         self.assertNotIn("/no_think", edge.client.requests[0]["messages"][0]["content"])
+        self.assertNotIn("/no_think", edge.client.requests[0]["messages"][-1]["content"])
+
+    async def test_no_think_goes_after_the_user_text_not_before(self):
+        # 顺序别搞反: 软开关要在**这一句之后**（贴住"该你答了"的位置）
+        edge = make_edge([text_response("x")])
+        provider = LLMProvider(mode="edge", edge_backend=edge)
+        await provider.chat("现在几点", {})
+        content = edge.client.requests[0]["messages"][-1]["content"]
+        self.assertTrue(content.startswith("现在几点"), content)
+        self.assertTrue(content.endswith("/no_think"), content)
 
     async def test_edge_default_backend_points_at_local_llama_server(self):
         # 不注入后端时按 config 的 llm: 段造 (llm.port / model_name / local_api_key)

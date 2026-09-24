@@ -42,9 +42,9 @@ from __future__ import annotations
 import logging
 import math
 import os
-import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from ..core import label_spec
 from . import wall_data
 
 __all__ = [
@@ -574,23 +574,17 @@ class TagIndex(object):
 # ---------------------------------------------------------------------------
 #  match 语法的零件
 # ---------------------------------------------------------------------------
+#: ⚠ T8-5b 起拆键/拆值**只有一份实现**: `agent/core/label_spec.py`
+#:   （壁纸的 `match=` 与音乐的 `tag=` / `set_tag=` 说的本来是同一件事）。
+#:   下面两个函数只是名字上的历史包袱（`match()` 与几十个老测试都在叫它们），行为一字未变。
 def _split_spec(text: str) -> Tuple[Optional[str], str]:
-    """把 `scene=anime` / `ip: EVA` 拆成 (键, 值)。
+    """把 `scene=anime` / `ip: EVA` 拆成 (键, 值) —— 实现在 `label_spec.split_key`。
 
     @return (None, 原文本) = 没有 `=`/`:`（只写了一个标签名）
     @note 键统一小写（轴名本来就是小写；`IP`/`ip` 都认）；
           `=anime`（键是空的）按"只写了标签名"处理 —— 用户手滑不该报错。
     """
-    for separator in ("=", ":"):
-        position = text.find(separator)
-        if position < 0:
-            continue
-        key = text[:position].strip().lower()
-        value = text[position + 1:].strip()
-        if not key:
-            return None, value
-        return key, value
-    return None, text.strip()
+    return label_spec.split_key(text)
 
 
 def _pick_labels(value: str, known: Sequence[str]) -> Tuple[List[str], List[str]]:
@@ -598,12 +592,11 @@ def _pick_labels(value: str, known: Sequence[str]) -> Tuple[List[str], List[str]
 
     @param known 词表里真有的标签（**大小写敏感** —— 标签本身是小写英文裸串）
     @return (认得的标签, 不认得的标签)，各自保持书写顺序、去重
-    @note 分隔符认 `/ , ; 、 ，` 与空白: 板端实测模型会用斜杠把一串标签拼起来
-          （`scene=space/technology/fantasy/anime`）, 也会用逗号或空格。词表里的标签
-          都是**不含空白**的裸串, 所以这样切不会误伤。
+    @note 拆值走 `label_spec.split_values`（分隔符与老行为一致: `/ , ; 、 ， ；` 与空白）;
+          板端实测模型会用斜杠把一串标签拼起来（`scene=space/technology/fantasy/anime`）。
     @note 认得的照用、不认得的**如实报出来**（`unknown`），不是静默丢掉。
     """
-    parts = [part for part in _LABEL_SPLIT_RE.split(value or "") if part]
+    parts = label_spec.split_values(value)
     if not parts:
         parts = [(value or "").strip()] if (value or "").strip() else []
     wanted: List[str] = []
@@ -618,10 +611,6 @@ def _pick_labels(value: str, known: Sequence[str]) -> Tuple[List[str], List[str]
         if label not in wanted:
             wanted.append(label)
     return wanted, unknown
-
-
-#: 拆多标签用的分隔符（半角/全角斜杠逗号分号 + 顿号 + 空白）
-_LABEL_SPLIT_RE = re.compile(r"[\/,;、，；\s]+")
 
 
 def _anchors_of(preset: Any) -> List[str]:

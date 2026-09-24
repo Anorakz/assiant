@@ -317,24 +317,27 @@ def bump_play(track: Mapping[str, Any], when: Optional[str] = None) -> Dict[str,
 # ---------------------------------------------------------------------------
 #  查询（"下一首由 chat 决定"就靠这几个）
 # ---------------------------------------------------------------------------
-def pick(tracks: Sequence[Mapping[str, Any]], tag: Optional[str] = None,
+def pick(tracks: Sequence[Mapping[str, Any]], tag: Optional[Any] = None,
          sort: str = "plays_asc", limit: int = 10,
          axis: Optional[str] = None, seed: Optional[int] = None) -> List[Dict[str, Any]]:
     """按 tag 过滤 + 按次数排序，给 chat 一份候选清单。
 
-    @param tag  只要带这个标签的歌（`"energetic"`）；None = 全部
+    @param tag  只要带这个标签的歌（`"energetic"`）；**也可以给一串**（`["energetic","calm"]`
+                = 任一命中 —— T8-5b 起统一语法允许 `mood=energetic/calm`）；None = 全部
     @param axis 限定在某个轴上找（`"mood"`）；None = 所有轴
     @param sort `plays_asc`（听得最少的先, 默认）/ `plays_desc` / `recent` /
                 `oldest` / `added` / `random`
     @return 记录列表（带上 `matched` 说明命中的是哪个轴/标签）
     """
-    wanted = str(tag).strip() if isinstance(tag, str) else ""
+    wanted = [str(x).strip() for x in (
+        tag if isinstance(tag, (list, tuple, set)) else [tag]) if str(x or "").strip()]
     hits: List[Dict[str, Any]] = []
     for track in tracks:
         tags = _clean_tags(track.get("tags"))
         if wanted:
-            matched = [(name, wanted) for name, values in tags.items()
-                       if (axis is None or name == axis) and wanted in values]
+            matched = [(name, value) for name, values in tags.items()
+                       if (axis is None or name == axis)
+                       for value in wanted if value in values]
             if not matched:
                 continue
             item = dict(track)
