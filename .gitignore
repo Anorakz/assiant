@@ -120,6 +120,16 @@ config/wall_data.jsonl
 # 那是**凭据**，绝不能入库。⚠ 同理盖不住（后缀 .json），必须单独写一行。
 config/netease_cookie.json
 config/netease_cookie.json.bak
+# B 站**登录态**（Phase 7 T11）: 这个文件里是 `SESSDATA` —— **凭据**，绝不能入库。
+# 它只对 **Agent 运行的那台机器**有效（板端），PC 仓库里放一份只是"待部署的源"，
+# 所以两边都得忽略（同 netease 那条：后缀是 .json，config/*.yaml 那条盖不住它）。
+# 没有这个文件 / 文件为空 = 匿名（清晰度按 B 站给多少算多少），不是错误。
+config/bilibili_cookie.json
+config/bilibili_cookie.json.bak
+# 游戏锚点（T11-4）: 截图 + 向量 + 游戏名，**运行期自学习**的派生数据（来源是屏幕截图），
+# 换台机器/换游戏就该重学，不入库。
+config/game_anchors.jsonl
+config/game_anchors.jsonl.bak
 # 本地音乐库（T8-3）: 一行一首歌（id + tags + 播放次数），**板端本地数据** ——
 # 从云歌单**导入一次** id 之后就不再看云歌单了，属于"这台机器听过什么"，不入库。
 config/music_library.jsonl
