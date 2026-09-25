@@ -1099,5 +1099,112 @@ class TestQueueRemoval(unittest.TestCase):
         self.assertEqual(player.queue_ids(), ["1"])
 
 
+class TestProfileEffectsOnTheQueue(unittest.IsolatedAsyncioTestCase):
+    """T10-5: 画像构建完的队列动作 —— 负反馈清队列 / **只有心情变了才重置**。"""
+
+    def _runtime(self, tmp):
+        import logging as _logging
+
+        from agent.main import Runtime
+
+        runtime = Runtime(config={"music": {"enabled": True, "pc_host": "192.168.137.1",
+                                            "pc_user": "Anorak",
+                                            "library_file": os.path.join(tmp, "music_library.jsonl"),
+                                            "count_after_s": 30, "poll_interval_s": 0.05}},
+                          start_native=False, start_terminal=False,
+                          log=_logging.getLogger("test.music.effects"))
+        return runtime
+
+    async def _with_queue(self, tmp, ids=("1", "2", "3")):
+        self.cli = FakeCli()
+        from agent.net import netease_cli
+
+        original = netease_cli.NeteaseCli.from_config
+        netease_cli.NeteaseCli.from_config = classmethod(
+            lambda cls, config=None, log=None, runner=None: self.cli)
+        self.addCleanup(setattr, netease_cli.NeteaseCli, "from_config", original)
+        lib.write_tracks(os.path.join(tmp, "music_library.jsonl"),
+                         [lib.make_record(i, "T%s" % i, artists="A") for i in ids])
+        runtime = self._runtime(tmp)
+        await runtime._start_music()
+        runtime._music_task.cancel()
+        runtime._music_task = None
+        for track_id in ids:
+            runtime.music.enqueue(track_id, verify=False)
+        return runtime
+
+    async def test_negative_feedback_clears_them_from_the_queue_and_refills(self):
+        tmp = tempfile.mkdtemp(prefix="music-eff-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = await self._with_queue(tmp, ids=("1", "2", "3"))
+        refills = []
+        runtime._music_autofill = lambda: refills.append("refill")
+        try:
+            runtime._apply_profile_effects({"cleared": {"track_ids": ["2"]}})
+            self.assertEqual(runtime.music.queue_ids(), ["1", "3"])
+            self.assertEqual(refills, ["refill"], "去掉之后要**立刻**补队列")
+        finally:
+            await runtime.stop()
+
+    async def test_removing_what_is_playing_skips_to_the_next(self):
+        tmp = tempfile.mkdtemp(prefix="music-eff-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = await self._with_queue(tmp, ids=("1", "2", "3"))
+        runtime._music_autofill = lambda: None
+        try:
+            runtime.music.current_id = "2"
+            runtime.music._queue_index = 1
+            runtime._apply_profile_effects({"cleared": {"track_ids": ["2"]}})
+            self.assertEqual(self.cli.calls[-1], ("play", "3"),
+                             "正在放的那首被点名 -> 跳到它后面那首")
+        finally:
+            await runtime.stop()
+
+    async def test_a_mood_change_resets_the_queue_but_keeps_what_is_playing(self):
+        tmp = tempfile.mkdtemp(prefix="music-eff-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = await self._with_queue(tmp, ids=("1", "2", "3"))
+        refills = []
+        runtime._music_autofill = lambda: refills.append("refill")
+        try:
+            runtime.music.current_id = "2"
+            result = runtime._reset_queue_on_mood_change(
+                {"mood": {"label": "tired"}}, {"mood": {"label": "happy"}})
+            self.assertEqual((result["from"], result["to"]), ("happy", "tired"))
+            self.assertEqual(result["kept"], "2")
+            self.assertEqual(runtime.music.queue_ids(), ["2"], "只留正在放的那首")
+            self.assertEqual(refills, ["refill"], "重置完立刻按新心情补")
+        finally:
+            await runtime.stop()
+
+    async def test_the_same_mood_does_not_reset_anything(self):
+        tmp = tempfile.mkdtemp(prefix="music-eff-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = await self._with_queue(tmp, ids=("1", "2", "3"))
+        runtime._music_autofill = lambda: None
+        try:
+            self.assertIsNone(runtime._reset_queue_on_mood_change(
+                {"mood": {"label": "calm"}}, {"mood": {"label": "calm"}}))
+            self.assertEqual(runtime.music.queue_ids(), ["1", "2", "3"], "没变就别动队列")
+        finally:
+            await runtime.stop()
+
+    async def test_an_unknown_mood_is_not_a_change(self):
+        tmp = tempfile.mkdtemp(prefix="music-eff-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = await self._with_queue(tmp, ids=("1", "2"))
+        runtime._music_autofill = lambda: None
+        try:
+            for old, new in (("calm", "unknown"), ("unknown", "calm"), ("", "calm"),
+                             ("calm", "")):
+                with self.subTest(old=old, new=new):
+                    self.assertIsNone(runtime._reset_queue_on_mood_change(
+                        {"mood": {"label": new}}, {"mood": {"label": old}}),
+                        "unknown 不算心情变化（模型偶尔答不出, 不该清队列）")
+            self.assertEqual(runtime.music.queue_ids(), ["1", "2"])
+        finally:
+            await runtime.stop()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

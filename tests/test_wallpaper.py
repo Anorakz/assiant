@@ -1465,6 +1465,17 @@ class TestWindowDrivenSwitching(unittest.IsolatedAsyncioTestCase):
         await runtime._build_profile_task({"reason": "test"})
         self.assertEqual(calls, ["refill"], "画像构建完要重挑一次「下一个」（你定的第 3 条②）")
 
+    async def test_a_profile_build_also_applies_the_queue_effects(self):
+        """T10-5: 画像构建完还要动队列（负反馈清队列 / 心情变了重置）—— 上一条要带过去。"""
+        runtime, root = self._runtime()
+        seen = []
+        runtime._refill_next = lambda: None
+        runtime._apply_profile_effects = lambda record, previous=None: seen.append(
+            (str((record.get("mood") or {}).get("label")), previous))
+        await runtime._build_profile_task({"reason": "test"})
+        self.assertEqual(len(seen), 1, "构建完要调一次队列动作")
+        self.assertIsNone(seen[0][1], "第一次构建没有上一条可比")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

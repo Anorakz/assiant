@@ -1169,10 +1169,11 @@ class Runtime:
 
         started = time.time()
         try:
+            history = user_profile.read_records(self.profile_file)
+            previous = history[-1] if history else None      # 上一条（判"心情变了"用）
             record = await user_profile.build_profile(
                 self.chat_memory, config=self.config, llm=self.llm, trigger=trigger,
-                clock=time.strftime("%H:%M"),
-                history=user_profile.read_records(self.profile_file))
+                clock=time.strftime("%H:%M"), history=history)
             user_profile.append_record(self.profile_file, record)
             self._profile_failed_at = 0.0
             dropped = self.chat_memory.settle()
@@ -1181,6 +1182,12 @@ class Runtime:
                 self._refill_next()
             except Exception as exc:        # noqa: BLE001 - 挑图失败不该让画像构建失败
                 self.log.warning("用户画像: 重挑壁纸的\"下一个\"失败 (已忽略): %r", exc)
+            # T10-5: 负反馈 -> 从播放队列里去掉类似的全部; 只有**心情变化**才重置队列
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, self._apply_profile_effects, record, previous)
+            except Exception as exc:        # noqa: BLE001 - 队列动作失败不该让画像构建失败
+                self.log.warning("用户画像: 队列动作失败 (已忽略): %r", exc)
             walls = record["walls"]["ip"][:2]
             artists = record["music"]["artist"][:2]
             self.log.info(
@@ -1199,6 +1206,76 @@ class Runtime:
             return None
         finally:
             self._profile_task = None
+
+    def _apply_profile_effects(self, record: Dict[str, Any],
+                               previous: Optional[Mapping[str, Any]] = None) -> None:
+        """画像构建完的**队列动作**（T10-5, 同步, 由调用方丢线程池）:
+
+        1. 负反馈点名了歌/歌手 -> 把**类似的全部**从播放队列里去掉; 正在放的那首被去掉时
+           跳下一首（用户说"不想听"却继续放它, 就是骗人）;
+        2. **只有心情变了才重置队列**（你定的第 6 条）: 保留正在放的那首, 其余清掉重补。
+        @note 两个动作之后都会**立刻补队列**（不等下一个轮询周期）。
+        """
+        if self.music is None:
+            return
+        ids = [str(item) for item in (record.get("cleared") or {}).get("track_ids") or ()]
+        removed = self._remove_from_playback(ids) if ids else None
+        if (removed or {}).get("removed"):
+            self._music_autofill()
+        self._reset_queue_on_mood_change(record, previous)
+
+    def _remove_from_playback(self, track_ids: Sequence[str]) -> Optional[Dict[str, Any]]:
+        """从播放队列里去掉这些歌（T10-5 第 5 条）。@return `music.remove()` 的结果。"""
+        if self.music is None or not track_ids:
+            return None
+        try:
+            result = self.music.remove(track_ids)
+        except MusicError as exc:
+            self.log.warning("music: 从队列里去掉失败 (已忽略): %s", exc)
+            return None
+        if not result["removed"]:
+            self.log.info("music: 负反馈点名了 %d 首, 但队列里没有它们", len(track_ids))
+            return result
+        self._push_music(self.music.snapshot())
+        if result["current_removed"]:
+            try:
+                self.music.step(1)                 # 跳到被去掉那首后面那首（环形）
+            except MusicError as exc:
+                self.log.warning("music: 想跳下一首但失败了: %s", exc)
+            self._push_music(self.music.snapshot())
+        self.log.info("music: 不想听的 %d 首已从队列里去掉（正在放的那首%s被去掉）",
+                      len(result["removed"]), "" if result["current_removed"] else "没")
+        return result
+
+    def _reset_queue_on_mood_change(self, record: Dict[str, Any],
+                                    previous: Optional[Mapping[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """**只有心情变了才重置队列**（你定的第 6 条）。
+
+        @return `{"from","to","cleared","kept"}`；没重置就是 None
+        @note "变了" = **两边都是已知心情**且不同 —— `unknown` 不算变化
+              （模型偶尔答不出, 不该因此把队列清掉）。
+        @note 重置时**保留正在放的那首**在队首（不掐正在听的）, 其余清掉再按新心情补满。
+        """
+        if self.music is None:
+            return None
+        new_label = str((record.get("mood") or {}).get("label") or "")
+        old_label = str(((previous or {}).get("mood") or {}).get("label") or "")
+        if not new_label or not old_label:
+            return None
+        if new_label in ("unknown", old_label) or old_label == "unknown":
+            return None
+        kept = self.music.current_id
+        cleared = self.music.clear_queue()["cleared"]
+        if kept:
+            try:
+                self.music.enqueue(kept, verify=False)
+            except MusicError as exc:               # noqa: BLE001
+                self.log.warning("music: 重置队列时没能留住正在放的那首: %s", exc)
+        self._push_music(self.music.snapshot())
+        self.log.info("music: 心情从 %s 变成 %s -> 重置队列（清掉 %d 首, 留住正在放的 %s）",
+                      old_label, new_label, cleared, kept or "-")
+        self._music_autofill()
+        return {"from": old_label, "to": new_label, "cleared": cleared, "kept": kept}
 
     async def _music_loop(self) -> None:
         """每 `poll_interval_s` 问一次 PC 的真实进度, 变化就推给 GUI。"""
