@@ -40,7 +40,43 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 from ..media import music_library as lib
 from ..net.netease_cli import NeteaseCli, NeteaseCliError, PlayerFailure
 
-__all__ = ["MusicPlayer", "MusicError", "DEFAULT_POLL_INTERVAL_S"]
+__all__ = ["MusicPlayer", "MusicError", "DEFAULT_POLL_INTERVAL_S",
+           "tracks_from_search"]
+
+
+def tracks_from_search(payload: Any, artist: Optional[str] = None) -> List[Dict[str, Any]]:
+    """把 `neteasecli search track <关键词>` 的结果整理成 [{id, name, artists, album, duration}, …]。
+
+    @param payload 信封里的 `data`（`{"tracks": [...]}`）或整个信封（都收）
+    @param artist  只留 **artists 命中这个名字** 的那些（T10-4 的"只按歌手补"就靠它）
+    @note 搜出来的结果会被原样当成元数据入队（`_meta_from_detail` 认这个形状）——
+          **不再逐首 track_detail**（一次补 28 首那样要走几十次 ssh）。
+    """
+    data = payload
+    if isinstance(payload, Mapping) and "tracks" not in payload:
+        data = payload.get("data")
+    rows = data.get("tracks") if isinstance(data, Mapping) else None
+    out: List[Dict[str, Any]] = []
+    wanted = str(artist or "").strip().lower()
+    for row in rows or ():
+        if not isinstance(row, Mapping) or not row.get("id"):
+            continue
+        item = dict(row)
+        if wanted:
+            names = []
+            for entry in (row.get("artists") or row.get("ar") or []):
+                if isinstance(entry, Mapping):
+                    names.append(str(entry.get("name") or "").lower())
+                else:
+                    names.append(str(entry).lower())
+            if wanted not in names:
+                continue
+        out.append(item)
+    return out
+
+
+#: 旧名（模块内用着顺手的短名）
+_tracks_from_search = tracks_from_search
 
 _log = logging.getLogger(__name__)
 
@@ -95,6 +131,9 @@ class MusicPlayer:
         self._queue_index = -1
         #: 曲终自动接下一首时的重入保护（`refresh()` 里会调 `play()`）
         self._advancing = False
+        #: 自动补歌（T10-4）: 目标长度（0 = 不补）+ 每个歌手搜失败的时间（退避用）
+        self._autofill_target = 0
+        self._search_failed_at: Dict[str, float] = {}
 
     # ------------------------------------------------------------ 本地库 ---
     def tracks(self) -> List[Dict[str, Any]]:
@@ -380,6 +419,162 @@ class MusicPlayer:
         if size:
             self.log.info("music: 队列被清空（原来 %d 首）", size)
         return {"cleared": size, "queue": self.queue_state()}
+
+    # ------------------------------------------------- 自动补歌（T10-4）---
+    def set_target(self, target: Any) -> int:
+        """队列**目标长度**（0 = 不自动补歌）。@return 记下来的那个数。"""
+        try:
+            self._autofill_target = max(0, int(target or 0))
+        except (TypeError, ValueError):
+            self._autofill_target = 0
+        return self._autofill_target
+
+    def target(self) -> int:
+        """当前目标长度（0 = 不补）。"""
+        return int(getattr(self, "_autofill_target", 0) or 0)
+
+    def queue_ids(self) -> List[str]:
+        """队列里的 id（老 -> 新）。"""
+        return [str(item) for item in self._queue]
+
+    def remove(self, track_ids: Sequence[Any]) -> Dict[str, Any]:
+        """把这些歌**从播放队列里去掉**（T10 第 5 条；不动本地库、不动播放状态）。
+
+        @return {"removed", "current_removed", "queue"}
+        @note 正在放的那首被去掉时**光标退一格**: 调用方接着 `step(1)` 就是"跳到下一首"
+              （环形, 到尾部会绕回开头）。这样"不想听正在放的这首"不会把它继续放下去。
+        """
+        wanted = {str(item) for item in (track_ids or ()) if str(item)}
+        if not wanted or not self._queue:
+            return {"removed": [], "current_removed": False, "queue": self.queue_state()}
+        current_was = self.current_id
+        index_before = self._queue_index
+        removed = [tid for tid in self._queue if tid in wanted]
+        if not removed:
+            return {"removed": [], "current_removed": False, "queue": self.queue_state()}
+        self._queue = [tid for tid in self._queue if tid not in wanted]
+        current_removed = bool(current_was) and str(current_was) in wanted
+        if not self._queue:
+            self._queue_index = -1
+        elif current_removed:
+            # 退一格 -> 下一次 step(1) 正好落在"被去掉那首原来后面那首"（环形）
+            self._queue_index = max(0, index_before) - 1
+        else:
+            self._queue_index = max(0, min(index_before, len(self._queue) - 1))
+        self.log.info("music: 从队列里去掉 %s（少了 %d 首, 正在放的那首%s被去掉）",
+                      "、".join(removed[:3]) + ("…" if len(removed) > 3 else ""),
+                      len(removed), "" if current_removed else "没")
+        return {"removed": removed, "current_removed": current_removed,
+                "queue": self.queue_state()}
+
+    def refill(self, profile: Optional[Mapping[str, Any]] = None, *,
+               muted_artists: Sequence[str] = (), muted_tracks: Sequence[str] = (),
+               by_artist: bool = True, search_per_cycle: int = 3,
+               search_limit: int = 10, search_backoff_s: float = 300.0,
+               now: Optional[float] = None) -> Dict[str, Any]:
+        """把队列补到**目标长度**（T10-4）: 先吃本地库, 不够再**按歌手**去 PC 搜。
+
+        @param profile 用户画像（`rank_tracks` 用它排本地库; 没有就按"听得最少的"）
+        @param by_artist 允许"按歌手去 PC 搜"这一段（唯一会出去找的路, 你定的）
+        @param search_per_cycle 每个 tick 最多搜几个歌手; `search_limit` 每个歌手最多收几首
+        @param search_backoff_s 同一个歌手搜失败后多久不再试
+        @return {"filled", "from_library", "from_search", "searched", "short_by",
+                 "skipped", "why"} —— 日志与测试都看它
+        @note **只从本地库 + 按歌手搜**; 搜到的歌用搜索结果里的元数据直接入队
+              （`verify=False`）—— 否则一次补 28 首要几十次 `track_detail`。
+        """
+        from . import user_profile
+
+        moment = float(now if now is not None else time.time())
+        target = self.target()
+        filled: List[str] = []
+        notes: List[str] = []
+        if target <= 0:
+            return {"filled": [], "from_library": 0, "from_search": 0, "searched": [],
+                    "short_by": 0, "skipped": {}, "why": ["没开自动补歌（target=0）"]}
+
+        muted_track_ids = {str(item) for item in (muted_tracks or ())}
+        muted_artist_names = {str(item) for item in (muted_artists or ())}
+
+        # ---- ① 本地库 ----
+        library = self.tracks()
+        while len(self._queue) < target:
+            ranked = user_profile.rank_tracks(
+                profile, library, exclude=self._queue,
+                muted_artists=sorted(muted_artist_names),
+                muted_tracks=sorted(muted_track_ids))
+            if not ranked:
+                break
+            top = ranked[0]
+            try:
+                self.enqueue(top["id"], meta=top, verify=False)
+            except MusicError as exc:
+                notes.append("本地库那首 %s 排不进去: %s" % (top["id"], exc))
+                break
+            filled.append(str(top["id"]))
+        from_library = len(filled)
+
+        # ---- ② 本地库不够 -> **按歌手**去 PC 搜（唯一会出去找的路）----
+        searched: List[str] = []
+        skipped: Dict[str, str] = {}
+        from_search = 0
+        artists = [str(row.get("name")) for row in
+                   (((profile or {}).get("music") or {}).get("artist") or [])
+                   if float(row.get("weight") or 0) > 0]
+        if len(self._queue) < target and not artists:
+            notes.append("画像里还没有歌手偏好 —— 只吃本地库（等画像攒够 2000 字）")
+        if len(self._queue) < target and by_artist and artists:
+            attempts = 0
+            for artist in artists:
+                # ⚠ 上限按**尝试次数**算: 搜失败的不进 `searched`, 只数成功的会一个 tick
+                #   把整张歌手表都试一遍（板端实测到过）。
+                if len(self._queue) >= target or attempts >= max(1, int(search_per_cycle)):
+                    break
+                if artist in muted_artist_names:
+                    skipped[artist] = "不想听这个歌手"
+                    continue
+                failed_at = float(self._search_failed_at.get(artist) or 0.0)
+                if failed_at and (moment - failed_at) < float(search_backoff_s):
+                    skipped[artist] = "刚搜失败过, 退避中"
+                    continue
+                attempts += 1
+                try:
+                    data = self.cli.search("track", artist, limit=max(1, int(search_limit)))
+                except NeteaseCliError as exc:
+                    self._search_failed_at[artist] = moment
+                    skipped[artist] = "搜不了: %s" % exc
+                    self.log.warning("music: 按歌手搜 %s 失败（%s 秒后再试）: %s",
+                                     artist, int(search_backoff_s), exc)
+                    continue
+                searched.append(artist)
+                for track in _tracks_from_search(data, artist):
+                    if len(self._queue) >= target:
+                        break
+                    track_id = str(track["id"])
+                    if track_id in self._queue or track_id in muted_track_ids:
+                        continue
+                    try:
+                        self.enqueue(track_id, meta=self._meta_from_detail(track),
+                                     verify=False)
+                    except MusicError as exc:
+                        notes.append("搜到的 %s 排不进去: %s" % (track_id, exc))
+                        continue
+                    filled.append(track_id)
+                    from_search += 1
+                self._search_failed_at.pop(artist, None)
+
+        short_by = max(0, target - len(self._queue))
+        if filled:
+            self.log.info("music: 自动补歌 +%d 首（本地库 %d / 按歌手搜 %d；搜了 %s）-> 队 %d/%d",
+                          len(filled), from_library, from_search,
+                          "、".join(searched) or "-", len(self._queue), target)
+        if short_by and not filled:
+            notes.append("补不满: 队里 %d 首, 差 %d（本地库 %d 首, 搜了 %s）"
+                         % (len(self._queue), short_by, len(library),
+                            "、".join(searched) or "-"))
+        return {"filled": filled, "from_library": from_library, "from_search": from_search,
+                "searched": searched, "short_by": short_by, "skipped": skipped,
+                "why": notes}
 
     def start_from_queue(self, index: Optional[int] = None) -> Dict[str, Any]:
         """从队列**当前**（或指定）位置起播 —— GUI 的"播放"按钮在 PC 上没在放时用它。

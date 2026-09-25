@@ -23,6 +23,8 @@ tests/test_music_player.py — 播放内核（Phase 7 T8-4）
   8) 没在放时的控制: `pause()` 如实报错; `toggle()`/`resume()` 从队列起播（队列空才报错）
 """
 
+import asyncio
+import json
 import logging
 import os
 import sys
@@ -861,6 +863,240 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(("play", "1"), self.cli.calls, "搜歌不播")
         finally:
             await runtime.stop()
+
+    # ---- T10-4: 轮询里自动补歌 ----
+
+    async def test_autofill_fills_the_queue_from_the_library(self):
+        tmp = tempfile.mkdtemp(prefix="music-rt-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = self._runtime(tmp)
+        await runtime._start_music()
+        try:
+            lib.write_tracks(os.path.join(tmp, "music_library.jsonl"),
+                             [lib.make_record(str(i), "T%d" % i, plays=i) for i in range(3)])
+            runtime.music.set_target(3)
+            result = runtime._music_autofill()
+            self.assertEqual(result["from_library"], 3)
+            self.assertEqual(len(runtime.music.queue_ids()), 3)
+            self.assertIsNone(runtime._music_autofill(), "够了就别再补")
+        finally:
+            await runtime.stop()
+
+    async def test_autofill_searches_by_the_profile_artist_when_short(self):
+        tmp = tempfile.mkdtemp(prefix="music-rt-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = self._runtime(tmp)
+        await runtime._start_music()
+        try:
+            lib.write_tracks(os.path.join(tmp, "music_library.jsonl"),
+                             [lib.make_record("1", "唯一", artists="米津玄師", plays=2)])
+            # 画像文件: 只有歌手权重（补歌就靠它去搜）
+            runtime.profile_file = os.path.join(tmp, "user_profile.jsonl")
+            with open(runtime.profile_file, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({"version": 1, "built_at": "t",
+                                         "music": {"artist": [{"name": "米津玄師",
+                                                               "weight": 0.6}]},
+                                         "walls": {"ip": []}, "mood": {"label": "calm"},
+                                         "thin": [], "muted": {"ip": [], "artist": [],
+                                                               "track": []}},
+                                        ensure_ascii=False) + "\n")
+            runtime.music.set_target(5)
+            result = runtime._music_autofill()
+            self.assertEqual(result["from_library"], 1)
+            self.assertEqual(result["searched"], ["米津玄師"], "本地库不够 -> 按歌手去搜")
+            self.assertIn(("search", "track", "米津玄師"), self.cli.calls)
+            self.assertIn("2747166493", runtime.music.queue_ids(), "搜到的真 id 进队了")
+            self.assertNotIn(("play", "2747166493"), self.cli.calls, "补歌不播")
+        finally:
+            await runtime.stop()
+
+    async def test_autofill_does_nothing_when_disabled(self):
+        tmp = tempfile.mkdtemp(prefix="music-rt-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = self._runtime(tmp)
+        runtime.config["music"]["autofill"] = {"enabled": False, "target": 5}
+        await runtime._start_music()
+        try:
+            self.assertEqual(runtime.music.target(), 0, "关掉就是目标 0")
+            self.assertIsNone(runtime._music_autofill())
+            self.assertEqual(runtime.music.queue_ids(), [])
+        finally:
+            await runtime.stop()
+
+    async def test_the_poll_loop_calls_the_autofill(self):
+        tmp = tempfile.mkdtemp(prefix="music-rt-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = self._runtime(tmp)
+        await runtime._start_music()
+        # ⚠ 先停掉 `_start_music` 起的那个后台轮询 —— 否则会有**两个** loop 同时补歌
+        runtime._music_task.cancel()
+        runtime._music_task = None
+        calls = []
+        runtime._music_autofill = lambda: calls.append("autofill")
+        original = asyncio.sleep
+
+        async def one_tick(_seconds):
+            if calls:
+                raise asyncio.CancelledError()
+            await original(0)
+
+        asyncio.sleep = one_tick
+        try:
+            with self.assertRaises(asyncio.CancelledError):
+                await runtime._music_loop()
+        finally:
+            asyncio.sleep = original
+            await runtime.stop()
+        self.assertEqual(calls, ["autofill"], "每次轮询都要看一眼队列够不够")
+
+
+class TestAutofill(unittest.TestCase):
+    """T10-4: 队列补到目标长度 —— 先吃本地库, 不够**按歌手**去 PC 搜。"""
+
+    def _player(self, tracks, cli=None, target=30):
+        player, cli, path = make_player(cli=cli)
+        lib.write_tracks(path, tracks)
+        player.set_target(target)
+        return player, cli, path
+
+    def _by_artist(self, artist, count, start=900):
+        return {"tracks": [{"id": str(start + i), "name": "%s-%d" % (artist, i),
+                            "artists": [{"name": artist}],
+                            "album": {"name": "A"}, "duration": 200000}
+                           for i in range(count)]}
+
+    def test_it_fills_from_the_library_first(self):
+        tracks = [lib.make_record(str(i), "T%d" % i, plays=i) for i in range(5)]
+        player, cli, _path = self._player(tracks, target=5)
+        result = player.refill()
+        self.assertEqual(result["from_library"], 5)
+        self.assertEqual(result["from_search"], 0)
+        self.assertEqual(result["searched"], [], "本地库够 -> 不出去搜")
+        self.assertEqual(len(player.queue_ids()), 5)
+        self.assertEqual(result["short_by"], 0)
+
+    def test_songs_already_in_the_queue_are_not_added_twice(self):
+        tracks = [lib.make_record(str(i), "T%d" % i) for i in range(3)]
+        player, _cli, _path = self._player(tracks, target=3)
+        player.enqueue("1", verify=False)
+        result = player.refill()
+        self.assertEqual(player.queue_ids().count("1"), 1)
+        self.assertEqual(len(player.queue_ids()), 3, "补到目标就不再补")
+        self.assertEqual(result["from_library"], 2)
+
+    def test_it_searches_by_the_profile_artists_when_the_library_is_short(self):
+        tracks = [lib.make_record("1", "唯一", artists="米津玄師", plays=3)]
+        player, cli, _path = self._player(tracks, target=30)
+        cli.search = lambda kind, keyword, limit=20, offset=0: self._by_artist(keyword, 4)
+        profile = {"music": {"artist": [{"name": "米津玄師", "weight": 0.6}]},
+                   "mood": {"label": "calm"}, "thin": []}
+        result = player.refill(profile, search_per_cycle=3, search_limit=4)
+        self.assertEqual(result["from_library"], 1)
+        self.assertEqual(result["from_search"], 4, "本地库那首 + 搜到的 4 首")
+        self.assertEqual(result["searched"], ["米津玄師"])
+        self.assertEqual(len(player.queue_ids()), 5)
+        self.assertEqual(result["short_by"], 25, "目标 30 —— 搜完这一轮还差 25")
+
+    def test_only_tracks_by_that_artist_are_kept(self):
+        player, cli, _path = self._player([])
+        cli.search = lambda kind, keyword, limit=20, offset=0: {
+            "tracks": [{"id": "1", "name": "对", "artists": [{"name": keyword}]},
+                       {"id": "2", "name": "不对", "artists": [{"name": "别人"}]}]}
+        profile = {"music": {"artist": [{"name": "米津玄師", "weight": 0.6}]}}
+        player.refill(profile)
+        self.assertEqual(player.queue_ids(), ["1"], "只收 artists 命中的")
+
+    def test_the_search_bound_and_backoff_are_respected(self):
+        player, cli, _path = self._player([])
+        calls = []
+
+        def search(kind, keyword, limit=20, offset=0):
+            calls.append(keyword)
+            raise NeteaseCliError("连不上 PC")
+
+        cli.search = search
+        profile = {"music": {"artist": [{"name": "A", "weight": 3}, {"name": "B", "weight": 2},
+                                       {"name": "C", "weight": 1}]}}
+        first = player.refill(profile, search_per_cycle=2, search_backoff_s=300, now=1000.0)
+        self.assertEqual(calls, ["A", "B"], "一个 tick 最多搜 2 个")
+        self.assertEqual(sorted(first["skipped"]), ["A", "B"])
+        second = player.refill(profile, search_per_cycle=3, search_backoff_s=300, now=1100.0)
+        self.assertEqual(calls, ["A", "B", "C"], "退避中的 A/B 不再试, 换 C")
+        third = player.refill(profile, search_per_cycle=3, search_backoff_s=300, now=1400.0)
+        self.assertEqual(calls[-1], "C", "C 也进了退避（1400-1000=400 > 300 -> A 可以再试）")
+
+    def test_muted_artists_and_tracks_are_left_alone(self):
+        tracks = [lib.make_record("1", "不想听", artists="A"),
+                  lib.make_record("2", "可以", artists="B")]
+        player, cli, _path = self._player(tracks, target=2)
+        cli.search = lambda kind, keyword, limit=20, offset=0: self._by_artist(keyword, 2)
+        profile = {"music": {"artist": [{"name": "A", "weight": 0.9},
+                                        {"name": "B", "weight": 0.1}]}}
+        result = player.refill(profile, muted_artists=["A"], muted_tracks=["1"])
+        self.assertEqual(result["from_library"], 1)
+        self.assertEqual(player.queue_ids()[0], "2")
+        self.assertNotIn("A", result["searched"], "不想听的歌手不搜")
+
+    def test_target_zero_means_no_autofill(self):
+        player, _cli, _path = self._player([lib.make_record("1", "T")], target=0)
+        result = player.refill()
+        self.assertEqual(result["filled"], [])
+        self.assertIn("没开自动补歌", result["why"][0])
+
+    def test_it_says_why_it_could_not_fill(self):
+        player, _cli, _path = self._player([lib.make_record("1", "唯一")], target=30)
+        result = player.refill()                       # 没有画像 -> 不搜
+        self.assertEqual(result["short_by"], 29)
+        self.assertTrue(any("画像里还没有歌手偏好" in note for note in result["why"]))
+
+    def test_a_search_that_returns_nothing_by_that_artist_is_not_fatal(self):
+        player, cli, _path = self._player([])
+        cli.search = lambda kind, keyword, limit=20, offset=0: {
+            "tracks": [{"id": "9", "name": "别人的", "artists": [{"name": "别人"}]}]}
+        profile = {"music": {"artist": [{"name": "米津玄師", "weight": 0.6}]}}
+        result = player.refill(profile)
+        self.assertEqual(result["from_search"], 0)
+        self.assertEqual(player.queue_ids(), [])
+
+
+class TestQueueRemoval(unittest.TestCase):
+    """T10 第 5 条: "不想听" -> 从播放队列里去掉（不动本地库）。"""
+
+    def test_it_removes_only_the_named_songs(self):
+        player, _cli, _path = make_player()
+        for track_id in ("1", "2", "3"):
+            player.enqueue(track_id, verify=False)
+        result = player.remove(["2"])
+        self.assertEqual(result["removed"], ["2"])
+        self.assertEqual(player.queue_ids(), ["1", "3"])
+        self.assertFalse(result["current_removed"])
+
+    def test_removing_the_current_one_moves_the_cursor_back_one(self):
+        """正在放的那首被去掉 -> 光标退一格, 调用方 `step(1)` 就是"跳到下一首"。"""
+        player, _cli, _path = make_player()
+        for track_id in ("1", "2", "3"):
+            player.enqueue(track_id, verify=False)
+        player.current_id = "2"
+        player._queue_index = 1
+        result = player.remove(["2"])
+        self.assertTrue(result["current_removed"])
+        player_step = player.step(1)
+        self.assertEqual(player.current_id, "3", "跳到被去掉那首后面那首")
+
+    def test_removing_everything_leaves_an_empty_queue(self):
+        player, _cli, _path = make_player()
+        player.enqueue("1", verify=False)
+        result = player.remove(["1", "9"])
+        self.assertEqual(result["removed"], ["1"])
+        self.assertEqual(player.queue_ids(), [])
+        self.assertEqual(player.queue_state()["index"], -1)
+
+    def test_removing_something_that_is_not_there_is_a_no_op(self):
+        player, _cli, _path = make_player()
+        player.enqueue("1", verify=False)
+        result = player.remove(["7"])
+        self.assertEqual(result["removed"], [])
+        self.assertEqual(player.queue_ids(), ["1"])
 
 
 if __name__ == "__main__":

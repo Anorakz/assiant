@@ -339,6 +339,8 @@ class Runtime:
         #: **None = 没开音乐**（配置 music.enabled=false 或没配 pc_host）——
         #: 与其它工具"缺依赖就跳过"同一条口径。
         self.music: Optional[Any] = None
+        #: 自动补歌（T10-4）的设置（`music.autofill`；`None` 只是没读配置时的占位）
+        self._autofill: Dict[str, Any] = {}
         #: music 推送钩子（与 on_wallpaper 同款"有就接"）—— IPC 层把它接到 topic `music`
         self.on_music: Optional[Callable[[Dict[str, Any]], Any]] = None
         self._music_task: Optional[asyncio.Task] = None
@@ -1079,8 +1081,21 @@ class Runtime:
                 cli, library_file,
                 count_after_s=int(self._cfg("music", "count_after_s", default=30) or 30),
                 log=self.log)
-            self.log.info("music: 就绪 (PC=%s@%s, 本地库=%s)",
-                          getattr(cli, "user", "?"), getattr(cli, "host", "?"), library_file)
+            # T10-4: 自动补歌（先吃本地库, 不够**按歌手**去 PC 搜）—— 目标长度 30（可配）
+            autofill = self._cfg("music", "autofill", default={}) or {}
+            self._autofill = {
+                "enabled": bool(autofill.get("enabled", True)),
+                "target": int(autofill.get("target", 30) or 30),
+                "by_artist": bool(autofill.get("by_artist", True)),
+                "search_per_cycle": int(autofill.get("search_per_cycle", 3) or 3),
+                "search_limit": int(autofill.get("search_limit", 10) or 10),
+                "search_backoff_s": float(autofill.get("search_backoff_s", 300) or 300),
+            }
+            target = self._autofill["target"] if self._autofill["enabled"] else 0
+            self.music.set_target(target)
+            self.log.info("music: 就绪 (PC=%s@%s, 本地库=%s, 自动补歌=%s)",
+                          getattr(cli, "user", "?"), getattr(cli, "host", "?"), library_file,
+                          "目标 %d 首" % target if target else "关")
             self._music_task = asyncio.ensure_future(self._music_loop())
 
         async def _stop() -> None:
@@ -1197,10 +1212,55 @@ class Runtime:
                 await asyncio.sleep(interval)
                 snapshot = await loop.run_in_executor(None, self.music.refresh)
                 self._push_music(snapshot)
+                # T10-4: 队列短于目标就补（先本地库、不够按歌手去 PC 搜）——
+                # 走线程池: 搜那一段是 ssh, 不能堵事件循环。
+                await loop.run_in_executor(None, self._music_autofill)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:        # noqa: BLE001 - 轮询失败不该把任务搞死
                 self.log.warning("music: 轮询失败 (已忽略): %r", exc)
+
+    def _music_autofill(self) -> Optional[Dict[str, Any]]:
+        """把队列补到目标长度（**同步**, 由轮询丢线程池跑）。
+
+        @return `music.refill()` 的结果；没做事就是 None
+        @note 只在"短于目标"时动手; 补不上时**同一条原因只记一次**（别每 3 秒刷一遍）。
+        """
+        from agent.core import user_profile
+
+        if self.music is None or not getattr(self, "_autofill", {}).get("enabled"):
+            return None
+        target = self.music.target()
+        if target <= 0 or len(self.music.queue_ids()) >= target:
+            return None
+
+        record = None
+        muted_artists: List[str] = []
+        muted_tracks: List[str] = []
+        if self.profile_file:
+            try:
+                records = user_profile.read_records(self.profile_file)
+                record = records[-1] if records else None
+                muted = user_profile.muted_from_records(records)
+                muted_artists = [str(item.get("name")) for item in muted["artist"].values()]
+                muted_tracks = [str(item.get("name")) for item in muted["track"].values()]
+            except ProfileError as exc:
+                self.log.warning("music: 画像读不了（补歌就没偏好可用）: %s", exc)
+        try:
+            result = self.music.refill(
+                record, muted_artists=muted_artists, muted_tracks=muted_tracks,
+                by_artist=self._autofill["by_artist"],
+                search_per_cycle=self._autofill["search_per_cycle"],
+                search_limit=self._autofill["search_limit"],
+                search_backoff_s=self._autofill["search_backoff_s"])
+        except Exception as exc:        # noqa: BLE001 - 补歌失败不该把轮询搞死
+            self.log.warning("music: 自动补歌失败 (已忽略): %r", exc)
+            return None
+        note = "；".join(result.get("why") or [])
+        if note and note != getattr(self, "_autofill_note", ""):
+            self.log.info("music: 自动补歌: %s", note)
+        self._autofill_note = note
+        return result
 
     def _push_music(self, snapshot: Dict[str, Any]) -> bool:
         """把状态推给 GUI（**变化才推**: 曲目/播放状态一变必推, 播放中每次带新进度推）。"""
