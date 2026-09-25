@@ -1432,7 +1432,42 @@ Phase 7 T8-7 — T8 收口：四类诚实失败**板端实跑** + 文档收口�
 ⚑ 环境核对: 登录态在 **PC** 上（neteasecli 自己的 store）; 板端 `config/netease_cookie.json`
       **根本不存在、代码也没人读它** → `.gitignore` / `config.example.yaml` /
       `docs/config-sources.md` 里"板端放 cookie"的旧说法**已按事实改掉**
-⚑ 下一步: 等 T8-7 验收; 通过后进 Phase 8（固化与优化: CI / systemd 自启 / bench / ADR）
+Phase 7 T9 — 用户画像（**Agent 内部能力, 不是工具**; 你定的六条 + 后续三条）
+☑ T9-1 **纯对话记忆**（`agent/core/chat_memory.py`）: 只收 gui/terminal; 每条带"当时哪个模式"
+      （判心情的**场景**依据）; 有界 8000 字/80 条; **一个字节都不写盘**（测试把 `open` 换成
+      "一调就炸"再跑一遍所有路径）; `settle()` 保留最后 6 条
+☑ T9-2 **偏好权重内核**（`agent/core/user_profile.py`）:
+      · IP: `0.6×用量占比 + 0.3×提及占比 + 0.1×近期占比`; 歌手: `0.7×播放占比 + 0.3×提及占比`;
+        每个数都留分子分母（能复算）
+      · **负反馈 = 两层清零**: 画像行归 0 + `muted_at`/`muted_text`; **源文件也清 0**
+        （`wall_data.clear_usage_in_file()` / `music_library.clear_plays()`）;
+        继承的 muted 每次重建重新套用（老用量不许把它顶回来）
+      · **心情调模型**（唯一一次额外调用）: 提示词带对话摘录 + **当时场景** + 时间; 只认封闭词表
+        `focused/relaxed/happy/tired/stressed/calm`; 解析不出/炸了 → `unknown`（不编）
+      · 落盘 `config/user_profile.jsonl`（一次一行、原子写、唯一写者=白名单第 5 个）;
+        **记录里没有对话原文**（只留长度; 唯一原话是"不想听/看 X"那句凭据）
+☑ T9-3 **接进 Agent 结构**（不是工具, 你定的）: `_start_profile` 步骤 + `handle_event` 每轮
+      `finally` 走一次 `_profile_tick()`; 攒够就**后台**构建（不堵对话）; 失败只 warning +
+      60 秒退避 + **不结算**; `TOOL_MODULES` 仍三个、prompt 清单**一个字符不涨**
+⚑ T9-4 跑出来的四个真问题（都当场修了 + 有测试）:
+      ① **触发口径**用了"内存里一共多少字" -> 保留的 6 条自己就超线 -> 每轮都构建一遍
+         → 改成 `pending_chars()`（自上次构建以来; 水位线, 被挤掉的老条目也算）
+      ② **`repo_sources()` 没把 `wallpaper.dir` 传给锚点检索** -> 每个 IP 命中恒为 0 且**不报错**
+         （画像里 IP 权重只剩"提及"那一项）→ 补上; 并加 `walls.anchor_problems` **不许静默算 0**
+      ③ **"命中"口径**: `match("ip=…")` 给的是**全库排序**不是筛过的集合 -> 命中改成
+         "用过的图里排在前 K 名（K=用过的张数, 最少 3）的张数"
+      ④ **`mood.ok`** 在模型回 `unknown` 时是 `True`（"判出来了"）→ 现在只有真给出六词之一才算
+☑ T9-4 **文档 + 板端真跑**（`docs/profile.md` 新 + llm/architecture/config-sources/Readme）:
+      · 真 Agent 进程: `15:56:31 自上次构建以来攒了 37 字 / 1 轮 -> 构建一次` →
+        `15:56:47 构建完成 (15.9s) 心情=unknown 置信=low; IP=SNF 0.70…`; 记录 4 -> 5 行
+      · 两层清零（**用数据副本跑, 不动真数据**）: "SNF 的图我看腻了" → `cleared.wall_images=1`
+        （那张 used 1→0）; "不想听高橋洋子了" → `cleared.tracks=1`（残酷な天使のテーゼ plays 6→0）
+      · 判心情那次调用 **15.9~42.2 s**（prompt ~930 字符）; 构建那会儿下一轮回复**晚 ~16 s**（单进程排队）
+      · 记录里**没有对话原文** ✓; 样本薄如实标 `thin=['音乐库']` + `confidence=low` ✓
+⚑ 顺手记一条**验收脚本的坑**: 板端 `sed 's/\r$//'` 把行尾的字母 `r` 吃掉了
+      （`wallpaper`→`wallpape`、`LLMProvider`→`LLMProvide`）—— 本地写的文件本来就是 LF,
+      **不该再 sed**; 之后所有脚本都直接 scp 不再动行尾。
+⚑ 下一步: 等 T9-4 验收; 通过后 T9 整批提交/推送 + 板端归一化, 然后进 Phase 8
 
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查

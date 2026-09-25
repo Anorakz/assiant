@@ -60,7 +60,10 @@ __all__ = [
     "RECENCY_DAYS",
     "Feedback",
     "ProfileError",
+    "Sources",
     "resolve_profile_file",
+    "count_hits",
+    "Sources",
     "detect_negative_feedback",
     "wallpaper_weights",
     "artist_weights",
@@ -383,13 +386,34 @@ async def ask_mood(llm: Any, prompt: str) -> Dict[str, Any]:
                 "error": "%s: %s" % (type(exc).__name__, exc),
                 "ms": int((time.time() - started) * 1000)}
     label = parse_mood(raw)
+    # ⚠ 模型回 "unknown" 是**合法回答**（它老实说判不出来）, 但那不是"判出来了":
+    #   `ok` 只认词表里那六个词 —— 否则记录上会出现 "ok=True, label=unknown"（板端实测）。
     return {"label": label or MOOD_UNKNOWN, "raw": str(raw or "").strip(),
-            "ok": label is not None, "ms": int((time.time() - started) * 1000)}
+            "ok": bool(label) and label != MOOD_UNKNOWN,
+            "ms": int((time.time() - started) * 1000)}
 
 
 # ---------------------------------------------------------------------------
 #  构建（把上面几块拼起来 + 负反馈清零）
 # ---------------------------------------------------------------------------
+def count_hits(ranking: Sequence[str], used_paths: Sequence[str],
+               top_k: Optional[int] = None) -> List[str]:
+    """用过的图里, 有几张排在该 IP 的**前 K**（K 默认 = 用过的张数, 最少 3）。
+
+    ⚠ 为什么不是"在不在候选里": `TagIndex.match("ip=…")` 给的是**全库按相似度排序**
+      （不是筛过的集合 —— 40 张库就是 40 个候选）。所以"像这个 IP"只能是"排在前 K"
+      这件事。K 取"用户用过的张数"意味着: 在 40 张里最像它的那几张里, 用户用过几张。
+    @return 命中的路径（按相似度从高到低）
+    """
+    order = [str(item) for item in (ranking or ())]
+    used = {str(item) for item in (used_paths or ())}
+    if not order or not used:
+        return []
+    k = int(top_k) if top_k else max(3, len(used))
+    k = max(1, min(k, len(order)))
+    return [path for path in order[:k] if path in used]
+
+
 @dataclass
 class Sources:
     """**外部依赖的口子**（真实实现在 `repo_sources()`; 单测给假的就行）。"""
@@ -403,6 +427,7 @@ class Sources:
     profile_file: str = ""
     wall_file: str = ""
     library_file: str = ""
+    wall_dir: str = ""
 
 
 def repo_sources(config: Optional[Mapping[str, Any]] = None,
@@ -420,6 +445,16 @@ def repo_sources(config: Optional[Mapping[str, Any]] = None,
     tagging = node if isinstance(node, Mapping) else {}
     ip_presets = tagging.get("ip_presets") or {}
     wall_file = wall_data.resolve_data_file(tagging.get("data_file"))
+    # ⚠ 锚点是**文件名**（相对 wallpaper.dir）—— 不把目录传下去, `match("ip=…")` 一个候选
+    #   都给不出来（**而且是静默的**）。板端 T9-4 实测踩到: IP 权重一直是 0。
+    wall_node = (config or {}).get("wallpaper") if isinstance(config, Mapping) else None
+    wall_dir = ""
+    if isinstance(wall_node, Mapping) and wall_node.get("dir"):
+        wall_dir = str(wall_node["dir"])
+    if not wall_dir:
+        from .wallpaper import DEFAULT_WALLPAPER_DIR
+
+        wall_dir = DEFAULT_WALLPAPER_DIR
     lib_node: Any = (config or {}).get("music") if isinstance(config, Mapping) else None
     library_file = music_library.resolve_library_file(
         (lib_node or {}).get("library_file") if isinstance(lib_node, Mapping) else None)
@@ -444,11 +479,14 @@ def repo_sources(config: Optional[Mapping[str, Any]] = None,
         return cached["index"]
 
     def match_ip(name: str) -> List[str]:
+        """该 IP 的原型向量检索 —— **返回全库按相似度排好的路径**（不是筛过的集合）。"""
         index = _index()
         if not index.count():
             return []
-        result = index.match("ip=%s" % name, presets=ip_presets)
-        return [str(path) for path in (result.pool if result.ok else [])]
+        result = index.match("ip=%s" % name, presets=ip_presets, wallpaper_dir=wall_dir)
+        if not result.ok:
+            raise ProfileError("ip=%s 检索不了: %s" % (name, result.error))
+        return [str(path) for path in result.pool or ()]
 
     def list_tracks() -> List[Dict[str, Any]]:
         tracks, _problems = music_library.read_tracks(library_file)
@@ -463,7 +501,8 @@ def repo_sources(config: Optional[Mapping[str, Any]] = None,
     return Sources(list_walls=list_walls, match_ip=match_ip, list_tracks=list_tracks,
                    clear_wall_usage=clear_wall_usage, clear_plays=clear_plays,
                    ip_names=sorted(str(k) for k in ip_presets),
-                   profile_file=out_file, wall_file=wall_file, library_file=library_file)
+                   profile_file=out_file, wall_file=wall_file, library_file=library_file,
+                   wall_dir=wall_dir)
 
 
 def _artists_of(track: Mapping[str, Any]) -> List[str]:
@@ -513,18 +552,22 @@ async def build_profile(entries: Sequence[Any], *, config: Optional[Mapping[str,
     hit_counts: Dict[str, int] = {}
     hit_paths: Dict[str, List[str]] = {}
     lasts: Dict[str, Any] = {}
+    anchor_problems: Dict[str, str] = {}
+    used_by_path = {str(record.get("path")): record for record in walls}
+    used_paths = [path for path, record in used_by_path.items()
+                  if int(record.get("used") or 0) > 0]
     for name in src.ip_names:
         try:
-            pool = list(src.match_ip(name))
-        except ProfileError:
-            pool = []
-        used = {}
-        for record in walls:
-            used[str(record.get("path"))] = record
-        matched = [path for path in pool if str(path) in used]
-        hit_counts[name] = len(matched)
-        hit_paths[name] = matched
-        stamps = [used[path].get("last_used") for path in matched if used[path].get("last_used")]
+            ranking = list(src.match_ip(name))
+        except ProfileError as exc:
+            # ⚠ **不许静默**: 锚点/目录配错时如实记下来（否则画像会一直显示 IP 权重 0）
+            anchor_problems[name] = str(exc)
+            ranking = []
+        hits = count_hits(ranking, used_paths)
+        hit_counts[name] = len(hits)
+        hit_paths[name] = hits
+        stamps = [used_by_path[path].get("last_used") for path in hits
+                  if used_by_path[path].get("last_used")]
         if stamps:
             lasts[name] = max(str(item) for item in stamps)
     wall_mentions = mention_counts(items, list(src.ip_names))
@@ -626,7 +669,7 @@ async def build_profile(entries: Sequence[Any], *, config: Optional[Mapping[str,
         "built_at": moment.isoformat(timespec="seconds"),
         "trigger": dict(trigger or {"reason": reason}),
         "samples": samples,
-        "walls": {"ip": wall_rows},
+        "walls": {"ip": wall_rows, "anchor_problems": anchor_problems},
         "music": {"artist": artist_rows},
         "mood": {"label": mood.get("label") or MOOD_UNKNOWN,
                  "zh": MOOD_ZH.get(mood.get("label") or MOOD_UNKNOWN, ""),

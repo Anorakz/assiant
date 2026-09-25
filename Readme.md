@@ -119,6 +119,7 @@ agent/
 │   ├── cli.md                   # 板端控制 CLI (assistant) 使用手册
 │   ├── tagging.md               # 壁纸标签化: 词表 / wall_data.jsonl / IP 检索 / 实测数字 (T7)
 │   ├── music.md                 # 音乐: 板端 ssh 调 PC neteasecli / 本地库 / 工具四件套 (T8)
+│   ├── profile.md               # 用户画像: 纯对话记忆 / IP·歌手权重 / 负反馈两层清零 / 心情 (T9)
 │   ├── llm.md                   # LLM 三模式 / edge 接 llama-server / 工具循环 / 降级
 │   ├── ipc-protocol.md          # Agent ⇄ GUI 协议 (线上格式唯一真源)
 │   ├── gui.md                   # GUI 构建与使用

@@ -28,6 +28,11 @@
 ⚠ **只读问句在进模型之前就被答掉了**（T8-5c，见 §5.3）：`handle_event()` 先问一遍
 `agent/core/read_intents.py`，命中就直连回话（**0 次模型推理**），没命中才走 `chat_with_tools()`。
 
+⚠ **T9 起 Agent 内部还有一次"自己发起的"模型调用**：纯对话攒到 2000 字时，用户画像要判一次
+"当前心情"（`agent/core/user_profile.py::ask_mood` → `LLMProvider.chat()`，**唯一的额外调用**）。
+它和用户那一轮共用板端那一个 llama-server 进程，所以会**排队**；它没有工具、不发 `tool_schemas`，
+模型也**看不到**画像本身（画像不是工具）。细节见 [`profile.md`](profile.md)。
+
 ## 2. edge 就是"连本机 llama-server"
 
 Agent **不加载 GGUF、不跑推理**。真正加载模型的是板端的 `llama-server` 进程

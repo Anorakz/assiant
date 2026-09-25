@@ -430,6 +430,7 @@ gui/src/
 | GUI → Agent | Unix socket | 命令信封 → **Chat Input Bus** / 命令处理器 |
 | Agent → GUI | Unix socket | topic 推送（状态、LLM 输出、壁纸、音乐） |
 | PC → 板端 | SSH / scp | `deploy.ps1`（Agent + `.so`）、`sync-gui.ps1`（GUI 源码） |
+| 对话 → 内存 → 画像 | **进程内**（无通道） | `ChatMemory` 攒纯对话（不落盘）→ 攒到 2000 字时 Agent **自己**构建一次用户画像 → `config/user_profile.jsonl`；模型看不到画像（**不是工具**）。见 [`profile.md`](profile.md) |
 
 ---
 

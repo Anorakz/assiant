@@ -42,11 +42,13 @@ from agent.core.user_profile import (  # noqa: E402
     artist_weights,
     ask_mood,
     build_profile,
+    count_hits,
     detect_negative_feedback,
     latest_record,
     mood_prompt,
     parse_mood,
     read_records,
+    repo_sources,
     wallpaper_weights,
 )
 
@@ -284,6 +286,12 @@ class TestAskMood(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["label"], "tired")
         self.assertTrue(result["ok"])
 
+    async def test_saying_unknown_is_an_honest_answer_but_not_a_mood(self):
+        """模型回 "unknown" 是合法回答, 但 `ok` 必须是 False（板端实测: 曾经是 True）。"""
+        result = await ask_mood(FakeLLM("unknown"), "提问")
+        self.assertEqual(result["label"], MOOD_UNKNOWN)
+        self.assertFalse(result["ok"], "unknown 不算判出了心情")
+
     async def test_a_broken_answer_lands_on_unknown_not_a_guess(self):
         result = await ask_mood(FakeLLM("我觉得他有点累"), "提问")
         self.assertEqual(result["label"], MOOD_UNKNOWN)
@@ -358,6 +366,35 @@ class TestBuildProfileRecord(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r["name"] for r in record["music"]["artist"]], ["米津玄師"])
         self.assertEqual(record["samples"]["plays"], 3)
         self.assertEqual(record["samples"]["chat_turns"], 2)
+
+    async def test_a_broken_anchor_is_recorded_not_silently_zeroed(self):
+        """板端实测: 锚点/目录配错时 IP 权重一直是 0（而且是静默的）—— 现在如实记下来。"""
+
+        def boom(_name):
+            raise ProfileError("ip=EVA 检索不了: 锚点图还没打过标签")
+
+        sources, _w, _p = fake_sources(ips=("EVA",))
+        sources.match_ip = boom
+        record = await build_profile(make_memory([(ROLE_USER, "在吗")]).entries(),
+                                     sources=sources, llm=None, now=NOW)
+        self.assertIn("EVA", record["walls"]["anchor_problems"])
+        self.assertIn("锚点图还没打过标签", record["walls"]["anchor_problems"]["EVA"])
+        self.assertEqual(record["walls"]["ip"][0]["weight"], 0.0)
+
+    async def test_hits_come_from_the_ranking_with_the_used_images(self):
+        """真的走一遍: 排序给出来 -> 前 K 里有用过的 -> 权重非 0（板端就是这个口径）。"""
+        memory = make_memory([(ROLE_USER, "换一张 EVA 那样的")])
+        sources, _w, _p = fake_sources(ips=("EVA",))
+        sources.match_ip = lambda _name: ["/w/1.png", "/w/2.png", "/w/9.png"]
+        sources.list_walls = lambda: [
+            {"path": "/w/1.png", "used": 2, "last_used": "2026-09-24T21:00:00"},
+            {"path": "/w/9.png", "used": 1, "last_used": "2026-09-20T21:00:00"},
+        ]
+        record = await build_profile(memory.entries(), sources=sources, llm=None, now=NOW)
+        row = record["walls"]["ip"][0]
+        self.assertEqual(row["parts"]["hits"], 2, "用过的 2 张都排在前面")
+        self.assertEqual(row["images"], ["/w/1.png", "/w/9.png"])
+        self.assertGreater(row["weight"], 0)
 
     async def test_a_broken_wall_file_is_an_honest_error(self):
         def boom():
@@ -575,6 +612,70 @@ class TestRuntimeTrigger(unittest.IsolatedAsyncioTestCase):
         component = [c for c in runtime._components if c.name == "profile"][0]
         await component.do_stop()
         self.assertIsNone(runtime._profile_task)
+
+
+class TestCountHits(unittest.TestCase):
+    """T9-4 板端实测改的口径: `match("ip=…")` 给的是**全库排序**, 不是筛过的集合。"""
+
+    def test_hits_are_the_used_images_inside_the_top_k(self):
+        ranking = ["a", "b", "c", "d", "e"]
+        self.assertEqual(count_hits(ranking, ["d", "a"], top_k=2), ["a"])
+        self.assertEqual(count_hits(ranking, ["d", "a"], top_k=4), ["a", "d"],
+                         "按相似度顺序返回")
+        self.assertEqual(count_hits(ranking, ["e"], top_k=2), [], "排在后面就不算像")
+
+    def test_top_k_defaults_to_how_many_the_user_used(self):
+        ranking = ["a", "b", "c", "d", "e"]
+        self.assertEqual(count_hits(ranking, ["b", "e"]), ["b"],
+                         "用过 2 张 -> 看前 2 名里有几张是用过的")
+
+    def test_empty_inputs_are_empty_not_an_error(self):
+        self.assertEqual(count_hits([], ["a"]), [])
+        self.assertEqual(count_hits(["a"], []), [])
+
+
+class TestRepoSourcesWiring(unittest.TestCase):
+    """`repo_sources()` 必须把 **wallpaper.dir** 传给锚点检索。
+
+    板端 T9-4 实测: 漏传时 `match("ip=…")` 一个候选都给不出来, 而且**不报错** ——
+    画像里的 IP 权重就永远是 0（只有"提及"那一项）。
+    """
+
+    def test_the_wallpaper_dir_reaches_the_anchor_lookup(self):
+        import agent.vision.tag_index as tag_index
+
+        seen = {}
+
+        class FakeIndex(object):
+            def count(self):
+                return 1
+
+            def match(self, spec, presets=None, wallpaper_dir=None, limit=None):
+                seen["spec"] = spec
+                seen["dir"] = wallpaper_dir
+                from agent.vision.tag_index import MatchResult
+
+                return MatchResult(pool=["/w/a.png"], kind="ip", note="", detail={})
+
+        original = tag_index.TagIndex.from_file
+        tag_index.TagIndex.from_file = classmethod(lambda cls, path: FakeIndex())
+        try:
+            config = {"wallpaper": {"dir": "/w", "tagging": {
+                "ip_presets": {"EVA": {"anchors": ["Rei_1.png"]}}}}}
+            sources = repo_sources(config)
+            self.assertEqual(sources.wall_dir, "/w")
+            self.assertEqual(sources.match_ip("EVA"), ["/w/a.png"])
+            self.assertEqual(seen["spec"], "ip=EVA")
+            self.assertEqual(seen["dir"], "/w", "锚点文件名相对 wallpaper.dir 解析")
+        finally:
+            tag_index.TagIndex.from_file = original
+
+    def test_without_a_configured_dir_it_falls_back_to_the_default(self):
+        from agent.core.wallpaper import DEFAULT_WALLPAPER_DIR
+
+        sources = repo_sources({})
+        self.assertEqual(sources.wall_dir, DEFAULT_WALLPAPER_DIR)
+        self.assertEqual(sources.ip_names, [])
 
 
 if __name__ == "__main__":

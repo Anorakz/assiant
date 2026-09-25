@@ -105,6 +105,18 @@ llama-server。这张表是"哪个键有第二个读者"的唯一说明（改键
 L2 归一化、只能按余弦 —— 全部写死在 `agent/vision/siglip/config.py` 的常量里。
 那些值改错**不报错、只会静默变笨**，所以刻意不给配置入口（见 `architecture.md` §4.3）。
 
+### 2.3 `profile:` 段给"用户画像"用（T9）
+
+| 键 | 谁读 | 说明 |
+| --- | --- | --- |
+| `enabled` | `agent/main.py::_start_profile` | 关掉就什么都不做（与其它子系统的口径一致） |
+| `trigger_chars` | 同上（默认 2000） | **自上次构建以来**纯对话攒到这么多字就构建一次 |
+| `trigger_turns` | 同上（默认 12） | 兜底：短消息太多时按轮数触发 |
+| `file` | `agent/core/user_profile.py` | 画像落盘路径，默认 `config/user_profile.jsonl`（相对路径按仓库根） |
+
+⚠ 这一段的**消费者只有 Agent 自己**：模型看不到画像（它不是工具），GUI 也不读它。
+⚠ `profile.md` 里有三路口径（权重配方 / 两层清零 / 心情那次模型调用）的完整说明。
+
 ## 3. 单向性（最容易踩的一条）
 
 派生是**单向**的，所以：
