@@ -205,6 +205,16 @@ class TestErrorTranslation(unittest.TestCase):
             cli.status()
         self.assertIn("OpenSSH", str(ctx.exception))
 
+    def test_the_ssh_reason_is_not_said_twice(self):
+        """ssh 失败时信封里的 message 就是 stderr 原文 —— 直接拼会说两遍（板端实测）。"""
+        err = "ssh: connect to host 192.168.137.1 port 22: Connection refused"
+        runner = FakeRunner(rc=255, out=envelope(False, None,
+                                                 {"code": "SSH", "message": err}), err=err)
+        cli = NeteaseCli(host="192.168.137.1", user="Anorak", runner=runner)
+        with self.assertRaises(ConnectionFailure) as ctx:
+            cli.status()
+        self.assertEqual(str(ctx.exception).count("Connection refused"), 1)
+
     def test_auth_error_from_neteasecli_says_where_to_relogin(self):
         runner = FakeRunner(rc=2, out=envelope(False, None,
                                                {"code": "AUTH_ERROR", "message": "not logged in"}))
@@ -236,6 +246,22 @@ class TestErrorTranslation(unittest.TestCase):
         with self.assertRaises(NeteaseCliError) as ctx:
             cli.status()
         self.assertIn("怪错误", str(ctx.exception))
+
+    def test_vip_track_error_is_not_a_network_problem(self):
+        """T8-7 板端实测: "这首要不到地址"的**退出码是 3**, 但 error_code 是 TRACK_ERROR。
+
+        按退出码翻就成了"PC 那边网络请求失败" —— 看日志/看回话都指错方向。
+        """
+        runner = FakeRunner(rc=3, out=envelope(False, None, error={
+            "code": "TRACK_ERROR",
+            "message": "Track unavailable (no copyright or VIP required)"}))
+        cli = NeteaseCli(host="h", user="u", runner=runner)
+        with self.assertRaises(NeteaseCliError) as ctx:
+            cli.run("track", "url", "186016")
+        self.assertNotIsInstance(ctx.exception, ConnectionFailure,
+                                 "版权/VIP 不是网络问题")
+        self.assertIn("VIP", str(ctx.exception))
+        self.assertIn("要不到播放地址", str(ctx.exception))
 
     def test_errors_are_all_valueerror_free_runtimeerrors(self):
         # 与仓库里其它错误家族一致: 能精确 except, 也能统一 except RuntimeError
@@ -321,6 +347,106 @@ class TestPlayGoesThroughTheInteractiveSession(unittest.TestCase):
             result = cli.play("1", confirm=False)
         self.assertIn("请求播放", result["message"])
         self.assertEqual([c for c in calls if "player status" in c], [])
+
+    def test_a_vip_track_is_refused_before_touching_the_player(self):
+        """T8-7 板端实测修的一处"报喜不报忧"。
+
+        VIP/无版权那首在 PC 上**拿不到播放地址**; 只看"有没有出声"的话, PC 上本来
+        正放着别的歌时就会判成成功 —— 实测点《晴天》(VIP) 拿到
+        `{"ok": true, "started": true}`, 而屏幕上放的还是上一首。
+        """
+        calls = []
+
+        class _Runner(object):
+            def __call__(self, argv, timeout_s):
+                remote = argv[-1]
+                calls.append(remote)
+                if "track url" in remote:
+                    return 0, envelope(False, None, error={
+                        "code": "TRACK_ERROR",
+                        "message": "Track unavailable (no copyright or VIP required)"}), ""
+                return 0, envelope(True, {"playing": True, "duration": 236.0}), ""
+
+        cli = NeteaseCli(host="h", user="u", runner=_Runner())
+        with mock.patch("agent.net.netease_cli.time.sleep", lambda _s: None):
+            with self.assertRaises(NeteaseCliError) as ctx:
+                cli.play("186016")
+        message = str(ctx.exception)
+        self.assertIn("VIP", message, "要把真实原因说出来")
+        self.assertIn("要不到播放地址", message)
+        self.assertNotIn("网络请求失败", message, "别把版权问题报成网络问题")
+        self.assertEqual([c for c in calls if "schtasks" in c], [], "别去起播")
+        self.assertEqual([c for c in calls if "player stop" in c], [],
+                         "还没确认能放, 不该把用户正在听的那首停掉")
+
+    def test_a_missing_login_is_not_reported_as_a_copyright_problem(self):
+        """T8-7 板端实测: **没登录**时 neteasecli 报的还是
+        `Track unavailable (no copyright or VIP required)` —— 跟 VIP 那首**同一句话**。
+
+        所以失败之后再问一句登录态; 问出来是"没登录"就给"去 PC 上重登"那句能照做的话,
+        而不是让用户以为这首歌要会员。
+        """
+        calls = []
+
+        class _Runner(object):
+            def __call__(self, argv, timeout_s):
+                remote = argv[-1]
+                calls.append(remote)
+                if "track url" in remote:
+                    return 3, envelope(False, None, error={
+                        "code": "TRACK_ERROR",
+                        "message": "Track unavailable (no copyright or VIP required)"}), ""
+                if "auth check" in remote:
+                    return 0, envelope(True, {"valid": False, "message": "Not logged in"}), ""
+                return 0, envelope(True, {}), ""
+
+        cli = NeteaseCli(host="h", user="u", runner=_Runner())
+        with mock.patch("agent.net.netease_cli.time.sleep", lambda _s: None):
+            with self.assertRaises(AuthFailure) as ctx:
+                cli.play("2747166493")
+        message = str(ctx.exception)
+        self.assertIn("auth login", message, "要给能照做的那句")
+        self.assertIn("登录态失效", message)
+        self.assertEqual([c for c in calls if "schtasks" in c], [], "别去起播")
+
+    def test_a_url_check_that_cannot_reach_the_pc_stays_a_connection_error(self):
+        calls = []
+
+        class _Runner(object):
+            def __call__(self, argv, timeout_s):
+                calls.append(argv[-1])
+                return 255, "", "ssh: connect to host h port 22: Connection refused"
+
+        cli = NeteaseCli(host="h", user="u", runner=_Runner())
+        with mock.patch("agent.net.netease_cli.time.sleep", lambda _s: None):
+            with self.assertRaises(ConnectionFailure) as ctx:
+                cli.play("1")
+        self.assertNotIn("版权", str(ctx.exception), "连不上就是连不上, 别赖版权")
+
+    def test_play_stops_whatever_was_playing_first(self):
+        # 不然"有没有出声"分不清是新歌还是旧歌（mpv 的 IPC 是固定管道名）
+        cli, _runner, calls = self._cli(status_after="pos")
+        with mock.patch("agent.net.netease_cli.time.sleep", lambda _s: None):
+            cli.play("1")
+        stop_at = [i for i, c in enumerate(calls) if "player stop" in c]
+        create_at = [i for i, c in enumerate(calls) if "schtasks /create" in c]
+        self.assertTrue(stop_at, "起播前要先停下来放着的")
+        self.assertTrue(create_at and stop_at[0] < create_at[0], "stop 要在起播之前")
+
+    def test_a_failed_stop_does_not_block_the_play(self):
+        class _Runner(object):
+            def __call__(self, argv, timeout_s):
+                remote = argv[-1]
+                if "player stop" in remote:
+                    return 1, envelope(False, None, error={"code": "PLAYER_ERROR",
+                                                           "message": "没有播放器"}), ""
+                if "player status" in remote:
+                    return 0, envelope(True, {"playing": True, "duration": 236.0}), ""
+                return 0, envelope(True, {}), ""
+
+        cli = NeteaseCli(host="h", user="u", runner=_Runner())
+        with mock.patch("agent.net.netease_cli.time.sleep", lambda _s: None):
+            self.assertIn("播放", cli.play("1")["message"])
 
     def test_is_playing_uses_duration(self):
         # duration=0 是"连不上 mpv"的乐观默认值 —— 不能当成在放

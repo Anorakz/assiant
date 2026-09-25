@@ -1404,7 +1404,35 @@ Phase 7 T8-6 — 壁纸"使用次数"（并入 `wall_data.jsonl`, 你定的方�
       "挑一张我看得最多的壁纸"-> `action="least"`（**方向反了**）; `least` 则 3/3 都调对。
       机制本身板端直验通过（`next_wallpaper(1, sort="used_desc")` 挑到用得最多的那张,
       再调一次跳过屏幕上那张）; 问"我看得最多的是哪张"走只读直连是准的。先如实记着。
-⚑ 下一步: T8-7（T8 收口验收: 四类诚实失败实跑 + 文档收口 + 整批提交/推送）
+Phase 7 T8-7 — T8 收口：四类诚实失败**板端实跑** + 文档收口（本阶段最后一项）
+☑ 四类都是真跑（真 ssh → 真 neteasecli → 真 mpv），造法与**用户实际看到的那句话**:
+      · VIP/无版权（点《晴天》186016）→ "这首在 PC 上要不到播放地址（VIP/无版权/已下架）:
+        Track unavailable (no copyright or VIP required)"
+      · cookie 过期（移走 PC 上 `~/.config/neteasecli/profiles/default/session.json`）→
+        "网易云登录态失效 —— 在 **PC 上**重跑 `neteasecli auth login`"
+      · PC 连不上（板端 `iptables -I OUTPUT -d <PC> --dport 22 -j REJECT`）→
+        "连不上 PC（…Connection refused）—— 检查 PC 是否开机 / OpenSSH Server / 网段"
+      · mpv 缺失（PATH 前面插一个"立刻退出"的假 mpv.exe）→ "PC 上没有开始播放 ——
+        **播放地址是有的**（所以不是版权问题）, 常见原因: ①没人登录桌面 ②mpv 不在 PATH"
+      · 四条的造法都**留了还原**: iptables 用 trap 删干净、session.json 改名后改回、
+        假 mpv 目录删掉、板端 config.yaml 与备份 `diff` 一致（都当场验过）
+☑ 三条我们自己"报喜不报忧"是被这轮跑出来的（当场修 + 测试）:
+      ① **VIP 那首被报成成功** —— 判据只有"有没有出声", PC 上本来放着别的歌就判成成功
+        （实测 `{"ok": true, "started": true}`, 屏幕还是上一首）→ `play()` **先要一次播放地址**
+      ② **cookie 过期被报成版权问题** —— 没登录时 neteasecli 报的是**同一句话**
+        （no copyright or VIP）→ 失败路径上多问一句 `auth check`, 分开给两句能照做的话
+      ③ **`tracks[].id` 是 null** —— `enqueue()` 返回的键是 `track_id`, Runtime 在读 `id`
+      · 另顺手: `TRACK_ERROR` 退出码是 3, 按退出码翻会变成"PC 网络请求失败"（改为按 error_code 先判）;
+        ssh 失败时信封 message = stderr 原文, 直接拼会说两遍（现在只说一次）
+☑ 另两处真话工程（都配了测试）:
+      · **起播前先 stop**（mpv 的 IPC 是固定管道名, 旧 mpv 还在时新的起不来 ——
+        不停就分不清"有没有出声"是新歌还是旧歌）
+      · **排歌之前先问一次 PC 真值**（`snapshot()` 不碰 PC; 刚重启的 Agent 会以为没在放,
+        于是把用户正在听的那首停掉从头起播 —— 实测踩到）
+⚑ 环境核对: 登录态在 **PC** 上（neteasecli 自己的 store）; 板端 `config/netease_cookie.json`
+      **根本不存在、代码也没人读它** → `.gitignore` / `config.example.yaml` /
+      `docs/config-sources.md` 里"板端放 cookie"的旧说法**已按事实改掉**
+⚑ 下一步: 等 T8-7 验收; 通过后进 Phase 8（固化与优化: CI / systemd 自启 / bench / ADR）
 
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查

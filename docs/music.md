@@ -210,18 +210,54 @@ T8-5b 合并成三个工具后：**一次 `next_music(action="enqueue")` 就能�
 
 | 症状 | 板端会说什么 |
 | --- | --- |
-| 连不上 PC | "PC 没开机 / OpenSSH Server 没启动 / 不在同一网段" |
-| `Permission denied (publickey)` | "把板端公钥放进 PC 的 `administrators_authorized_keys`"（并把公钥内容带上） |
+| 连不上 PC | "连不上 PC（ssh: …Connection refused）—— 检查 PC 是否开机、Windows OpenSSH Server 是否启动、板端与 PC 是否在同一网段" |
+| `Permission denied (publickey)` | "板端连 PC 的 ssh 被拒（认证失败）—— 把板端公钥放进 PC 的 `administrators_authorized_keys`"（并把公钥内容带上） |
 | `AUTH_ERROR` / rc=2 | "网易云登录态失效 —— 在 **PC 上**重跑 `neteasecli auth login`" |
-| `spawn mpv ENOENT` | "PC 上 mpv 没装 / 不在 PATH" |
+| `spawn mpv ENOENT` / 起不来 | "PC 上起不了 mpv（neteasecli 报 …）—— 确认 PC 装了 mpv 且在 PATH 里" |
+
+### 6.1 四类失败**板端实跑**的原文（T8-7，2026-09-25）
+
+四条都在板端真跑过（真 ssh → 真 neteasecli → 真 mpv），话术就是用户实际看到的那句：
+
+| 场景（怎么造出来的） | 模型/工具回给用户的话 |
+| --- | --- |
+| **VIP/无版权**（点《晴天》186016；能搜到、拿不到流） | `这首在 PC 上要不到播放地址（VIP/无版权/已下架）: Track unavailable (no copyright or VIP required)` |
+| **cookie 过期**（把 PC 上 `~/.config/neteasecli/profiles/default/session.json` 移走） | `网易云登录态失效 —— 在 **PC 上**重跑 neteasecli auth login（neteasecli 把"没登录"报成了"要不到播放地址（VIP/无版权）", 别当成会员问题）` |
+| **PC 连不上**（板端 `iptables -I OUTPUT -d <PC> -p tcp --dport 22 -j REJECT`） | `连不上 PC（ssh: connect to host 192.168.137.1 port 22: Connection refused）—— 检查 PC 是否开机、Windows OpenSSH Server 是否启动、板端与 PC 是否在同一网段` |
+| **mpv 缺失**（PATH 前面插一个"立刻退出"的假 mpv.exe） | `PC 上没有开始播放 —— 播放地址是有的（所以不是版权问题）, 常见原因: ①PC 上**没人登录桌面**（计划任务只在用户登录时运行）②PC 上 mpv 不在 PATH。可以先在 PC 上手动跑一次 neteasecli track play <id> 看它报什么` |
+
+⚠ 这四条里有**三处是我们自己"报喜不报忧"**，都是这一轮跑出来的、当场修掉的：
+
+1. **VIP 那首被报成成功**。判据只有"PC 上有没有出声"（`duration > 0`），而 PC 上**本来
+   就在放别的歌** —— 实测拿到 `{"ok": true, "started": true}`，屏幕上还是上一首。
+   现在 `NeteaseCli.play()` **先要一次播放地址**（`track url`）：要不到就直接失败，既不去起播、
+   也不动用户正在听的那首。
+2. **cookie 过期被报成版权问题**。没登录时 neteasecli 报的就是
+   `Track unavailable (no copyright or VIP required)`（跟 VIP 那首**同一句话**）。
+   现在只在**失败路径**上多问一句 `auth check`：没登录就给"去 PC 上重登"那句，
+   是登录着的才说"要不到播放地址（VIP/无版权/已下架）"。
+3. **`tracks[].id` 是 `null`**（工具回话里本来该带真 id）—— `enqueue()` 返回的键是
+   `track_id`，Runtime 那边在读 `id`。
+
+另外顺手把两个"说话指错方向"的地方改了：`TRACK_ERROR` 的退出码是 **3**，按退出码翻会变成
+"PC 那边网络请求失败"（现在按 `error_code` 先判）；ssh 失败时信封里的 message 就是 stderr
+原文，直接拼会说**两遍**（现在同一句只说一次）。
+
+**起播前还会先停下来放着的**（`play()` 里）：mpv 的 IPC 是固定管道名，旧 mpv 还在时新的
+一首根本起不来 —— 不停的话"有没有出声"就分不清是新歌还是旧歌。走到 `play()` 一定是
+"决定要起播"（enqueue 只在 PC 上没在放时才起、曲终才换下一首），所以不会打断用户正在听的。
+
+**排歌之前先问一次 PC 的真值**（`Runtime.music_enqueue` → `music.refresh()`）：
+`snapshot()` 是纯本地的（不碰 PC），刚重启的 Agent 会以为"PC 上没在放"，
+于是把用户正在听的那首停掉从头起播（实测踩到）。
 
 ## 7. 怎么验
 
 ```bash
 # 纯逻辑（开发机与板端同一份）
-python tests/test_netease_cli.py     # SSH 封装: 拼命令行 / 解信封 / 四类错误翻译
+python tests/test_netease_cli.py     # SSH 封装: 拼命令行 / 解信封 / 四类错误翻译 / 起播前后的两处规矩
 python tests/test_music_library.py   # 本地库: 读写/合并/打标/计数/挑选
-python tests/test_music_player.py    # 播放内核: 30 秒计一次 / 曲终停 / 状态推送
+python tests/test_music_player.py    # 播放内核: 30 秒计一次 / 曲终停 / 状态推送 / 不打断在放的
 python tests/test_music_tools.py     # 四个工具: schema / 缺依赖跳过 / 只做该做的事
 ```
 

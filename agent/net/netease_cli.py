@@ -256,20 +256,52 @@ class NeteaseCli:
           所以播放这一条走 `schtasks /it`（"只在用户登录时运行"）—— 落到**用户桌面会话**;
           **读取与控制仍然走 ssh**（mpv 的 IPC socket 在 session 0 也够得着, 实测能暂停）。
 
+        ⚠ T8-7 板端实测修的两处（都是"报喜不报忧"）:
+          ① **先要一次播放地址**（`track url`）。不要地址的话: VIP/无版权那首在 PC 上
+             根本拿不到流, 而下面"有没有出声"会因为**本来就在放别的歌**而判成成功 ——
+             实测点《晴天》(VIP) 拿到了 `{"ok": true, "started": true}`, 屏幕上放的还是上一首。
+          ② 真要开播之前**先 stop**（best-effort）。不然"有没有出声"分不清是新歌还是旧歌
+             （mpv 的 IPC 是固定管道名, 旧 mpv 还在时新的一首根本起不来）。
+             走到这里一定是"决定要起播"（enqueue 只在 PC 上没在放时才起、曲终才换下一首）,
+             所以停一下不会打断用户正在听的歌。
+
         @param confirm True = 起完等 1–2 s 确认 `duration > 0`（做不到就如实抛错）
-        @raise PlayerFailure PC 上没人登录桌面 / mpv 起不来
+        @raise PlayerFailure 这首要不到地址（VIP/版权）/ PC 上没人登录桌面 / mpv 起不来
         """
         command = "%s track play %s" % (self.binary, track_id)
         if quality:
             command += " -q %s" % quality
+
+        # ① 先要一次播放地址（`track url`）: 拿不到就直接抛出去 —— `_classify` 会把它翻成
+        #   "这首在 PC 上要不到播放地址（VIP/无版权/已下架）"; **不碰**正在放的那首、也不起播。
+        #   ⚠ 但**没登录**时 neteasecli 报的是同一句话（`Track unavailable (no copyright or
+        #   VIP required)`）—— 板端实测把"cookie 过期"误报成了版权问题。所以失败之后
+        #   再问一句登录态（只在失败路径上花这一次 ssh）, 分开给两句能照做的话。
+        try:
+            self.track_url(track_id, quality=quality or "exhigh")
+        except NeteaseCliError as exc:
+            if self.auth_ok() is False:
+                self.log.warning("netease_cli: 要不到地址, 一问才知道是没登录 (%s)", exc)
+                raise AuthFailure(
+                    "网易云登录态失效 —— 在 **PC 上**重跑 `neteasecli auth login`"
+                    "（neteasecli 把\"没登录\"报成了\"要不到播放地址（VIP/无版权）\", "
+                    "别当成会员问题）")
+            raise
+
+        if confirm:
+            try:
+                self.stop()
+            except NeteaseCliError as exc:      # 停不掉不该拦住播放
+                self.log.warning("netease_cli: 播放前 stop 失败 (已忽略): %s", exc)
+
         self._run_interactive(command)
         if not confirm:
             return {"message": "已在 PC 上请求播放 %s" % track_id}
         time.sleep(PLAY_CONFIRM_WAIT_S)
         if not self.is_playing():
             raise PlayerFailure(
-                "PC 上没有开始播放 —— 常见原因: ①PC 上**没人登录桌面**（计划任务只在"
-                "用户登录时运行）②PC 上 mpv 不在 PATH ③这首要 VIP/版权拿不到地址。"
+                "PC 上没有开始播放 —— 播放地址是有的（所以不是版权问题）, 常见原因: "
+                "①PC 上**没人登录桌面**（计划任务只在用户登录时运行）②PC 上 mpv 不在 PATH。"
                 "可以先在 PC 上手动跑一次 `neteasecli track play %s` 看它报什么" % track_id)
         return {"message": "正在 PC 上播放 %s" % track_id}
 
@@ -324,6 +356,21 @@ class NeteaseCli:
 
     def track_detail(self, track_id: Any) -> Dict[str, Any]:
         return self.run("track", "detail", str(track_id))
+
+    def auth_ok(self) -> Optional[bool]:
+        """登录态还在吗。
+
+        @return True/False；**问不到就 None**（连不上 PC 时别把"问不到"当成"没登录"）
+        @note T8-7 加的: "没登录"和"这首要 VIP"在 neteasecli 那边是**同一句话**
+              （`Track unavailable (no copyright or VIP required)`）—— 要靠这一条分开。
+        """
+        try:
+            data = self.run("auth", "check")
+        except NeteaseCliError as exc:
+            self.log.warning("netease_cli: 问登录态失败 (当成问不到): %s", exc)
+            return None
+        valid = data.get("valid")
+        return bool(valid) if valid is not None else None
 
     def track_url(self, track_id: Any, quality: str = "exhigh") -> Dict[str, Any]:
         return self.run("track", "url", str(track_id), "-q", quality)
@@ -424,7 +471,9 @@ def _classify(payload: Mapping[str, Any], code: int, err: str) -> NeteaseCliErro
         error = {"message": str(error)}
     error_code = str(error.get("code") or "").upper()
     message = str(error.get("message") or "").strip() or "neteasecli 没给出原因"
-    joined = "%s %s" % (message, err or "")
+    # ⚠ ssh 失败时 neteasecli 信封里的 message 就是 stderr 的原文, 直接拼会**说两遍**
+    #   （板端实测: "…Connection refused ssh: connect to host … Connection refused"）
+    joined = message if message and message in (err or "") else "%s %s" % (message, err or "")
 
     if error_code == "SSH":
         if "Permission denied" in joined:
@@ -438,6 +487,13 @@ def _classify(payload: Mapping[str, Any], code: int, err: str) -> NeteaseCliErro
                 "连不上 PC（%s）—— 检查 PC 是否开机、Windows OpenSSH Server 是否启动、"
                 "板端与 PC 是否在同一网段" % joined.strip()[:160])
         return ConnectionFailure("ssh 调用失败: %s" % joined.strip()[:200])
+
+    if error_code in ("TRACK_ERROR", "TRACK", "COPYRIGHT", "VIP"):
+        # 业务上"这首放不了"（VIP / 无版权 / 已下架）。
+        # ⚠ 必须按 error_code **先判**: neteasecli 这类失败的**退出码是 3**（它自己也当
+        #   "拿不到资源"）, 落到下面 `code == 3` 那条就成了"PC 那边网络请求失败" ——
+        #   板端实测就是这么把 VIP 报成网络问题的, 看日志/看回话都指错方向。
+        return NeteaseCliError("这首在 PC 上要不到播放地址（VIP/无版权/已下架）: %s" % message)
 
     if error_code in _ERRORS:
         cls = _ERRORS[error_code]

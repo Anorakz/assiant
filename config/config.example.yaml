@@ -137,8 +137,11 @@ vision:
 #    OpenSSH Server 属于前者（一次性开好, 不是常驻程序）, 而且是**唯一能读回输出**
 #    的通道（Sunshine 的输入注入能跑命令但读不回, 那样进度只能瞎猜）。
 #    一次性配置步骤（管理员 PowerShell + 板端公钥）见 docs/music.md。
-# ⚠ 登录态在 **PC 上**（neteasecli 自己存的）, 板端不碰它; 板端只用
-#    `config/netease_cookie.json`（已进 .gitignore）做"加歌到歌单"这类写操作。
+# ⚠ 登录态在 **PC 上**（neteasecli 自己存的: `%USERPROFILE%\.config\neteasecli\profiles\`
+#    `<profile>\session.json`，从浏览器导入）—— 板端**不存 cookie、也不碰它**。
+#    T8-7 核对过: Agent 代码里没有任何地方读 `config/netease_cookie.json`
+#    （.gitignore 里那条是 T8-1 留下的保险, 防的是"万一有人手动放过一份"）。
+#    登录态失效时板端会如实说"在 PC 上重跑 `neteasecli auth login`"（docs/music.md §6）。
 music:
   # 关掉它 = 音乐工具全部不装（与其它工具"缺依赖就跳过"同一条口径）
   enabled: false

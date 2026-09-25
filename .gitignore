@@ -114,9 +114,10 @@ config/creds/
 # 在板端生成，含 40 张图的标签与 base64(float16) 向量（约 80KB），换台机器就该重打。
 # ⚠ 它住在 config/ 下，但 config/*.yaml 那条盖不住它（后缀是 .jsonl），所以单独写一行。
 config/wall_data.jsonl
-# 网易云音乐的**登录态**（T8-1）: 一段 cookie（`{"key": "MUSIC_U=…; __csrf=…"}`），
-# 由人在板端手动放进去（`config/netease_cookie.json`）—— 它是**凭据**，绝不能入库。
-# ⚠ 同理盖不住（后缀 .json），必须单独写一行。
+# 网易云音乐的**登录态**（T8-1 的保险, T8-7 核对过代码里没人读它）: 登录态其实住在
+# **PC 上**（neteasecli 自己的 store: `%USERPROFILE%\.config\neteasecli\profiles\…`），
+# 板端不存 cookie。这条留着只是防"万一有人手动在板端放过一份 `{"key": "MUSIC_U=…"}`"——
+# 那是**凭据**，绝不能入库。⚠ 同理盖不住（后缀 .json），必须单独写一行。
 config/netease_cookie.json
 config/netease_cookie.json.bak
 # 本地音乐库（T8-3）: 一行一首歌（id + tags + 播放次数），**板端本地数据** ——

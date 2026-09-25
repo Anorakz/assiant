@@ -640,6 +640,9 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
                              "keyword 默认只排 1 首（要几首就写 limit）")
             self.assertTrue(result["started"], "A1: 什么都没在放 -> 顺手起播")
             self.assertEqual(result["tracks"][0]["name"], "JANE DOE", "用搜索结果里的名字入库")
+            self.assertEqual(result["tracks"][0]["id"], "2747166493",
+                             "回话里的 id 必须是真 id（T8-7 修: 以前这里是 null，"
+                             "模型拿到 null 没法接着用它）")
             self.assertEqual(result["queue"]["size"], 1)
             self.assertTrue(pushed, "起播后要推一条 music")
             self.assertIn("title", pushed[-1])
@@ -650,6 +653,42 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
             paused = runtime.music_control("play_pause")
             self.assertTrue(paused["ok"], paused)
             self.assertTrue(paused["paused"])
+        finally:
+            await runtime.stop()
+
+    async def test_enqueue_does_not_interrupt_what_is_already_playing(self):
+        """T8-7: 排歌之前先问一次 PC 的**真值**（`snapshot()` 是纯本地的, 不碰 PC）。
+
+        修前: 刚重启的 Agent（本地那份 playing=False）会把用户正在听的那首停掉从头起播。
+        """
+        tmp = tempfile.mkdtemp(prefix="music-rt-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = self._runtime(tmp)
+        await runtime._start_music()
+        try:
+            self.cli.state = {"playing": True, "paused": False, "position": 30.0,
+                              "duration": 236.0}          # PC 上已经在放
+            result = runtime.music_enqueue(track_id="2747166493")
+            self.assertTrue(result["ok"], result)
+            self.assertFalse(result["will_start"], "PC 上已经在放 -> 不该起播")
+            self.assertFalse(result["started"])
+            self.assertNotIn(("play", "2747166493"), self.cli.calls,
+                             "不该去动用户正在听的那首")
+        finally:
+            await runtime.stop()
+
+    async def test_enqueue_still_starts_when_something_was_playing_before_we_looked(self):
+        """反面: PC 上确实没在放（status duration=0）-> 照旧顺手起播。"""
+        tmp = tempfile.mkdtemp(prefix="music-rt-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = self._runtime(tmp)
+        await runtime._start_music()
+        try:
+            self.cli.state = {"playing": False, "paused": False, "position": 0.0,
+                              "duration": 0.0}
+            result = runtime.music_enqueue(track_id="2747166493")
+            self.assertTrue(result["started"], result)
+            self.assertIn(("play", "2747166493"), self.cli.calls)
         finally:
             await runtime.stop()
 

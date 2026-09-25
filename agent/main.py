@@ -1038,6 +1038,8 @@ class Runtime:
               ⚠ 这一步要走 ssh + schtasks（板端实测 5~8 s）, 比默认工具超时（5 s）长 ——
                 所以 `next_music` 这个工具自己声明了 `timeout_s`（见 tools/music.py）。
         @note `track_id` 会**去 PC 校验一次**（板端实测 0.6B 会编造 id）—— 问不到就如实报错。
+        @note T8-7: 起播前会 `refresh()` 一次真值（见下）, 所以"PC 上已经在放"时**不会**
+              把用户正在听的那首停掉重排。
         @note 这里只动**队列与播放**; 标签/播放次数不碰（那是 music_tag / 计次的事）。
         """
         if self.music is None:
@@ -1090,6 +1092,10 @@ class Runtime:
                 return {"ok": False, "error": str(exc), "tell_user": str(exc)}
             queued.append(str(item["id"]))
 
+        # T8-7: 排之前**问一次 PC 的真值** —— `snapshot()` 是纯本地的（不碰 PC）,
+        # 刚重启的 Agent 会以为"PC 上没在放", 于是把用户正在听的那首停掉从头起播。
+        # 一次 ssh 换一句真话, 值（失败只记 warning: 问不到就按本地那份判）。
+        self.music.refresh()
         will_start = bool(queued) and not bool(self.music.snapshot().get("playing"))
         started = False
         if will_start:
@@ -1105,7 +1111,7 @@ class Runtime:
         self._push_music(self.music.snapshot())
         return {"ok": True, "queued": queued, "started": started,
                 "will_start": will_start, "queue": self.music.queue_state(),
-                "tracks": [{"id": r.get("id"), "name": r.get("name"),
+                "tracks": [{"id": r.get("track_id") or r.get("id"), "name": r.get("name"),
                             "artists": r.get("artists"), "plays": r.get("plays"),
                             "tags": r.get("tags"), "matched": r.get("matched")}
                            for r in records]}
