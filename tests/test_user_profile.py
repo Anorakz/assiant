@@ -1,0 +1,398 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+tests/test_user_profile.py — 用户画像内核（Phase 7 T9-2）
+
+跑法:
+    python tests/test_user_profile.py
+
+钉五件事:
+  1) **前两路是权重, 不是计数**: 权重 = 占比配方（IP 0.6 用量 / 0.3 提及 / 0.1 近期;
+     歌手 0.7 播放 / 0.3 提及）, 每个分量都留了分子分母能复核
+  2) **负反馈清零**: 负向词 + 实体名同时出现才算; 画像里权重与分量归 0,
+     并且**源文件也清 0**（走那两个唯一写者）; 继承下来的 muted 每次重建都要重新套用
+  3) **心情调模型**: 提示词带"当时场景"; 只认封闭词表; 解析不出/模型炸了 -> unknown（不编）
+  4) **落盘**: `config/user_profile.jsonl` 一次一行、原子写、本模块是唯一写者
+  5) **不存对话原文**（只存长度）—— 唯一留下的原话是 `muted_text`（破坏性动作的凭据）
+
+⚠ 用 `IsolatedAsyncioTestCase`（`build_profile` 要 await 模型, 且 py3.8 的 Runtime 说明
+  见 tests/test_chat_memory.py 模块头）。
+"""
+
+import json
+import logging
+import os
+import sys
+import tempfile
+import unittest
+from datetime import datetime, timedelta
+from pathlib import Path
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from agent.core.chat_memory import ROLE_ASSISTANT, ROLE_USER, ChatMemory  # noqa: E402
+from agent.core.user_profile import (  # noqa: E402
+    MOOD_LABELS,
+    MOOD_UNKNOWN,
+    ProfileError,
+    Sources,
+    append_record,
+    artist_weights,
+    ask_mood,
+    build_profile,
+    detect_negative_feedback,
+    latest_record,
+    mood_prompt,
+    parse_mood,
+    read_records,
+    wallpaper_weights,
+)
+
+logging.disable(logging.CRITICAL)
+
+NOW = datetime(2026, 9, 25, 23, 40, 0)
+
+
+def make_memory(pairs, states=None):
+    """(角色, 文本) 列表 -> ChatMemory（states 可选, 每条一个模式）。"""
+    memory = ChatMemory()
+    for index, (role, text) in enumerate(pairs):
+        state = (states or [])[index] if states and index < len(states) else "study"
+        if role == ROLE_USER:
+            memory.add_user(text, source="gui", state=state)
+        else:
+            memory.add_reply(text, source="gui", state=state)
+    return memory
+
+
+class FakeLLM(object):
+    """判心情用的替身: 记下提示词, 回一个预置答案（或抛异常）。"""
+
+    def __init__(self, reply="calm", exc=None):
+        self.reply = reply
+        self.exc = exc
+        self.prompts = []
+
+    async def chat(self, user_input, context=None):
+        self.prompts.append(user_input)
+        if self.exc is not None:
+            raise self.exc
+        return self.reply
+
+
+def fake_sources(ips=("EVA", "Nier"), hits=None, mentions_ok=True, tracks=None,
+                 profile_file="", wall_file="", library_file=""):
+    """假的依赖口子: 记下清零调用, 返回预置的图/歌。"""
+    cleared_walls = []
+    cleared_plays = []
+
+    def match_ip(name):
+        return list((hits or {}).get(name, []))
+
+    def clear_wall_usage(paths):
+        cleared_walls.append(list(paths))
+        return len(paths)
+
+    def clear_plays(ids):
+        cleared_plays.append(list(ids))
+        return len(ids)
+
+    walls = []
+    for _name, paths in (hits or {}).items():
+        for path in paths:
+            walls.append({"path": path, "used": 1})
+    sources = Sources(list_walls=lambda: walls,
+                      match_ip=match_ip,
+                      list_tracks=lambda: list(tracks or []),
+                      clear_wall_usage=clear_wall_usage,
+                      clear_plays=clear_plays,
+                      ip_names=list(ips),
+                      profile_file=profile_file, wall_file=wall_file,
+                      library_file=library_file)
+    return sources, cleared_walls, cleared_plays
+
+
+def a_track(track_id="1", artists=("米津玄師",), plays=4, last_played=None):
+    return {"id": track_id, "artists": "/".join(artists), "plays": plays,
+            "tags": {"artist": list(artists)}, "last_played": last_played}
+
+
+# ===========================================================================
+#  1) 权重（纯函数, 直接算）
+# ===========================================================================
+class TestWallpaperWeights(unittest.TestCase):
+    def test_the_recipe_is_the_documented_one(self):
+        rows = wallpaper_weights(
+            usages={"EVA": 6, "Nier": 2},
+            hits={"EVA": ["/w/1.png", "/w/2.png"], "Nier": ["/w/9.png"]},
+            mentions={"EVA": 3, "Nier": 1},
+            lasts={"EVA": (NOW - timedelta(days=1)).isoformat(), "Nier": None},
+            now=NOW)
+        self.assertEqual([row["name"] for row in rows], ["EVA", "Nier"], "权重高的在前")
+        top = rows[0]
+        self.assertAlmostEqual(top["parts"]["usage_share"], 0.75)
+        self.assertAlmostEqual(top["parts"]["mention_share"], 0.75)
+        self.assertAlmostEqual(top["parts"]["recency_share"], 1.0, places=4)
+        self.assertAlmostEqual(top["weight"], 0.6 * 0.75 + 0.3 * 0.75 + 0.1 * 1.0, places=4)
+        self.assertEqual(rows[1]["parts"]["recency_share"], 0.0,
+                         "Nier 没有近期用量 -> 近期那一项拿 0")
+        self.assertAlmostEqual(rows[1]["weight"], 0.6 * 0.25 + 0.3 * 0.25, places=4)
+
+    def test_recency_decays_over_thirty_days(self):
+        rows = wallpaper_weights({"A": 0}, {}, {}, {"A": (NOW - timedelta(days=15)).isoformat()},
+                                 now=NOW)
+        self.assertAlmostEqual(rows[0]["parts"]["recency"], 0.5, places=2)
+        old = wallpaper_weights({"A": 0}, {}, {}, {"A": (NOW - timedelta(days=90)).isoformat()},
+                                now=NOW)
+        self.assertEqual(old[0]["parts"]["recency"], 0.0)
+
+    def test_no_evidence_is_an_empty_list_not_a_guess(self):
+        self.assertEqual(wallpaper_weights({}, {}, {}, {}), [])
+
+    def test_zero_totals_do_not_divide_by_zero(self):
+        rows = wallpaper_weights({"A": 0, "B": 0}, {}, {}, {})
+        self.assertEqual([row["weight"] for row in rows], [0.0, 0.0])
+
+
+class TestArtistWeights(unittest.TestCase):
+    def test_the_recipe_is_the_documented_one(self):
+        rows = artist_weights({"米津玄師": 6, "别的": 2}, {"米津玄師": 1, "别的": 1})
+        top = rows[0]
+        self.assertEqual(top["name"], "米津玄師")
+        self.assertAlmostEqual(top["parts"]["plays_share"], 0.75)
+        self.assertAlmostEqual(top["parts"]["mention_share"], 0.5)
+        self.assertAlmostEqual(top["weight"], 0.7 * 0.75 + 0.3 * 0.5, places=4)
+
+    def test_no_tracks_is_an_empty_list(self):
+        self.assertEqual(artist_weights({}, {}), [])
+
+
+# ===========================================================================
+#  2) 负反馈
+# ===========================================================================
+class TestNegativeFeedback(unittest.TestCase):
+    def test_cue_plus_name_is_required(self):
+        memory = make_memory([(ROLE_USER, "不想听米津玄師了"),
+                              (ROLE_USER, "这个不错"),                    # 没有负向词
+                              (ROLE_USER, "不想听了"),                    # 没有实体名
+                              (ROLE_USER, "别看 EVA 了")])
+        found = detect_negative_feedback(memory.entries(), ["EVA"], ["米津玄師"])
+        self.assertEqual([(f.axis, f.name) for f in found], [("artist", "米津玄師"), ("ip", "EVA")])
+
+    def test_assistant_lines_are_not_evidence(self):
+        memory = make_memory([(ROLE_ASSISTANT, "那以后不看 EVA 了")])
+        self.assertEqual(detect_negative_feedback(memory.entries(), ["EVA"], []), [])
+
+    def test_unknown_names_produce_nothing(self):
+        memory = make_memory([(ROLE_USER, "不想听周杰伦了")])
+        self.assertEqual(detect_negative_feedback(memory.entries(), ["EVA"], ["米津玄師"]), [],
+                         "实体名对不上就一条都不产生（宁可不猜）")
+
+    def test_english_cues_work_too(self):
+        memory = make_memory([(ROLE_USER, "no more EVA please")])
+        found = detect_negative_feedback(memory.entries(), ["EVA"], [])
+        self.assertEqual([f.name for f in found], ["EVA"])
+
+
+class TestFeedbackZeroesBothLayers(unittest.IsolatedAsyncioTestCase):
+    async def _build(self, entries, *, history=(), tracks=None, hits=None):
+        sources, cleared_walls, cleared_plays = fake_sources(hits=hits, tracks=tracks)
+        record = await build_profile(entries, sources=sources, llm=None, now=NOW,
+                                     history=history)
+        return record, cleared_walls, cleared_plays
+
+    async def test_ip_feedback_clears_the_profile_and_the_source_file(self):
+        memory = make_memory([(ROLE_USER, "EVA 的图看腻了")])
+        record, cleared_walls, cleared_plays = await self._build(
+            memory.entries(), hits={"EVA": ["/w/1.png", "/w/2.png", "/w/3.png"]})
+        row = [r for r in record["walls"]["ip"] if r["name"] == "EVA"][0]
+        self.assertEqual(row["weight"], 0.0)
+        self.assertEqual(row["parts"]["hits"], 0)
+        self.assertEqual(row["parts"]["mentions"], 0)
+        self.assertTrue(row["muted_at"], "记下什么时候被清零的")
+        self.assertIn("看腻", row["muted_text"], "留原话（破坏性动作要能追溯）")
+        self.assertEqual(cleared_walls, [["/w/1.png", "/w/2.png", "/w/3.png"]],
+                         "**源文件也清 0**（走唯一写者）")
+        self.assertEqual(cleared_plays, [])
+        self.assertEqual(record["cleared"]["wall_images"], 3)
+
+    async def test_artist_feedback_clears_plays_in_the_library(self):
+        memory = make_memory([(ROLE_USER, "不想听米津玄師了")])
+        record, cleared_walls, cleared_plays = await self._build(
+            memory.entries(), tracks=[a_track("1", plays=5), a_track("2", artists=("别的",))])
+        row = [r for r in record["music"]["artist"] if r["name"] == "米津玄師"][0]
+        self.assertEqual(row["weight"], 0.0)
+        self.assertEqual(row["parts"]["plays"], 0)
+        self.assertEqual(cleared_plays, [["1"]], "只清那个歌手的歌")
+        self.assertEqual(cleared_walls, [])
+        self.assertEqual(record["cleared"]["tracks"], 1)
+
+    async def test_a_mute_is_reapplied_on_every_rebuild(self):
+        """源文件清 0 之后用量会长回来 —— 所以 muted 必须在每次重建时重新套用。"""
+        first, _w, _p = await self._build(make_memory([(ROLE_USER, "EVA 看腻了")]).entries(),
+                                          hits={"EVA": ["/w/1.png"]})
+        second, cleared_walls, _p = await self._build(
+            make_memory([(ROLE_USER, "换一张壁纸")]).entries(), history=[first],
+            hits={"EVA": ["/w/1.png", "/w/2.png"]})       # 源文件里又有了用量
+        row = [r for r in second["walls"]["ip"] if r["name"] == "EVA"][0]
+        self.assertEqual(row["weight"], 0.0, "老用量不许把它顶回来")
+        self.assertEqual(row["parts"]["hits"], 0)
+        self.assertIn("看腻", row["muted_text"])
+        self.assertEqual(cleared_walls, [], "这次没有新的负反馈 -> 不再重复清")
+
+    async def test_unmatched_feedback_is_recorded_but_changes_nothing(self):
+        memory = make_memory([(ROLE_USER, "不想听周杰伦了")])
+        sources, cleared_walls, cleared_plays = fake_sources(tracks=[a_track()])
+        record = await build_profile(memory.entries(), sources=sources, llm=None, now=NOW)
+        self.assertEqual(record["feedback"], [])
+        self.assertEqual(record["unmatched_feedback"], [], "识别不出实体 -> 连记录都不产生")
+        self.assertEqual((cleared_walls, cleared_plays), ([], []))
+
+
+# ===========================================================================
+#  3) 心情（调模型）
+# ===========================================================================
+class TestMoodPromptAndParsing(unittest.TestCase):
+    def test_the_prompt_carries_the_scene_and_the_closed_vocabulary(self):
+        prompt = mood_prompt("[study] 用户: 有点累了", ["study"], clock="23:40", reason="攒满了")
+        for label in MOOD_LABELS:
+            self.assertIn(label, prompt)
+        self.assertIn("study", prompt)
+        self.assertIn("23:40", prompt)
+        self.assertIn("有点累了", prompt)
+
+    def test_parsing_accepts_the_vocabulary_and_refuses_to_guess(self):
+        self.assertEqual(parse_mood("calm"), "calm")
+        self.assertEqual(parse_mood("CALM."), "calm")
+        self.assertEqual(parse_mood("疲惫"), "tired")
+        self.assertEqual(parse_mood("unknown"), MOOD_UNKNOWN)
+        self.assertIsNone(parse_mood(""), "空回答不算")
+        self.assertIsNone(parse_mood("我觉得他可能有点累吧"), "一整句话 -> 不采信")
+        self.assertIsNone(parse_mood("tired and calm"), "两个词 -> 不采信")
+
+
+class TestAskMood(unittest.IsolatedAsyncioTestCase):
+    async def test_a_good_answer_is_used(self):
+        result = await ask_mood(FakeLLM("tired"), "提问")
+        self.assertEqual(result["label"], "tired")
+        self.assertTrue(result["ok"])
+
+    async def test_a_broken_answer_lands_on_unknown_not_a_guess(self):
+        result = await ask_mood(FakeLLM("我觉得他有点累"), "提问")
+        self.assertEqual(result["label"], MOOD_UNKNOWN)
+        self.assertFalse(result["ok"])
+        self.assertIn("有点累", result["raw"], "原话留着, 好复核")
+
+    async def test_a_failing_model_does_not_raise(self):
+        result = await ask_mood(FakeLLM(exc=RuntimeError("模型炸了")), "提问")
+        self.assertEqual(result["label"], MOOD_UNKNOWN)
+        self.assertIn("模型炸了", result["error"])
+
+
+class TestBuildProfileMood(unittest.IsolatedAsyncioTestCase):
+    async def test_mood_comes_from_the_model_with_the_scene(self):
+        memory = make_memory([(ROLE_USER, "今天有点累"), (ROLE_ASSISTANT, "那早点休息")],
+                             states=["study", "study"])
+        sources, _w, _p = fake_sources()
+        llm = FakeLLM("tired")
+        record = await build_profile(memory.entries(), sources=sources, llm=llm, now=NOW,
+                                     clock="23:40")
+        self.assertEqual(record["mood"]["label"], "tired")
+        self.assertEqual(record["mood"]["zh"], "疲惫")
+        self.assertTrue(record["mood"]["ok"])
+        self.assertIn("[study]", llm.prompts[0], "场景（当时哪个模式）要进提示词")
+
+    async def test_without_a_model_it_says_unknown_not_a_guess(self):
+        memory = make_memory([(ROLE_USER, "今天有点累")])
+        sources, _w, _p = fake_sources()
+        record = await build_profile(memory.entries(), sources=sources, llm=None, now=NOW)
+        self.assertEqual(record["mood"]["label"], MOOD_UNKNOWN)
+        self.assertIn("没有模型", record["mood"]["error"])
+        self.assertFalse(record["mood"]["ok"])
+
+    async def test_confidence_is_low_when_the_samples_are_thin(self):
+        memory = make_memory([(ROLE_USER, "累")])
+        sources, _w, _p = fake_sources()
+        record = await build_profile(memory.entries(), sources=sources, llm=FakeLLM("tired"),
+                                     now=NOW)
+        self.assertEqual(record["mood"]["confidence"], "low")
+        self.assertIn("对话", record["thin"])
+
+    async def test_the_dialogue_text_is_not_persisted(self):
+        memory = make_memory([(ROLE_USER, "今天有点累")])
+        sources, _w, _p = fake_sources()
+        record = await build_profile(memory.entries(), sources=sources, llm=FakeLLM("tired"),
+                                     now=NOW)
+        blob = json.dumps(record, ensure_ascii=False)
+        self.assertNotIn("今天有点累", blob, "记忆不落盘 -> 画像里也不许有原文")
+        self.assertGreater(record["mood"]["excerpt_chars"], 0, "只留长度, 好知道看了多少")
+
+
+# ===========================================================================
+#  4) 记录与落盘
+# ===========================================================================
+class TestBuildProfileRecord(unittest.IsolatedAsyncioTestCase):
+    async def test_the_record_has_the_three_blocks_and_samples(self):
+        memory = make_memory([(ROLE_USER, "放点米津玄師的歌"), (ROLE_USER, "EVA 那张不错")])
+        sources, _w, _p = fake_sources(
+            hits={"EVA": ["/w/1.png", "/w/2.png"]},
+            tracks=[a_track("1", plays=3, last_played="2026-09-24T21:00:00")])
+        record = await build_profile(memory.entries(), sources=sources, llm=FakeLLM("relaxed"),
+                                     now=NOW, trigger={"reason": "chat_chars", "chars": 2004,
+                                                       "turns": 2})
+        self.assertEqual(record["version"], 1)
+        self.assertEqual(set(record), {"version", "built_at", "trigger", "samples", "walls",
+                                       "music", "mood", "feedback", "unmatched_feedback",
+                                       "muted", "cleared", "thin"})
+        self.assertEqual(record["trigger"]["chars"], 2004)
+        eva = [r for r in record["walls"]["ip"] if r["name"] == "EVA"][0]
+        self.assertEqual(eva["parts"]["hits"], 2)
+        self.assertEqual(eva["parts"]["mentions"], 1, "用户提过一次 EVA")
+        self.assertEqual([r["name"] for r in record["music"]["artist"]], ["米津玄師"])
+        self.assertEqual(record["samples"]["plays"], 3)
+        self.assertEqual(record["samples"]["chat_turns"], 2)
+
+    async def test_a_broken_wall_file_is_an_honest_error(self):
+        def boom():
+            raise ProfileError("壁纸数据读不了: 磁盘坏了")
+
+        sources, _w, _p = fake_sources()
+        sources.list_walls = boom
+        with self.assertRaises(ProfileError):
+            await build_profile(make_memory([(ROLE_USER, "在吗")]).entries(),
+                                sources=sources, llm=None, now=NOW)
+
+
+class TestPersistence(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="profile-")
+        self.path = os.path.join(self.tmp, "user_profile.jsonl")
+
+    def test_append_keeps_one_record_per_build(self):
+        append_record(self.path, {"version": 1, "built_at": "a"})
+        append_record(self.path, {"version": 1, "built_at": "b"})
+        records = read_records(self.path)
+        self.assertEqual([r["built_at"] for r in records], ["a", "b"])
+        self.assertEqual(latest_record(self.path)["built_at"], "b")
+
+    def test_reading_a_missing_file_is_empty_not_an_error(self):
+        self.assertEqual(read_records(os.path.join(self.tmp, "nope.jsonl")), [])
+        self.assertIsNone(latest_record(os.path.join(self.tmp, "nope.jsonl")))
+
+    def test_a_bad_line_is_skipped_not_fatal(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write('{"a": 1}\n这不是 JSON\n{"a": 2}\n')
+        self.assertEqual([r["a"] for r in read_records(self.path)], [1, 2])
+
+    def test_the_write_is_atomic(self):
+        append_record(self.path, {"a": 1})
+        leftovers = [name for name in os.listdir(self.tmp) if name.startswith(".")]
+        self.assertEqual(leftovers, [], "原子写不留半截临时文件")
+        with open(self.path, "r", encoding="utf-8") as handle:
+            self.assertTrue(handle.read().endswith("\n"), "一行一条, 结尾有换行")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

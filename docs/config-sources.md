@@ -42,14 +42,15 @@ GUI 读它的 `gui:` 段、读写它的 `llm:` 段、**只读**它的 `scheduler
 | `config/config.yaml` | **唯一真源** | 否（只提交 `config.example.yaml`） | 人 / GUI（设置页、模型测试页）/ **Agent（只在"删掉已触发的一次性日程"这一件事上，见 §3.1）** | Agent、GUI |
 | `config/wall_data.jsonl` | **派生数据**（第一行 = 标签向量缓存，其后一行一张图: 标签 + 图像向量 + 使用次数，Phase 7 T7-2 / T8-6） | 否（`.gitignore` 里单列一行） | `agent/vision/wall_data.py`（唯一写者）: `assistant tag --apply` 打标签，以及**运行期换壁纸时给那一张 `used` +1** | Agent（挑图/检索/按用量挑）、`assistant tag` 自己（算增量 + 复用词表向量） |
 | `config/music_library.jsonl` | **本地数据**（一行一首歌: id + tags + 播放次数，Phase 7 T8-3） | 否（`.gitignore` 里单列一行） | `agent/media/music_library.py`（唯一写者）: `assistant music` 导入/打标、以及运行期"听满 30 秒计一次" | Agent（挑歌）、`assistant music` |
+| `config/user_profile.jsonl` | **本地数据**（一次构建一行: IP/歌手**权重** + 心情 + 清零记录，Phase 7 T9-2） | 否（`.gitignore` 里单列一行） | `agent/core/user_profile.py`（唯一写者）: Agent 在"纯对话攒到 2000 字"时构建（T9-3） | Agent（暂不应用）；**模型看不到**（不是工具） |
 | `config/netease_cookie.json` | **T8-1 的保险条目**（板端**不放** cookie；登录态住在 PC 上 neteasecli 自己的 store） | 否（`.gitignore` 里单列一行） | 谁都不写（T8-7 核对过: 代码里没有任何地方读它） | — |
 | `llm/config/llm.env` | **派生**（喂 llama-server） | 否 | `ConfigSyncer`（GUI 保存时、或 `gui_config_sync` CLI） | llama-server 启动脚本 |
 | `config/config.example.yaml` | 模板 | **是** | 人 | 人（`cp` 起步） |
 
 > ⚠ `config/` 下现在有**三类**东西：**真源**（`config.yaml`，人/GUI 写）、**派生/本地数据**
-> （`wall_data.jsonl`、`music_library.jsonl`，机器写）、**凭据**（只剩 `netease_cookie.json`
-> 这个位子 —— T8-7 核对后确认它是 **T8-1 留下的空保险**：登录态其实在 **PC 上**
-> `neteasecli` 自己的 store 里，板端不存、代码也不读）。
+> （`wall_data.jsonl`、`music_library.jsonl`、`user_profile.jsonl`，机器写）、**凭据**（只剩
+> `netease_cookie.json` 这个位子 —— T8-7 核对后确认它是 **T8-1 留下的空保险**：登录态其实在
+> **PC 上** `neteasecli` 自己的 store 里，板端不存、代码也不读）。
 > 别因为"都在 config 目录里"就以为都能手改 —— 手改 `wall_data.jsonl` **基本没意义**
 > （下次打标签或换壁纸会覆盖那一行；只有 `used`/`last_used` 是运行期真的会被改的字段，
 > 想清零就直接删文件重打标签，见 [`tagging.md`](tagging.md) §6.1）；

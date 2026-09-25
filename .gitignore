@@ -124,6 +124,10 @@ config/netease_cookie.json.bak
 # 从云歌单**导入一次** id 之后就不再看云歌单了，属于"这台机器听过什么"，不入库。
 config/music_library.jsonl
 config/music_library.jsonl.bak
+# 用户画像（T9-2）: 一次构建一行（IP/歌手权重 + 心情 + 清零记录），**板端本地数据**。
+# ⚠ 里面**没有**对话原文（纯对话记忆不落盘），唯一的原话是"不想听/看 X"那句（凭据）。
+config/user_profile.jsonl
+config/user_profile.jsonl.bak
 # 板端部署用的凭据目录（deploy.ps1 之外的 creds/，见 docs/sunshine-pairing-findings.md）:
 # 除 client.pem / client.key 外还可能放 client.der / clientcert.hex 等中间产物，
 # 那些**不在** *.pem / *.key 的覆盖范围内，所以整个目录一起忽略。

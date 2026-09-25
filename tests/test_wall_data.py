@@ -511,6 +511,34 @@ class TestUsage(unittest.TestCase):
         record = wall_data.read_records(self.data)[0][0]
         self.assertEqual(wall_data.usage_of(record), {"used": 7, "last_used": "t7"})
 
+    # ---- T9-2: 负反馈清零（"不想再看这个 IP 了" -> 源文件也清 0）----
+    def test_clear_usage_zeroes_only_the_wanted_paths(self):
+        wall_data.write_records(self.data, [make_record(self.a, used=5, last_used="t5"),
+                                            make_record(self.b, used=3, last_used="t3")])
+        cleared = wall_data.clear_usage_in_file(self.data, [self.a])
+        self.assertEqual(cleared, 1)
+        by_path = {record["path"]: wall_data.usage_of(record)
+                   for record in wall_data.read_records(self.data)[0]}
+        self.assertEqual(by_path[self.a], {"used": 0, "last_used": None})
+        self.assertEqual(by_path[self.b], {"used": 3, "last_used": "t3"}, "别的图不动")
+
+    def test_clear_usage_does_not_write_when_nothing_matches(self):
+        wall_data.write_records(self.data, [make_record(self.a, used=5, last_used="t5")])
+        with open(self.data, "r", encoding="utf-8") as handle:
+            before = handle.read()
+        self.assertEqual(wall_data.clear_usage_in_file(self.data, [self.b]), 0)
+        self.assertEqual(wall_data.clear_usage_in_file(self.data, []), 0)
+        with open(self.data, "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), before, "没有要清的 -> 一个字节都不写")
+
+    def test_clear_usage_keeps_the_vocab_header(self):
+        wall_data.write_records(self.data, [make_record(self.a, used=5, last_used="t5")],
+                                vocab={"kind": wall_data.VOCAB_KIND, "axes": {}})
+        wall_data.clear_usage_in_file(self.data, [self.a])
+        loaded = wall_data.load(self.data)
+        self.assertIsNotNone(loaded["vocab"], "清用量不该把词表头弄丢")
+        self.assertEqual(wall_data.usage_of(loaded["records"][0])["used"], 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

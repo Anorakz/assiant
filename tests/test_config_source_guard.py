@@ -223,6 +223,10 @@ ALLOWED_WRITERS = {
     # ⚠ 同样是本地数据不是真源: 一行一首歌（id + tags + 播放次数）。写入路径两条:
     #   `assistant music` 导入/打标, 以及运行期"听满 30 秒计一次"。
     "agent/media/music_library.py",
+    # T9-2 新增的第五个写入者: **用户画像**（config/user_profile.jsonl）。
+    # ⚠ 一次构建一行; 真源仍然只有 config.yaml。写入者只有画像内核这一条路径
+    #   （T9-3 由 Agent 在"纯对话攒到 2000 字"时触发; 模型看不到、也调不到它）。
+    "agent/core/user_profile.py",
 }
 
 

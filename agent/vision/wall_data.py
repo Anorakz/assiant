@@ -82,6 +82,7 @@ __all__ = [
     "with_usage",
     "bump_usage",
     "bump_usage_in_file",
+    "clear_usage_in_file",
     "usage_summary",
     "make_vocab_record",
     "vocab_matches",
@@ -322,6 +323,34 @@ def bump_usage_in_file(path: str, image_path: str,
         return None
     write_records(path, records, vocab=loaded["vocab"])
     return result
+
+
+def clear_usage_in_file(path: str, image_paths: Sequence[str]) -> int:
+    """把这些图的 `used` / `last_used` **清零**并整文件写回（原子写 + .bak）。
+
+    @return 真的清掉几条（0 = 这些图都不在数据文件里, **不写文件**）
+    @raise WallDataError 文件读不了 / 写不了
+    @note T9-2: 用户说"不想再看这个 IP 了"时用 —— 清 0 之后这些图会重新变成
+          "用得最少的"，**下次挑最少的会先把它们挑出来**（这是你定的设计意图：
+          清零就是把偏好归零、让它重新进候选），不是 bug。
+    @note 仍然是"唯一写者"里的那条路（`write_records()`）。
+    """
+    wanted = {str(item) for item in (image_paths or ())}
+    if not wanted:
+        return 0
+    loaded = load(path)
+    cleared = 0
+    records: List[Mapping[str, Any]] = []
+    for record in loaded["records"]:
+        if str(record.get("path")) in wanted and (usage_of(record)["used"]
+                                                  or record.get("last_used")):
+            record = with_usage(record, {"used": 0, "last_used": None})
+            cleared += 1
+        records.append(record)
+    if not cleared:
+        return 0
+    write_records(path, records, vocab=loaded["vocab"])
+    return cleared
 
 
 def usage_summary(records: Sequence[Mapping[str, Any]], top: int = 3) -> Dict[str, Any]:

@@ -1,0 +1,685 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+agent/core/user_profile.py — **用户画像内核**（Phase 7 T9-2）
+
+它算什么（三件, 前两件是**权重**, 第三件**调模型**）
+    1. **壁纸 IP 喜好**（权重）: 用户换过的图 × `wallpaper.tagging.ip_presets` 的锚点
+       （纯 CPU 余弦, `TagIndex.match("ip=…")`）+ 纯对话里提到这个 IP 的次数
+    2. **歌手喜好**（权重）: `music_library.jsonl` 的 `plays` × `tags.artist` +
+       纯对话里提到这个歌手的次数
+    3. **当前心情**: 把"纯对话片段 + **当时场景**（idle/study/game/sleep + 时间）"交给模型,
+       只许回封闭词表里的一个词; 解析不出就 `unknown`（**不编**）
+
+权重怎么算（每个数都留分子分母, 能复核）
+    权重 = 0.6×用量占比 + 0.3×提及占比 + 0.1×近期占比      （IP）
+    权重 = 0.7×播放占比 + 0.3×提及占比                      （歌手）
+    占比 = 该项 / 所有候选的和（都不是绝对值, 是"谁相对更重"）; 近期 = 30 天内线性衰减。
+
+**负反馈 = 直接清零**（你 T9 定的, 且**源文件也清 0**）
+    用户说"不想听 X 了 / 别看 X 了 / 听腻了 / 换掉 X"（负向词 + 实体名同时出现才算）→
+      · 画像里 X 的权重与全部分量归 0, 并记 `muted_at` + 原话;
+      · **源文件也清 0**: 那些图的 `used`/`last_used`、那些歌的 `plays`/`last_played`
+        （走 `wall_data.clear_usage_in_file()` / `music_library.clear_plays()`, 唯一的两个写者）。
+      ⚠ 清零之后它们会重新变成"用得/听得最少的" → **下次"挑最少的"先把它们挑出来**。
+        这是你明确的设计意图（"清零 = 把偏好归零、重新进候选"）, 不是副作用。
+      ⚠ 识别不出实体名时**什么都不做**, 只记一条 `unmatched`（宁可不猜）。
+
+落盘
+    `config/user_profile.jsonl`: **一次构建一行**（原子写; 本模块是唯一写者）。
+    全局的"不想看/听"名单是**上一行里记着的** `muted` —— 每次构建都先算、再套用,
+    否则源文件里新长出来的用量会把它顶回来。
+
+它**不做**什么
+    · 不决定"什么时候构建"（那是 T9-3: 纯对话攒到 2000 字, Agent 触发）;
+    · 不把画像用在挑图/挑歌上（你定的"暂不应用"）;
+    · 不把画像塞进每轮上下文（模型看不到它）。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+__all__ = [
+    "PROFILE_VERSION",
+    "DEFAULT_PROFILE_FILE",
+    "DEFAULT_IP_FILE",
+    "MOOD_LABELS",
+    "MOOD_ZH",
+    "MOOD_UNKNOWN",
+    "NEGATIVE_CUES",
+    "IP_WEIGHTS",
+    "ARTIST_WEIGHTS",
+    "RECENCY_DAYS",
+    "Feedback",
+    "ProfileError",
+    "resolve_profile_file",
+    "detect_negative_feedback",
+    "wallpaper_weights",
+    "artist_weights",
+    "mood_prompt",
+    "parse_mood",
+    "ask_mood",
+    "build_profile",
+    "append_record",
+    "read_records",
+    "latest_record",
+    "muted_from_records",
+]
+
+PROFILE_VERSION = 1
+
+#: 画像文件（相对于**仓库根**解析, 与其它本地数据同款）
+DEFAULT_PROFILE_FILE = "config/user_profile.jsonl"
+
+#: `assistant tag` 那份壁纸数据（IP 喜好的"用量"和"锚点"都从它来）
+DEFAULT_IP_FILE = "config/wall_data.jsonl"
+
+#: 心情的**封闭词表**（英文 key + 中文; 模型只许回这里面之一）
+MOOD_LABELS: Tuple[str, ...] = ("focused", "relaxed", "happy", "tired", "stressed", "calm")
+MOOD_ZH: Dict[str, str] = {
+    "focused": "专注", "relaxed": "放松", "happy": "开心",
+    "tired": "疲惫", "stressed": "烦躁", "calm": "平静",
+    "unknown": "说不准",
+}
+MOOD_UNKNOWN = "unknown"
+
+#: 负向词（**必须和实体名同时出现**才算一条负反馈 —— 只看到"不想听"就去猜是谁, 会猜错）
+NEGATIVE_CUES: Tuple[str, ...] = (
+    "不想听", "不想看", "不爱听", "不爱看", "别放", "别再放", "别给我放", "别给我看",
+    "不要放", "不要看", "别听", "别看", "别再听", "别再给",
+    "听腻", "看腻", "腻了", "讨厌", "不喜欢", "换掉", "受不了",
+    "no more", "dislike", "tired of",
+)
+
+#: 权重配方（改这两行就等于改口径 —— 文档 docs/profile.md 里有同一张表）
+IP_WEIGHTS = {"usage": 0.6, "mention": 0.3, "recency": 0.1}
+ARTIST_WEIGHTS = {"plays": 0.7, "mention": 0.3}
+
+#: "近期"的窗口（天）: 30 天前的算 0 分, 越新越接近 1
+RECENCY_DAYS = 30.0
+
+
+class ProfileError(ValueError):
+    """画像文件读不了/写不了, 或配置里的路径不对。"""
+
+
+# ---------------------------------------------------------------------------
+#  路径
+# ---------------------------------------------------------------------------
+def _repo_root() -> str:
+    from ..config import config_dir
+
+    return str(config_dir().parent)
+
+
+def resolve_profile_file(configured: Optional[str] = None) -> str:
+    """把配置里的 `profile.file` 解析成绝对路径（相对路径按**仓库根**, 与其它数据同款）。"""
+    text = configured.strip() if isinstance(configured, str) else ""
+    if not text:
+        return os.path.normpath(os.path.join(_repo_root(), DEFAULT_PROFILE_FILE))
+    if os.path.isabs(text):
+        return os.path.normpath(text)
+    return os.path.normpath(os.path.join(_repo_root(), text))
+
+
+# ---------------------------------------------------------------------------
+#  负反馈
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class Feedback:
+    """一条识别出来的负反馈（"不想听 X 了"）。"""
+
+    axis: str                 # "ip" | "artist"
+    name: str                 # 实体名（IP 名 / 歌手名）
+    text: str                 # 原话
+    ts: float = 0.0
+    matched: str = ""         # 原话里那一次写法（大小写可能不同）
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"axis": self.axis, "name": self.name, "text": self.text,
+                "ts": self.ts, "matched": self.matched}
+
+
+def detect_negative_feedback(entries: Sequence[Any], known_ips: Sequence[str],
+                             known_artists: Sequence[str]) -> List[Feedback]:
+    """从纯对话里挑出"不想听/看某个实体"的话。
+
+    @param entries `ChatMemory.entries()`（只要 `role == "user"` 的会被看）
+    @return 识别出来的负反馈（**实体名对不上就一条都不产生** —— 宁可不猜）
+    @note 判据是"负向词 + 实体名同时出现"。同一句话里同时骂两个也会各记一条。
+    """
+    lookup: List[Tuple[str, str]] = []
+    for name in known_ips or ():
+        if str(name).strip():
+            lookup.append(("ip", str(name).strip()))
+    for name in known_artists or ():
+        if str(name).strip():
+            lookup.append(("artist", str(name).strip()))
+
+    found: List[Feedback] = []
+    for entry in entries or ():
+        if getattr(entry, "role", "") != "user":
+            continue
+        text = str(getattr(entry, "text", "") or "")
+        lowered = text.lower()
+        if not any(cue.lower() in lowered for cue in NEGATIVE_CUES):
+            continue
+        for axis, name in lookup:
+            if name.lower() in lowered:
+                found.append(Feedback(axis=axis, name=name, text=text,
+                                      ts=float(getattr(entry, "ts", 0.0) or 0.0),
+                                      matched=name))
+    return found
+
+
+def muted_from_records(records: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """把历史记录里的"不想看/听"名单汇总出来（**最新的那次说了算**）。
+
+    @return {"ip": {名字: {...}}, "artist": {名字: {...}}}
+    @note 顺序: 老 -> 新, 后面的覆盖前面的（用户后来又想听了就再构建一次即可）。
+    """
+    muted: Dict[str, Dict[str, Any]] = {"ip": {}, "artist": {}}
+    for record in records or ():
+        blob = record.get("muted") if isinstance(record, Mapping) else None
+        if not isinstance(blob, Mapping):
+            continue
+        for axis in ("ip", "artist"):
+            for item in blob.get(axis) or ():
+                if isinstance(item, Mapping) and str(item.get("name") or ""):
+                    muted[axis][str(item["name"])] = dict(item)
+    return muted
+
+
+# ---------------------------------------------------------------------------
+#  权重
+# ---------------------------------------------------------------------------
+def _share(value: float, total: float) -> float:
+    return round(float(value) / float(total), 4) if total else 0.0
+
+
+def _age_days(stamp: Any, now: datetime) -> Optional[float]:
+    """ISO 时间戳 -> 多少天前（解析不了返回 None）。"""
+    text = str(stamp or "").strip()
+    if not text:
+        return None
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return max(0.0, (now - when).total_seconds() / 86400.0)
+
+
+def _recency(stamp: Any, now: datetime) -> float:
+    """30 天内线性衰减到 1（越新越接近 1）, 更早/没有 = 0。"""
+    age = _age_days(stamp, now)
+    if age is None:
+        return 0.0
+    return max(0.0, 1.0 - age / RECENCY_DAYS)
+
+
+def wallpaper_weights(usages: Mapping[str, int], hits: Mapping[str, Sequence[str]],
+                      mentions: Mapping[str, int], lasts: Mapping[str, Any],
+                      now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """算各 IP 的权重（**纯函数** —— 输入是"已经查好的数", 方便单测与复核）。
+
+    @param usages   {IP 名: 用户换过的图里"像该 IP"的张数}（= 命中张数）
+    @param hits     {IP 名: [那些图的路径]}（只进记录, 不进公式）
+    @param mentions {IP 名: 对话里提到它的次数}
+    @param lasts    {IP 名: 最近一次用到的时间戳}
+    @return [{name, weight, parts:{hits, mentions, recency, usage_share, mention_share,
+             recency_share}, last_used, images}]（按权重降序; 权重都是 0 时按名字排）
+    """
+    now = now or datetime.now()
+    names = sorted(set(list(usages) + list(mentions)))
+    if not names:
+        return []
+    total_hits = float(sum(max(0, int(usages.get(n) or 0)) for n in names))
+    total_mentions = float(sum(max(0, int(mentions.get(n) or 0)) for n in names))
+    recency_values = {n: _recency(lasts.get(n), now) for n in names}
+    total_recency = float(sum(recency_values.values()))
+
+    out: List[Dict[str, Any]] = []
+    for name in names:
+        usage_share = _share(usages.get(name) or 0, total_hits)
+        mention_share = _share(mentions.get(name) or 0, total_mentions)
+        recency_share = _share(recency_values[name], total_recency)
+        weight = (IP_WEIGHTS["usage"] * usage_share
+                  + IP_WEIGHTS["mention"] * mention_share
+                  + IP_WEIGHTS["recency"] * recency_share)
+        out.append({
+            "name": name,
+            "weight": round(weight, 4),
+            "parts": {"hits": int(usages.get(name) or 0),
+                      "mentions": int(mentions.get(name) or 0),
+                      "recency": round(recency_values[name], 4),
+                      "usage_share": usage_share,
+                      "mention_share": mention_share,
+                      "recency_share": recency_share},
+            "last_used": lasts.get(name),
+            "images": sorted(str(p) for p in (hits.get(name) or ())),
+        })
+    out.sort(key=lambda item: (-item["weight"], item["name"]))
+    return out
+
+
+def artist_weights(plays: Mapping[str, int], mentions: Mapping[str, int],
+                   lasts: Optional[Mapping[str, Any]] = None,
+                   tracks: Optional[Mapping[str, Sequence[str]]] = None) -> List[Dict[str, Any]]:
+    """算各歌手的权重（纯函数, 同 `wallpaper_weights`）。"""
+    names = sorted(set(list(plays) + list(mentions)))
+    if not names:
+        return []
+    total_plays = float(sum(max(0, int(plays.get(n) or 0)) for n in names))
+    total_mentions = float(sum(max(0, int(mentions.get(n) or 0)) for n in names))
+    out: List[Dict[str, Any]] = []
+    for name in names:
+        play_share = _share(plays.get(name) or 0, total_plays)
+        mention_share = _share(mentions.get(name) or 0, total_mentions)
+        weight = ARTIST_WEIGHTS["plays"] * play_share + ARTIST_WEIGHTS["mention"] * mention_share
+        out.append({
+            "name": name,
+            "weight": round(weight, 4),
+            "parts": {"plays": int(plays.get(name) or 0),
+                      "mentions": int(mentions.get(name) or 0),
+                      "plays_share": play_share,
+                      "mention_share": mention_share},
+            "last_played": (lasts or {}).get(name),
+            "tracks": sorted(str(item) for item in (tracks or {}).get(name) or ()),
+        })
+    out.sort(key=lambda item: (-item["weight"], item["name"]))
+    return out
+
+
+def mention_counts(entries: Sequence[Any], names: Sequence[str],
+                   roles: Sequence[str] = ("user",)) -> Dict[str, int]:
+    """这些名字在纯对话里被提到几次（默认只数**用户**说的）。"""
+    counts = {str(name): 0 for name in names}
+    for entry in entries or ():
+        if roles and getattr(entry, "role", "") not in roles:
+            continue
+        text = str(getattr(entry, "text", "") or "").lower()
+        for name in counts:
+            if name and name.lower() in text:
+                counts[name] += 1
+    return counts
+
+
+# ---------------------------------------------------------------------------
+#  心情（**唯一一次模型调用**）
+# ---------------------------------------------------------------------------
+def mood_prompt(excerpt: str, states: Sequence[str], clock: Optional[str] = None,
+                reason: str = "") -> str:
+    """拼"判心情"的那个提示词。
+
+    @param excerpt 纯对话片段（`ChatMemory.excerpt()`, 已经带 `[study]` 这种场景标记）
+    @param states  这段对话里出现过的模式（**场景**依据之一）
+    @param clock   现在几点（`HH:MM`; 夜里/清晨也是场景）
+    @param reason  这次为什么构建（攒满/等等）, 只影响提示词里的那句话
+    """
+    scope = "/".join([str(item) for item in states if str(item)]) or "未知"
+    return (
+        "根据下面这段对话和它发生的场景, 判断**用户当前的心情**。\n"
+        "只允许从这 %d 个词里选一个: %s\n"
+        "（中文对应: %s）\n"
+        "场景: 板子在 %s 模式; 现在 %s。%s\n"
+        "对话:\n%s\n"
+        "只输出那一个英文词, 不要解释、不要标点。判不出来就输出 unknown。"
+        % (len(MOOD_LABELS), " / ".join(MOOD_LABELS),
+           " / ".join("%s=%s" % (k, MOOD_ZH[k]) for k in MOOD_LABELS),
+           scope, clock or "时间未知", reason or "", excerpt or "(还没说什么)")
+    )
+
+
+def parse_mood(reply: str) -> Optional[str]:
+    """把模型的回答解析成词表里的一个词（**认不出就 None, 不硬套**）。
+
+    @note 容忍大小写/标点/中英文（"疲惫"/"tired."/"TIRED"都可以）; 一句话里出现
+          两个不同的词 -> 也返回 None（说明它没照规矩来, 那就不采信）。
+    """
+    text = str(reply or "").strip().lower()
+    if not text:
+        return None
+    found = []
+    for label in MOOD_LABELS:
+        if label in text or MOOD_ZH[label] in str(reply or ""):
+            found.append(label)
+    if MOOD_UNKNOWN in text:
+        return MOOD_UNKNOWN
+    if len(found) == 1:
+        return found[0]
+    return None
+
+
+async def ask_mood(llm: Any, prompt: str) -> Dict[str, Any]:
+    """问一次模型（**唯一的模型调用**）。
+
+    @return {"label", "raw", "ok", "error"?, "ms"} —— 失败/解析不出都给 `unknown`
+    @note 不抛异常: 判心情失败不该让整次构建失败（调用方照样落一行, 记下 raw）。
+    """
+    import time
+
+    started = time.time()
+    try:
+        raw = await llm.chat(prompt)
+    except Exception as exc:                # noqa: BLE001 - 单次模型失败不该炸构建
+        return {"label": MOOD_UNKNOWN, "raw": "", "ok": False,
+                "error": "%s: %s" % (type(exc).__name__, exc),
+                "ms": int((time.time() - started) * 1000)}
+    label = parse_mood(raw)
+    return {"label": label or MOOD_UNKNOWN, "raw": str(raw or "").strip(),
+            "ok": label is not None, "ms": int((time.time() - started) * 1000)}
+
+
+# ---------------------------------------------------------------------------
+#  构建（把上面几块拼起来 + 负反馈清零）
+# ---------------------------------------------------------------------------
+@dataclass
+class Sources:
+    """**外部依赖的口子**（真实实现在 `repo_sources()`; 单测给假的就行）。"""
+
+    list_walls: Callable[[], List[Dict[str, Any]]] = field(default=lambda: [])
+    match_ip: Callable[[str], List[str]] = field(default=lambda _name: [])
+    list_tracks: Callable[[], List[Dict[str, Any]]] = field(default=lambda: [])
+    clear_wall_usage: Callable[[Sequence[str]], int] = field(default=lambda _paths: 0)
+    clear_plays: Callable[[Sequence[str]], int] = field(default=lambda _ids: 0)
+    ip_names: Sequence[str] = ()
+    profile_file: str = ""
+    wall_file: str = ""
+    library_file: str = ""
+
+
+def repo_sources(config: Optional[Mapping[str, Any]] = None,
+                 profile_file: Optional[str] = None) -> Sources:
+    """真实依赖: 读 `wall_data.jsonl` / `music_library.jsonl`, 锚点走 `TagIndex`。"""
+    from ..media import music_library
+    from ..vision import wall_data
+    from ..vision.tag_index import TagIndex
+
+    node: Any = config or {}
+    for key in ("wallpaper", "tagging"):
+        node = node.get(key) if isinstance(node, Mapping) else None
+        if node is None:
+            break
+    tagging = node if isinstance(node, Mapping) else {}
+    ip_presets = tagging.get("ip_presets") or {}
+    wall_file = wall_data.resolve_data_file(tagging.get("data_file"))
+    lib_node: Any = (config or {}).get("music") if isinstance(config, Mapping) else None
+    library_file = music_library.resolve_library_file(
+        (lib_node or {}).get("library_file") if isinstance(lib_node, Mapping) else None)
+    out_file = resolve_profile_file(profile_file)
+
+    def list_walls() -> List[Dict[str, Any]]:
+        try:
+            records, _problems = wall_data.read_records(wall_file)
+        except wall_data.WallDataError as exc:
+            raise ProfileError("壁纸数据读不了: %s" % exc)
+        return [dict(item) for item in records]
+
+    cached: Dict[str, Any] = {}
+
+    def _index() -> Any:
+        """标签索引只建一次（一个 IP 建一次等于把 234KB 读十遍）。"""
+        if "index" not in cached:
+            try:
+                cached["index"] = TagIndex.from_file(wall_file)
+            except Exception as exc:             # noqa: BLE001 - 索引坏了就当没锚点
+                raise ProfileError("壁纸标签索引读不了: %s" % exc)
+        return cached["index"]
+
+    def match_ip(name: str) -> List[str]:
+        index = _index()
+        if not index.count():
+            return []
+        result = index.match("ip=%s" % name, presets=ip_presets)
+        return [str(path) for path in (result.pool if result.ok else [])]
+
+    def list_tracks() -> List[Dict[str, Any]]:
+        tracks, _problems = music_library.read_tracks(library_file)
+        return [dict(item) for item in tracks]
+
+    def clear_wall_usage(paths: Sequence[str]) -> int:
+        return wall_data.clear_usage_in_file(wall_file, list(paths))
+
+    def clear_plays(ids: Sequence[str]) -> int:
+        return music_library.clear_plays(library_file, list(ids))
+
+    return Sources(list_walls=list_walls, match_ip=match_ip, list_tracks=list_tracks,
+                   clear_wall_usage=clear_wall_usage, clear_plays=clear_plays,
+                   ip_names=sorted(str(k) for k in ip_presets),
+                   profile_file=out_file, wall_file=wall_file, library_file=library_file)
+
+
+def _artists_of(track: Mapping[str, Any]) -> List[str]:
+    tags = track.get("tags") or {}
+    values = tags.get("artist") if isinstance(tags, Mapping) else None
+    if isinstance(values, str):
+        values = [values]
+    out = [str(item).strip() for item in (values or []) if str(item).strip()]
+    if not out and str(track.get("artists") or "").strip():
+        out = [part.strip() for part in str(track["artists"]).replace("/", ",").split(",")
+               if part.strip()]
+    return out
+
+
+def _aware(moment: Optional[datetime]) -> datetime:
+    """统一成 aware（跟数据文件里的 `datetime.now().isoformat()` 同一种本地时间）。"""
+    return moment or datetime.now()
+
+
+async def build_profile(entries: Sequence[Any], *, config: Optional[Mapping[str, Any]] = None,
+                        sources: Optional[Sources] = None, llm: Any = None,
+                        now: Optional[datetime] = None, reason: str = "chat_chars",
+                        trigger: Optional[Mapping[str, Any]] = None,
+                        clock: Optional[str] = None,
+                        history: Optional[Sequence[Mapping[str, Any]]] = None) -> Dict[str, Any]:
+    """构建一条画像记录（**不落盘** —— 落盘是 `append_record()` 的事, 好测）。
+
+    @param entries 纯对话（`ChatMemory.entries()`）
+    @param history 已有的画像记录（用来继承"不想看/听"名单, 只读最后一条也行）
+    @param llm     判心情用的 provider（None = 不判, 记 unknown; 单测可以不传）
+    @return 一条记录（见模块头; `walls.ip` / `music.artist` / `mood` 三块）
+    """
+    src = sources or repo_sources(config)
+    moment = _aware(now)
+    items = list(entries or ())
+    previous = list(history or ())
+
+    walls = src.list_walls()
+    tracks = src.list_tracks()
+
+    # ---- 1) 壁纸 IP 权重 ----
+    hit_counts: Dict[str, int] = {}
+    hit_paths: Dict[str, List[str]] = {}
+    lasts: Dict[str, Any] = {}
+    for name in src.ip_names:
+        try:
+            pool = list(src.match_ip(name))
+        except ProfileError:
+            pool = []
+        used = {}
+        for record in walls:
+            used[str(record.get("path"))] = record
+        matched = [path for path in pool if str(path) in used]
+        hit_counts[name] = len(matched)
+        hit_paths[name] = matched
+        stamps = [used[path].get("last_used") for path in matched if used[path].get("last_used")]
+        if stamps:
+            lasts[name] = max(str(item) for item in stamps)
+    wall_mentions = mention_counts(items, list(src.ip_names))
+    wall_rows = wallpaper_weights(hit_counts, hit_paths, wall_mentions, lasts, now=moment)
+
+    # ---- 2) 歌手权重 ----
+    plays: Dict[str, int] = {}
+    per_artist_tracks: Dict[str, List[str]] = {}
+    artist_last: Dict[str, Any] = {}
+    for track in tracks:
+        for artist in _artists_of(track):
+            plays[artist] = plays.get(artist, 0) + max(0, int(track.get("plays") or 0))
+            per_artist_tracks.setdefault(artist, []).append(str(track.get("id")))
+            stamp = track.get("last_played")
+            if stamp and str(stamp) > str(artist_last.get(artist) or ""):
+                artist_last[artist] = stamp
+    artist_names = sorted(plays)
+    artist_mentions = mention_counts(items, artist_names)
+    artist_rows = artist_weights(plays, artist_mentions, artist_last, per_artist_tracks)
+
+    # ---- 3) 负反馈: 清零（画像 + **源文件**）----
+    feedback = detect_negative_feedback(items, src.ip_names, artist_names)
+    muted = muted_from_records(previous)
+    cleared = {"wall_images": 0, "tracks": 0}
+    unmatched: List[Dict[str, Any]] = []
+    for item in feedback:
+        axis, name = item.axis, item.name
+        row = next((r for r in (wall_rows if axis == "ip" else artist_rows)
+                    if r["name"] == name), None)
+        if row is None:
+            unmatched.append(item.to_dict())
+            continue
+        if axis == "ip":
+            images = [str(p) for p in row.get("images") or ()]
+            cleared["wall_images"] += int(src.clear_wall_usage(images) or 0)
+            row["parts"] = {key: 0 for key in row["parts"]}
+            row["images"] = []
+            row["last_used"] = None
+        else:
+            ids = [str(x) for x in row.get("tracks") or ()]
+            cleared["tracks"] += int(src.clear_plays(ids) or 0)
+            row["parts"] = {key: 0 for key in row["parts"]}
+            row["tracks"] = []
+            row["last_played"] = None
+        row["weight"] = 0.0
+        row["muted_at"] = moment.isoformat(timespec="seconds")
+        row["muted_text"] = item.text
+        muted[axis][name] = {"axis": axis, "name": name, "at": row["muted_at"],
+                             "text": item.text}
+
+    # 继承下来的 muted: 每次重建都要**重新套用**（否则源文件里的老用量会把它顶回来）
+    for axis, rows in (("ip", wall_rows), ("artist", artist_rows)):
+        for row in rows:
+            item = muted.get(axis, {}).get(row["name"])
+            if not item:
+                continue
+            row["weight"] = 0.0
+            row["parts"] = {key: 0 for key in row["parts"]}
+            row["muted_at"] = item.get("at")
+            row["muted_text"] = item.get("text")
+    for rows in (wall_rows, artist_rows):
+        rows.sort(key=lambda item: (-item["weight"], item["name"]))
+
+    # ---- 4) 心情（唯一一次模型调用）----
+    states = sorted({getattr(entry, "state", "") for entry in items
+                     if getattr(entry, "state", "")})
+    if entries is not None and hasattr(entries, "excerpt"):
+        excerpt = entries.excerpt(max_chars=800)
+    elif items:
+        excerpt = "\n".join(
+            "%s%s: %s" % ("[%s] " % getattr(e, "state", "") if getattr(e, "state", "") else "",
+                          "用户" if getattr(e, "role", "") == "user" else "助手",
+                          getattr(e, "text", "")) for e in items[-8:])
+    else:
+        excerpt = ""
+    if llm is None:
+        mood = {"label": MOOD_UNKNOWN, "raw": "", "ok": False,
+                "error": "这次没有模型可用（没接 LLM）", "ms": 0,
+                "prompt_chars": 0}
+    else:
+        prompt = mood_prompt(excerpt, states, clock=clock, reason=reason)
+        mood = await ask_mood(llm, prompt)
+        mood["prompt_chars"] = len(prompt)
+
+    samples = {
+        "wall_tagged": len(walls),
+        "wall_images_used": sum(1 for r in walls if int(r.get("used") or 0) > 0),
+        "tracks": len(tracks),
+        "plays": sum(max(0, int(t.get("plays") or 0)) for t in tracks),
+        "chat_turns": sum(1 for e in items if getattr(e, "role", "") == "user"),
+        "chat_chars": sum(len(str(getattr(e, "text", "") or "")) for e in items),
+    }
+    thin = [key for key, value in (("壁纸用量", samples["wall_images_used"]),
+                                  ("音乐库", samples["tracks"]),
+                                  ("对话", samples["chat_turns"])) if value < 3]
+
+    return {
+        "version": PROFILE_VERSION,
+        "built_at": moment.isoformat(timespec="seconds"),
+        "trigger": dict(trigger or {"reason": reason}),
+        "samples": samples,
+        "walls": {"ip": wall_rows},
+        "music": {"artist": artist_rows},
+        "mood": {"label": mood.get("label") or MOOD_UNKNOWN,
+                 "zh": MOOD_ZH.get(mood.get("label") or MOOD_UNKNOWN, ""),
+                 "ok": bool(mood.get("ok")),
+                 "confidence": ("low" if (not mood.get("ok") or thin) else
+                                "medium" if samples["chat_turns"] < 8 else "high"),
+                 # ⚠ 这里**不存对话原文**（你定的"纯对话记忆不落盘"）—— 只存长度,
+                 #   要复核就去看日志里那段 excerpt。唯一留下的原话是 `muted_text`
+                 #   （一个破坏性动作的凭据, 必须能追溯）。
+                 "excerpt_chars": len(excerpt),
+                 "raw": mood.get("raw", ""),
+                 "error": mood.get("error"),
+                 "ms": mood.get("ms", 0),
+                 "prompt_chars": mood.get("prompt_chars", 0)},
+        "feedback": [item.to_dict() for item in feedback],
+        "unmatched_feedback": unmatched,
+        "muted": {"ip": list(muted["ip"].values()), "artist": list(muted["artist"].values())},
+        "cleared": cleared,
+        "thin": thin,
+    }
+
+
+# ---------------------------------------------------------------------------
+#  落盘（**本模块是 `config/user_profile.jsonl` 的唯一写者**）
+# ---------------------------------------------------------------------------
+def read_records(path: str) -> List[Dict[str, Any]]:
+    """读所有记录（坏行跳过并记一句, 不让一行坏掉整个文件）。"""
+    if not os.path.exists(path):
+        return []
+    out: List[Dict[str, Any]] = []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for lineno, line in enumerate(handle, 1):
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    item = json.loads(text)
+                except ValueError:
+                    continue
+                if isinstance(item, dict):
+                    out.append(item)
+    except OSError as exc:
+        raise ProfileError("画像文件读不了 %s: %s" % (path, exc))
+    return out
+
+
+def append_record(path: str, record: Mapping[str, Any]) -> str:
+    """追加一行（**读全量 + 原子写** —— 走 `agent/config.py::write_text_atomic`）。
+
+    @return 写进去的整段文本
+    @raise ProfileError 写不了
+    """
+    from ..config import write_text_atomic
+
+    existing = read_records(path)
+    lines = [json.dumps(item, ensure_ascii=False, sort_keys=False) for item in existing]
+    try:
+        lines.append(json.dumps(dict(record), ensure_ascii=False, sort_keys=False))
+    except (TypeError, ValueError) as exc:
+        raise ProfileError("画像记录无法序列化: %s" % exc)
+    text = "\n".join(lines) + "\n"
+    try:
+        write_text_atomic(path, text, encoding="utf-8")
+    except OSError as exc:
+        raise ProfileError("画像文件写不了 %s: %s" % (path, exc))
+    return text
+
+
+def latest_record(path: str) -> Optional[Dict[str, Any]]:
+    """最后一次构建的那行（没有就是 None）。"""
+    records = read_records(path)
+    return records[-1] if records else None

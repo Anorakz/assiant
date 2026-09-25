@@ -64,6 +64,7 @@ __all__ = [
     "add_tags",
     "remove_tags",
     "bump_play",
+    "clear_plays",
     "pick",
     "tag_counts",
     "summarise",
@@ -312,6 +313,36 @@ def bump_play(track: Mapping[str, Any], when: Optional[str] = None) -> Dict[str,
     out["plays"] = int(track.get("plays") or 0) + 1
     out["last_played"] = when or datetime.now().isoformat(timespec="seconds")
     return out
+
+
+def clear_plays(path: str, track_ids: Sequence[str]) -> int:
+    """把这些歌的 `plays` / `last_played` **清零**并整库写回（原子写 + .bak）。
+
+    @return 真的清掉几首（0 = 这些 id 都不在库里, **不写文件**）
+    @raise MusicLibraryError 文件读不了 / 写不了
+    @note T9-2: 用户说"不想听这个歌手了"时用 —— 清 0 之后这些歌会重新变成
+          "听得最少的"，**`plays_asc` 会先把它们挑出来**（你定的设计意图: 清零就是把
+          偏好归零、让它重新进候选），不是 bug。
+    @note 仍然是"唯一写者"里的那条路（`write_tracks()`）。
+    """
+    wanted = {str(item) for item in (track_ids or ())}
+    if not wanted:
+        return 0
+    tracks, _problems = read_tracks(path)
+    cleared = 0
+    out: List[Mapping[str, Any]] = []
+    for track in tracks:
+        if str(track.get("id")) in wanted and (int(track.get("plays") or 0)
+                                               or track.get("last_played")):
+            track = dict(track)
+            track["plays"] = 0
+            track["last_played"] = None
+            cleared += 1
+        out.append(track)
+    if not cleared:
+        return 0
+    write_tracks(path, out)
+    return cleared
 
 
 # ---------------------------------------------------------------------------

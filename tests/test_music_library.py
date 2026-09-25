@@ -230,6 +230,39 @@ class TestBumpPlay(unittest.TestCase):
                          "2026-09-23T20:00:00")
 
 
+class TestClearPlays(unittest.TestCase):
+    """T9-2: 负反馈清零（"不想听这个歌手了" -> 库里那些歌的播放次数也清 0）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="lib-clear-")
+        self.path = os.path.join(self.tmp, "music_library.jsonl")
+
+    def test_clear_zeroes_only_the_wanted_tracks(self):
+        ml.write_tracks(self.path, [ml.make_record("1", "A", plays=5,
+                                                   last_played="2026-09-24T10:00:00"),
+                                    ml.make_record("2", "B", plays=3,
+                                                   last_played="2026-09-24T11:00:00")])
+        cleared = ml.clear_plays(self.path, ["1"])
+        self.assertEqual(cleared, 1)
+        by_id = {t["id"]: t for t in ml.read_tracks(self.path)[0]}
+        self.assertEqual((by_id["1"]["plays"], by_id["1"]["last_played"]), (0, None))
+        self.assertEqual((by_id["2"]["plays"], by_id["2"]["last_played"]),
+                         (3, "2026-09-24T11:00:00"), "别的歌不动")
+
+    def test_clear_does_not_write_when_nothing_matches(self):
+        ml.write_tracks(self.path, [ml.make_record("1", "A", plays=5)])
+        with open(self.path, "r", encoding="utf-8") as handle:
+            before = handle.read()
+        self.assertEqual(ml.clear_plays(self.path, ["9"]), 0)
+        self.assertEqual(ml.clear_plays(self.path, []), 0)
+        with open(self.path, "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), before, "没有要清的 -> 一个字节都不写")
+
+    def test_clear_skips_tracks_that_are_already_zero(self):
+        ml.write_tracks(self.path, [ml.make_record("1", "A", plays=0)])
+        self.assertEqual(ml.clear_plays(self.path, ["1"]), 0, "本来就是 0 -> 不算清过")
+
+
 # ===========================================================================
 #  6) 查询（"下一首由 chat 决定"的原料）
 # ===========================================================================
