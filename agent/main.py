@@ -66,6 +66,7 @@ if __package__ in (None, ""):  # pragma: no cover - 只在直接执行时走
 from agent.config import ConfigError, ConfigNotFoundError, config_path, load_config
 from agent.core import Scheduler, State, StateMachine, ToolRouter
 from agent.core import read_intents
+from agent.core.chat_memory import ChatMemory
 from agent.io import (
     ChatInputBus,
     ImageReader,
@@ -286,6 +287,11 @@ class Runtime:
         self.image_reader: Optional[ImageReader] = None
         self.input_sender: Optional[InputSender] = None
         self.ipc: Any = None
+
+        #: 纯对话记忆（T9-1）: 用户跟助手说过的那几句话（**只在这块内存里, 不落盘**）。
+        #: 记的是"谁说的/说了什么/什么时候/当时哪个模式" —— T9-2 判心情的语料与场景都在里面。
+        #: ⚠ 它不是模型的上下文（板端 LLM 每轮无状态, 见 agent/core/chat_memory.py 模块头）。
+        self.chat_memory = ChatMemory()
 
         #: 回复钩子: 每产生一条 LLM 回复就调一次 (IPC 层用它推 llm 消息)。
         #: 默认 None —— 没有 IPC 时行为与以前完全一样。
@@ -1551,10 +1557,20 @@ class Runtime:
             "wallpaper_state": self.wallpaper_snapshot,
         }
 
-    async def _deliver_reply(self, reply: str) -> str:
-        """把一条回复算进统计、记日志、交给 IPC 钩子（两条路共用: 直连 / 模型）。"""
+    def _state_text(self) -> str:
+        """当前模式（"idle"/"study"…；状态机没起来就是 "unknown"）。"""
+        return self.state.current().value if self.state else "unknown"
+
+    async def _deliver_reply(self, reply: str, source: Optional[str] = None) -> str:
+        """把一条回复算进统计、记日志、交给 IPC 钩子（两条路共用: 直连 / 模型）。
+
+        @param source 这条回复是**对谁说的**（T9-1: 只有 gui/terminal 的对话进纯对话记忆；
+                      不给就是"不知道来源", 不记记忆)
+        """
         self.stats["replies"] += 1
         self.log.info("回复: %s", reply)
+        if source is not None:
+            self.chat_memory.add_reply(reply, source=source, state=self._state_text())
 
         # Phase 6 D4: 把回复交给 IPC (推 llm{text} 给 GUI)。
         # 钩子是"没人接就什么都不做" —— 没有 IPC / 没注册时行为与以前一致。
@@ -1583,11 +1599,13 @@ class Runtime:
         text = event.get("text", "")
         self.stats["events"] += 1
         self.log.info("[%s] %s", source, text)
+        # T9-1: 纯对话记忆（只收 gui/terminal；记下**当时**的模式给 T9-2 判心情用）
+        self.chat_memory.add_user(text, source=source, state=self._state_text())
 
         direct = read_intents.answer(text, self.read_services())
         if direct is not None:
             self.log.info("只读问句直连 (%s, 没走模型)", direct.intent)
-            return await self._deliver_reply(direct.text)
+            return await self._deliver_reply(direct.text, source=source)
 
         if self.llm is None:
             self.log.error("llm 未就绪, 无法处理这条输入")
@@ -1628,7 +1646,7 @@ class Runtime:
             self.stats["llm_errors"] += 1
 
         reply = result.get("text") or ""
-        return await self._deliver_reply(reply)
+        return await self._deliver_reply(reply, source=source)
 
     # ------------------------------------------------------------ 停止 ---
     async def stop(self) -> None:

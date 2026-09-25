@@ -9,6 +9,14 @@
 # ============================================================================
 
 from .state_machine import INITIAL_STATE, LEGAL_TRANSITIONS, State, StateMachine
+from .chat_memory import (
+    CHAT_SOURCES,
+    DEFAULT_KEEP_AFTER_SETTLE,
+    DEFAULT_MAX_CHARS,
+    DEFAULT_MAX_ENTRIES,
+    ChatMemory,
+    Entry,
+)
 from .music import DEFAULT_POLL_INTERVAL_S, MusicError, MusicPlayer
 from .scheduler import (
     DEFAULT_HISTORY_LIMIT,
@@ -63,4 +71,11 @@ __all__ = [
     "MusicPlayer",
     "MusicError",
     "DEFAULT_POLL_INTERVAL_S",
+    # 纯对话记忆（T9-1）
+    "ChatMemory",
+    "Entry",
+    "CHAT_SOURCES",
+    "DEFAULT_MAX_CHARS",
+    "DEFAULT_MAX_ENTRIES",
+    "DEFAULT_KEEP_AFTER_SETTLE",
 ]
