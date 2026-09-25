@@ -3,12 +3,13 @@
 #
 #  它做什么: 一个工具管壁纸的**全部**动作（`action` 决定干哪件）:
 #
-#      action="next"    往后翻一张（默认）
-#      action="prev"    往前翻一张
+#      action="next"    往后走一格（三个的窗口: next 变当前, 再按画像补一个新的 next）
+#      action="prev"    往回走一格（上一个）
 #      action="repeat"  重推当前这张
-#      action="pick"    按 `match=` 挑（按内容/按 IP 检索，最像的在最前）
+#      action="pick"    按 `match=` 挑（按内容/按 IP 检索，最像的在最前）—— 会**立刻换**
 #      action="least"   挑**用得最少**的一张（T8-6；等价于 pick + sort=used_asc）
 #      action="most"    挑**用得最多**的一张（T8-6）
+#      action="stage"   只把一张放进"下一个"（**不切屏**）—— 不带 match 就按画像重挑一张
 #      action="tags"    只读: 库里有哪些标签 / 某个作品最像哪几张
 #
 #  ⚠ T8-6 板端实测（"挑一张我用得最少的壁纸"）: 0.6B **不会为了"用得最少"去设 `sort=`**
@@ -80,15 +81,16 @@ VOCAB_TEXT_LIMIT = 320
 
 DESCRIPTION = (
     "板子屏幕上的背景图：换、按内容挑、按用得多少挑、看标签。"
-    "action=least 挑用得最少的 / action=most 用得最多的（不用给 match）；"
-    "action=next/prev/repeat 翻页；action=pick 要给 match（例如 \"scene=anime\"、"
-    "\"anime\"、\"ip=EVA\"，多条用 / 隔开 = 任一命中）；action=tags 是只读清单"
+    "action=next/prev/repeat 翻页/重推；action=least/most 挑用得最少/最多的（不用 match）；"
+    "action=stage 只预备下一个（不切屏, 按画像挑）；"
+    "action=pick 要给 match（例如 \"scene=anime\"、\"anime\"、\"ip=EVA\"，"
+    "多条用 / 隔开 = 任一命中）；action=tags 是只读清单"
     "（ip_query 只填作品名, 例如 EVA —— 不是问题/问句, 也别把作品名当标签答）。"
     "⚠ 只改显示, 不动任何文件; 推给界面后没有回执。"
 )
 
 #: `action` 的取值（schema 的 enum 与 handler 的分派都以它为准）
-ACTIONS = ("next", "prev", "repeat", "pick", "least", "most", "tags")
+ACTIONS = ("next", "prev", "repeat", "pick", "least", "most", "stage", "tags")
 
 #: T8-6: 按使用次数挑的两个 action -> 传给 Runtime 的 `sort`
 _USAGE_ACTIONS = {"least": "used_asc", "most": "used_desc"}
@@ -108,8 +110,8 @@ SCHEMA: Dict[str, Any] = {
         "action": {
             "type": "string",
             "enum": list(ACTIONS),
-            "description": "要做什么：next 下一张 / prev 上一张 / repeat 重推当前 / "
-                           "least 用得最少 / most 用得最多 / "
+            "description": "要做什么：next/prev 翻页 / repeat 重推 / least 用得最少 / "
+                           "most 用得最多 / stage 只预备下一个（不切屏）/ "
                            "pick 按 match 挑 / tags 看标签（只读）",
         },
         "match": {
@@ -306,6 +308,8 @@ def build(services: Dict[str, Any]) -> Optional[Tool]:
             return advance(1, match, order)
         if choice in _USAGE_ACTIONS:                   # T8-6: least / most
             return advance(1, match or None, _USAGE_ACTIONS[choice])
+        if choice == "stage":                          # T10-3: 只预备"下一个", 不切屏
+            return advance(1, match or None, order, stage=True)
         if choice in _STEPS:
             return advance(_STEPS[choice], match or None, order)
         return {"ok": False,

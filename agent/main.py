@@ -71,6 +71,7 @@ from agent.core.user_profile import (
     DEFAULT_RETRY_S as DEFAULT_PROFILE_RETRY_S,
     DEFAULT_TRIGGER_CHARS,
     DEFAULT_TRIGGER_TURNS,
+    ProfileError,
 )
 from agent.io import (
     ChatInputBus,
@@ -709,23 +710,29 @@ class Runtime:
         return self.wallpaper.directory if self.wallpaper is not None else None
 
     def next_wallpaper(self, step: int = 1, match: Optional[str] = None,
-                       sort: Optional[str] = None) -> Dict[str, Any]:
-        """换一张壁纸并把结果推给 GUI（T3 起；T7-3 起支持按标签/IP 挑；T8-6 起能按使用次数排）。
+                       sort: Optional[str] = None,
+                       stage: bool = False) -> Dict[str, Any]:
+        """换一张壁纸并把结果推给 GUI（T3 起；T7-3 按标签/IP 挑；T8-6 按用量挑；T10-3 走三格窗口）。
 
         入口只有一条: **对话**里 LLM 调 `next_wallpaper` 工具（手动按钮与
         `next_wallpaper` IPC 命令在 T7-3 按需求**删掉了**, 见 agent/core/wallpaper.py 的模块头）。
 
-        @param step  正数往后、负数往前、0 = 重推当前这张（都在候选列表里翻）
-        @param match 挑图条件（None = 按文件名顺序翻全部）:
+        **窗口怎么走（T10-3, 你定的）**::
+
+            prev  ←  current  ←  next            （三格, prev 只留 1 张）
+            action=next   往后走: next 变 current, 原来那张进 prev, **再按画像塞一个新的 next**
+            action=prev   往回走: 对调; prev 空着就退回"按文件名往前翻一张"
+            action=pick   替换 next（按 match/sort）-> **推进一格** -> 再塞一个新的 next
+            action=stage  只把一张放进 next（**不切屏**）: 不带 match = 按画像重挑一张
+                                             带 match = 把指定条件里最好的那张放进去
+
+        @param step  正数往后、负数往前、0 = 重推当前这张（老口径, 现在映射到窗口的走法）
+        @param match 挑图条件（None = 按画像挑, 画像不可用就按"用得最少的"）:
                      `"scene=anime"` 某轴某标签 / `"anime"` 只写标签名 / `"ip=EVA"` 锚点检索。
-                     **候选按相关度排好**（最像的在前），所以 step=1 就是"最像的那张"。
-        @param sort  T8-6: 候选**再按使用次数排一遍** —— `"used_asc"` 用得最少的在前
-                     （"挑一张我最少看到的"）/ `"used_desc"` 用得最多的在前 / None = 不动。
-                     有 match 时是"在最像的那批里挑用得最少的"。
-                     ⚠ 排序后会**跳过屏幕上当前这张**再从第 1 名拿 —— 连说两次
-                     "再挑一张用得最少的"是一张张往少走, 不会挑回同一张、也不会跳回用得多的一头。
-        @return {"ok", "path", "index", "total", "pushed", "used", "match"?, "score"?, "error"}
-                     `used` = **记完这一次之后**的总次数（"这张一共显示过几次"）。
+        @param sort  T8-6: `"used_asc"` 用得最少的在前 / `"used_desc"` 用得最多的在前 / None = 不动。
+        @param stage True = **只更新"下一个"**, 不切屏、不推送、不计使用次数。
+        @return {"ok", "path", "index", "total", "pushed", "used", "window", "why", …}
+                     `used` = **记完这一次之后**的总次数; `staged=True` 时 `pushed` 恒为 False。
         @note 目录不存在/没图片属于运行期问题: 这里报错, 不让工具在启动时消失。
               标签数据还没打（或 match 写错）同样只是**这次失败**, 不抛异常。
         @note **状态权限不在这里判**: 那张表挂在工具上（`allowed_states`）, 由
@@ -736,72 +743,222 @@ class Runtime:
         if self.wallpaper is None:
             return self._wallpaper_failure("壁纸还没初始化（Agent 的 tools 步骤没起来？）")
 
-        pool = None
-        picked: Dict[str, Any] = {}
-        # 锚点（只在"按内容挑 / 按使用次数挑"时给）:
-        #   None = 这次是新的挑选, 从第 1 名开始; 给路径 = 从它往后翻。
-        # ⚠ 不给 match/sort 的普通"换一张"**不能**传 anchor（T8-6 顺手修的 T7-4 遗留 bug:
-        #   传 None 等于"假装还没选过", 于是"换一张"每次都挑回第 1 张 —— 实测连叫 4 次
-        #   都是 01_a.png。普通换图要走游标, 也就是 step() 自己的默认值）。
-        anchor: Any = None
-        if match:
-            resolved = self._resolve_match(match)
-            if not resolved.get("ok"):
-                return resolved
-            pool = resolved["pool"]
-            picked = resolved
-            # ⚠ 只有"上一张就是这个 match 挑的"才从它往后翻（"再换一张同类的"）;
-            #   换了条件（或者压根是第一次）就从**第 1 名**开始 —— 否则用户说
-            #   "换一张动漫的"，会从当前那张在候选里的名次往下走（实测踩到:
-            #   当前那张排第 28，于是挑回来第 29 名，根本不是"最像的"）。
-            previous = self._last_match_pick or {}
-            if previous.get("spec") == match.strip() and previous.get("path") in pool:
-                anchor = previous.get("path")
-
-        # T8-6: 按使用次数重排候选（"挑用得最少的"）。⚠ 排完之后"上次挑的那张再往后翻"
-        # 就不成立了（名次会随计数变），所以改成: **先把当前屏幕上这张从候选里去掉**,
-        # 再从第 1 名拿。板端实测过两种错法:
-        #   · 从"当前这张在排序里的名次"往后走 -> 第一次挑完它自己就跑到用得多的一头去了,
-        #     第二次会跳到 **index=39/40**（用得最多的那一档）;
-        #   · 不跳过当前这张 -> 用户说"再挑一张用得最少的"却拿到同一张。
-        # 现在是"在**屏幕上没有**的那些里挑用得最少的", 连说几次会一张张往少走。
-        if sort:
-            pool, picked = self._sort_pool_by_usage(pool, match, sort)
-            if pool is None:
-                return picked                            # 失败（原因已在里面）
-            current = self.wallpaper.current()
-            if len(pool) > 1 and current in pool:
-                pool = [path for path in pool if path != current]
-            anchor = None
-
-        try:
+        # ---- ① stage: 只改"下一个", 不切屏（你定的第 3 条①③）----
+        if stage:
+            chosen = self._choose_next(match=match, sort=sort, avoid_next=True)
+            if not chosen.get("ok"):
+                return self._wallpaper_failure(chosen.get("error") or "挑不出下一张")
+            self.wallpaper.set_next(chosen["path"])
+            self.log.info("wallpaper: 预备下一张 = %s（%s）", os.path.basename(chosen["path"]),
+                          chosen.get("why_text") or "")
+            out: Dict[str, Any] = {"ok": True, "staged": True, "path": chosen["path"],
+                                   "pushed": False, "window": self._window_names(),
+                                   "why": chosen.get("why") or []}
             if match or sort:
-                index, path, total = self.wallpaper.step(step, pool=pool, anchor=anchor)
-            else:                                   # 普通"换一张": 按游标一格一格走
-                index, path, total = self.wallpaper.step(step)
+                out["basis"] = chosen.get("basis")
+            return out
+
+        # ---- ② 带条件的换图（pick / least / most）: 替换 next -> 推进 -> 再塞一个 ----
+        if match or sort:
+            chosen = self._choose_next(match=match, sort=sort)
+            if not chosen.get("ok"):
+                return self._wallpaper_failure(chosen.get("error") or "挑不出下一张")
+            self.wallpaper.set_next(chosen["path"])
+            try:
+                _index, path, _total = self.wallpaper.advance()
+            except WallpaperError as exc:
+                self.log.warning("wallpaper: 换不了: %s", exc)
+                return self._wallpaper_failure(str(exc))
+            pushed = self._push_wallpaper(path, chosen.get("rank_index", 0))
+            used = self.wallpaper_usage(path)
+            self._refill_next()
+            self.log.info("wallpaper: %s（按条件 %s%s, 候选 %d 张, 第 %d 名, pushed=%s, used=%d）",
+                          path, match or "-", ", sort=%s" % sort if sort else "",
+                          len(chosen.get("pool") or ()), chosen.get("rank", 1), pushed, used)
+            result: Dict[str, Any] = {
+                "ok": True, "path": path, "index": chosen.get("rank_index", 0),
+                "total": len(chosen.get("pool") or ()), "pushed": pushed, "used": used,
+                "window": self._window_names(), "why": chosen.get("why") or []}
+            if match:
+                self._last_match_pick = {"spec": match.strip(), "path": path}
+                result["match"] = {"spec": match, "kind": chosen.get("kind"),
+                                   "note": chosen.get("note"),
+                                   "candidates": len(chosen.get("pool") or ()),
+                                   "rank": chosen.get("rank", 1)}
+                score = (chosen.get("scores") or {}).get(path)
+                if score is not None:
+                    result["score"] = score
+            if sort:
+                result["sort"] = sort
+            return result
+
+        # ---- ③ 普通"换一张": 往后走窗口 / 往回走 / 重推当前 ----
+        try:
+            if step > 0:
+                if not self.wallpaper.window()["ready"]:
+                    chosen = self._choose_next()
+                    if chosen.get("ok"):
+                        self.wallpaper.set_next(chosen["path"])
+                    else:
+                        self.log.debug("wallpaper: 画像/用量都挑不出下一张(%s), 按文件名翻",
+                                       chosen.get("error"))
+                if self.wallpaper.window()["ready"]:
+                    index, path, total = self.wallpaper.advance()
+                else:
+                    index, path, total = self.wallpaper.step(1)
+            elif step < 0:
+                index, path, total = self.wallpaper.back()
+            else:
+                index, path, total = self.wallpaper.step(0)
         except WallpaperError as exc:
             self.log.warning("wallpaper: 换不了: %s", exc)
             return self._wallpaper_failure(str(exc))
 
         pushed = self._push_wallpaper(path, index)
         used = self.wallpaper_usage(path)
-        self.log.info("wallpaper: %s (index=%d/%d%s%s, pushed=%s, used=%d)", path, index, total,
-                      ", match=%s" % match if match else "",
-                      ", sort=%s" % sort if sort else "", pushed, used)
-        out: Dict[str, Any] = {"ok": True, "path": path, "index": index,
-                               "total": total, "pushed": pushed, "used": used}
-        if match:
-            self._last_match_pick = {"spec": match.strip(), "path": path}
-            out["match"] = {"spec": match, "kind": picked.get("kind"),
-                            "note": picked.get("note"),
-                            "candidates": len(pool or ()),
-                            "rank": index + 1}
-            score = (picked.get("scores") or {}).get(path)
-            if score is not None:
-                out["score"] = score
-        if sort:
-            out["sort"] = sort
+        staged = self._refill_next()
+        self.log.info("wallpaper: %s (index=%d/%d, step=%d, pushed=%s, used=%d, window=%s)",
+                      path, index, total, step, pushed, used, self._window_names())
+        out: Dict[str, Any] = {"ok": True, "path": path, "index": index, "total": total,
+                               "pushed": pushed, "used": used,
+                               "window": self._window_names()}
+        if step > 0 and staged:
+            out["next"] = staged
         return out
+
+    def _window_names(self) -> Dict[str, Optional[str]]:
+        """窗口三格的文件名（日志/工具回话里用短名, 省上下文）。"""
+        window = self.wallpaper.window() if self.wallpaper is not None else {}
+        return {key: (os.path.basename(value) if value else None)
+                for key, value in (("prev", window.get("prev")),
+                                   ("current", window.get("current")),
+                                   ("next", window.get("next")))}
+
+    def _choose_next(self, match: Optional[str] = None, sort: Optional[str] = None,
+                     avoid_next: bool = False) -> Dict[str, Any]:
+        """挑"下一个"那张（**不改窗口**）：有条件按条件, 没条件按画像, 画像不行按用量。
+
+        @return {"ok", "path", "why": […], "why_text", "basis": "condition|profile|usage",
+                 "pool"?, "rank"?, "rank_index"?, "kind"?, "note"?, "scores"?}
+        @note 一定**跳过窗口里的 prev 与 current**（"下一张"不该是屏幕上这张或刚看过的那张）;
+              `avoid_next=True` 时连当前那个 next 也跳过（stage = 换掉它）。
+        """
+        if self.wallpaper is None:
+            return {"ok": False, "error": "壁纸还没初始化"}
+        try:
+            images = self.wallpaper.scan()
+        except WallpaperError as exc:
+            return {"ok": False, "error": str(exc)}
+        if not images:
+            return {"ok": False, "error": "壁纸目录里没有图片"}
+
+        window = self.wallpaper.window()
+        skip = {path for path in (window.get("prev"), window.get("current")) if path}
+        if avoid_next and window.get("next"):
+            skip.add(window["next"])
+        available = [path for path in images if path not in skip] or list(images)
+
+        if match or sort:
+            pool: Optional[list] = None
+            picked: Dict[str, Any] = {}
+            if match:
+                resolved = self._resolve_match(match)
+                if not resolved.get("ok"):
+                    return resolved          # 已经带 tell_user（别在外面再包一层）
+                pool = list(resolved["pool"])
+                picked = resolved
+            if sort:
+                pool, picked = self._sort_pool_by_usage(pool, match, sort)
+                if pool is None:
+                    return {"ok": False, "error": (picked or {}).get("error") or "排不了序"}
+            candidates = [path for path in (pool or []) if path in set(available)]
+            if not candidates:
+                return {"ok": False,
+                        "error": "符合条件的图都在窗口里了（就剩刚看过的那几张）—— 换个条件试试"}
+            chosen = candidates[0]
+            rank = (pool or []).index(chosen) + 1
+            return {"ok": True, "path": chosen, "basis": "condition", "pool": pool,
+                    "rank": rank, "rank_index": rank - 1, "kind": picked.get("kind"),
+                    "note": picked.get("note"), "scores": picked.get("scores") or {},
+                    "why": ["按条件挑：%s" % (match or sort or "")],
+                    "why_text": "%s -> 第 %d 名" % (match or sort or "", rank)}
+
+        ranked = self._rank_next_by_profile(available)
+        if ranked:
+            top = ranked[0]
+            return {"ok": True, "path": top["path"], "basis": "profile",
+                    "why": top.get("why") or [], "why_text": "；".join(top.get("why") or [])}
+        # ⚠ 画像不可用时**回退到老行为**（按文件名顺序往后）, 不是"用得最少的" ——
+        #   用户说"下一张"时, 可预期的顺序比一个悄悄换掉的排序规则重要;
+        #   "挑用得最少的"仍然是显式动作（sort="used_asc"）。
+        #   （available 已经按文件名排好、并去掉了 prev/current, 所以第一个就是"往后下一张"。）
+        if available:
+            return {"ok": True, "path": available[0], "basis": "order",
+                    "why": ["画像还没有可用的偏好 —— 按文件名往后拿（老行为）"],
+                    "why_text": "回退: 按文件名"}
+        return {"ok": False, "error": "挑不出下一张（标签数据也用不上）"}
+
+    def _rank_next_by_profile(self, candidates: Sequence[str]) -> List[Dict[str, Any]]:
+        """按用户画像排一遍候选（**画像不可用就返回空** —— 让调用方回退）。
+
+        @note 相似度是**名次折算**的（`1 - rank/N`）: 锚点检索本来就给全库排序,
+                  再逐张算余弦等于把同一件事算两遍; 名次对排序是等价的。
+        """
+        from agent.core import user_profile
+
+        if not self.profile_file:
+            return []
+        try:
+            record = user_profile.latest_record(self.profile_file)
+        except ProfileError as exc:
+            self.log.warning("wallpaper: 画像读不了（当成没有）: %s", exc)
+            return []
+        if not user_profile.profile_basis(record).get("wallpaper"):
+            return []
+        try:
+            index = self.tag_index()
+        except Exception as exc:                     # noqa: BLE001
+            self.log.warning("wallpaper: 标签索引用不了（当成没有）: %r", exc)
+            return []
+        presets = self._cfg("wallpaper", "tagging", "ip_presets", default={}) or {}
+        pools: Dict[str, List[str]] = {}
+
+        def similarity(name: str, path: str) -> float:
+            if name not in pools:
+                try:
+                    found = index.match("ip=%s" % name, presets=presets,
+                                        wallpaper_dir=self._wallpaper_dir())
+                    pools[name] = [str(item) for item in (found.pool if found.ok else [])]
+                except Exception:                    # noqa: BLE001
+                    pools[name] = []
+            pool = pools[name]
+            if not pool or path not in pool:
+                return 0.0
+            return 1.0 - pool.index(path) / float(len(pool))
+
+        def mood_of(path: str) -> List[str]:
+            tags = index.tags_of(path) or {}
+            return [str(pair[0]) for pair in (tags.get("mood") or []) if pair]
+
+        return user_profile.rank_wallpapers(
+            record, candidates, ip_similarity=similarity,
+            usage=lambda path: int(index.usage_of(path).get("used") or 0),
+            mood_of=mood_of)
+
+    def _refill_next(self) -> Optional[str]:
+        """推进/换图之后**再塞一个 next**（T10-3；失败只记 debug, 下次推进时还会再试）。"""
+        if self.wallpaper is None:
+            return None
+        if self.wallpaper.window()["ready"]:
+            return self.wallpaper.window()["next"]
+        chosen = self._choose_next()
+        if not chosen.get("ok"):
+            self.log.debug("wallpaper: 没准备出下一张 (%s)", chosen.get("error"))
+            return None
+        self.wallpaper.set_next(chosen["path"])
+        self.log.info("wallpaper: 下一个 = %s（%s）", os.path.basename(chosen["path"]),
+                      chosen.get("why_text") or "")
+        return chosen["path"]
 
     def _sort_pool_by_usage(self, pool: Optional[list], match: Optional[str],
                             sort: str) -> Any:
@@ -1004,6 +1161,11 @@ class Runtime:
             user_profile.append_record(self.profile_file, record)
             self._profile_failed_at = 0.0
             dropped = self.chat_memory.settle()
+            # T10-3: 画像变了 -> 立刻按新画像重挑壁纸的"下一个"（你定的第 3 条②）
+            try:
+                self._refill_next()
+            except Exception as exc:        # noqa: BLE001 - 挑图失败不该让画像构建失败
+                self.log.warning("用户画像: 重挑壁纸的\"下一个\"失败 (已忽略): %r", exc)
             walls = record["walls"]["ip"][:2]
             artists = record["music"]["artist"][:2]
             self.log.info(

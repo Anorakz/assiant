@@ -452,10 +452,10 @@ class TestToolExecution(unittest.IsolatedAsyncioTestCase):
         calls = []
         tags = []
 
-        def advance(step=1, match=None, sort=None):
-            calls.append((step, match, sort))
+        def advance(step=1, match=None, sort=None, stage=False):
+            calls.append((step, match, sort, stage))
             return {"ok": True, "path": "/w/%d.png" % step, "index": 0, "total": 3,
-                    "pushed": True}
+                    "pushed": not stage, "staged": stage}
 
         def lookup(ip_query=None, limit=5):
             tags.append((ip_query, limit))
@@ -471,42 +471,60 @@ class TestToolExecution(unittest.IsolatedAsyncioTestCase):
         router, calls, _tags = self._router()
         result = await router.execute("next_wallpaper", {"action": "next"})
         self.assertTrue(result["ok"])
-        self.assertEqual(calls, [(1, None, None)], "工具只是把入参转给 Runtime 的入口")
+        self.assertEqual(calls, [(1, None, None, False)], "工具只是把入参转给 Runtime 的入口")
         self.assertEqual(result["result"]["path"], "/w/1.png")
 
     async def test_prev_and_repeat_map_to_the_other_steps(self):
         router, calls, _tags = self._router()
         await router.execute("next_wallpaper", {"action": "prev"})
         await router.execute("next_wallpaper", {"action": "repeat"})
-        self.assertEqual(calls, [(-1, None, None), (0, None, None)])
+        self.assertEqual(calls, [(-1, None, None, False), (0, None, None, False)])
 
     async def test_pick_forwards_match(self):
         router, calls, _tags = self._router()
         result = await router.execute("next_wallpaper",
                                       {"action": "pick", "match": "scene=anime"})
-        self.assertEqual(calls, [(1, "scene=anime", None)])
+        self.assertEqual(calls, [(1, "scene=anime", None, False)])
         self.assertTrue(result["ok"])
+
+    async def test_stage_only_prepares_the_next_one(self):
+        """T10-3: `action=stage` 只把一张放进"下一个"（**不切屏**）—— 走 stage=True。"""
+        router, calls, _tags = self._router()
+        result = await router.execute("next_wallpaper", {"action": "STAGE"})
+        self.assertEqual(calls, [(1, None, None, True)])
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["result"]["staged"])
+        self.assertFalse(result["result"]["pushed"], "stage 不切屏")
+        await router.execute("next_wallpaper", {"action": "stage", "match": "ip=EVA"})
+        self.assertEqual(calls[-1], (1, "ip=EVA", None, True), "带了条件也照样只预备")
 
     async def test_least_and_most_are_usage_picks(self):
         """T8-6: 板端实测 0.6B **不会**为"用得最少"去设 `sort=` —— 所以做成单字 action。"""
         router, calls, _tags = self._router()
         self.assertTrue((await router.execute("next_wallpaper", {"action": "least"}))["ok"])
-        self.assertEqual(calls, [(1, None, "used_asc")])
+        self.assertEqual(calls, [(1, None, "used_asc", False)])
         await router.execute("next_wallpaper", {"action": "MOST_USED"})
         await router.execute("next_wallpaper", {"action": "used_asc"})
-        self.assertEqual(calls[1:], [(1, None, "used_desc"), (1, None, "used_asc")],
+        self.assertEqual(calls[1:], [(1, None, "used_desc", False), (1, None, "used_asc", False)],
                          "同义写法（most_used / used_asc）都要落到 least / most 上")
 
     async def test_least_with_a_match_stays_inside_that_pool(self):
         # "挑一张我用得最少的**风景**壁纸" -> 在最像的那批里挑用得最少的
         router, calls, _tags = self._router()
         await router.execute("next_wallpaper", {"action": "least", "match": "scene=landscape"})
-        self.assertEqual(calls, [(1, "scene=landscape", "used_asc")])
+        self.assertEqual(calls, [(1, "scene=landscape", "used_asc", False)])
 
     async def test_sort_alone_means_a_usage_pick(self):
         router, calls, _tags = self._router()
         await router.execute("next_wallpaper", {"sort": "USED_ASC"})
-        self.assertEqual(calls, [(1, None, "used_asc")], "只给 sort = 挑一张 + 那个排序")
+        self.assertEqual(calls, [(1, None, "used_asc", False)], "只给 sort = 挑一张 + 那个排序")
+
+    def test_stage_is_in_the_schema_and_the_description(self):
+        self.assertIn("stage", wallpaper_tool.ACTIONS)
+        schema = wallpaper_tool.SCHEMA["properties"]["action"]
+        self.assertIn("stage", schema["enum"])
+        self.assertIn("stage", wallpaper_tool.DESCRIPTION)
+        self.assertIn("不切屏", wallpaper_tool.DESCRIPTION)
 
     async def test_pick_without_match_is_honest(self):
         router, calls, _tags = self._router()
@@ -1300,6 +1318,152 @@ class TestWindow(unittest.TestCase):
         self.assertEqual(self._name(deck.window()["next"]), "03_c.png", "路径不受新图影响")
         _index, path, _total = deck.advance()
         self.assertEqual(self._name(path), "03_c.png")
+
+
+class _ProfileIndex:
+    """只给"按画像挑"用的替身: 按 spec 给排序（真 TagIndex 也是这个形状）。"""
+
+    def __init__(self, pools=None):
+        self.pools = dict(pools or {})
+        self.calls = []
+
+    def count(self):
+        return 3
+
+    def match(self, spec, presets=None, wallpaper_dir=None, limit=None):
+        from agent.vision.tag_index import MatchResult
+
+        self.calls.append((spec, wallpaper_dir))
+        return MatchResult(pool=list(self.pools.get(spec, [])), kind="ip", note="ip",
+                           detail={})
+
+    def usage_of(self, path):
+        return {"used": 0, "last_used": None}
+
+    def tags_of(self, path):
+        return {"mood": [["calm", 0.4]]} if str(path).endswith("c.png") else {}
+
+
+class TestWindowDrivenSwitching(unittest.IsolatedAsyncioTestCase):
+    """T10-3: `Runtime.next_wallpaper` 走三格窗口（stage / pick / next / prev）。
+
+    ⚠ 用 `IsolatedAsyncioTestCase`: 板端 Python 3.8 里 `Runtime.__init__` 建 asyncio 原语
+      需要当前线程有事件循环（见 tests/test_read_intents.py 里那段说明）。
+    """
+
+    def _runtime(self, root=None, profile=None, index=None):
+        import json
+        import tempfile
+
+        from agent.core.user_profile import PROFILE_VERSION
+        from agent.main import Runtime
+
+        root = root or make_dir("01_a.png", "02_b.png", "03_c.png")
+        profile_file = os.path.join(tempfile.mkdtemp(prefix="profile-"), "user_profile.jsonl")
+        if profile is not None:
+            with open(profile_file, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(dict(profile, version=PROFILE_VERSION),
+                                        ensure_ascii=False) + "\n")
+        runtime = Runtime(
+            config={"wallpaper": {"dir": root,
+                                  "tagging": {"data_file": "/tmp/wall_data.jsonl",
+                                              "ip_presets": {"EVA": {"anchors": ["01_a.png"]}}}}},
+            start_native=False, start_terminal=False,
+            log=logging.getLogger("test.wallpaper.window"))
+        runtime.wallpaper = WallpaperDeck(root)
+        runtime.profile_file = profile_file
+        runtime._tag_index = index or _ProfileIndex()
+        return runtime, root
+
+    def _names(self, window):
+        return {key: (os.path.basename(value) if value else None)
+                for key, value in window.items() if key in ("prev", "current", "next")}
+
+    async def test_stage_only_prepares_the_next_one(self):
+        """你定的第 3 条①③: 只更新"下一个" —— 不切屏、不推送、不计使用次数。"""
+        runtime, root = self._runtime()
+        runtime._tag_index = _FakeIndex(pool=[os.path.join(root, "03_c.png"),
+                                              os.path.join(root, "01_a.png")],
+                                        kind="axis")
+        pushed = []
+        runtime.on_wallpaper = lambda path, index: pushed.append(path)
+        result = runtime.next_wallpaper(stage=True, match="scene=anime")
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["staged"])
+        self.assertFalse(result["pushed"])
+        self.assertEqual(pushed, [], "stage 不切屏")
+        self.assertEqual(self._names(result["window"])["next"], "03_c.png")
+        self.assertIsNone(self._names(result["window"])["current"], "屏幕没动")
+        self.assertEqual(runtime._last_shown_wallpaper, "", "stage 不算「换成了另一张」")
+
+    async def test_pick_replaces_next_then_advances_then_refills(self):
+        runtime, root = self._runtime()
+        runtime._tag_index = _FakeIndex(pool=[os.path.join(root, "03_c.png")], kind="axis")
+        pushed = []
+        runtime.on_wallpaper = lambda path, index: pushed.append(os.path.basename(path))
+        result = runtime.next_wallpaper(1, match="scene=anime")
+        self.assertEqual(os.path.basename(result["path"]), "03_c.png")
+        self.assertEqual(pushed, ["03_c.png"], "pick 会立刻切")
+        window = self._names(result["window"])
+        self.assertEqual(window["current"], "03_c.png")
+        self.assertEqual(window["next"], "01_a.png", "切完**又塞了一个**下一个（无画像时按文件名）")
+        self.assertIsNone(window["prev"], "第一张没有历史")
+
+    async def test_plain_next_advances_the_window(self):
+        runtime, root = self._runtime()
+        first = runtime.next_wallpaper(1)
+        second = runtime.next_wallpaper(1)
+        self.assertEqual(os.path.basename(first["path"]), "01_a.png")
+        self.assertEqual(os.path.basename(second["path"]), "02_b.png")
+        window = self._names(second["window"])
+        self.assertEqual(window["prev"], "01_a.png", "prev 只留 1 张")
+        self.assertEqual(window["next"], "03_c.png")
+
+    async def test_prev_walks_back_and_keeps_the_way_forward(self):
+        runtime, root = self._runtime()
+        runtime.next_wallpaper(1)                     # 01_a
+        runtime.next_wallpaper(1)                     # 02_b
+        back = runtime.next_wallpaper(-1)             # 回 01_a
+        self.assertEqual(os.path.basename(back["path"]), "01_a.png")
+        self.assertEqual(self._names(back["window"])["next"], "02_b.png",
+                         "退回来之后还能往前走回去")
+
+    async def test_the_profile_drives_the_next_one(self):
+        """画像可用时 -> "下一个"按理应按画像挑（画像里最喜欢 EVA, 排序把 c 放第一）。"""
+        root = make_dir("01_a.png", "02_b.png", "03_c.png")
+        profile = {"walls": {"ip": [{"name": "EVA", "weight": 0.9, "parts": {"hits": 3}}]},
+                   "music": {"artist": []}, "mood": {"label": "calm", "ok": True}, "thin": []}
+        index = _ProfileIndex({"ip=EVA": [os.path.join(root, "03_c.png"),
+                                          os.path.join(root, "01_a.png"),
+                                          os.path.join(root, "02_b.png")]})
+        runtime, _root = self._runtime(root=root, profile=profile, index=index)
+        chosen = runtime._choose_next()
+        self.assertEqual(chosen["basis"], "profile")
+        self.assertEqual(os.path.basename(chosen["path"]), "03_c.png")
+        self.assertTrue(any("像 EVA" in reason for reason in chosen["why"]),
+                        "挑图理由要说清是「像哪个 IP」: %s" % chosen["why"])
+        result = runtime.next_wallpaper(1)
+        self.assertEqual(os.path.basename(result["path"]), "03_c.png",
+                         "画像说最喜欢 EVA -> 最像 EVA 的那张进「下一个」")
+        self.assertIn("ip=EVA", [call[0] for call in index.calls])
+
+    async def test_an_unusable_profile_falls_back_to_the_filename_order(self):
+        profile = {"walls": {"ip": [{"name": "EVA", "weight": 0.9}]},
+                   "music": {"artist": []}, "mood": {"label": "unknown", "ok": False},
+                   "thin": ["壁纸用量"]}
+        runtime, root = self._runtime(profile=profile)
+        chosen = runtime._choose_next()
+        self.assertEqual(chosen["basis"], "order", "样本薄 + 心情不知道 -> 回退")
+        result = runtime.next_wallpaper(1)
+        self.assertEqual(os.path.basename(result["path"]), "01_a.png",
+                         "回退就是按文件名（老行为）, 不是画像乱挑")
+
+    async def test_a_profile_build_refreshes_the_next_one(self):
+        runtime, root = self._runtime()
+        calls = []
+        runtime._refill_next = lambda: calls.append("refill")
+        await runtime._build_profile_task({"reason": "test"})
+        self.assertEqual(calls, ["refill"], "画像构建完要重挑一次「下一个」（你定的第 3 条②）")
 
 
 if __name__ == "__main__":
