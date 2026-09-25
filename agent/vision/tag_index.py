@@ -222,6 +222,46 @@ class TagIndex(object):
         """图片记录（原样，顺序就是文件里的顺序）。"""
         return list(self._records)
 
+    # ------------------------------------------------------------ 用量 ---
+    #  T8-6: `used` / `last_used` 由运行时推图时加（见 agent/vision/wall_data.py）
+    def usage_of(self, path: str) -> Dict[str, Any]:
+        """某张图的使用次数（缺字段 = 0/None）。"""
+        return wall_data.usage_of(self._by_path.get(str(path)))
+
+    def usage_summary(self, top: int = 3) -> Dict[str, Any]:
+        """整库的使用情况摘要（`action="tags"` 回话用）。"""
+        summary = wall_data.usage_summary(self._records, top=top)
+        summary["least_used"] = [self._named(item) for item in summary.get("least_used") or []]
+        summary["most_used"] = [self._named(item) for item in summary.get("most_used") or []]
+        return summary
+
+    @staticmethod
+    def _named(item: Mapping[str, Any]) -> Dict[str, Any]:
+        """路径换成文件名（给模型/用户看，别塞绝对路径）。"""
+        out = dict(item)
+        out["name"] = os.path.basename(str(item.get("path") or ""))
+        return out
+
+    def rank_by_usage(self, limit: Optional[int] = None, ascending: bool = True,
+                      pool: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
+        """按**使用次数**排序。
+
+        @param ascending True = 用得最少的在前（挑"没怎么看过的"）
+        @param pool 只在这个候选集合里排（None = 全库）
+        @return [{"path", "used", "last_used", "score"?}, …]
+        """
+        wanted = [str(p) for p in pool] if pool is not None else list(self._by_path)
+        entries: List[Dict[str, Any]] = []
+        for path in wanted:
+            if path not in self._by_path:
+                continue
+            usage = self.usage_of(path)
+            entries.append({"path": path, "used": usage["used"],
+                            "last_used": usage["last_used"]})
+        entries.sort(key=lambda item: ((item["used"] if ascending else -item["used"]),
+                                       item["path"]))
+        return entries[:limit] if limit else entries
+
     def paths(self) -> List[str]:
         return [self._path_of(r) for r in self._records]
 
@@ -324,7 +364,7 @@ class TagIndex(object):
         return []
 
     def summarise(self, top: Optional[int] = DEFAULT_LIMIT) -> Dict[str, Any]:
-        """数据文件摘要（`list_wallpaper_tags` 不带参数时回的就是它）。"""
+        """数据文件摘要（`action="tags"` 不带参数时回的就是它）。"""
         return {
             "count": len(self._records),
             "data_file": self.data_file,
@@ -332,6 +372,8 @@ class TagIndex(object):
             "with_vectors": len(self._vectors),
             "vocab_vectors": self.has_vocab_vectors(),
             "problems": list(self.problems),
+            # T8-6: 使用次数（"挑用得最少的"就靠它）
+            "usage": self.usage_summary(top=top if top else 3),
         }
 
     # ------------------------------------------------------------ 排序 ---

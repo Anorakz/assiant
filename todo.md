@@ -1350,6 +1350,62 @@ Phase 7 T8 — 音乐（对话点歌）+ 工具合并（T8-5b）
       （直接复读问题）—— 见 docs/llm.md §5.2 的方向讨论（读操作可能不该走模型）
 ⚑ 下一步（待你定方向）: T8-6（壁纸使用次数并入 `wall_data.jsonl`）/ T8-7（T8 收口验收）
 
+Phase 7 T8-5c — 四条架构调整（按你拍的方向, 逐条验收过）
+☑ T8-5c-1 **参数归一化**（`Tool.normalize`, 在 **schema 校验之前**跑）:
+      · 每个工具一个纯函数: 大小写与同义词（`play`→`enqueue`）/ 老参数名（`step`→`action`、
+        `ip_query`→`match`）/ 空字面量（`""`、`"none"` 当没给）/ 只给 `match` 不给 `action` → 补 `pick`
+      · 为什么: 0.6B 的失败里"意思对、名字不对"占一大半 —— 报参数错等于白跑一轮
+      · `agent/core/tool_router.py::_normalized_args()`; 归一化本身抛异常只记 warning（不炸工具）;
+        `tests/test_tool_normalize.py`（16 项）
+☑ T8-5c-2 **只读问句直连**（`agent/core/read_intents.py`）:
+      · 板端实测 0.6B 对"现在在放什么"**不肯调 status**, 把问题原样复读 —— 这类答案只活在设备状态里
+      · 分工: 只读问句（在放什么 / 库里有什么 / 壁纸有哪些标签 / 现在哪张）→ 直连
+        （真实数据拼一句话, **0 次模型推理**）; 写意图照旧进模型; 依赖缺了/拿不到数据 → 交回模型
+      · `Runtime.handle_event()` 先问直连; `tests/test_read_intents.py`（20 项, 含"写意图不许被截胡"）
+☑ T8-5c-3 **优先扩 action, 不加工具**: 工具数维持 3 个; prompt 预算守卫钉在
+      `tests/test_merged_tools.py::TestPromptBudget`（清单 3600 / 单工具 2000 字符）
+☑ T8-5c-4 **关思考做成"不变量"（两层）**: ① user 消息末尾追加 `/no_think`;
+      ② 每一轮请求都带 `extra_body={"chat_template_kwargs": {"enable_thinking": False}}`
+      （`openai` SDK 拒收未知**顶层**参数, 实测踩过 `TypeError` → 整轮降级, 所以必须走 extra_body）
+      · 板端 A/B: 只做① → 499 字思考 / 289.8 s; 加上② → **0 字 / 22.1 s**; 成功率 1/6 → 5/6
+      · 四端套件全绿（PC 33 个文件 / 板端 33 个文件）
+
+Phase 7 T8-6 — 壁纸"使用次数"（并入 `wall_data.jsonl`, 你定的方案）
+☑ 记录: 每行加 `used` / `last_used`（记录版本仍是 1, **缺字段 = 0/None** —— 老数据文件照用）;
+      `agent/vision/wall_data.py` 仍是**唯一写者**: `bump_usage_in_file()`（读整表 → 改一行 →
+      原子写 + `.bak`）; 重打标签用 `with_usage()` 把计数带到新行（`assistant tag` 已做）
+☑ 计数判据只有一条: **屏幕上换成了另一张**。同一张重推（`step=0`）/ GUI 重连补推 /
+      开机后第一次补推（`count=False`）/ 图不在数据文件里（没打过标签）都不算;
+      推送失败不计数, 计数写盘失败只记 warning（**统计坏了不该让换图失败**）
+☑ 挑图: `next_wallpaper(action="least"｜"most")` —— **单字 action 是板端实测逼出来的**:
+      只给 `sort=` 时 0.6B 用不起来, 它照样写 `action="pick"` + 自己编的 `match="scene=landscape"`;
+      要"在最像的那批里挑用得最少的"仍用 `action="pick", match=…, sort="used_asc"`
+      （`sort` 只有挑图/翻页才有意义）; 排完**跳过屏幕上当前这张**再拿第 1 名 ——
+      连说两次"再挑张用得最少的"是一张张往少走（板端第一版写成"从当前这张往后翻",
+      第二次跳到 **index=39/40** —— 跑到用得多的一头去了, 当场改掉）
+☑ 板端第二种误用: 模型写过 `action="tags", sort="used_asc"`（**读动作配挑图参数**）。
+      修前它安静回一份标签清单, 模型接着说"已找到使用次数最少的壁纸, 您可以在界面中看到它"
+      —— **谎报**（屏幕根本没换）。现在 `tags` 带 `sort` **如实报错**并指出该用 `action="least"`
+      （不装没看见, 也不替它把"读"改成"写"）
+☑ 只读问句: "哪张壁纸我用得最少 / 壁纸都用过几次"也直连（`wallpaper_usage`, 0 次模型）——
+      带**护栏**: 整句要有疑问词, 且不许出现"换一张/放一首/挑一张"这类**动作**,
+      免得把写意图"换一张用得最少的壁纸"截胡（T8-5c 同款坑的第二次）
+⚑ **顺手修掉一个 T7-4 遗留 bug（写 T8-6 测试时才发现）**: 不给 `match` 的普通"换一张"
+      也一直在传 `anchor=None`（= "假装还没选过"）→ 连叫 4 次 `next_wallpaper(1)` 每次都
+      挑回 `01_a.png`, **"下一张"根本没往后走**。现在不给 `match`/`sort` 时不传 anchor,
+      按游标一格格走; `test_a_plain_switch_walks_forward` 钉住。
+      教训: "只测一次调用"的测试会漏掉**游标/状态类**问题 —— 这类要连叫两次才看得见。
+☑ 测试与文档: `test_wall_data.py`（50）/ `test_tag_index.py`（65）/ `test_wallpaper.py`（106）/
+      `test_tool_normalize.py`（16, 含 least/most 同义写法）/ `test_read_intents.py`（21）/
+      `test_cli.py`（重打标签保住 used）;
+      `docs/tagging.md` §4 + §6.1（含两种板端误用）、`docs/architecture.md` §4.1、
+      `docs/llm.md` §5.3、`docs/config-sources.md` §2、`Readme.md`
+⚑ **未解边界（模型层, 0.6B）**: `action="most"` 到不了 —— "换一张我老看的那张壁纸"-> `action="next"`、
+      "挑一张我看得最多的壁纸"-> `action="least"`（**方向反了**）; `least` 则 3/3 都调对。
+      机制本身板端直验通过（`next_wallpaper(1, sort="used_desc")` 挑到用得最多的那张,
+      再调一次跳过屏幕上那张）; 问"我看得最多的是哪张"走只读直连是准的。先如实记着。
+⚑ 下一步: T8-7（T8 收口验收: 四类诚实失败实跑 + 文档收口 + 整批提交/推送）
+
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档

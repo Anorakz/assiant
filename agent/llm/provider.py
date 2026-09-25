@@ -288,12 +288,28 @@ class EdgeBackend(_OpenAICompatibleBackend):
 
     # ------------------------------------------------------------ 请求 ---
     def extra_request_kwargs(self) -> Dict[str, Any]:
-        """把 llm.max_tokens / temperature 真正带上 (T2 之前这两个键没人读)。"""
+        """把 llm.max_tokens / temperature 真正带上 (T2 之前这两个键没人读)。
+
+        ⚠ T8-5c-4: `no_think` 打开时**每一次请求**都带
+        `chat_template_kwargs={"enable_thinking": false}` —— 这是 llama.cpp 的模板开关
+        （模型模板里有 `{%- if enable_thinking is defined and enable_thinking is false %}`,
+        为假时直接吐一个空的思考块）。为什么不能只靠 system/user 里那句 `/no_think`:
+
+          · 软开关是**模型学过的**：只在第一轮稳, 工具结果那一轮里 user 消息已经被推到
+            历史深处（最后一条是 `tool`）, 不能保证还压得住;
+          · 模板参数是**模板自己保证**的, 与第几轮、消息形状都无关。
+
+        ⚠ 必须走 `extra_body=`（板端实测踩到）: openai SDK **不接受未知的顶层关键字** ——
+        直接传 `chat_template_kwargs=` 会 `TypeError: create() got an unexpected keyword
+        argument`, 然后整轮降级成规则兜底。`extra_body` 是 SDK 官方的"塞进请求体"通道。
+        """
         kwargs: Dict[str, Any] = {}
         if self.max_tokens is not None:
             kwargs["max_tokens"] = int(self.max_tokens)
         if self.temperature is not None:
             kwargs["temperature"] = float(self.temperature)
+        if self.no_think:
+            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
         return kwargs
 
     # ------------------------------------------------------------ 诊断 ---

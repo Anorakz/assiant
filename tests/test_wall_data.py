@@ -424,5 +424,93 @@ class TestDataFilePath(unittest.TestCase):
         self.assertTrue(resolved.endswith(os.path.join("config", "wall_data.jsonl")))
 
 
+# ------------------------------------------------------------------ 使用次数 ---
+class TestUsage(unittest.TestCase):
+    """T8-6: `used` / `last_used` —— "这张壁纸显示过几次"。
+
+    为什么要它: 板端可以挑"用得最少的"那张（`next_wallpaper(sort="used_asc")`），
+    也让 `action="tags"` 能回报使用情况。写入者仍只有本模块（`write_records()`）。
+    """
+
+    def setUp(self):
+        self.dir = make_dir("01_a.png", "02_b.png")
+        self.a = os.path.join(self.dir, "01_a.png")
+        self.b = os.path.join(self.dir, "02_b.png")
+        self.data = os.path.join(self.dir, "wall_data.jsonl")
+
+    def test_missing_fields_mean_zero(self):
+        # 老数据文件（没有这两个字段）照样能用
+        record = {"path": self.a}
+        self.assertEqual(wall_data.usage_of(record), {"used": 0, "last_used": None})
+        self.assertEqual(wall_data.usage_of(None), {"used": 0, "last_used": None})
+        self.assertEqual(wall_data.usage_of({"used": "很多", "last_used": ""}),
+                         {"used": 0, "last_used": None})
+
+    def test_make_record_writes_them(self):
+        record = make_record(self.a)
+        self.assertEqual(record["used"], 0)
+        self.assertIsNone(record["last_used"])
+        self.assertEqual(make_record(self.a, used=3, last_used="2026-09-25T10:00:00")["used"], 3)
+
+    def test_bump_returns_a_copy_and_sets_the_time(self):
+        record = make_record(self.a)
+        bumped = wall_data.bump_usage(record, when="2026-09-25T10:00:00")
+        self.assertEqual(bumped["used"], 1)
+        self.assertEqual(bumped["last_used"], "2026-09-25T10:00:00")
+        self.assertEqual(record["used"], 0, "不该改入参（调用方拿的是副本）")
+        self.assertEqual(wall_data.bump_usage(bumped, when="x")["used"], 2)
+
+    def test_with_usage_carries_the_count_over(self):
+        # ⚠ 重打标签时用它把计数带过去（assistant tag 已经这么做）
+        old = wall_data.bump_usage(make_record(self.a), when="t")
+        fresh = make_record(self.a)                       # 假装的"新打的那行"
+        carried = wall_data.with_usage(fresh, wall_data.usage_of(old))
+        self.assertEqual(carried["used"], 1)
+        self.assertEqual(carried["last_used"], "t")
+        self.assertEqual(fresh["used"], 0, "不改入参")
+
+    def test_bump_in_file_writes_and_returns_the_count(self):
+        wall_data.write_records(self.data, [make_record(self.a), make_record(self.b)])
+        self.assertEqual(wall_data.bump_usage_in_file(self.data, self.a,
+                                                      when="2026-09-25T11:00:00"), 1)
+        self.assertEqual(wall_data.bump_usage_in_file(self.data, self.a, when="t2"), 2)
+        records = wall_data.read_records(self.data)[0]
+        by_path = {r["path"]: r for r in records}
+        self.assertEqual(by_path[self.a]["used"], 2)
+        self.assertEqual(by_path[self.a]["last_used"], "t2")
+        self.assertEqual(by_path[self.b]["used"], 0, "别的图不该被动到")
+
+    def test_bump_in_file_keeps_the_vocab_header(self):
+        vocab = {"kind": "vocab", "version": 1, "axes": {}, "embeds": {}}
+        wall_data.write_records(self.data, [make_record(self.a)], vocab=vocab)
+        wall_data.bump_usage_in_file(self.data, self.a)
+        loaded = wall_data.load(self.data)
+        self.assertIsNotNone(loaded["vocab"], "整文件重写不能把词表头弄丢")
+        self.assertEqual(loaded["records"][0]["used"], 1)
+
+    def test_bump_in_file_ignores_an_unknown_path(self):
+        wall_data.write_records(self.data, [make_record(self.a)])
+        with open(self.data, "r", encoding="utf-8") as handle:
+            before = handle.read()
+        self.assertIsNone(wall_data.bump_usage_in_file(self.data, self.b))
+        with open(self.data, "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), before, "文件里没有这张 -> 一个字节都不写")
+
+    def test_usage_summary_orders_and_counts(self):
+        records = [make_record(self.a, used=5, last_used="t5"),
+                   make_record(self.b)]
+        summary = wall_data.usage_summary(records, top=1)
+        self.assertEqual(summary["total_used"], 5)
+        self.assertEqual(summary["with_usage"], 1)
+        self.assertEqual(summary["never_used"], 1)
+        self.assertEqual(summary["least_used"][0]["path"], self.b)
+        self.assertEqual(summary["most_used"][0]["path"], self.a)
+
+    def test_usage_survives_a_round_trip(self):
+        wall_data.write_records(self.data, [make_record(self.a, used=7, last_used="t7")])
+        record = wall_data.read_records(self.data)[0][0]
+        self.assertEqual(wall_data.usage_of(record), {"used": 7, "last_used": "t7"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

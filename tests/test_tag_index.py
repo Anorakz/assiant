@@ -600,5 +600,61 @@ class TestMatchResult(unittest.TestCase):
         self.assertIn("error", repr(MatchResult(error="炸了")))
 
 
+class TestUsage(unittest.TestCase):
+    """T8-6: 索引要能回答"这张用过几次"（挑用得最少的就靠它）。"""
+
+    def _index(self, tmp, used=None):
+        directory = os.path.join(tmp, "wallpapers")
+        os.makedirs(directory, exist_ok=True)
+        records = []
+        for name, count in (used or {"01_a.png": 0, "02_b.png": 3, "03_c.png": 1}).items():
+            path = os.path.join(directory, name)
+            with open(path, "wb") as handle:
+                handle.write(b"x")
+            records.append(wall_data.make_record(
+                path, 1280, 800, 1, "sha-%s" % name, 1, "m1", "v1",
+                {"scene": [["anime", 0.5]]}, [0.0] * DIM, used=count))
+        data_file = os.path.join(tmp, "wall_data.jsonl")
+        wall_data.write_records(data_file, records, backup=False)
+        return TagIndex.from_file(data_file), directory
+
+    def test_usage_of_one_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            index, directory = self._index(tmp)
+            self.assertEqual(index.usage_of(os.path.join(directory, "02_b.png"))["used"], 3)
+            self.assertEqual(index.usage_of(os.path.join(directory, "没有这张.png"))["used"], 0)
+
+    def test_rank_by_usage_ascending_and_descending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            index, directory = self._index(tmp)
+            least = index.rank_by_usage(ascending=True)
+            self.assertEqual([os.path.basename(item["path"]) for item in least],
+                             ["01_a.png", "03_c.png", "02_b.png"])
+            most = index.rank_by_usage(ascending=False)
+            self.assertEqual([os.path.basename(item["path"]) for item in most],
+                             ["02_b.png", "03_c.png", "01_a.png"])
+
+    def test_rank_by_usage_can_stay_inside_a_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            index, directory = self._index(tmp)
+            pool = [os.path.join(directory, "02_b.png"), os.path.join(directory, "03_c.png")]
+            ranked = index.rank_by_usage(ascending=True, pool=pool)
+            self.assertEqual([os.path.basename(item["path"]) for item in ranked],
+                             ["03_c.png", "02_b.png"])
+            self.assertEqual(index.rank_by_usage(pool=["不存在"]), [])
+
+    def test_summary_carries_the_usage_block_named_by_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            index, _directory = self._index(tmp)
+            summary = index.summarise(top=2)
+            usage = summary["usage"]
+            self.assertEqual(usage["total_used"], 4)
+            self.assertEqual(usage["never_used"], 1)
+            self.assertEqual(usage["with_usage"], 2)
+            self.assertEqual(usage["least_used"][0]["name"], "01_a.png",
+                             "回话里给文件名, 不塞绝对路径")
+            self.assertEqual(usage["most_used"][0]["name"], "02_b.png")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

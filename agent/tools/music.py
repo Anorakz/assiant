@@ -47,7 +47,7 @@ from ..core.state_machine import State
 from ..core.tool_router import Tool
 
 __all__ = ["NAME", "ALLOWED_STATES", "ACTIONS", "SORTS", "TIMEOUT_S", "DESCRIPTION",
-           "SCHEMA", "build"]
+           "SCHEMA", "normalize", "build"]
 
 _log = logging.getLogger(__name__)
 
@@ -156,6 +156,105 @@ def _parsed_tag(value: Optional[str]) -> Any:
     return axis, (values[0] if len(values) == 1 else values)
 
 
+#: 老工具名/同义写法 -> 现在的 action（`play_music` 是 T8-5 那版的工具名,
+#: 语义与现在的 `enqueue` 完全一样; 板端实测模型偶尔会用老名字）
+_ACTION_SYNONYMS = {
+    "play": "enqueue",
+    "play_music": "enqueue",
+    "add": "enqueue",
+    "push": "enqueue",
+    "queue": "enqueue",
+    "clear": "clear_queue",
+    "list_music_library": "list",
+    "search_music": "search",
+}
+
+#: 空值写法 —— 模型有时候把"没给"写成这些字面量（板端实测见过 `track_id="none"`）
+_EMPTY_VALUES = ("", "none", "null", "nil", "n/a", "na", "-", "无", "空")
+
+#: 哪些字段出现就意味着"这是一条 enqueue"（action 缺失时用来推断）
+_ENQUEUE_HINTS = ("track_id", "keyword", "tag", "sort", "limit", "replace")
+
+
+def _clean_text(value: Any) -> Optional[str]:
+    """字符串字段的清洗: 去空白; 空值字面量 -> None（= 没给）。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.lower() in _EMPTY_VALUES:
+        return None
+    return text
+
+
+def normalize(args: Dict[str, Any]) -> Dict[str, Any]:
+    """参数归一化（T8-5c）—— **按语义接受, 不按参数名挑刺**。
+
+    规则（每条都写明来源; 只做等价改写, 不猜内容）:
+
+    ================================================  ==========================================
+    模型可能这样写                                     归一化成
+    ================================================  ==========================================
+    `action=" ENQUEUE "` / 大写                      小写 + 去空白
+    `action="play"` / `"play_music"` / `"add"`        `action="enqueue"`（老工具名/同义; 板端
+                                                     实测模型会用老名字）
+    `action="clear"`                                  `action="clear_queue"`
+    没给 `action`, 但给了 `track_id`/`keyword`/`tag`/  `action="enqueue"`（语义就是"放一首"）
+      `sort`/`limit`/`replace`
+    没给 `action`, 但给了 `set_tag`                   `action="tag"`；给了 `level` -> `volume`
+    `track_id="none"` / `""` / `null`（板端实测）      删掉（当没给 -> 走"按条件挑"）
+    `keyword` / `tag` / `set_tag` 的空写法             删掉
+    `action="tag"` 却把标签放进了 `tag`（不是 `set_tag`）`set_tag` 拿过来, 删掉 `tag`
+    `limit="3"` / `level="30"`（数字写成字符串）       转成 int（schema 会拒字符串）
+    ================================================  ==========================================
+
+    @return 新的参数字典（不改入参）
+    """
+    out = dict(args)
+
+    action = out.get("action")
+    if isinstance(action, str):
+        action = action.strip().lower()
+    if isinstance(action, str) and action:
+        action = _ACTION_SYNONYMS.get(action, action)
+
+    for key in ("track_id", "keyword", "tag", "set_tag"):
+        if key in out:
+            cleaned = _clean_text(out.get(key))
+            if cleaned is None:
+                out.pop(key, None)
+            else:
+                out[key] = cleaned
+    for key in ("quality", "sort"):
+        if isinstance(out.get(key), str):
+            out[key] = out[key].strip()
+
+    if not action:
+        if "set_tag" in out:
+            action = "tag"
+        elif "level" in out:
+            action = "volume"
+        elif any(key in out for key in _ENQUEUE_HINTS):
+            action = "enqueue"
+    if isinstance(action, str) and action:
+        out["action"] = action
+
+    for key in ("limit", "level"):
+        value = out.get(key)
+        if isinstance(value, str):
+            try:
+                out[key] = int(float(value))
+            except ValueError:
+                out.pop(key, None)      # 转不了就当没给（handler 会用它自己的默认 / 如实报错）
+        elif isinstance(value, bool):   # True/False 不是数字
+            out.pop(key, None)
+
+    # `action="tag"` 时模型容易把要写的标签塞进 `tag`（那是筛选用的）—— 等价改写到 set_tag
+    if out.get("action") == "tag" and not out.get("set_tag") and out.get("tag"):
+        out["set_tag"] = out.pop("tag")
+
+    return out
+
+
 def build(services: Dict[str, Any]) -> Optional[Tool]:
     """造工具。音乐没开（缺入口）就返回 None（并说清为什么）。
 
@@ -181,6 +280,8 @@ def build(services: Dict[str, Any]) -> Optional[Tool]:
                 sort: str = "plays_asc", limit: int = 0, replace: Optional[bool] = None,
                 set_tag: Optional[str] = None, remove: Optional[bool] = None,
                 level: Optional[int] = None) -> Dict[str, Any]:
+        # ⚠ 归一化已经在路由层跑过（`Tool.normalize`, 规则表见 `normalize()`）——
+        #   这里只看规范形: 老 action 名 / 空值字面量 / 字符串数字都已经被改写。
         choice = str(action or "").strip().lower()
 
         if choice == "enqueue":
@@ -242,4 +343,5 @@ def build(services: Dict[str, Any]) -> Optional[Tool]:
         handler=handler,
         allowed_states=set(ALLOWED_STATES),
         timeout_s=TIMEOUT_S,
+        normalize=normalize,
     )

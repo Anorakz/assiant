@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -51,6 +52,8 @@ __all__ = [
     "validate_args",
     "validate_schema",
 ]
+
+_log = logging.getLogger(__name__)
 
 
 #: 执行超时默认值 (秒)
@@ -276,6 +279,9 @@ class Tool:
                           ⚠ T8-5b 加的: 有的工具会**同步走一趟 PC**（音乐排队列后起播
                           要走 ssh + schtasks, 板端实测 5~8 s），用一个全局 5 s 会把它
                           误判成 `timed out`（板端实测踩到过）。
+    @param normalize      参数归一化（T8-5c）: `normalize(args) -> args`, **纯函数**,
+                          在校验前跑（见 `agent/core/tool_router.py::_normalized_args`）。
+                          只做**等价改写**（老写法/同义写法/字符串数字）, 不改语义、不猜内容。
     """
 
     name: str
@@ -284,6 +290,7 @@ class Tool:
     handler: Callable[..., Any]
     allowed_states: Set[State] = field(default_factory=set)
     timeout_s: Optional[float] = None
+    normalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
 
     def __post_init__(self) -> None:
         # 允许传 list/tuple/frozenset; 统一成 set 便于查找
@@ -474,14 +481,42 @@ class ToolRouter:
                 % (name, state.value, self._states_label(tool)),
             }
 
-        # 3) 参数符合 schema?
+        # 3) 参数**归一化**（T8-5c: "按语义接受, 不按参数名挑刺"）——
+        #    ⚠ 必须在 schema 校验**之前**: 模型写的老写法/等价写法（例如
+        #    `action="play"` 这种老工具名、数字写成字符串）要能被接住, 否则校验先把它拒了。
+        #    工具没声明 normalize 就是原样（`_normalized_args` 保证不抛）。
+        args = self._normalized_args(tool, args)
+
+        # 4) 参数符合 schema?
         try:
             validate_args(tool.schema, args)
         except SchemaError as exc:
             return {"ok": False, "error": "invalid arguments: %s" % exc}
 
-        # 4/5) 执行 + 超时 + 异常
+        # 5/6) 执行 + 超时 + 异常
         return await self._run(tool, args)
+
+    def _normalized_args(self, tool: Tool, args: Dict[str, Any]) -> Dict[str, Any]:
+        """按工具自己的规则把参数**等价改写**成规范形（失败就当没归一化）。
+
+        @note 归一化是**纯函数**、只做等价改写, 不改语义、不猜内容 —— 约定见
+              `docs/architecture.md` §4.1"参数归一化"。工具没声明就用原参数。
+        @note **归一化自己炸了不能影响工具**: 记一条 warning, 照原参数往下走
+              （真有问题就让 schema 校验或 handler 如实报错）。
+        """
+        normalize = getattr(tool, "normalize", None)
+        if not callable(normalize):
+            return args
+        try:
+            normalized = normalize(dict(args))
+        except Exception as exc:  # noqa: BLE001 - 归一化不该让工具挂掉
+            _log.warning("tool %r 的 normalize() 出错 (已忽略): %r", tool.name, exc)
+            return args
+        if not isinstance(normalized, dict):
+            _log.warning("tool %r 的 normalize() 没返回 dict (已忽略): %r",
+                         tool.name, type(normalized).__name__)
+            return args
+        return normalized
 
     async def _run(self, tool: Tool, args: Dict[str, Any]) -> Dict[str, Any]:
         """真正执行 handler, 带超时与异常兜底。"""

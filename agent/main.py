@@ -65,6 +65,7 @@ if __package__ in (None, ""):  # pragma: no cover - 只在直接执行时走
 
 from agent.config import ConfigError, ConfigNotFoundError, config_path, load_config
 from agent.core import Scheduler, State, StateMachine, ToolRouter
+from agent.core import read_intents
 from agent.io import (
     ChatInputBus,
     ImageReader,
@@ -308,6 +309,10 @@ class Runtime:
         #: 上一次由 `match` 挑中的那张 ({"spec", "path"}) —— T7-4:
         #: 同一个条件再来一次就"往下翻一名"（再换一张同类的）; 换了条件就从第 1 名重挑。
         self._last_match_pick: Dict[str, str] = {}
+
+        #: T8-6: 上一次**推到屏幕上**的那张壁纸 —— "换成另一张"才算一次使用,
+        #: 重推当前这张 / GUI 重连补推同一张都不重复计数。
+        self._last_shown_wallpaper: str = ""
 
         #: 音乐（T8-4）: `agent/core/music.py::MusicPlayer` + 在 PC 上跑的 neteasecli。
         #: **None = 没开音乐**（配置 music.enabled=false 或没配 pc_host）——
@@ -673,14 +678,17 @@ class Runtime:
         summary["ok"] = True
         summary["ip_presets"] = preset_names(presets)
         summary["note"] = ("挑图用 next_wallpaper(match=\"scene=anime\") 这种写法；"
-                           "IP 用 match=\"ip=EVA\"。分数是余弦（不是概率）。")
+                           "IP 用 match=\"ip=EVA\"；"
+                           "挑\"用得最少的\"用 sort=\"used_asc\"（T8-6）。"
+                           "分数是余弦（不是概率）。")
         return summary
 
     def _wallpaper_dir(self) -> Optional[str]:
         return self.wallpaper.directory if self.wallpaper is not None else None
 
-    def next_wallpaper(self, step: int = 1, match: Optional[str] = None) -> Dict[str, Any]:
-        """换一张壁纸并把结果推给 GUI（T3 起；T7-3 起支持按标签/IP 挑）。
+    def next_wallpaper(self, step: int = 1, match: Optional[str] = None,
+                       sort: Optional[str] = None) -> Dict[str, Any]:
+        """换一张壁纸并把结果推给 GUI（T3 起；T7-3 起支持按标签/IP 挑；T8-6 起能按使用次数排）。
 
         入口只有一条: **对话**里 LLM 调 `next_wallpaper` 工具（手动按钮与
         `next_wallpaper` IPC 命令在 T7-3 按需求**删掉了**, 见 agent/core/wallpaper.py 的模块头）。
@@ -689,9 +697,13 @@ class Runtime:
         @param match 挑图条件（None = 按文件名顺序翻全部）:
                      `"scene=anime"` 某轴某标签 / `"anime"` 只写标签名 / `"ip=EVA"` 锚点检索。
                      **候选按相关度排好**（最像的在前），所以 step=1 就是"最像的那张"。
-        @return {"ok", "path", "index", "total", "pushed", "match"?, "score"?, "error"}
-                · ok=False 时 error 是**给人看的**一句话
-                · pushed=True 只表示"已经交给 IPC 去推了", 不代表 GUI 收到了
+        @param sort  T8-6: 候选**再按使用次数排一遍** —— `"used_asc"` 用得最少的在前
+                     （"挑一张我最少看到的"）/ `"used_desc"` 用得最多的在前 / None = 不动。
+                     有 match 时是"在最像的那批里挑用得最少的"。
+                     ⚠ 排序后会**跳过屏幕上当前这张**再从第 1 名拿 —— 连说两次
+                     "再挑一张用得最少的"是一张张往少走, 不会挑回同一张、也不会跳回用得多的一头。
+        @return {"ok", "path", "index", "total", "pushed", "used", "match"?, "score"?, "error"}
+                     `used` = **记完这一次之后**的总次数（"这张一共显示过几次"）。
         @note 目录不存在/没图片属于运行期问题: 这里报错, 不让工具在启动时消失。
               标签数据还没打（或 match 写错）同样只是**这次失败**, 不抛异常。
         @note **状态权限不在这里判**: 那张表挂在工具上（`allowed_states`）, 由
@@ -704,7 +716,12 @@ class Runtime:
 
         pool = None
         picked: Dict[str, Any] = {}
-        anchor: Any = None                 # None = "这次是新的挑选, 从第 1 名开始"
+        # 锚点（只在"按内容挑 / 按使用次数挑"时给）:
+        #   None = 这次是新的挑选, 从第 1 名开始; 给路径 = 从它往后翻。
+        # ⚠ 不给 match/sort 的普通"换一张"**不能**传 anchor（T8-6 顺手修的 T7-4 遗留 bug:
+        #   传 None 等于"假装还没选过", 于是"换一张"每次都挑回第 1 张 —— 实测连叫 4 次
+        #   都是 01_a.png。普通换图要走游标, 也就是 step() 自己的默认值）。
+        anchor: Any = None
         if match:
             resolved = self._resolve_match(match)
             if not resolved.get("ok"):
@@ -719,17 +736,38 @@ class Runtime:
             if previous.get("spec") == match.strip() and previous.get("path") in pool:
                 anchor = previous.get("path")
 
+        # T8-6: 按使用次数重排候选（"挑用得最少的"）。⚠ 排完之后"上次挑的那张再往后翻"
+        # 就不成立了（名次会随计数变），所以改成: **先把当前屏幕上这张从候选里去掉**,
+        # 再从第 1 名拿。板端实测过两种错法:
+        #   · 从"当前这张在排序里的名次"往后走 -> 第一次挑完它自己就跑到用得多的一头去了,
+        #     第二次会跳到 **index=39/40**（用得最多的那一档）;
+        #   · 不跳过当前这张 -> 用户说"再挑一张用得最少的"却拿到同一张。
+        # 现在是"在**屏幕上没有**的那些里挑用得最少的", 连说几次会一张张往少走。
+        if sort:
+            pool, picked = self._sort_pool_by_usage(pool, match, sort)
+            if pool is None:
+                return picked                            # 失败（原因已在里面）
+            current = self.wallpaper.current()
+            if len(pool) > 1 and current in pool:
+                pool = [path for path in pool if path != current]
+            anchor = None
+
         try:
-            index, path, total = self.wallpaper.step(step, pool=pool, anchor=anchor)
+            if match or sort:
+                index, path, total = self.wallpaper.step(step, pool=pool, anchor=anchor)
+            else:                                   # 普通"换一张": 按游标一格一格走
+                index, path, total = self.wallpaper.step(step)
         except WallpaperError as exc:
             self.log.warning("wallpaper: 换不了: %s", exc)
             return self._wallpaper_failure(str(exc))
 
         pushed = self._push_wallpaper(path, index)
-        self.log.info("wallpaper: %s (index=%d/%d%s, pushed=%s)", path, index, total,
-                      ", match=%s" % match if match else "", pushed)
+        used = self.wallpaper_usage(path)
+        self.log.info("wallpaper: %s (index=%d/%d%s%s, pushed=%s, used=%d)", path, index, total,
+                      ", match=%s" % match if match else "",
+                      ", sort=%s" % sort if sort else "", pushed, used)
         out: Dict[str, Any] = {"ok": True, "path": path, "index": index,
-                               "total": total, "pushed": pushed}
+                               "total": total, "pushed": pushed, "used": used}
         if match:
             self._last_match_pick = {"spec": match.strip(), "path": path}
             out["match"] = {"spec": match, "kind": picked.get("kind"),
@@ -739,7 +777,70 @@ class Runtime:
             score = (picked.get("scores") or {}).get(path)
             if score is not None:
                 out["score"] = score
+        if sort:
+            out["sort"] = sort
         return out
+
+    def _sort_pool_by_usage(self, pool: Optional[list], match: Optional[str],
+                            sort: str) -> Any:
+        """把候选按使用次数排一遍（T8-6）。
+
+        @return (新候选, 说明 dict) —— 失败时返回 (None, 失败 dict)
+        """
+        order = str(sort or "").strip().lower()
+        if order not in ("used_asc", "used_desc"):
+            return None, self._wallpaper_failure("不认识的 sort %r（可用的: used_asc / used_desc）"
+                                                 % sort)
+        index = self.tag_index()
+        if not index.count():
+            return None, self._wallpaper_failure(
+                "还没有壁纸标签数据（%s）—— 按使用次数挑也要先跑 assistant tag --apply"
+                % index.data_file)
+        ranked = index.rank_by_usage(ascending=(order == "used_asc"), pool=pool)
+        paths = [item["path"] for item in ranked]
+        if not paths:
+            return None, self._wallpaper_failure("没有可挑的壁纸（候选是空的）")
+        note = "%s：%d 张按使用次数排序（%s），最少的 %d 次、最多的 %d 次" % (
+            "用得最少优先" if order == "used_asc" else "用得最多优先", len(paths),
+            "升序" if order == "used_asc" else "降序",
+            ranked[0]["used"], ranked[-1]["used"])
+        return paths, {"kind": "usage", "note": note, "scores": {}}
+
+    def wallpaper_usage(self, path: str) -> int:
+        """某张壁纸被显示过几次（T8-6；读数据文件，缺字段 = 0）。"""
+        try:
+            return int(self.tag_index().usage_of(path).get("used") or 0)
+        except Exception as exc:                     # noqa: BLE001 - 计数读不到不该影响换图
+            self.log.warning("wallpaper: 读使用次数失败 (当成 0): %r", exc)
+            return 0
+
+    def _note_wallpaper_shown(self, path: str, count: bool = True) -> None:
+        """屏幕上**换成了**这一张 -> 使用次数 +1（T8-6）。
+
+        @param count False = 只是"同步显示"（开机后补推当前这张）, 记下是谁但**不计**
+        ⚠ 判据是"换成了另一张"（path 跟上次推上去的不一样）—— 重推当前这张（step=0）、
+          GUI 重连补推、同一次换图重复调用都**不算**新的使用。
+        @note 计数写盘失败只记 warning: 一个统计数字不该让"换壁纸"这件事失败。
+        """
+        if not path or path == self._last_shown_wallpaper:
+            return
+        self._last_shown_wallpaper = path           # 屏幕上现在是这张（先记下, 免重复写盘）
+        if not count:
+            return
+        from agent.vision import wall_data
+
+        data_file = wall_data.resolve_data_file(self._cfg("wallpaper", "tagging", "data_file"))
+        try:
+            used = wall_data.bump_usage_in_file(data_file, path)
+        except wall_data.WallDataError as exc:
+            self.log.warning("wallpaper: 使用次数写盘失败 (已忽略): %s", exc)
+            return
+        if used is None:
+            self.log.info("wallpaper: %s 不在标签数据里 —— 不计使用次数", path)
+            return
+        # 内存里的索引也要跟上, 否则同一次会话里再挑"用得最少的"会看到旧数字
+        self._tag_index = None
+        self.log.info("wallpaper: 使用次数 %s -> %d", os.path.basename(path), used)
 
     def _wallpaper_failure(self, reason: str, **extra: Any) -> Dict[str, Any]:
         """换壁纸失败的统一返回（T7-4 (c)）。
@@ -1060,30 +1161,43 @@ class Runtime:
         @note 这是"**同步显示**", 不是"换一张": 所以**不受状态表限制** ——
               客户端连上时 Agent 可能正处在 SLEEP/GAME, 补一张当前壁纸不该被拒。
         @note 从来没选过任何一张时, 会**顺手选第一张**当初始画面（只动游标, 不做别的）。
+        @note T8-6: 这一路**只在真换过图之后才计数**。开机/重启后 GUI 连上来的第一次
+              补推不算一次使用（那张图本来就是屏幕上的, 不是用户换的）—— 否则每次
+              重启 Agent 都会给同一张图白加一次。
         """
         if self.wallpaper is None:
             return False
+        previous = self.wallpaper.current()        # None = 这次是"初始画面"
         snapshot = self.wallpaper.snapshot(initialise=True)
         if snapshot is None:
             self.log.debug("wallpaper: 没有可补推的壁纸（目录空的或读不了）")
             return False
         index, path, total = snapshot
-        pushed = self._push_wallpaper(path, index)
+        pushed = self._push_wallpaper(path, index, count=previous is not None)
         self.log.info("wallpaper: 给刚连上的 GUI 补推 %s (index=%d/%d, pushed=%s)",
                       path, index, total, pushed)
         return pushed
 
-    def _push_wallpaper(self, path: str, index: int) -> bool:
-        """把一张壁纸交给 IPC 推出去（没有 IPC 时返回 False, 不抛）。"""
+    def _push_wallpaper(self, path: str, index: int, count: bool = True) -> bool:
+        """把一张壁纸交给 IPC 推出去（没有 IPC 时返回 False, 不抛）。
+
+        @param count False = 只推**不计**（"同步显示当前这张", 不是"换成了这一张"）
+        @note T8-6: 推出去之后**顺手记一次**（`_note_wallpaper_shown`）——
+              判据是"换成了另一张", 所以重推/补推不会重复计数。
+              推送**失败**（抛异常）就不记: 那张图并没真的上屏。计数写盘失败只记 warning。
+        """
+        pushed = False
         if self.on_wallpaper is None:
             self.log.info("wallpaper: 没有 IPC 推送入口（没接 GUI），只更新了游标")
-            return False
-        try:
-            self.on_wallpaper(path, index)
-            return True
-        except Exception as exc:        # noqa: BLE001 - 推送失败不该让"换壁纸"失败
-            self.log.warning("wallpaper: 推送失败 (已忽略): %r", exc)
-            return False
+        else:
+            try:
+                self.on_wallpaper(path, index)
+                pushed = True
+            except Exception as exc:        # noqa: BLE001 - 推送失败不该让"换壁纸"失败
+                self.log.warning("wallpaper: 推送失败 (已忽略): %r", exc)
+        if pushed or self.on_wallpaper is None:
+            self._note_wallpaper_shown(path, count=count)
+        return pushed
 
     def _register_tools(self, router: ToolRouter) -> int:
         """注册工具。
@@ -1404,15 +1518,70 @@ class Runtime:
                 self.log.info("已达 max_events=%d, 主动退出主循环", self.max_events)
                 return
 
+    def wallpaper_snapshot(self) -> Dict[str, Any]:
+        """当前壁纸的现状 —— **只读**（不动游标、不推送）。
+
+        @return {"index", "path", "total"}; 没选过 / 目录用不了 -> {}（"不知道"就是不知道）
+        @note T8-5c: 给"现在是什么壁纸"这类**只读问句直连**用（不走模型）。
+        """
+        if self.wallpaper is None:
+            return {}
+        snapshot = self.wallpaper.snapshot()
+        if not snapshot:
+            return {}
+        index, path, total = snapshot
+        return {"index": index, "path": path, "total": total}
+
+    def read_services(self) -> Dict[str, Any]:
+        """**只读问句直连**要用的入口（T8-5c）。
+
+        @return 缺哪个键, 对应那类问句就**交回模型**（见 `agent/core/read_intents.py`）
+        @note 这些入口与工具用的是**同一份数据**, 所以直连答的数字与工具回话一定一致。
+        """
+        return {
+            "music_state": self.music_state if self.music else None,
+            "music_list": self.music_candidates if self.music else None,
+            "wallpaper_tags": self.wallpaper_tags,
+            "wallpaper_state": self.wallpaper_snapshot,
+        }
+
+    async def _deliver_reply(self, reply: str) -> str:
+        """把一条回复算进统计、记日志、交给 IPC 钩子（两条路共用: 直连 / 模型）。"""
+        self.stats["replies"] += 1
+        self.log.info("回复: %s", reply)
+
+        # Phase 6 D4: 把回复交给 IPC (推 llm{text} 给 GUI)。
+        # 钩子是"没人接就什么都不做" —— 没有 IPC / 没注册时行为与以前一致。
+        # 钩子本身出错不能影响这条回复已经算成功这件事, 所以只记 warning。
+        if reply and self.on_reply is not None:
+            try:
+                hooked = self.on_reply(reply)
+                if inspect.isawaitable(hooked):
+                    await hooked
+            except Exception as exc:        # noqa: BLE001
+                self.log.warning("回复钩子出错 (已忽略): %r", exc)
+                self.log.debug("回复钩子 traceback", exc_info=True)
+        return reply
+
     async def handle_event(self, event: Dict[str, Any]) -> Optional[str]:
         """处理一条 bus 事件并返回回复 (没回复则 None)。
 
         单独抽出来是为了能直接测"一条消息进来会怎样", 不用起整个进程。
+
+        ⚠ T8-5c: **只读问句先走直连**（`agent/core/read_intents.py`）——
+          "现在在放什么 / 库里有什么歌 / 壁纸有哪些标签 / 哪张壁纸用得最少"这类问题的
+          答案只存在于设备状态里, 板端实测 0.6B 既不肯调 `status` 也编不出来,
+          所以直接用真实数据拼一句话回, **一次模型推理都不花**。写意图照旧进模型。
         """
         source = event.get("source", "?")
         text = event.get("text", "")
         self.stats["events"] += 1
         self.log.info("[%s] %s", source, text)
+
+        direct = read_intents.answer(text, self.read_services())
+        if direct is not None:
+            self.log.info("只读问句直连 (%s, 没走模型)", direct.intent)
+            return await self._deliver_reply(direct.text)
 
         if self.llm is None:
             self.log.error("llm 未就绪, 无法处理这条输入")
@@ -1453,22 +1622,7 @@ class Runtime:
             self.stats["llm_errors"] += 1
 
         reply = result.get("text") or ""
-        self.stats["replies"] += 1
-        self.log.info("回复: %s", reply)
-
-        # Phase 6 D4: 把回复交给 IPC (推 llm{text} 给 GUI)。
-        # 钩子是"没人接就什么都不做" —— 没有 IPC / 没注册时行为与以前一致。
-        # 钩子本身出错不能影响这条回复已经算成功这件事, 所以只记 warning。
-        if reply and self.on_reply is not None:
-            try:
-                hooked = self.on_reply(reply)
-                if inspect.isawaitable(hooked):
-                    await hooked
-            except Exception as exc:        # noqa: BLE001
-                self.log.warning("回复钩子出错 (已忽略): %r", exc)
-                self.log.debug("回复钩子 traceback", exc_info=True)
-
-        return reply
+        return await self._deliver_reply(reply)
 
     # ------------------------------------------------------------ 停止 ---
     async def stop(self) -> None:

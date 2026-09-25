@@ -73,11 +73,27 @@ class _FakeResponse:
 
 
 class _FakeCompletions:
+    """假 client —— **刻意学 openai SDK 的严格性**: 未知的顶层关键字要抛 TypeError。
+
+    ⚠ T8-5c-4 板端实测踩到过: 我们往 `create()` 传了个 SDK 不认的顶层关键字
+    （`chat_template_kwargs=`），PC 上的替身**照单全收**, 板端却
+    `TypeError: create() got an unexpected keyword argument` → 整轮降级。
+    替身比现实宽松 = 这类 bug 只在板端暴露, 所以这里把允许的键写死。
+    """
+
+    #: openai SDK 真认的顶层关键字（我们只会用这些）
+    ALLOWED = ("model", "messages", "tools", "tool_choice", "max_tokens",
+               "temperature", "extra_body")
+
     def __init__(self, script):
         self._script = list(script)
         self.requests = []
 
     def create(self, **kwargs):
+        unexpected = sorted(set(kwargs) - set(self.ALLOWED))
+        if unexpected:
+            raise TypeError("create() got an unexpected keyword argument %r"
+                            % unexpected[0])
         self.requests.append(kwargs)
         if not self._script:
             return _FakeResponse(content="(no more scripted responses)")
@@ -404,6 +420,75 @@ class TestModeSelection(unittest.IsolatedAsyncioTestCase):
         content = edge.client.requests[0]["messages"][-1]["content"]
         self.assertTrue(content.startswith("现在几点"), content)
         self.assertTrue(content.endswith("/no_think"), content)
+
+    async def test_edge_requests_carry_the_template_switch(self):
+        """T8-5c-4 不变量: edge 的**每一次**请求都要关思考 —— 两层一起上。
+
+        ① user 消息末尾的 `/no_think`（模型学过的软开关）
+        ② `chat_template_kwargs={"enable_thinking": false}`（llama.cpp 的模板开关,
+           模板里为假时直接吐一个空思考块 —— 与第几轮无关, 所以它在"工具结果那一轮"
+           也照样成立）
+
+        ⚠ ② 必须走 `extra_body=`: openai SDK 不接受未知的**顶层**关键字
+        （板端实测: 直接传顶层会 TypeError → 整轮降级）。替身 client 现在就学这条严格性。
+        """
+        edge = make_edge([text_response("x")])
+        provider = LLMProvider(mode="edge", edge_backend=edge)
+        await provider.chat("hi", {})
+        self.assertEqual(edge.client.requests[0]["extra_body"],
+                         {"chat_template_kwargs": {"enable_thinking": False}})
+
+    async def test_every_round_of_the_tool_loop_is_thinking_free(self):
+        """工具循环的**每一轮**（含带工具结果那一轮）都必须关思考 —— 这才是"不变量"。"""
+        router = ToolRouter(state_provider=StateMachine())      # 初始 IDLE
+        router.register(Tool(
+            name="get_time",
+            description="取当前时间",
+            schema={"type": "object", "properties": {}, "additionalProperties": False},
+            handler=lambda **k: "12:00",
+            allowed_states={State.IDLE},
+        ))
+        edge = make_edge([
+            tool_response("call_1", "get_time", "{}"),
+            text_response("现在是 12:00"),
+        ])
+        provider = LLMProvider(mode="edge", tools=router, edge_backend=edge)
+        result = await provider.chat_with_tools("几点了", {})
+        self.assertTrue(result["ok"], result)
+
+        self.assertEqual(len(edge.client.requests), 2, "两轮请求")
+        for index, request in enumerate(edge.client.requests):
+            with self.subTest(round=index):
+                self.assertEqual(request["extra_body"],
+                                 {"chat_template_kwargs": {"enable_thinking": False}},
+                                 "第 %d 轮没带模板开关" % (index + 1))
+                users = [m for m in request["messages"] if m.get("role") == "user"]
+                self.assertTrue(users, "每一轮都该看得见那条 user 消息")
+                self.assertIn("/no_think", users[-1]["content"],
+                              "第 %d 轮的 user 侧软开关丢了" % (index + 1))
+        # 第二轮的最后一条是工具结果（不是 user）—— 这正是"只靠软开关不可靠"的原因
+        self.assertEqual(edge.client.requests[1]["messages"][-1]["role"], "tool")
+
+    async def test_no_think_off_means_no_template_switch(self):
+        edge = make_edge([text_response("x")], no_think=False)
+        provider = LLMProvider(mode="edge", edge_backend=edge)
+        await provider.chat("hi", {})
+        self.assertNotIn("extra_body", edge.client.requests[0])
+
+    async def test_cloud_never_gets_the_llama_template_switch(self):
+        # `chat_template_kwargs` 是 llama.cpp 的东西: 发给云端 API 会被当成未知参数
+        cloud = make_cloud([text_response("ok")])
+        provider = LLMProvider(mode="cloud", cloud_backend=cloud)
+        await provider.chat("hi", {})
+        self.assertNotIn("extra_body", cloud.client.requests[0])
+
+    async def test_the_fake_client_is_as_strict_as_the_real_sdk(self):
+        """替身必须**比我们严**（板端那次 TypeError 就是替身太宽松漏掉的）: """
+        edge = make_edge([text_response("x")])
+        with self.assertRaises(TypeError) as ctx:
+            edge.client.chat.completions.create(model="m", messages=[],
+                                                chat_template_kwargs={"enable_thinking": False})
+        self.assertIn("chat_template_kwargs", str(ctx.exception))
 
     async def test_edge_default_backend_points_at_local_llama_server(self):
         # 不注入后端时按 config 的 llm: 段造 (llm.port / model_name / local_api_key)

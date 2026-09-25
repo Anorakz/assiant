@@ -1075,8 +1075,10 @@ async def cmd_tag(args: argparse.Namespace) -> int:
         except (OSError, wall_data.WallDataError) as exc:
             failed.append((name, str(exc)))
             continue
-        by_path[path] = wall_data.make_record(
-            path, width, height, size, sha, ms, model8, vocab8, tags, vector)
+        by_path[path] = wall_data.with_usage(
+            wall_data.make_record(path, width, height, size, sha, ms, model8, vocab8,
+                                  tags, vector),
+            wall_data.usage_of(by_path.get(path)))       # T8-6: 重打不许清零使用次数
         done += 1
         per_image.append(ms)
         # **每张都写盘**: 40 张要跑一两分钟，崩在中途不该丢掉已经打好的

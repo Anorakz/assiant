@@ -149,7 +149,7 @@ def make_router(machine=None):
         async def show_desktop(self):
             calls["desktop"] += 1
 
-    def _next_wallpaper(step=1, match=None):
+    def _next_wallpaper(step=1, match=None, sort=None):
         calls["wallpaper"] += 1
         return {"ok": True, "path": "/w/1.png", "index": 0, "total": 1, "pushed": True}
 
@@ -471,10 +471,10 @@ class TestDeckAndToolsAreTheRealOnes(unittest.TestCase):
         empty = tempfile.mkdtemp()
         deck = WallpaperDeck(empty)
         self.assertEqual(deck.count(), 0)
-        router = ToolRouter(services={"next_wallpaper": lambda step=1, match=None: {"ok": True}})
+        router = ToolRouter(services={"next_wallpaper": lambda step=1, match=None, sort=None: {"ok": True}})
         self.assertEqual([t.name for t in build_tools(router)], [],
                          "少了 wallpaper_tags -> 整个 next_wallpaper 不装")
-        both = ToolRouter(services={"next_wallpaper": lambda step=1, match=None: {"ok": True},
+        both = ToolRouter(services={"next_wallpaper": lambda step=1, match=None, sort=None: {"ok": True},
                                     "wallpaper_tags": lambda ip_query=None, limit=5: {}})
         self.assertEqual([t.name for t in build_tools(both)], ["next_wallpaper"])
 

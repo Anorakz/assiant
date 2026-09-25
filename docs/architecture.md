@@ -181,6 +181,63 @@ agent/
 | 超时 | 路由默认 5 s；**工具可以声明自己的**（`Tool.timeout_s`）—— 会同步走一趟 PC 的工具（`next_music` 排队列后起播要 ssh + schtasks, 板端实测 5~8 s）必须声明，否则会被误判成 `timed out`（T8-5b 板端实测踩到过） |
 | 给模型看的说明 | `DESCRIPTION` 要写清**副作用与不确定性** —— 例如 `back_to_desktop` 明说"是开关动作、没有回执、别连着调"。CLI 那边"不假装调了工具"是同一条口径 |
 | 说明可以是**动态的** | T7-4 起 `next_wallpaper` 在 `build()` 时把**当前词表**拼进 description（"可用标签: scene=…；tone=…；mood=…"，超 320 字符就截断并指向 `action="tags"`）。理由：板端实测小模型会编造标签名，而词表只有配置/代码知道 |
+| **参数归一化（T8-5c）** | 每个工具可以声明一个**纯函数** `normalize(args) -> args`（`Tool.normalize`），路由在 **schema 校验之前**跑它 —— 见下面 §4.1.1 |
+
+### 4.1.1 参数归一化：按语义接受，不按参数名挑刺（T8-5c）
+
+板端实测反复证明：0.6B **填得进参数，但常常填错位置/填成老写法**
+（`action="play"`、`action="next"` + `match`、条件塞进 `ip_query`、`track_id="none"`、
+把 `3` 写成 `"3"`）。这些都是**等价写法**，白丢一轮很亏。
+
+所以定成一条约定：
+
+| 规则 | 为什么 |
+| --- | --- |
+| 归一化是**纯函数**（`agent/tools/<tool>.py::normalize`），只收参数、只回参数，不碰 services/IO | 能脱离路由单测；规则表就是文档（`tests/test_tool_normalize.py`） |
+| 在 **schema 校验之前**跑（`ToolRouter._normalized_args`） | 否则 `action="play"` 这种 enum 外的老写法**轮不到被救**：校验先把它拒了 |
+| 只做**等价改写**：老参数名、同义 action、空值字面量（`""`/`none`/`null`）、字符串数字 | 不改语义、**不猜内容** —— 猜不出来的（`action="dance"`、`pick` 却没给 `match`）原样交下去，让校验/handler 如实报错 |
+| schema **不因为归一化而放宽** | schema 是"给模型看的声明"；宽容只发生在**入口**，模型看到的 action 列表仍与真实可用完全一致 |
+| 每条规则都要写**来源**（哪种板端实测逼出来的） | 免得变成"凭空发明的宽容"，一年后没人敢删 |
+| 归一化自己炸了 → 记 warning、**照原参数往下走** | 一个坏规则不该让工具挂掉（`Tool` 边界测试钉着） |
+| 没声明 `normalize` = 原样通过 | 简单工具（`back_to_desktop`）没什么可归一化的 |
+
+**工具清单的预算守卫（T8-5c-3）** —— 清单是 prompt 的大头，涨了必须有人知道：
+
+| 事实（板端实测） | 数字 |
+| --- | --- |
+| 三个工具的清单（STUDY） | **3274 字符 ≈ 1309 token**（中文≈1 字/token，JSON 键/标点≈3~4 字/token） |
+| ↑ T8-6 加了 `least`/`most` 两个 action 之后 | **3522 字符**（≈ +40 token；离 3600 的守卫只剩 78 字符 —— 再想加东西就得先想"能不能改措辞"） |
+| 第一轮 prompt | 1495 token（T8-5b 测得；T8-6 之后约 1535，`ctx_size` 4096 —— **没有重量过板端**） |
+| 加一个 **action**（enum 多一个值） | ≈ 十几 token |
+| 加一个**工具**（像样的 description + schema） | ≈ 250~750 token |
+
+`tests/test_merged_tools.py::TestPromptBudget` 按**字符**卡上限（`TOOL_BLOCK_BUDGET_CHARS = 3600`、
+单工具 `TOOL_BUDGET_CHARS = 2000`）—— 也就是"再加一个像样的工具就会红"，逼着人先想
+"能不能扩 action"。要抬预算就得**在注释里写清理由**，并重量一遍板端 prompt（char→token
+的换算上面那张表里有）。守卫带反空转检查：量出来的清单不能太小、真加一个工具必须过不去、
+加一个 action 涨的字符必须远小于加一个工具。
+
+⚠ 顺带记一个坑（有测试钉着）：`Tool.to_llm_dict()` 的 `parameters` **就是模块级 `SCHEMA`
+那个对象**（不是拷贝）—— 谁原地改清单里的 schema，就等于改了这个工具本身。
+
+规则表（现状，来源都在各自模块的 docstring 里）：
+
+| 工具 | 模型可能这样写 | 归一化成 |
+| --- | --- | --- |
+| `next_wallpaper` | `action=" NEXT "` / `step=1｜-1｜0`（老参数名） | `action="next"｜"prev"｜"repeat"` |
+| | `action="next"` + `match="scene=anime"` | **原样保留**（等价合法："在最像的几张里翻"） |
+| | `action="next"` + `ip_query="scene=anime"` | `match` 拿过来（`ip_query` 只有 `tags` 用） |
+| | `match=""` / `"none"` | 删掉（当没给） |
+| | `sort=" used_asc "` / `sort=""` | 小写 / 删掉（T8-6: `used_asc`｜`used_desc`） |
+| | `action="least_used"｜"used_asc"｜"fewest"` | `action="least"`（T8-6） |
+| | `action="most_used"｜"used_desc"` | `action="most"` |
+| | 只给 `sort="used_asc"`（没给 action） | `action="least"`（落成 `pick` 会撞"pick 需要 match"） |
+| | 只给 `match`（没给 action） | `action="pick"` |
+| `next_music` | `action="play"｜"add"｜"push"｜"clear"` | `enqueue` / `clear_queue`（老版本工具名/同义写法） |
+| | 没给 `action`，但给了 `track_id`/`keyword`/`tag`/`sort`/`limit` | `action="enqueue"`（语义就一个） |
+| | `track_id="none"｜""｜"null"` | 删掉（走"按条件挑"） |
+| | `limit="3"` / `level="30"` | `3` / `30`（schema 会拒字符串） |
+| | `action="tag"` 却把标签放进 `tag` | 搬到 `set_tag` |
 
 **权限表（T4，唯一写下来的地方是 `tests/test_tool_permissions.py::EXPECTED`）**：
 
@@ -194,7 +251,7 @@ agent/
 > **T8-5b: 七个工具合并成三个**（每个工具用 `action` 分派具体动作）。动机是 prompt 预算 ——
 > T8-5 板端实测 7 个工具的工具清单占第一轮 prompt 的 **90%**（1699 / 1898 token），
 > 第二轮 2131 直接把 `ctx_size 2048` 撞穿。合并后模型只认三个名字：
-> `next_wallpaper`（翻页/按内容挑/看标签）、`next_music`（音乐的一切，transport 交给 GUI）、
+> `next_wallpaper`（翻页/按内容挑/按用量挑/看标签）、`next_music`（音乐的一切，transport 交给 GUI）、
 > `back_to_desktop`（无参数）。标签写法两边共用 `agent/core/label_spec.py`。
 > ⚠ **缺一个入口就整个工具不装**（不是"少一个动作"）—— 模型看到的 action 列表必须与
 > 真实可用的完全一致。链路见 [music.md](music.md)、[tagging.md](tagging.md)。
@@ -224,11 +281,25 @@ agent/
 起因是板端实测 0.6B **谎报成功**（工具报错、它回"已更换"）。见 [`llm.md` §3](llm.md)。
 
 ⚠ **换壁纸只有一条路（T7-3 起）**：对话 → LLM → `next_wallpaper` 工具 →
-`Runtime.next_wallpaper(step, match)` → `core/wallpaper.py`（目录 + 游标）。
+`Runtime.next_wallpaper(step, match, sort)` → `core/wallpaper.py`（目录 + 游标）。
 `match` 的挑图逻辑在 `agent/vision/tag_index.py`（读 `config/wall_data.jsonl`，
 **纯 Python 点积、不碰 NPU**），入口见 [`tagging.md` §6](tagging.md)。
 推给 GUI 的 topic 名只有 `agent/ipc/` 知道（`Runtime.on_wallpaper` 钩子），
 `Runtime` 与工具都不认识线格式字段。
+
+⚠ **"换成了另一张"才计一次使用（T8-6）**：`Runtime._push_wallpaper()` 推出成功（或压根没有
+GUI 入口，游标照样动了）之后调 `_note_wallpaper_shown()`，由它写 `wall_data.jsonl` 里那一行的
+`used`/`last_used`。判据是"path 跟上次推上去的不一样"—— 重推当前这张（`step=0`）、
+GUI 重连补推、开机后的初始画面（`count=False`）都**不算**。数字只用于挑图偏好
+（`action="least"/"most"`，入口读的是同一份文件），坏了只记 warning：**统计不该让换图失败**。
+按用量排完会**跳过屏幕上当前这张**再拿第 1 名 —— 连说两次"再挑张用得最少的"是一张张往少走
+（板端实测过另一种写法"从当前这张往后翻"：第二次跳到 **index=39/40**，跑到用得多的一头去了）。
+
+⚠ **按用量的挑图做成了 action，不是参数（T8-6 板端实测）**：只给 `sort=` 时 0.6B 用不起来
+（它照样写 `action="pick"` + 自己编的 `match`），于是加了 `action="least"/"most"` ——
+枚举里一眼能看见、还不用参数。另外它写过 `action="tags" + sort="used_asc"`（读动作配挑图
+参数）：那种自相矛盾**既不能装没看见**（会谎报"已换好"）**也不能替它改成换图**（读当写），
+所以 `tags` 带 `sort` 时如实报错并指出该用 `action="least"`。见 [`tagging.md` §6.1](tagging.md)。
 
 ### 4.2 LLM 层：edge / cloud / disabled（T2）
 

@@ -33,6 +33,7 @@ agent/
 │   │   ├── state_machine.py     # SLEEP ⇄ IDLE ⇄ STUDY/GAME 状态机
 │   │   ├── tool_router.py       # 工具注册 / 权限控制 / 执行调度
 │   │   ├── label_spec.py        # 标签/条件的**统一小语法**（壁纸 match= 与音乐 tag= 共用，T8-5b）
+│   │   ├── read_intents.py      # **只读问句直连**（在放什么/库里有什么/壁纸标签/哪张用得最少，0 次模型推理，T8-5c/T8-6）
 │   │   ├── scheduler.py         # 日程检查 + 定时触发 + 终端命令监听
 │   │   ├── wallpaper.py         # 壁纸目录 + 游标（可在挑出来的候选里翻，T7-3）
 │   │   └── music.py             # 播放内核: 环形队列 / 轮询真实进度 / 30 秒计一次 (T8-4/5b)
@@ -101,7 +102,9 @@ agent/
 │   ├── test_music_library.py    # 本地音乐库: 读写 / 合并 / 打标 / 挑选 (T8-3)
 │   ├── test_music_player.py     # 播放内核: 环形队列 / 30 秒计一次 / 曲终自动下一首 (T8-4/5b)
 │   ├── test_label_spec.py       # 统一标签语法: 拆键 / 拆值 / 多轴 / 壁纸那边只用这一份 (T8-5b)
-│   ├── test_merged_tools.py     # 三个工具: action 分派 / 缺依赖跳过 / 统一标签语法 (T8-5b)
+│   ├── test_merged_tools.py     # 三个工具: action 分派 / 缺依赖跳过 / 清单**预算守卫** (T8-5b/5c)
+│   ├── test_tool_normalize.py   # 参数归一化: 真实错法 → 规范形 / 校验前跑 / 边界 (T8-5c)
+│   ├── test_read_intents.py     # 只读问句直连: 该直连的/不该截胡的/拿不到数据 (T8-5c)
 │   ├── mocks/                   # mock_agent_native: native 替身
 │   ├── host/                    # 需要 numpy 的绑定层测试 (按需手动跑)
 │   └── board/                   # 板端真机验收脚本
@@ -225,7 +228,8 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
   | `STUDY` | ✓ | ✓ | ✓ |
 
   **T8-5b 把七个工具合并成三个**（每个工具用 `action` 分派具体动作）：
-  `next_wallpaper` = 翻页/按内容挑/看标签；`next_music` = 排队列/清空/清单/搜/状态/标签/音量
+  `next_wallpaper` = 翻页/按内容挑/**按用量挑**（`action=least`/`most`，T8-6）/看标签；
+  `next_music` = 排队列/清空/清单/搜/状态/标签/音量
   （transport 交给 GUI 四个按钮）；`back_to_desktop` = 回桌面（无参数，只 STUDY）。
   动机是 **prompt 预算**：T8-5 实测 7 个工具的工具清单占第一轮 prompt 的 90%
   （1699 / 1898 token），第二轮 2131 直接撞穿 ctx。链路见

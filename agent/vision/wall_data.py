@@ -10,7 +10,17 @@
 #      {"version": 1, "path": ..., "sha256": ..., "w": ..., "h": ..., "bytes": ...,
 #       "tagged_at": ..., "ms": ..., "model_sha8": ..., "vocab_sha8": ...,
 #       "tags": {"scene": [["landscape", 0.21], ...], ...},
-#       "embedding": "<base64 float16 × 768>"}
+#       "embedding": "<base64 float16 × 768>",
+#       "used": 3, "last_used": "2026-09-25T10:06:44"}     ← T8-6 运行时字段
+#
+#  `used` / `last_used`（T8-6）
+#  ---------------------------------------------------------------------------
+#  这张当壁纸**显示过几次 / 上次是什么时候**。谁加: 运行时推图成功之后
+#  （`Runtime._push_wallpaper` → `bump_usage_in_file()`，"换成这一张"才算一次，
+#  重推/repeat/重连补推不算）。干什么用: `next_wallpaper(sort="used_asc")` 挑
+#  "用得最少的"，以及 `action="tags"` 里回报使用情况。
+#  ⚠ 缺这两个字段 = 0 / 没有（老数据文件不用重打)；**重打一张图时要 `with_usage()`
+#    把计数带过去**（`assistant tag` 已经这么做），否则计数会被打标签覆盖掉。
 #
 #  两个向量字段，精度**故意不同**
 #  ---------------------------------------------------------------------------
@@ -27,8 +37,10 @@
 #
 #  谁写、谁读（边界必须清楚）
 #  ---------------------------------------------------------------------------
-#  写: **只有** `assistant tag --apply`（本模块是全仓唯一的调用点）。
-#  读: Agent（标签索引 / 挑图）与 `assistant tag` 自己（算增量）。
+#  写: **只有本模块**（全仓唯一的调用点就在这儿）。两个时机:
+#      · `assistant tag --apply` —— 打标签（离线，要 NPU）
+#      · 运行时推图成功 —— 只改 `used` / `last_used` 两格（T8-6）
+#  读: Agent（标签索引 / 挑图 / 直连问句）与 `assistant tag` 自己（算增量）。
 #  ⚠ 它住在 `config/` 里，但**不是**配置真源: `config.yaml` 才是人写的真源，
 #    这个文件是机器派生数据 —— 手改它没有意义（下次打标签会覆盖），
 #    所以它必须进 .gitignore（它是板端本地数据，不该入库）。
@@ -66,6 +78,11 @@ __all__ = [
     "decode_embedding",
     "image_sha256",
     "make_record",
+    "usage_of",
+    "with_usage",
+    "bump_usage",
+    "bump_usage_in_file",
+    "usage_summary",
     "make_vocab_record",
     "vocab_matches",
     "vocab_vectors",
@@ -216,11 +233,17 @@ def image_sha256(path: str, chunk: int = 1 << 20) -> str:
 def make_record(path: str, width: int, height: int, size: int, sha256: str, ms: int,
                 model_sha8: str, vocab_sha8: str,
                 tags: Mapping[str, Sequence[Sequence[Any]]],
-                embedding: Sequence[float]) -> Dict[str, Any]:
+                embedding: Sequence[float],
+                used: int = 0, last_used: Optional[str] = None) -> Dict[str, Any]:
     """造一行记录（**schema 只在这里定义一次**）。
 
     @param tags {轴名: [[标签, 分数], ...]} —— 每轴 top-k，分数是余弦
     @param embedding L2 归一化后的图像向量（768 维）
+    @param used     这张当壁纸显示过几次（T8-6；运行时由 `bump_usage()` 加）
+    @param last_used 上次显示的时间（ISO 字符串）
+    @note ⚠ `used` / `last_used` 是**运行时字段**，不是打标签字段: 重打一张图时
+          调用方要用 `with_usage()` 把它们**带过去**，否则计数会被清零
+          （`assistant tag` 已经这么做了）。
     """
     return {
         "version": RECORD_VERSION,
@@ -236,6 +259,90 @@ def make_record(path: str, width: int, height: int, size: int, sha256: str, ms: 
         "tags": {axis: [[str(label), float(score)] for label, score in pairs]
                  for axis, pairs in (tags or {}).items()},
         "embedding": encode_embedding(embedding),
+        "used": max(0, int(used or 0)),
+        "last_used": str(last_used) if last_used else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+#  使用次数（T8-6: "这张壁纸被显示过几次" —— 挑"用得最少的"就靠它）
+# ---------------------------------------------------------------------------
+def usage_of(record: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """读一条记录的使用次数（**缺字段 = 0/None** —— 老数据文件照样能用）。"""
+    if not isinstance(record, Mapping):
+        return {"used": 0, "last_used": None}
+    try:
+        used = max(0, int(record.get("used") or 0))
+    except (TypeError, ValueError):
+        used = 0
+    last = record.get("last_used")
+    return {"used": used, "last_used": str(last) if last else None}
+
+
+def with_usage(record: Mapping[str, Any], usage: Mapping[str, Any]) -> Dict[str, Any]:
+    """把使用次数写回一条记录（返回**副本**）—— 重打标签时用它保住计数。"""
+    out = dict(record)
+    out["used"], out["last_used"] = usage_of(usage)["used"], usage_of(usage)["last_used"]
+    return out
+
+
+def bump_usage(record: Mapping[str, Any], when: Optional[str] = None) -> Dict[str, Any]:
+    """这张又显示了一次（返回**副本**，不改入参）。
+
+    @param when 时间戳（默认现在）—— 测试要可控就传一个
+    """
+    out = dict(record)
+    usage = usage_of(record)
+    out["used"] = usage["used"] + 1
+    out["last_used"] = str(when) if when else datetime.now().isoformat(timespec="seconds")
+    return out
+
+
+def bump_usage_in_file(path: str, image_path: str,
+                       when: Optional[str] = None) -> Optional[int]:
+    """把**某一张**的计数 +1 并整文件写回（原子写 + .bak）。
+
+    @return 加完之后这张的计数；`None` = 文件里没有这张（**不写文件**，不是错误）
+    @raise WallDataError 文件读不了 / 写不了
+    @note 这是 T8-6 给运行时用的入口 —— 它仍然是"唯一写者"里的那条路
+          （`write_records()`），所以数据文件不会出现两个写者各写一半。
+    """
+    loaded = load(path)
+    wanted = str(image_path)
+    bumped = False
+    records: List[Mapping[str, Any]] = []
+    result: Optional[int] = None
+    for record in loaded["records"]:
+        if str(record.get("path")) == wanted:
+            record = bump_usage(record, when=when)
+            result = int(record["used"])
+            bumped = True
+        records.append(record)
+    if not bumped:
+        return None
+    write_records(path, records, vocab=loaded["vocab"])
+    return result
+
+
+def usage_summary(records: Sequence[Mapping[str, Any]], top: int = 3) -> Dict[str, Any]:
+    """使用次数的摘要（给 `action="tags"` 回话用）。
+
+    @return {"with_usage": n, "never_used": n, "total_used": n,
+             "least_used": [{"path","used","last_used"}], "most_used": [...]}
+    """
+    entries = []
+    for record in records:
+        usage = usage_of(record)
+        entries.append({"path": str(record.get("path")),
+                        "used": usage["used"], "last_used": usage["last_used"]})
+    ordered = sorted(entries, key=lambda item: (item["used"], item["path"]))
+    limit = max(0, int(top))
+    return {
+        "with_usage": sum(1 for item in entries if item["used"] > 0),
+        "never_used": sum(1 for item in entries if item["used"] == 0),
+        "total_used": sum(item["used"] for item in entries),
+        "least_used": ordered[:limit] if limit else ordered,
+        "most_used": list(reversed(ordered[-limit:])) if limit else list(reversed(ordered)),
     }
 
 

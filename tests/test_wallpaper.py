@@ -19,6 +19,7 @@ tests/test_wallpaper.py — 壁纸"下一张"（Phase 7 T3；T7-3 起能按内�
      换一张 -> 调 on_wallpaper 钩子 / 没有 IPC 时也能算（pushed=False）/
      目录坏了返回 ok=False + 给人看的原因 / match 解析失败如实报错 /
      T7-3: `next_wallpaper` **IPC 命令**已删除（"手动换壁纸"按要求下线）
+     T8-6: 使用次数（"换成了另一张"才算一次 / `sort=used_asc` 挑用得最少的）
 
 ⚠ 不测 GUI 画得像不像（那是 `gui/tests/test_image_fit.cpp` 与板端截图的事）,
   也不测真实图片能不能解码（Agent 不解码）。
@@ -303,7 +304,7 @@ class TestToolBuild(unittest.TestCase):
     """合并后的壁纸工具（T8-5b）: 一个 `action` 管翻页/挑图/看标签。"""
 
     def _services(self, calls, tags=None):
-        def advance(step=1, match=None):
+        def advance(step=1, match=None, sort=None):
             calls.append((step, match))
             return {"ok": True, "path": "/w/1.png", "index": 0, "total": 1, "pushed": True}
 
@@ -314,7 +315,7 @@ class TestToolBuild(unittest.TestCase):
         # 两个入口缺一个就不装 —— 模型看到的 action 列表必须与真实可用的完全一致
         self.assertIsNone(wallpaper_tool.build({}))
         self.assertIsNone(wallpaper_tool.build({"next_wallpaper": "not callable"}))
-        self.assertIsNone(wallpaper_tool.build({"next_wallpaper": lambda step=1, match=None: {}}))
+        self.assertIsNone(wallpaper_tool.build({"next_wallpaper": lambda step=1, match=None, sort=None: {}}))
         self.assertIsNone(wallpaper_tool.build({"wallpaper_tags": lambda **kw: {}}))
 
     def test_builds_with_the_services(self):
@@ -355,7 +356,7 @@ class TestVocabHint(unittest.TestCase):
     """T7-4（b）: 把**当前词表**写进 description（堵住模型编造标签那条路）。"""
 
     def _services(self, config=None):
-        return {"next_wallpaper": lambda step=1, match=None: {"ok": True},
+        return {"next_wallpaper": lambda step=1, match=None, sort=None: {"ok": True},
                 "wallpaper_tags": lambda ip_query=None, limit=5: {"ok": True},
                 "config": config if config is not None else {}}
 
@@ -379,7 +380,7 @@ class TestVocabHint(unittest.TestCase):
     def test_without_config_it_still_lists_the_default_vocabulary(self):
         # 词表默认值在代码里（tag_vocab.py），配置只是"按轴追加" ——
         # 所以没有 config 时**照样**该把默认词表告诉模型（少一个信息来源而已）
-        tool = wallpaper_tool.build({"next_wallpaper": lambda step=1, match=None: {},
+        tool = wallpaper_tool.build({"next_wallpaper": lambda step=1, match=None, sort=None: {},
                                      "wallpaper_tags": lambda ip_query=None, limit=5: {}})
         self.assertIn("可用标签", tool.description)
         self.assertIn("scene=", tool.description)
@@ -423,7 +424,7 @@ class TestWallpaperTagsAction(unittest.TestCase):
             calls.append((ip_query, limit))
             return {"ok": True, "count": 3, "axes": {}}
 
-        return {"next_wallpaper": lambda step=1, match=None: {"ok": True},
+        return {"next_wallpaper": lambda step=1, match=None, sort=None: {"ok": True},
                 "wallpaper_tags": lookup}
 
     def test_ip_query_description_says_it_is_a_work_name_only(self):
@@ -451,8 +452,8 @@ class TestToolExecution(unittest.IsolatedAsyncioTestCase):
         calls = []
         tags = []
 
-        def advance(step=1, match=None):
-            calls.append((step, match))
+        def advance(step=1, match=None, sort=None):
+            calls.append((step, match, sort))
             return {"ok": True, "path": "/w/%d.png" % step, "index": 0, "total": 3,
                     "pushed": True}
 
@@ -470,21 +471,42 @@ class TestToolExecution(unittest.IsolatedAsyncioTestCase):
         router, calls, _tags = self._router()
         result = await router.execute("next_wallpaper", {"action": "next"})
         self.assertTrue(result["ok"])
-        self.assertEqual(calls, [(1, None)], "工具只是把入参转给 Runtime 的入口")
+        self.assertEqual(calls, [(1, None, None)], "工具只是把入参转给 Runtime 的入口")
         self.assertEqual(result["result"]["path"], "/w/1.png")
 
     async def test_prev_and_repeat_map_to_the_other_steps(self):
         router, calls, _tags = self._router()
         await router.execute("next_wallpaper", {"action": "prev"})
         await router.execute("next_wallpaper", {"action": "repeat"})
-        self.assertEqual(calls, [(-1, None), (0, None)])
+        self.assertEqual(calls, [(-1, None, None), (0, None, None)])
 
     async def test_pick_forwards_match(self):
         router, calls, _tags = self._router()
         result = await router.execute("next_wallpaper",
                                       {"action": "pick", "match": "scene=anime"})
-        self.assertEqual(calls, [(1, "scene=anime")])
+        self.assertEqual(calls, [(1, "scene=anime", None)])
         self.assertTrue(result["ok"])
+
+    async def test_least_and_most_are_usage_picks(self):
+        """T8-6: 板端实测 0.6B **不会**为"用得最少"去设 `sort=` —— 所以做成单字 action。"""
+        router, calls, _tags = self._router()
+        self.assertTrue((await router.execute("next_wallpaper", {"action": "least"}))["ok"])
+        self.assertEqual(calls, [(1, None, "used_asc")])
+        await router.execute("next_wallpaper", {"action": "MOST_USED"})
+        await router.execute("next_wallpaper", {"action": "used_asc"})
+        self.assertEqual(calls[1:], [(1, None, "used_desc"), (1, None, "used_asc")],
+                         "同义写法（most_used / used_asc）都要落到 least / most 上")
+
+    async def test_least_with_a_match_stays_inside_that_pool(self):
+        # "挑一张我用得最少的**风景**壁纸" -> 在最像的那批里挑用得最少的
+        router, calls, _tags = self._router()
+        await router.execute("next_wallpaper", {"action": "least", "match": "scene=landscape"})
+        self.assertEqual(calls, [(1, "scene=landscape", "used_asc")])
+
+    async def test_sort_alone_means_a_usage_pick(self):
+        router, calls, _tags = self._router()
+        await router.execute("next_wallpaper", {"sort": "USED_ASC"})
+        self.assertEqual(calls, [(1, None, "used_asc")], "只给 sort = 挑一张 + 那个排序")
 
     async def test_pick_without_match_is_honest(self):
         router, calls, _tags = self._router()
@@ -497,6 +519,22 @@ class TestToolExecution(unittest.IsolatedAsyncioTestCase):
         self.assertIn("match", payload["error"])
         self.assertIn("scene=anime", payload["tell_user"], "要给出能照着写的例子")
         self.assertEqual(calls, [], "缺参数时 handler 不碰 Runtime")
+
+    async def test_tags_with_a_usage_sort_is_an_honest_failure(self):
+        """T8-6 板端实测: 模型写过 `action="tags" + sort="used_asc"`（想换图却点了只读动作）。
+
+        ⚠ 修前它会安静地回一份标签清单, 然后模型对用户说"已找到使用次数最少的壁纸,
+          您可以在界面中看到它" —— **谎报**（屏幕根本没换）。
+        """
+        router, calls, tags = self._router()
+        result = await router.execute("next_wallpaper",
+                                      {"action": "tags", "sort": "used_asc"})
+        payload = result["result"]
+        self.assertEqual(calls, [])
+        self.assertEqual(tags, [], "不该真去列标签 —— 那会让模型以为办成了")
+        self.assertFalse(payload["ok"])
+        self.assertIn("least", payload["error"], "要指出该用哪个 action")
+        self.assertIn("不会换壁纸", payload["tell_user"])
 
     async def test_tags_is_read_only_and_goes_to_the_other_entry(self):
         router, calls, tags = self._router()
@@ -541,10 +579,16 @@ class TestToolExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [])
 
     async def test_empty_match_is_refused_before_running(self):
+        # ⚠ T8-5c 起 `match=""` 被**归一化**成"没给"（那是空值写法）—— 于是它不再是
+        #   schema 错误, 而是 handler 那句能照着做的"挑图要说明按什么挑"。
+        #   两种都算"拒绝且 handler 没碰 Runtime"。
         router, calls, _tags = self._router()
         result = await router.execute("next_wallpaper", {"action": "pick", "match": ""})
-        self.assertFalse(result["ok"])
-        self.assertEqual(calls, [])
+        payload = result["result"]
+        self.assertTrue(result["ok"], "路由层算跑通了（失败在 handler 里如实说）")
+        self.assertFalse(payload["ok"])
+        self.assertIn("match", payload["error"])
+        self.assertEqual(calls, [], "缺 match 时不该去动壁纸游标")
 
     async def test_refused_in_game_mode(self):
         # 游戏模式主区是视频区, 换壁纸没意义 —— 权限表里不给 GAME
@@ -555,7 +599,7 @@ class TestToolExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [])
 
     async def test_allowed_in_idle_and_study(self):
-        tool = wallpaper_tool.build({"next_wallpaper": lambda step=1, match=None: {},
+        tool = wallpaper_tool.build({"next_wallpaper": lambda step=1, match=None, sort=None: {},
                                      "wallpaper_tags": lambda ip_query=None, limit=5: {}})
         self.assertEqual(tool.allowed_states, {State.IDLE, State.STUDY})
 
@@ -919,6 +963,209 @@ class TestRuntimeStartBuildsTheDeck(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(runtime.tools), 2)
         finally:
             await runtime.stop()
+
+
+class TestRuntimeWallpaperUsage(unittest.IsolatedAsyncioTestCase):
+    """T8-6: 使用次数 —— "换成了这一张"才算一次, 并且能挑"用得最少的"。
+
+    ⚠ 库那层（`wall_data.bump_usage*` / `TagIndex.rank_by_usage`）在
+      `tests/test_wall_data.py` 与 `tests/test_tag_index.py`；这里只说 Runtime 的行为。
+    """
+
+    def _runtime(self, counts, extra=()):
+        """counts = {文件名: 已用过几次}；extra = 只放文件、**不进数据文件**的图。"""
+        from agent.main import Runtime
+        from agent.vision import wall_data
+
+        root = make_dir(*(list(counts) + list(extra)))
+        data_file = os.path.join(root, "wall_data.jsonl")
+        wall_data.write_records(
+            data_file,
+            [{"path": os.path.join(root, name), "tags": {"scene": [["anime", 0.9]]},
+              "used": used} for name, used in counts.items()],
+            backup=False,
+        )
+        runtime = Runtime(
+            config={"wallpaper": {"dir": root, "tagging": {"data_file": data_file}}},
+            start_native=False, start_terminal=False,
+            log=logging.getLogger("test.wallpaper.usage"),
+        )
+        runtime.wallpaper = WallpaperDeck(root)
+        runtime._tag_index = None                  # 数据文件是刚写的, 别用缓存的
+        return runtime, root, data_file
+
+    def _used_in_file(self, data_file, name):
+        from agent.vision import wall_data
+
+        records, _problems = wall_data.read_records(data_file)
+        for record in records:
+            if os.path.basename(record["path"]) == name:
+                return wall_data.usage_of(record)["used"]
+        self.fail("%s 不在数据文件里" % name)
+
+    async def test_a_real_switch_counts_one(self):
+        runtime, root, data_file = self._runtime({"01_a.png": 5, "02_b.png": 0})
+        result = runtime.next_wallpaper(1)
+        self.assertTrue(result["ok"])
+        self.assertEqual(os.path.basename(result["path"]), "01_a.png")
+        self.assertEqual(self._used_in_file(data_file, "01_a.png"), 6)
+        self.assertEqual(result["used"], 6, "回给模型的 used 是**记完这一次**的总数")
+        self.assertEqual(self._used_in_file(data_file, "02_b.png"), 0, "别的图不动")
+
+    async def test_re_showing_the_same_one_is_not_a_new_use(self):
+        runtime, root, data_file = self._runtime({"01_a.png": 5, "02_b.png": 0})
+        runtime.next_wallpaper(1)
+        again = runtime.next_wallpaper(0)          # step=0 = 重推当前这张
+        self.assertEqual(os.path.basename(again["path"]), "01_a.png")
+        self.assertEqual(self._used_in_file(data_file, "01_a.png"), 6,
+                         "重推当前这张不算新的使用")
+        self.assertEqual(again["used"], 6)
+
+    async def test_the_gui_reconnect_push_does_not_count_again(self):
+        runtime, root, data_file = self._runtime({"01_a.png": 0, "02_b.png": 0})
+        runtime.next_wallpaper(1)                  # 真换了一次
+        runtime.push_current_wallpaper()           # 客户端断开重连, 补推同一张
+        runtime.push_current_wallpaper()
+        self.assertEqual(self._used_in_file(data_file, "01_a.png"), 1,
+                         "补推是\"同步显示\", 不是换图")
+
+    async def test_the_initial_screen_is_not_counted(self):
+        """开机/重启后 GUI 连上来的第一次补推不算 —— 不是用户换的。"""
+        runtime, root, data_file = self._runtime({"01_a.png": 0, "02_b.png": 0})
+        runtime.push_current_wallpaper()
+        runtime.push_current_wallpaper()
+        self.assertEqual(self._used_in_file(data_file, "01_a.png"), 0)
+        runtime.next_wallpaper(1)                  # 之后真换一张还是要计
+        self.assertEqual(self._used_in_file(data_file, "02_b.png"), 1)
+
+    async def test_sort_used_asc_picks_the_least_shown(self):
+        runtime, root, data_file = self._runtime({"01_a.png": 5, "02_b.png": 0, "03_c.png": 2})
+        result = runtime.next_wallpaper(1, sort="used_asc")
+        self.assertTrue(result["ok"])
+        self.assertEqual(os.path.basename(result["path"]), "02_b.png",
+                         "全库按使用次数升序 -> 第 1 名是用得最少的")
+        self.assertEqual(result["sort"], "used_asc")
+        self.assertEqual(result["total"], 3, "没给 match 时全库都进候选")
+        self.assertEqual(self._used_in_file(data_file, "02_b.png"), 1)
+
+    async def test_sort_used_desc_picks_the_most_shown(self):
+        runtime, root, data_file = self._runtime({"01_a.png": 5, "02_b.png": 0, "03_c.png": 2})
+        result = runtime.next_wallpaper(1, sort="used_desc")
+        self.assertEqual(os.path.basename(result["path"]), "01_a.png")
+        self.assertEqual(self._used_in_file(data_file, "01_a.png"), 6)
+
+    async def test_asking_twice_never_hands_back_the_same_one(self):
+        """连说两次"再挑一张用得最少的"要真的换一张, 而且往**用得少**的方向走。
+
+        ⚠ 两种错法都在板端见过（T8-6 实测）:
+          · 从"当前这张在排序里的名次"往后翻 -> 第二次跳到 index=**39/40**（用得多的一头）;
+          · 不跳过当前这张 -> 第二次拿到同一张。
+        现在的规则: **在"屏幕上没有"的那些里挑用得最少的**。
+        """
+        runtime, root, data_file = self._runtime(
+            {"01_a.png": 5, "02_b.png": 0, "03_c.png": 0, "04_d.png": 2})
+        first = runtime.next_wallpaper(1, sort="used_asc")
+        second = runtime.next_wallpaper(1, sort="used_asc")
+        self.assertEqual(os.path.basename(first["path"]), "02_b.png")
+        self.assertEqual(os.path.basename(second["path"]), "03_c.png",
+                         "第二张也是**没被用过**的（不是刚看过的那张, 更不是用得多的一头）")
+        self.assertEqual(self._used_in_file(data_file, "02_b.png"), 1)
+        self.assertEqual(self._used_in_file(data_file, "03_c.png"), 1)
+        self.assertEqual(self._used_in_file(data_file, "01_a.png"), 5, "用得多的那张没被碰")
+        self.assertEqual(self._used_in_file(data_file, "04_d.png"), 2)
+
+    async def test_the_least_pick_skips_what_is_already_on_screen(self):
+        """屏幕上那张哪怕就是最少用的, 也不该"挑"回它（用户是要**换**一张）。"""
+        runtime, root, data_file = self._runtime({"01_a.png": 0, "02_b.png": 0})
+        runtime.wallpaper.step(1)                  # 屏幕上先放 01_a（还没计过使用）
+        result = runtime.next_wallpaper(1, sort="used_asc")
+        self.assertEqual(os.path.basename(result["path"]), "02_b.png")
+
+    async def test_most_also_skips_the_current_one(self):
+        runtime, root, data_file = self._runtime({"01_a.png": 3, "02_b.png": 5})
+        result = runtime.next_wallpaper(1, sort="used_desc")
+        self.assertEqual(os.path.basename(result["path"]), "02_b.png")
+        again = runtime.next_wallpaper(1, sort="used_desc")
+        self.assertEqual(os.path.basename(again["path"]), "01_a.png")
+
+    async def test_with_a_single_image_the_skip_does_not_empty_the_pool(self):
+        runtime, root, data_file = self._runtime({"01_a.png": 0})
+        result = runtime.next_wallpaper(1, sort="used_asc")
+        self.assertTrue(result["ok"], "只有一张时不能把自己筛没了")
+        self.assertEqual(os.path.basename(result["path"]), "01_a.png")
+
+    async def test_a_plain_switch_walks_forward(self):
+        """T8-6 顺手修的 T7-4 遗留 bug: 不给 match 的"换一张"以前每次都挑回第一张。
+
+        实测（修前）: 连叫 4 次 `next_wallpaper(1)` 都是 `01_a.png` —— 因为给
+        `step()` 传了 `anchor=None`（= "假装还没选过"）。普通换图必须按游标走。
+        """
+        runtime, root, data_file = self._runtime({"01_a.png": 0, "02_b.png": 0, "03_c.png": 0})
+        forward = [os.path.basename(runtime.next_wallpaper(1)["path"]) for _ in range(4)]
+        self.assertEqual(forward,
+                         ["01_a.png", "02_b.png", "03_c.png", "01_a.png"], "翻到头回绕")
+        backward = [os.path.basename(runtime.next_wallpaper(-1)["path"]) for _ in range(2)]
+        self.assertEqual(backward, ["03_c.png", "02_b.png"], "往回也一样")
+        self.assertEqual([self._used_in_file(data_file, n)
+                          for n in ("01_a.png", "02_b.png", "03_c.png")],
+                         [2, 2, 2], "每真换一次都各自 +1（01 被换到两次）")
+
+    async def test_a_bad_sort_is_an_honest_failure(self):
+        runtime, root, data_file = self._runtime({"01_a.png": 0})
+        result = runtime.next_wallpaper(1, sort="plays_asc")
+        self.assertFalse(result["ok"])
+        self.assertIn("used_asc", result["error"], "错误里要说清楚能用什么")
+        self.assertIn("换壁纸没有成功", result["tell_user"])
+        self.assertEqual(self._used_in_file(data_file, "01_a.png"), 0, "失败时不计数")
+
+    async def test_sort_without_tag_data_says_what_to_run(self):
+        from agent.main import Runtime
+        from agent.vision import wall_data
+
+        root = make_dir("01_a.png")
+        runtime = Runtime(
+            config={"wallpaper": {"dir": root, "tagging": {
+                "data_file": os.path.join(root, wall_data.DEFAULT_DATA_FILE)}},
+            },
+            start_native=False, start_terminal=False,
+            log=logging.getLogger("test.wallpaper.usage"),
+        )
+        runtime.wallpaper = WallpaperDeck(root)
+        runtime._tag_index = None
+        result = runtime.next_wallpaper(1, sort="used_asc")
+        self.assertFalse(result["ok"])
+        self.assertIn("assistant tag", result["error"],
+                      "没标签数据 -> 给一句能照做的（按使用次数也要先打标签）")
+
+    async def test_an_image_outside_the_data_file_is_not_counted(self):
+        runtime, root, data_file = self._runtime({"01_a.png": 3}, extra=("00_new.png",))
+        result = runtime.next_wallpaper(1)         # 名字排在前面 -> 挑到没打过标签的那张
+        self.assertTrue(result["ok"], "没进过数据文件的图照样能显示")
+        self.assertEqual(os.path.basename(result["path"]), "00_new.png")
+        self.assertEqual(result["used"], 0, "它不在数据文件里 -> 没次数可计")
+        self.assertEqual(self._used_in_file(data_file, "01_a.png"), 3, "别的图不受影响")
+
+    async def test_a_broken_data_file_does_not_break_switching(self):
+        """统计坏了是**统计**的事: 换壁纸照样成功（只记 warning）。"""
+        runtime, root, data_file = self._runtime({"01_a.png": 0, "02_b.png": 0})
+        with open(data_file, "w", encoding="utf-8") as handle:
+            handle.write("{这不是 JSON\n")
+        runtime._tag_index = None
+        result = runtime.next_wallpaper(1)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["used"], 0, "读不到次数就按 0")
+        self.assertEqual(os.path.basename(result["path"]), "01_a.png")
+
+    async def test_the_tags_summary_reports_usage(self):
+        runtime, root, data_file = self._runtime({"01_a.png": 5, "02_b.png": 0, "03_c.png": 2})
+        summary = runtime.wallpaper_tags()
+        self.assertTrue(summary["ok"])
+        usage = summary["usage"]
+        self.assertEqual(usage["least_used"][0]["name"], "02_b.png")
+        self.assertEqual(usage["most_used"][0]["name"], "01_a.png")
+        self.assertEqual(usage["never_used"], 1, "一次都没用过的张数")
+        self.assertIn("used_asc", summary["note"],
+                      "tags 回话里要告诉模型怎么挑\"用得最少的\"")
 
 
 if __name__ == "__main__":

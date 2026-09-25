@@ -25,6 +25,9 @@
 `agent/main.py::handle_event()` 用的都是 `chat_with_tools()`；返回的 dict 形状固定：
 `{"ok", "text", "tool_calls", "error", "mode", "degraded"}`。
 
+⚠ **只读问句在进模型之前就被答掉了**（T8-5c，见 §5.3）：`handle_event()` 先问一遍
+`agent/core/read_intents.py`，命中就直连回话（**0 次模型推理**），没命中才走 `chat_with_tools()`。
+
 ## 2. edge 就是"连本机 llama-server"
 
 Agent **不加载 GGUF、不跑推理**。真正加载模型的是板端的 `llama-server` 进程
@@ -101,24 +104,49 @@ Qwen3 默认"先想再答"。0.6B 上这一步**只花时间不涨质量**，而
 出现 `finish_reason="length"` + `content=""`（正文一个字都没有）。
 
 所以 edge 默认在 **system 提示末尾 + 最后一条 user 消息末尾**两处都写 `/no_think`
-（`EdgeBackend(no_think=True)`，Qwen3 的软开关）。板端实测（RK3568 + Qwen3-0.6B-Q4_K_M +
-llama-server build 10677，温度 0，同一句话）：
+（`EdgeBackend(no_think=True)`，Qwen3 的软开关），并且**每一次请求**都带
+`chat_template_kwargs={"enable_thinking": false}`（见 §4.1）。
+板端实测（RK3568 + Qwen3-0.6B-Q4_K_M + llama-server build 10677，温度 0，同一句话）：
 
 | | 耗时 | `reasoning_content` | 正文 |
 | --- | --- | --- | --- |
 | 不关思考 | 27.0 s | 281 字 | 8 字（`适合编程和调试。`） |
 | 关思考（默认） | **2.3 s** | 0 字 | 14 字（`天适合做编程、学习、娱乐等。`） |
 
-### 4.1 为什么**两处**都写（T8-5b 实测）
+### 4.1 为什么**两处**都写 + 模板开关（T8-5b/5c 实测）
 
 只写在 system 里时，**带工具**的那条路会时不时又想起来（6 条提示词里有 1 条产出 339 字
 `reasoning_content`，那一轮 211 s）。T8-5b 按"三条路按序试、可行即停"测过：
 
 | 手段 | 结果 |
 | --- | --- |
-| ① `/no_think` 也放进 **user** 消息末尾 | ✅ **采这个** —— 6 条提示词 `reasoning_content` 全为 0 字, 单轮 13~54 s |
-| ② 请求里带 `chat_template_kwargs={"enable_thinking": false}` | 没测（① 已经可行就停了）；模型模板里**确实**支持这个变量（`/props` 里第 86 行） |
-| ③ 换对话模板（`--chat-template-file`） | 没测；模板里本来就只有 `enable_thinking`, **没有** `/no_think` 的处理 —— 所以软开关是**模型学过的**，位置越靠近生成点越可靠 |
+| ① `/no_think` 也放进 **user** 消息末尾 | ✅ 采用 —— 6 条提示词 `reasoning_content` 全为 0 字, 单轮 13~54 s |
+| ② 请求里带 `chat_template_kwargs={"enable_thinking": false}` | ✅ 板端实测这个 build **收得下**（HTTP 200、工具调用照旧正确），且模板里明确支持这个变量 |
+| ③ 换对话模板（`--chat-template-file`） | 不做；模板里本来就只有 `enable_thinking`, **没有** `/no_think` 的处理 —— 软开关是**模型学过的** |
+
+**T8-5c-4 起两层一起上（这是不变量，不是可选项）**：
+
+```
+每一次 edge 请求都必须满足:
+  ① user 消息末尾带 /no_think                        —— 模型学过的软开关
+  ② chat_template_kwargs={"enable_thinking": false}  —— llama.cpp 的模板开关
+                                                        （模板里为假时直接吐空思考块）
+```
+
+为什么不能只靠 ①：**工具循环的第二轮里最后一条消息是 `tool`（工具结果）**，那条带
+`/no_think` 的 user 消息已经被推到历史深处 —— 而 ② 是模板自己保证的，与第几轮、消息形状
+都无关。所以"每一轮都关思考"只能靠 ② 兜底。
+
+⚠ ② 是 **llama.cpp 专有参数**，只发给 edge 后端；`cloud` 一个字节都不带（云端 API 会把它
+当未知参数）。两条都有测试钉着（`tests/test_llm.py`：
+`test_every_round_of_the_tool_loop_is_thinking_free` / `test_cloud_never_gets_the_llama_template_switch`）。
+
+⚠ ② 必须走 **`extra_body=`**（板端实测踩到）：openai SDK **不接受未知的顶层关键字** ——
+直接传 `create(chat_template_kwargs=…)` 会 `TypeError: create() got an unexpected keyword
+argument`，然后**整轮降级成规则兜底**（`llm_errors` +1，用户看到"板端模型没有响应"）。
+`extra_body` 是 SDK 官方的"塞进请求体"通道。顺带一个教训：`tests/test_llm.py` 的假 client
+原本对关键字**照单全收**，所以这个 bug 只在板端暴露 —— 现在假 client 会像真 SDK 一样
+对未知顶层键抛 `TypeError`（`_FakeCompletions.ALLOWED` + 一条专门的测试）。
 
 正文为空时**不当成"模型说了空话"**：`chat_with_tools()` 按"模型没给正文"降级（下面一节），
 理由里会写明是 `finish_reason` 还是"思考吃掉了预算"。
@@ -165,7 +193,13 @@ llama-server build 10677，温度 0，同一句话）：
 > 关掉思考后模型自己只花 **30~34** token（不再是 200），第二轮 ≈ 1550 —— `ctx_size 2048`
 > 也能装下了（现在配的是 4096，留了余量）。
 > ⚠ 加**一个 action**（enum 里多一个值）≈ 十几 token；加**一个工具** ≈ 250~750 token ——
-> 所以要加能力优先扩 action。
+> 所以要加能力优先扩 action。**这条现在是机械守卫**：`tests/test_merged_tools.py::TestPromptBudget`
+> 按字符卡上限（清单 3600 / 单工具 2000 字符），超了立刻红（见 architecture.md §4.1.1）。
+>
+> ⚠ **T8-6** 给 `next_wallpaper` 加了 `least`/`most` 两个 action（"挑用得最少的/最多的"），
+> 并顺手把几段说明改短 —— 清单 **3274 → 3522 字符**（≈ +40 token，离 3600 只剩 78 字符）。
+> 板端 prompt 没有重量过（按上面那条换算 ≈ 1535 token，`ctx_size` 4096 仍有大余量）；
+> 下一次再加东西前得先想"能不能只改措辞"。
 
 结论：
 - 工具清单占 prompt 的 **~90%**（合并前）；模型自己只花 30~200 token。
@@ -198,9 +232,34 @@ llama-server build 10677，温度 0，同一句话）：
 | 参数写错位置 | `action="next"` + `match`（该是 pick） | 无（工具侧归一化吸收了） |
 | 编造 id | `track_id="none"`（真的会失败） | 无（`enqueue` 会去 PC 校验, 编的 id 当场被拒） |
 
-⚠ 还没解决的边界（**0.6B 的能力问题, 不是接线问题**）：
+⚠ 曾经没解决的边界（**0.6B 的能力问题, 不是接线问题**）：
 "现在在放什么"这类**读状态**的问句它不肯调 `status`（直接复读问题）。
-下一步的方向之一就是"读操作不走模型"（见 `docs/architecture.md` 的讨论）。
+**T8-5c 用"读操作不走模型"治掉了** —— 见下一节。
+
+### 5.3 只读问句直连：读操作不走模型（T8-5c）
+
+分工（你拍的板）：
+
+```
+只读问句（在放什么 / 库里有什么 / 壁纸有哪些标签 / 现在是什么壁纸 / 哪张壁纸用得最少）
+        ->  agent/core/read_intents.py  直连回答（真实数据拼一句话, **0 次模型推理**）
+写意图（放首歌 / 换张壁纸 / 小声点 / 加进队列 …）
+        ->  照旧进模型（它负责决定"做什么", 以及把失败说清楚）
+```
+
+| 规则 | 为什么 |
+| --- | --- |
+| 只认**读状态**（5 个意图: `music_status` / `music_library` / `wallpaper_tags` / `wallpaper_now` / `wallpaper_usage`），问候/闲聊/时间**不**直连 | 直连是**固定话术**：用在"报数据"上没损失，用在闲聊上会把对话变僵（那两条路仍由模型/RuleEngine 管） |
+| 答案与工具用**同一份数据**（`Runtime.music_state()` / `music_candidates()` / `wallpaper_tags()` / `wallpaper_snapshot()`） | 直连答的数字与工具回话一定一致，不会"两套口径" |
+| **依赖缺了不算命中**（音乐没开 → 那两条规则跳过） | 直连不假装知道；交回模型（它至少能照着工具说明说清） |
+| 入口自己说"不行"（音乐没开 / 标签没打）→ **原样把那句能照做的话给用户** | 这类话不该丢回模型去猜（它只会编） |
+| 匹配**锚住名词/动词**（壁纸规则必须出现"壁纸/图"或"显示的是"） | 踩过：早先的宽匹配把"现在在放什么"当成壁纸问句截胡了（已有测试钉住） |
+| T8-6 的 `wallpaper_usage` 另加一道**护栏**：整句要有疑问词（哪/什么/几/多少/吗/？）、且不许出现"换一张/放一首/挑一张"这类**动作** | 同款坑再踩一次：松规则会把写意图"**换一张用得最少的壁纸**"当问句抢走 —— 用户是要换图，不是要报表 |
+| 顺序即优先级，**第一个命中即返回**；不认识就返回 `None` | 与 RuleEngine 同一条约定；宁可多花一次推理，也不猜 |
+| 正则匹配、**不做意图理解** | 与 RuleEngine 同样的取舍：边界清楚、可单测（`tests/test_read_intents.py` 20 项） |
+
+⚠ 直连**不受状态权限表约束**（它一个字节都不写）：SLEEP/GAME 下问"在放什么"照答。
+⚠ 报给用户的壁纸序号是**从 1 开始**的（游标本身 0 基 —— 这里做过一次 +1，别再搞混）。
 
 ## 6. 怎么验
 

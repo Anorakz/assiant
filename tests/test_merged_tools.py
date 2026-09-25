@@ -25,8 +25,12 @@ tests/test_merged_tools.py — 三个工具（Phase 7 T8-5b）
   4) **统一标签语法**: `tag="mood=energetic"` / 多条 / 打标签必须带轴
   5) **schema**: 必填 `action`、枚举、范围、`additionalProperties: false`
   6) **description**: 该说的都说了（PC 出声 / 30 秒计次 / 没有音频特征 / handle 分工）
+  7) **工具清单预算守卫**（T8-5c-3）: 清单是 prompt 的大头（T8-5 实测占 90%）——
+     超预算**立刻红**, 逼着人"优先扩 action, 而不是加工具"（见文件末尾的 `TestPromptBudget`）
 """
 
+import copy
+import json
 import logging
 import sys
 import unittest
@@ -49,7 +53,7 @@ def fake_services(**overrides):
     """三个工具要的全部入口的替身: 记下调用, 返回一个像 Runtime 那样的结果。"""
     calls = []
 
-    def advance(step=1, match=None):
+    def advance(step=1, match=None, sort=None):
         calls.append(("advance", step, match))
         return {"ok": True, "path": "/w/1.png", "index": 0, "total": 1, "pushed": True}
 
@@ -125,7 +129,7 @@ class TestSkippedWithoutDependencies(unittest.TestCase):
 
     def test_wallpaper_needs_both_entries(self):
         self.assertIsNone(wallpaper.build({}))
-        self.assertIsNone(wallpaper.build({"next_wallpaper": lambda step=1, match=None: {}}))
+        self.assertIsNone(wallpaper.build({"next_wallpaper": lambda step=1, match=None, sort=None: {}}))
         self.assertIsNone(wallpaper.build({"wallpaper_tags": lambda **kw: {}}))
         self.assertIsNone(wallpaper.build({"next_wallpaper": "x", "wallpaper_tags": "y"}))
 
@@ -205,10 +209,14 @@ class TestWallpaperActions(unittest.TestCase):
 
     def test_next_with_match_is_accepted_as_a_pick(self):
         """T8-5b 板端实测: 模型写 `action="next"` 又给 `match`（"在最像的几张里翻"）——
-        这在老版本就是合法写法, 合并后**必须继续认**, 否则白丢一轮。"""
+        这在老版本就是合法写法, 合并后**必须继续认**, 否则白丢一轮。
+
+        ⚠ T8-5c 起"认这些写法"的活儿在 `normalize()` 里（路由在**校验前**跑它,
+          见 tests/test_tool_normalize.py）。这里就按路由的做法: 先归一化再进 handler。
+        """
         tool, calls = build_one(wallpaper)
-        tool.handler(action="next", match="scene=landscape")
-        tool.handler(action="prev", match="mood=calm")
+        tool.handler(**wallpaper.normalize({"action": "next", "match": "scene=landscape"}))
+        tool.handler(**wallpaper.normalize({"action": "prev", "match": "mood=calm"}))
         self.assertEqual(calls, [("advance", 1, "scene=landscape"),
                                  ("advance", -1, "mood=calm")])
         tool.handler(action="next")
@@ -218,11 +226,12 @@ class TestWallpaperActions(unittest.TestCase):
         """同一批实测里模型还写过 `action="next"` + `ip_query="scene=landscape"`
         —— `ip_query` 只有 tags 用得上, 翻页类动作下当 match 用（宽容一点）。"""
         tool, calls = build_one(wallpaper)
-        tool.handler(action="next", ip_query="scene=landscape")
+        tool.handler(**wallpaper.normalize({"action": "next", "ip_query": "scene=landscape"}))
         self.assertEqual(calls, [("advance", 1, "scene=landscape")])
         tool.handler(action="tags", ip_query="EVA", limit=2)
         self.assertEqual(calls[-1], ("tags", "EVA", 2), "tags 照旧走 ip_query")
-        tool.handler(action="next", match="mood=calm", ip_query="scene=anime")
+        tool.handler(**wallpaper.normalize({"action": "next", "match": "mood=calm",
+                                            "ip_query": "scene=anime"}))
         self.assertEqual(calls[-1], ("advance", 1, "mood=calm"), "给了 match 就不看 ip_query")
 
     def test_pick_without_match_is_honest(self):
@@ -444,6 +453,108 @@ class TestExecution(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(result["ok"])
                 self.assertIn("not allowed", result["error"])
         self.assertEqual(calls, [])
+
+
+# ===========================================================================
+#  8) 工具清单预算守卫（T8-5c-3）
+# ===========================================================================
+#: 整份工具清单的**字符**预算（请求里 `tools=[{"type":"function","function":…}]` 那段）。
+#:
+#: 为什么按字符而不按 token: 开发机与板端都**没有** Qwen 的 tokenizer, 不为一条断言装一份。
+#: 板端实测的换算关系（`/tokenize`, STUDY 三个工具）: **3274 字符 ≈ 1309 token**
+#: （中文≈1 字/token, JSON 键与标点≈3~4 字/token —— 混着算下来 ≈ 0.4 token/字符）。
+#:
+#: 预算怎么定的: 现在 3274 字符（≈1309 token, 第一轮 prompt 1495 token, ctx 4096）。
+#: 留 ~10% 余量就封顶 —— 也就是"**再加一个像样的工具（≥600 字符 ≈ 250 token）就会红**",
+#: 逼着人先想"能不能扩 action"（一个 action 只加十几 token）。
+TOOL_BLOCK_BUDGET_CHARS = 3600
+
+#: 单个工具的字符预算（最大的 `next_music` 现在 1761 字符 ≈ 744 token）——
+#: 防的是"某条 description 突然把一整份词表/清单塞进去"（T7-4 那种注入有前科）。
+TOOL_BUDGET_CHARS = 2000
+
+
+def _tool_block(tools):
+    """按请求里的形态算字符数（与 `provider.request_kwargs` 的包装一致）。"""
+    return json.dumps([{"type": "function", "function": tool} for tool in tools],
+                      ensure_ascii=False)
+
+
+def advertised_tools():
+    """STUDY 下的完整工具清单（T8-5c-3 的守卫量它）。"""
+    from agent.core.state_machine import StateMachine
+    from agent.llm import provider as provider_module
+    from agent.tools import build_tools as build
+
+    machine = StateMachine()
+    machine.transition(State.STUDY, "budget")
+    router = ToolRouter(state_provider=machine, services=fake_services()[0])
+    for tool in build(router):
+        router.register(tool)
+    return provider_module._advertised_tools(router)
+
+
+class TestPromptBudget(unittest.TestCase):
+    """工具清单是 prompt 的大头: 超预算必须**立刻红**, 不许悄悄涨。"""
+
+    def test_tool_block_is_within_budget(self):
+        block = _tool_block(advertised_tools())
+        self.assertLessEqual(
+            len(block), TOOL_BLOCK_BUDGET_CHARS,
+            "工具清单 %d 字符超预算 %d —— 优先扩 action（≈十几 token）, "
+            "确实要加工具就先量一遍板端 prompt 再改这个预算（记得写理由）"
+            % (len(block), TOOL_BLOCK_BUDGET_CHARS))
+
+    def test_every_tool_is_within_its_own_budget(self):
+        for tool in advertised_tools():
+            with self.subTest(tool=tool["name"]):
+                size = len(json.dumps(tool, ensure_ascii=False))
+                self.assertLessEqual(size, TOOL_BUDGET_CHARS,
+                                     "%s 一个就 %d 字符 —— description/schema 太肥了"
+                                     % (tool["name"], size))
+
+    def test_the_measurement_is_not_vacuous(self):
+        # 反空转: 清单真的量出来了（不是空列表/量了个寂寞）
+        tools = advertised_tools()
+        self.assertEqual([t["name"] for t in tools],
+                         ["back_to_desktop", "next_music", "next_wallpaper"])
+        block = _tool_block(tools)
+        self.assertGreater(len(block), TOOL_BLOCK_BUDGET_CHARS // 2,
+                           "量出来的清单太小了 —— 守卫可能是空转的")
+
+    def test_the_guard_has_teeth(self):
+        # 反空转之二: 真加一个"像样的工具"就该**过不去**
+        tools = advertised_tools()
+        extra = {"name": "next_video", "description": "换一集视频。" * 40,
+                 "parameters": {"type": "object", "properties": {
+                     "action": {"type": "string", "enum": ["next", "prev"],
+                                "description": "下一个 / 上一个"}},
+                     "required": ["action"], "additionalProperties": False}}
+        grown = _tool_block(tools + [extra])
+        self.assertGreater(len(grown), TOOL_BLOCK_BUDGET_CHARS,
+                           "加了一个工具却还在预算内 —— 那这条守卫就没用了")
+
+    def test_action_is_a_lot_cheaper_than_a_tool(self):
+        # 文档里那句"加 action ≈ 十几 token / 加工具 ≈ 250~750 token"的机械版:
+        # 往 enum 里加一个值, 涨的字符数必须远小于加一个工具
+        # ⚠ 必须 deepcopy: `Tool.to_llm_dict()` 里的 `parameters` **就是模块级 SCHEMA 那个对象**,
+        #   原地改会把工具本身的 schema 改坏（这个坑当场踩过一次: 后面那条 enum 断言就红了）
+        tools = copy.deepcopy(advertised_tools())
+        before = len(_tool_block(tools))
+        for tool in tools:
+            params = tool["parameters"]["properties"].get("action")
+            if params:
+                params["enum"] = list(params["enum"]) + ["__extra__"]
+        grown = len(_tool_block(tools)) - before
+        self.assertLess(grown, 200, "加一个 action 不该涨这么多: %d 字符" % grown)
+        self.assertGreater(grown, 0, "反空转: 加一个 enum 值总得涨一点")
+
+    def test_advertised_dicts_share_the_module_schema(self):
+        """把上面那个坑写成事实: 清单里的 `parameters` 是**共享对象**, 改它等于改工具。"""
+        tools = advertised_tools()
+        by_name = {tool["name"]: tool for tool in tools}
+        self.assertIs(by_name["next_music"]["parameters"], music.SCHEMA)
+        self.assertIs(by_name["next_wallpaper"]["parameters"], wallpaper.SCHEMA)
 
 
 if __name__ == "__main__":

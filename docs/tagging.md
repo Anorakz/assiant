@@ -59,7 +59,7 @@ wallpaper:
  "sha256":"…","tagged_at":"2026-09-22T22:53:01","ms":1420,
  "model_sha8":"a50233e0","vocab_sha8":"b780f2b5",
  "tags":{"scene":[["landscape",0.21],["city",0.08]],"tone":[["dark",0.15]],"mood":[["calm",0.11]]},
- "embedding":"<base64 float16 × 768>"}
+ "embedding":"<base64 float16 × 768>","used":3,"last_used":"2026-09-24T21:07:12"}
 ```
 
 | 字段 | 为什么留着 |
@@ -69,6 +69,7 @@ wallpaper:
 | `tags` | 每轴 top-k（默认 3）+ **余弦分数** |
 | `embedding` | L2 归一化的图像向量：IP 检索/相似图召回**不用再过 NPU**（一张 ≈ 2KB） |
 | `ms` | 每张耗时，性能回归有据可查 |
+| `used` / `last_used` | **运行期**字段（T8-6）：这张当壁纸显示过几次 / 上次是什么时候 —— "挑一张用得最少的"靠它（见 §6.1） |
 
 **为什么第一行是标签向量**：32 条标签每条都要过一次文本塔，板端实测 **61 s**
 （占一次全量 206 s 的 30%），而这 32 个向量跟图片目录毫无关系。
@@ -88,6 +89,9 @@ wallpaper:
   手改它没有意义（下次打标签会覆盖），所以它**进了 `.gitignore`**（板端本地数据）。
 - **唯一写入者**是 `assistant tag --apply`（`agent/vision/wall_data.py`）；Agent **只读**。
   写之前会在旁边留一份 `wall_data.jsonl.bak`（原子写，走 `agent/config.py::write_text_atomic`）。
+  ⚠ T8-6 起有**两个写入时机**，但仍然是同一个函数（`wall_data.write_records()`）：
+  打标签时整表重写、以及**换壁纸时给那一张 +1**（`bump_usage_in_file()` 读整表 → 改一行 →
+  原子重写）。所以文件里不会出现"两个写者各写一半"。
 - `tests/test_config_source_guard.py` 的写入者白名单里因此多了第三个文件 —— 那是**显式**决定，
   见 `docs/config-sources.md` §3.1 的口径。
 
@@ -123,6 +127,8 @@ IPC 命令都删掉了（理由见 `agent/core/wallpaper.py` 模块头）。挑�
 | "有哪些风格？" | `next_wallpaper(action="tags")` | 先看清单（每轴各标签几张） |
 | "换一张像 EVA 的" | `next_wallpaper(action="pick", match="ip=EVA")` | 锚点原型检索（纯 CPU） |
 | "换一张壁纸" | `next_wallpaper(action="next")` | 按文件名翻下一页（老行为） |
+| "挑一张我用得最少的" | `next_wallpaper(action="least")` | 按使用次数挑：最少的在前（T8-6，见 §6.1） |
+| "来一张我老看的" | `next_wallpaper(action="most")` | 用得最多的在前 |
 
 ⚠ **`action="tags"` 的 `ip_query` 只填作品名**（例如 `EVA`）——板端实测模型会把
 一句问句（"这个作品最像哪几张"）填进去，工具如实报错后它又把"可用的 IP 名"当成壁纸标签
@@ -151,6 +157,11 @@ IPC 命令都删掉了（理由见 `agent/core/wallpaper.py` 模块头）。挑�
   ⚠ T7-4 修过一处：以前"当前那张恰好在候选里"时会从**它在候选里的名次**往后走 ——
   实测说"换一张动漫的"却挑回第 29 名（当前那张排第 28）。现在只有"上一张就是这个条件挑的"
   才从它往后翻（`WallpaperDeck.step(anchor=…)`）。
+  ⚠ T8-6 又修了同一处的**另一半**（写 T8-6 的测试时才发现的）：不给 `match` 的普通
+  "换一张"也一直在传 `anchor=None`，那是"假装还没选过"的意思 —— 于是连叫 4 次
+  `next_wallpaper(1)` 每次都挑回 `01_a.png`（**"下一张"其实没往后走**）。
+  现在不给 `match`/`sort` 时不传 `anchor`，按游标一格格走；
+  `tests/test_wallpaper.py::TestRuntimeWallpaperUsage.test_a_plain_switch_walks_forward` 钉住它。
 - **分数是余弦**（不是概率）：排序可信，绝对值不要当置信度（阈值还没标定，见 §8）。
 - **当前词表写进了工具的说明**（T7-4）：`next_wallpaper` 的 description 末尾带着
   `可用标签: scene=landscape/city/…；tone=dark/…；mood=calm/…`（按 `wallpaper.tagging.vocab`
@@ -162,6 +173,64 @@ IPC 命令都删掉了（理由见 `agent/core/wallpaper.py` 模块头）。挑�
 - **失败都有一句能照做的话**：不认识的轴会列出真轴、不认识的标签会列词表、
   没配置锚点的 IP 会说去 `ip_presets` 加、锚点没打过标签会说"先跑 `assistant tag`"、
   整个库还没打标签会说去跑 `assistant tag --apply`。
+
+### 6.1 使用次数（T8-6）
+
+"挑一张我最少看到的"要有依据 —— 依据就是**这张图被换上去过几次**，记在数据文件的
+`used` / `last_used` 里（§4）。计数**不需要额外的文件**，也不需要 NPU。
+
+**什么时候 +1**（判据只有一条：屏幕上**换成了另一张**）：
+
+| 动作 | 算不算 |
+| --- | --- |
+| 对话里换了一张（`action=next/prev/pick`，真的换了另一张） | **算**（+1） |
+| 没有 GUI 连着（`on_wallpaper is None`）时换图 | **算** —— 游标确实动了，"换成了"这件事发生了 |
+| 同一张再推一次（`action=repeat` / `step=0`） | 不算 |
+| GUI 断开重连，补推**当前**这张（`push_current_wallpaper`） | 不算 |
+| 开机/重启后 GUI 第一次连上（还没有"当前"，补推第一张当初始画面） | 不算（`count=False`：那是"同步显示"，不是用户换的） |
+| 这张图不在数据文件里（没打过标签 / 是新图） | 不计、不报错（换图照常成功，`used` 回 0） |
+| 计数写盘失败（磁盘满 / 文件被改成目录…） | 只记 warning —— **统计坏了不该让换图失败** |
+
+**怎么挑**：`next_wallpaper(action="least")` 挑**用得最少**的一张、`action="most"` 挑用得最多的
+（这两个不用给 `match`）；要"在最像的那批里挑用得最少的"就用
+`action="pick", match="scene=anime", sort="used_asc"`（`sort` 只有挑图/翻页才有意义）。
+⚠ 排序后会**跳过屏幕上当前这张**再从第 1 名拿 —— 连说两次"再挑一张用得最少的"是一张张往少走，
+不会挑回同一张、也不会跳回用得多的一头（板端实测过这两种错法，见下表）。
+`test_asking_twice_never_hands_back_the_same_one` 钉住它。
+
+**板端实测的两种误用（0.6B，T8-6 验收时抓到的）**：
+
+| 模型实际写的 | 结果 | 现在的处理 |
+| --- | --- | --- |
+| `action="pick", match="scene=landscape"`（自己编了个标签，**完全不提"用得最少"**） | 换了一张风景图 —— 能用，但不是用户要的 | 把"按用量挑"做成**单字 action**（`least`/`most`）写进枚举与说明，别再指望它去设 `sort=` |
+| `action="tags", sort="used_asc"`（"看标签"是**只读**的，却被当成了换图） | 修前：安静回一份标签清单，模型接着说"已找到使用次数最少的壁纸，您可以在界面中看到它" —— **谎报**（屏幕没换） | 如实报错 + 指出该用 `action="least"`（下一轮它有机会改；不改也有 `tell_user` 兜底出现在正文） |
+| 连着说两次"再挑一张用得最少的" | 修前（从当前这张在排序里的名次往后翻）：第二次跳到 **index=39/40** —— 跑到**用得多**的那一档去了 | 排序后先**跳过屏幕上这张**再从第 1 名拿（"在屏幕上没有的那些里挑最少的"） |
+
+> 教训（和 T8-5c 那次同源）：**只加参数不给 action，小模型用不起来**；
+> 而**参数与 action 自相矛盾**时既不能装没看见（会谎报）也不能替它改（读当写），
+> 只能**如实报错 + 告诉它正确的写法**。
+
+**怎么看**：
+
+- 对话里问"哪张壁纸我用得最少 / 我用得最多的壁纸是哪张 / 壁纸都用过几次" —— 这是**只读问句**，
+  按 T8-5c 的分工**直连回答（0 次模型推理）**，报的是 `usage` 块里的真实数字
+  （共换过几次、几张没换到过、最少/最多的三张）。一次都没换过时只说实话
+  （"还一次都没换过"），**不会**报"用得最多的是谁"（那只是文件名顺序，板端第一次问就撞上）。
+- 问"有哪些壁纸标签"（`action="tags"`）时，回话里也带同一份 `usage` 摘要。
+
+**已知边界（如实写）**：
+
+- 计数是**软信号**，只统计"Agent 自己换上去的那几次"：断电重启、崩溃重启期间屏幕上是哪张、
+  以及**用别的方式**（桌面环境自己改壁纸）换过什么，它都不知道 —— 板端**没有 RTC 也没有持久游标**。
+- 数据文件是**派生数据**（进了 `.gitignore`）。删了它 / 换台机器重打标签，计数就从 0 开始。
+- 重打标签**不会清零**：`assistant tag` 会用 `wall_data.with_usage()` 把 `used`/`last_used`
+  带到新记录上（`tests/test_cli.py` 与 `test_wall_data.py::TestUsage` 钉住）。
+- **`action="most"` 目前"到不了"（板端实测 2 次）**：说"换一张我老看的那张壁纸"它调
+  `action="next"`；说"挑一张我看得最多的壁纸"它调 `action="least"`（**方向反了**）。
+  `least` 相反很稳（3/3 都调对）。机制本身没问题 —— 板端直接调
+  `next_wallpaper(1, sort="used_desc")` 验过（挑到用得最多的那张，再调一次会跳过屏幕上那张）；
+  而且**问**"我看得最多的是哪张"走只读直连，那个是准的（见上）。
+  结论：这条是 0.6B 的能力边界，不是接线问题 —— 记在这，别再往描述里堆字（预算只剩 78 字符）。
 
 ## 7. 已知边界（如实写下来）
 
@@ -215,10 +284,10 @@ Nier 那两张锚点本身差异大（黑底徽记 vs 黑白人影），均值�
 ## 9. 怎么验
 
 ```bash
-python tests/test_wall_data.py        # 词表 / 数据文件 / 增量计划（开发机也能跑）
-python tests/test_tag_index.py        # 标签索引 / 锚点检索 / match 语法（开发机也能跑）
-python tests/test_cli.py              # assistant tag 的计划逻辑（dry-run）
-python tests/test_wallpaper.py        # 游标 / 工具 / match 透传（开发机也能跑）
+python tests/test_wall_data.py        # 词表 / 数据文件 / 增量计划 / 使用次数（开发机也能跑）
+python tests/test_tag_index.py        # 标签索引 / 锚点检索 / match 语法 / 按用量排序（开发机也能跑）
+python tests/test_cli.py              # assistant tag 的计划逻辑（dry-run）+ 重打标签保住 used
+python tests/test_wallpaper.py        # 游标 / 工具 / match 透传 / "换成另一张才算一次"（开发机也能跑）
 python tests/test_siglip.py           # SigLIP 双塔（板端才跑模型那几条）
 python tests/board/siglip_align.py    # 搬运对齐（仓库版 vs 板端实验树 sig/）
 python tests/board/tag_quality.py     # 命中率 / 预处理 A/B / IP 检索（板端，§8 的数字出自它）
