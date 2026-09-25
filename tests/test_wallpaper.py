@@ -1168,5 +1168,139 @@ class TestRuntimeWallpaperUsage(unittest.IsolatedAsyncioTestCase):
                       "tags 回话里要告诉模型怎么挑\"用得最少的\"")
 
 
+class TestWindow(unittest.TestCase):
+    """T10-1: 三格窗口（上一个 / 当前 / 下一个）—— 你定的那套走法。
+
+    `prev` **只留 1 张**（真实走过的那张）; `next` 是"要来的一张", 由调用方（画像/指定）塞进来;
+    推进 = `next` 变 `current`; 后退 = 反过来; `prev` 空着时退回老规则（按文件名往前翻）。
+    """
+
+    def _deck(self, *names):
+        root = make_dir(*(names or ("01_a.png", "02_b.png", "03_c.png")))
+        return WallpaperDeck(root), root
+
+    def _name(self, path):
+        return os.path.basename(path)
+
+    def test_a_fresh_window_is_empty(self):
+        deck, _root = self._deck()
+        self.assertEqual(deck.window(),
+                         {"prev": None, "current": None, "next": None,
+                          "history_size": 0, "ready": False})
+
+    def test_set_next_fills_only_that_slot(self):
+        deck, root = self._deck()
+        deck.step(1)                                  # current = 01_a
+        deck.set_next(os.path.join(root, "03_c.png"))
+        window = deck.window()
+        self.assertEqual(self._name(window["current"]), "01_a.png")
+        self.assertEqual(self._name(window["next"]), "03_c.png")
+        self.assertIsNone(window["prev"])
+        self.assertTrue(window["ready"])
+        self.assertEqual(deck.set_next(""), None, "空串 = 清掉这一格")
+
+    def test_advance_moves_next_into_current_and_keeps_one_history(self):
+        deck, root = self._deck()
+        deck.step(1)
+        deck.set_next(os.path.join(root, "03_c.png"))
+        index, path, total = deck.advance()
+        self.assertEqual(self._name(path), "03_c.png")
+        self.assertEqual((index, total), (2, 3), "报的是它在目录里的位置")
+        self.assertEqual(deck.current(), path)
+        window = deck.window()
+        self.assertEqual(self._name(window["prev"]), "01_a.png", "原来那张进历史")
+        self.assertIsNone(window["next"], "推完就空着 —— 要不要重算由调用方决定")
+        self.assertEqual(window["history_size"], 1)
+
+    def test_advance_without_a_next_is_an_honest_error(self):
+        deck, _root = self._deck()
+        deck.step(1)
+        with self.assertRaises(WallpaperError) as ctx:
+            deck.advance()
+        self.assertIn("下一个", str(ctx.exception))
+        self.assertIn("set_next", str(ctx.exception))
+        self.assertEqual(self._name(deck.current()), "01_a.png", "失败时不动窗口")
+
+    def test_advance_refuses_a_next_that_vanished(self):
+        deck, root = self._deck()
+        deck.step(1)
+        gone = os.path.join(root, "03_c.png")
+        deck.set_next(gone)
+        os.remove(gone)
+        with self.assertRaises(WallpaperError) as ctx:
+            deck.advance()
+        self.assertIn("不在壁纸目录里", str(ctx.exception))
+        self.assertEqual(self._name(deck.current()), "01_a.png", "失败时不动窗口")
+
+    def test_back_swaps_with_prev(self):
+        deck, root = self._deck()
+        deck.step(1)                                  # 01_a
+        deck.set_next(os.path.join(root, "03_c.png"))
+        deck.advance()                                # 03_c, prev = 01_a
+        index, path, total = deck.back()
+        self.assertEqual(self._name(path), "01_a.png")
+        self.assertEqual((index, total), (0, 3))
+        window = deck.window()
+        self.assertIsNone(window["prev"], "退过一次之后就没有更早的了（只留 1 张）")
+        self.assertEqual(self._name(window["next"]), "03_c.png", "再往后走能回到刚才那张")
+        self.assertEqual(window["history_size"], 0)
+
+    def test_back_then_forward_returns_to_where_we_were(self):
+        deck, root = self._deck()
+        deck.step(1)
+        deck.set_next(os.path.join(root, "03_c.png"))
+        deck.advance()
+        deck.back()
+        _index, path, _total = deck.advance()
+        self.assertEqual(self._name(path), "03_c.png", "back 之后 next 就是刚才那张")
+
+    def test_back_without_history_falls_back_to_the_old_rule(self):
+        """A5（你定的）: prev 空着 -> 按文件名往前翻一张, 并把翻之前那张记成 prev。"""
+        deck, _root = self._deck()
+        deck.snapshot(initialise=True)                # 屏幕上先有第一张（prev 还是空的）
+        self.assertEqual(self._name(deck.current()), "01_a.png")
+        self.assertIsNone(deck.window()["prev"])
+        _index, path, _total = deck.back()
+        self.assertEqual(self._name(path), "03_c.png", "按文件名往前翻（越界回绕）")
+        self.assertEqual(self._name(deck.window()["prev"]), "01_a.png",
+                         "翻之前那张记成 prev（\"上一张\"不给空话）")
+
+    def test_back_without_history_gives_the_last_by_name(self):
+        deck, _root = self._deck()
+        _index, path, _total = deck.back()
+        self.assertEqual(self._name(path), "03_c.png", "没选过时往前翻 = 最后一张")
+        self.assertIsNone(deck.window()["prev"], "一张都没走过, 没有历史可记")
+
+    def test_step_keeps_history_and_clears_a_stale_next(self):
+        deck, root = self._deck()
+        deck.step(1)
+        deck.set_next(os.path.join(root, "03_c.png"))
+        deck.step(1)                                  # 普通翻页 -> 02_b
+        window = deck.window()
+        self.assertEqual(self._name(window["current"]), "02_b.png")
+        self.assertEqual(self._name(window["prev"]), "01_a.png")
+        self.assertIsNone(window["next"], "换了一张 -> 旧的 next 不算数了")
+
+    def test_repeat_does_not_touch_the_window(self):
+        deck, root = self._deck()
+        deck.step(1)
+        deck.set_next(os.path.join(root, "03_c.png"))
+        deck.step(0)                                  # 重推当前这张
+        window = deck.window()
+        self.assertEqual(self._name(window["current"]), "01_a.png")
+        self.assertEqual(self._name(window["next"]), "03_c.png", "重推不是\"换了一张\"")
+        self.assertIsNone(window["prev"])
+
+    def test_the_window_survives_a_rescan(self):
+        deck, root = self._deck()
+        deck.step(1)
+        deck.set_next(os.path.join(root, "03_c.png"))
+        with open(os.path.join(root, "00_new.png"), "w", encoding="utf-8") as handle:
+            handle.write("x")
+        self.assertEqual(self._name(deck.window()["next"]), "03_c.png", "路径不受新图影响")
+        _index, path, _total = deck.advance()
+        self.assertEqual(self._name(path), "03_c.png")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

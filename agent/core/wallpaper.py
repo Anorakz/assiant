@@ -1,21 +1,33 @@
 # ============================================================================
 #  agent/core/wallpaper.py — 壁纸目录的"下一张"（Phase 7 T3；T7-3 起支持"只在挑出来的
-#                            那几张里翻"）
+#                            那几张里翻"；T10-1 起变成**三格窗口**）
 #
-#  它是什么: 一个目录 + 一个游标。**不碰 IPC、不碰 GUI、不读图片内容** ——
+#  它是什么: 一个目录 + 一个**三格窗口**。**不碰 IPC、不碰 GUI、不读图片内容** ——
 #            只回答"下一张是哪张"。
 #
 #  谁用它（**只有一条入口**: 对话里 LLM 调 next_wallpaper 工具）
 #  ---------------------------------------------------------------------------
 #      agent/tools/wallpaper.py     LLM 调 next_wallpaper 工具
-#        └─ agent/main.py::Runtime.next_wallpaper(step, match)
-#             └─ WallpaperDeck.step(step, pool)   ← "下一张"的语义只有这一份
+#        └─ agent/main.py::Runtime.next_wallpaper(step, match, …)
+#             └─ WallpaperDeck.step()/advance()/back()/set_next()   ← 语义只有这一份
 #
 #  ⚠ T7-3 的需求变更: **手动换壁纸的入口都删掉了** —— GUI 主区那个「下一张」按钮、
 #    以及配套的 `next_wallpaper` IPC 命令（T3 加的、T6 还给它接上了状态权限表）。
 #    理由: 标签化之后"换成什么样"应该由**对话**表达（"换一张安静的深色风景"）,
 #    按钮只能"按文件名翻下一张", 反而更容易让画面和意图对不上。
 #    所以这类现在只剩一条路: 对话 -> LLM -> 工具 -> 这里。
+#
+#  三格窗口（T10-1, 你定的）
+#  ---------------------------------------------------------------------------
+#      prev      current      next
+#      （1 张, 真实走过的那张） （屏幕上这张） （要来的一张: 画像/指定算出来的）
+#
+#  · **prev 只留 1 张**（你定的）: 它是"上一张"的**真实历史**, 不是更长的栈。
+#  · **next 空着是正常的**: 谁把它填上（画像挑 / 用户指定）是调用方的事 —— 这里只管
+#    "推进时把它搬过来"。`advance()` 需要 next 已经在窗口里; 没有就如实报错。
+#  · 推进/后退都是**路径**（不是下标, 见下面"游标语义"）—— 加图删图不会错位。
+#  · `back()` 时 prev 是空的（刚启动 / 已经退过一次）→ **退回老规则**: 按文件名往前翻一张,
+#    并把翻之前那张记成 prev（"上一张"永远不给你一句空话）。
 #
 #  游标语义（为什么不是"下标 +1"）
 #  ---------------------------------------------------------------------------
@@ -38,7 +50,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 __all__ = [
     "WallpaperDeck",
@@ -52,6 +64,9 @@ _log = logging.getLogger(__name__)
 #: `step(anchor=…)` 的默认值: 代表"用游标里那张"（与显式传 `None` 区分开 ——
 #: `None` 的含义是"假装还没选过"）。用哨兵而不是 `None`, 是因为后者有意义。
 _CURSOR: Any = object()
+
+#: 窗口固定三格（T10-1）: 上一个 / 当前 / 下一个。写在这里是给日志和测试看的。
+WINDOW_SIZE = 3
 
 #: 认得的图片后缀（小写比较）。刻意不含 .gif —— Qt 能显示但"壁纸"要的是静态图。
 IMAGE_SUFFIXES: Tuple[str, ...] = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -70,13 +85,18 @@ class WallpaperError(ValueError):
 
 
 class WallpaperDeck:
-    """一个壁纸目录 + 一个游标。
+    """一个壁纸目录 + 一个三格窗口（`prev` / `current` / `next`）。
 
     典型用法::
 
         deck = WallpaperDeck("/home/kickpi/wallpapers")
-        index, path, total = deck.step()        # 下一张
-        index, path, total = deck.step(-1)      # 上一张
+        index, path, total = deck.step()        # 下一张（老口径: 按文件名翻）
+        deck.set_next(some_path)                # 把画像/指定算出来的那张放进 next
+        index, path, total = deck.advance()     # 推进一格（next 变 current）
+        index, path, total = deck.back()        # 退回上一张（prev 里那张）
+
+    ⚠ `advance()`/`back()` 之后 `next`/`prev` 是什么（调用方要接着做什么）见各自 docstring:
+    这里只做"搬运", **要不要马上用画像重算 next 是调用方的事**（T10-3 在 Runtime 里做）。
     """
 
     def __init__(
@@ -95,6 +115,9 @@ class WallpaperDeck:
         )
         #: 当前那张的**路径**（不是下标, 见模块头）
         self._current: Optional[str] = None
+        #: 窗口的另外两格（T10-1）: prev 只留 1 张真实历史; next 是"要来的一张"
+        self._prev: Optional[str] = None
+        self._next: Optional[str] = None
 
     # ------------------------------------------------------------ 列目录 ---
     def scan(self) -> List[str]:
@@ -134,6 +157,91 @@ class WallpaperDeck:
 
         picked.sort(key=lambda p: (os.path.basename(p).lower(), os.path.basename(p)))
         return picked
+
+    # ---------------------------------------------------- 三格窗口 (T10-1) ---
+    def window(self) -> Dict[str, Any]:
+        """三格窗口现状（**纯读**）。
+
+        @return {"prev", "current", "next", "history_size", "ready"}
+                `ready` = next 已经在窗口里（`advance()` 现在就能推）
+        """
+        return {"prev": self._prev, "current": self._current, "next": self._next,
+                "history_size": self.history_size(), "ready": bool(self._next)}
+
+    def history_size(self) -> int:
+        """历史里有几张（**你定的: 只留 1 张**）。"""
+        return 1 if self._prev else 0
+
+    def set_next(self, path: Optional[str]) -> Optional[str]:
+        """把一张图放进"下一个"那一格（画像挑的 / 用户指定的）。
+
+        @param path 绝对路径; None/空 = 清掉这一格
+        @return 放进去的路径（或 None）
+        @note 这里**不检查它在不在目录里**（可能刚准备还没来得及拷进来）——
+              真推进的时候会重新列目录, 那会儿不在就如实报错（见 `advance()`）。
+        """
+        text = str(path).strip() if isinstance(path, str) else ""
+        self._next = text or None
+        return self._next
+
+    def advance(self) -> Tuple[int, str, int]:
+        """推进一格: `next` 变成 `current`, 原来那张进 `prev`。
+
+        @return (index, path, total) —— 新当前那张在目录里的位置（给日志/IPC 推）
+        @raise WallpaperError "下一个"还没准备（先 `set_next()`）/ 目录用不了 /
+                              那张已经不在了（被删/改名 —— 调用方重新挑一张）
+        @note 推完 `next` 就**空着**了 —— 要不要马上用画像重算一张, 是调用方的事。
+        """
+        if not self._next:
+            raise WallpaperError(
+                "窗口里的\"下一个\"还没准备 —— 先挑一张放进去（set_next）, 再推进"
+            )
+        images = self.scan()
+        if not images:
+            raise WallpaperError(
+                "壁纸目录里没有图片（认这些后缀: %s）: %s"
+                % (", ".join(self.suffixes), self.directory)
+            )
+        target = self._next
+        if target not in images:
+            raise WallpaperError(
+                "\"下一个\"那张已经不在壁纸目录里了（%s）—— 重新挑一张"
+                % os.path.basename(target)
+            )
+        previous = self._current
+        self._current = target
+        self._next = None
+        if previous and previous != target:
+            self._prev = previous
+        return images.index(target), target, len(images)
+
+    def back(self) -> Tuple[int, str, int]:
+        """退回一格: `prev` 变成 `current`, 原来那张进 `next`（方便再往回走）。
+
+        @return (index, path, total)
+        @raise WallpaperError 目录用不了 / 一张图都没有
+        @note **prev 是空的**（刚启动, 或已经退过一次）→ 退回老规则: 按文件名往前翻一张,
+              并把翻之前那张记成 prev（你定的 A5: "上一张"永远不给你一句空话）。
+        """
+        images = self.scan()
+        if not images:
+            raise WallpaperError(
+                "壁纸目录里没有图片（认这些后缀: %s）: %s"
+                % (", ".join(self.suffixes), self.directory)
+            )
+        if self._prev and self._prev in images:
+            target, previous = self._prev, self._current
+            self._current = target
+            self._prev = None
+            self._next = previous if previous and previous != target else None
+            return images.index(target), target, len(images)
+
+        # prev 空着（或那张已经不在了）: 老规则 —— 按文件名往前翻, 翻之前那张记成 prev
+        before = self._current
+        index, path, total = self.step(-1)
+        if before and before != path:
+            self._prev = before
+        return index, path, total
 
     # ------------------------------------------------------------ 游标 ---
     def current(self) -> Optional[str]:
@@ -223,7 +331,13 @@ class WallpaperDeck:
             # step<=0 从 0 起（step=0 → 第 1 名, step=-1 → 最后一名）
             base = -1 if step > 0 else 0
         target = (base + step) % len(candidates)
+        # T10-1: 真的换了一张 -> 原来那张进 prev（历史只留 1 张）, next 空着等重算。
+        # ⚠ step=0（重推当前这张）**不动窗口** —— 那不是"换了一张"。
+        previous = self._current
         self._current = candidates[target]
+        if previous and previous != self._current:
+            self._prev = previous
+            self._next = None
         return target, candidates[target], len(candidates)
 
     def __repr__(self) -> str:
