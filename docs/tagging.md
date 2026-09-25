@@ -126,9 +126,10 @@ IPC 命令都删掉了（理由见 `agent/core/wallpaper.py` 模块头）。挑�
 | "换一张安静的深色风景" | `next_wallpaper(action="pick", match="scene=landscape")` | 挑最像的几张里翻 |
 | "有哪些风格？" | `next_wallpaper(action="tags")` | 先看清单（每轴各标签几张） |
 | "换一张像 EVA 的" | `next_wallpaper(action="pick", match="ip=EVA")` | 锚点原型检索（纯 CPU） |
-| "换一张壁纸" | `next_wallpaper(action="next")` | 按文件名翻下一页（老行为） |
-| "挑一张我用得最少的" | `next_wallpaper(action="least")` | 按使用次数挑：最少的在前（T8-6，见 §6.1） |
-| "来一张我老看的" | `next_wallpaper(action="most")` | 用得最多的在前 |
+| "换一张壁纸" | `next_wallpaper(action="next")` | **往后走一格**（三格窗口: next 变当前, 再按画像补一个新的 next） |
+| "上一张" | `next_wallpaper(action="prev")` | **往回走一格**（`prev` 只留 1 张真实历史） |
+| "挑一张我用得最少的" | `next_wallpaper(action="least")` | 按使用次数挑：最少的在前（T8-6） |
+| "下一张想要 EVA 的"（**先别换**） | `next_wallpaper(action="stage", match="ip=EVA")` | 只把那张放进"下一个"，**不切屏**（T10-3） |
 
 ⚠ **`action="tags"` 的 `ip_query` 只填作品名**（例如 `EVA`）——板端实测模型会把
 一句问句（"这个作品最像哪几张"）填进去，工具如实报错后它又把"可用的 IP 名"当成壁纸标签
@@ -232,6 +233,91 @@ IPC 命令都删掉了（理由见 `agent/core/wallpaper.py` 模块头）。挑�
   而且**问**"我看得最多的是哪张"走只读直连，那个是准的（见上）。
   结论：这条是 0.6B 的能力边界，不是接线问题 —— 记在这，别再往描述里堆字（预算只剩 78 字符）。
 
+### 6.2 三格窗口与"下一个"是**预挑**出来的（T10-3）
+
+T10-3 之前每次换图都是"当场挑一张"，屏幕上是哪张、下一张会是谁**没有记账**。
+现在 `WallpaperDeck` 维护一个**三格窗口**（`agent/core/wallpaper.py`）：
+
+```
+prev  ──advance()──▶  current  ──advance()──▶  prev
+                        next  ──────────────────┘
+```
+
+| 槽 | 含义 | 有几张 |
+| --- | --- | --- |
+| `prev` | **真实历史**（上一次真的显示过的那张） | 只留 **1** 张（T10-2 用户决定） |
+| `current` | 屏幕上现在这张 | 1 |
+| `next` | **已经挑好的下一张**（还没显示） | 1 |
+
+三个槽存的都是**路径**，而且 `next` 是**提前挑好的**：屏幕上一切换，Agent 就紧接着
+按当前画像再补一个新的 `next`（`Runtime._refill_next()`）。好处是"下一张"是可预告、
+可替换、可被画像影响的 —— 而不是"等你说换的时候我再临时掷一次骰子"。
+
+**四种动作怎么动窗口**（`WallpaperDeck.step()` / `advance()` / `back()`）：
+
+| action | prev | current | next |
+| --- | --- | --- | --- |
+| `next`（`step>0`，普通"换一张"） | ← 旧的 current | ← 旧的 next（没有就现挑） | 清空 → 补一个新挑的 |
+| `pick` / `least` / `most`（带 `match`/`sort`） | ← 旧的 current | ← 新挑的那张 | 清空 → 补一个 |
+| `prev`（`step<0`，"上一张"） | ← 交换，`prev` 空 → 按文件名往前翻一张并把它记成 `prev`（A5） | | 不动 |
+| `stage`（只预挑） | 不动 | **不动** | ← 换成你点名的那张 |
+| `repeat`（同条件再来一张） | 不动 | **不动**（还是这张） | 不动 |
+| `pick` 再来一次（同 `match`） | ← 旧的 current | ← 候选里往后翻一名 | 清空 → 补一个 |
+
+窗口**不落盘**（和游标一样：板端没有 RTC 也没有持久游标），重启后从"没有 prev/next"开始
+—— 和 T8-6 的计数规矩不冲突：只有**"换成了另一张"**才 +1，`stage`/`repeat`/补推当前/开机首屏都不算。
+
+**`next` 什么时候会被换掉（T10-2 用户决定的三种情况）**：
+
+1. 用户**直接点名**要换下一个（`action="stage"`，或带 `match` 的 `pick`）；
+2. **用户画像更新**了 —— 画像是"下一个"的排序依据之一，画像变了就该重挑
+   （`_build_profile_task()` 里在画像落盘后调 `_refill_next()`，见 [profile.md](profile.md) §8）；
+3. 用户**要求挑某一个**（`match`/`sort` 命中了具体一张）。
+
+> 用户原话（T10-2 验收时）：`1、pick = 重新挑一个替换掉当前的下一个，然后队列接着走，
+> 然后再重新塞入下一个`；`3、next 更新三种情况：①用户要直接更换下一个 ②用户画像更新
+> ③用户要求选某一个`。
+
+**画像怎么参与挑图**（T10-2 的 `Runtime._choose_next()`，只在**没有** `match`/`sort` 时生效）：
+
+```
+match / sort 命中？  ── 是 ──▶ 按条件挑（老行为，画像不插手）
+        │ 否
+        ▼
+   画像能用吗？ ── 能 ──▶ _rank_next_by_profile()：按画像排序取第 1 名
+        │ 不能（画像太薄 / 关掉了 / 没有候选）
+        ▼
+   按文件名顺序翻一格（**故意不用"用得最少"**）
+```
+
+- 画像排序的权重在 [`user_profile.py`](profile.md)：壁纸 `ip 0.7 / mood 0.2 / fresh 0.1`；
+  `ip` 那一项用**排序名次当相似度代理**（`1 - rank/N`，池子按 IP 缓存），
+  因为"像不像"本来就是个相对量（§3 说过分数是余弦，不可比）。
+- **回退是文件名顺序，不是"用得最少"**：这是刻意的 —— 画像关掉/太薄时行为要**可预测**，
+  老用户能料到"换一张"就是往后走一格。之前拿"用得最少"当回退，把 T8-6 的
+  `test_a_plain_switch_walks_forward` 撞红了（连叫 4 次每次都挑回 `01_a.png`）。
+- 挑的时候**永远跳过窗口里的 `prev`/`current`**（重新补 `next` 时还要跳过现在这个 `next`）——
+  不然"换一张"会当场换回刚才那张。
+- **画像不是工具**（T9 决定）：它没有自己的 tool schema，是 **Agent 结构的一部分**，
+  在 `_choose_next()` 里被**读**，模型既看不见也调不动它。
+
+**板端实测**（T10-6, 真目录 40 张 + 真索引 + 真画像, `tests/board/t10_accept.py`）:
+
+```
+起始      prev=None                  current=None                        next=None
+① next    prev=None                  current=wallhaven-858vpj_1200x1920  next=wallhaven-y85mqx_2560x1440
+② next    prev=wallhaven-858vpj…    current=wallhaven-y85mqx_2560x1440  next=wallhaven-w8j79x_1280x720
+③ prev    prev=None                  current=wallhaven-858vpj_1200x1920  next=wallhaven-y85mqx_2560x1440
+④ stage   prev=None                  current=wallhaven-858vpj_1200x1920  next=Rei_1.png   ← 不切屏、不计次数
+⑤ 推进    prev=wallhaven-858vpj…    current=Rei_1.png                   next=wallhaven-w8j79x_1280x720
+⑥ pick    prev=Rei_1.png             current=wallhaven-85j9qo_2560x1080  next=wallhaven-w8j79x_1280x720
+```
+
+- 画像挑图那条的原文：`像 SNF（0.70）；还没看过`（`basis=profile`）；
+  把画像文件挪走再挑 -> `basis=order`（`回退: 按文件名`）。
+- `pick "ip=EVA"` 那次的 `match` 详情：`rank=2`、`candidates=40`、
+  `EVA：用 2 张锚点图的平均向量检索，全库 40 张按相似度排序`。
+
 ## 7. 已知边界（如实写下来）
 
 - **分数是余弦，不是概率**：`logit_scale/bias` 没随模型导出，拿不到标定过的 sigmoid。
@@ -241,6 +327,12 @@ IPC 命令都删掉了（理由见 `agent/core/wallpaper.py` 模块头）。挑�
   多给几张（同 IP 不同构图）会明显更稳。
 - **不对 UI 截图负责**：SigLIP 对整屏截图会坍缩（实测见 `llm/multimodal_report.md` §7.2）——
   这是壁纸（自然图像）场景之外的用法，别拿它当借口。
+- **`ip_query` 搬运只覆盖 `next/prev/repeat`**（写 T10-6 文档时对出来的，如实记下）：
+  模型把条件填错位置（填进 `ip_query`）时，`next` 那条路会被**搬**到 `match` 上；
+  但 `pick`/`stage` 不在 `_STEPS` 里，**搬不了** —— `pick` 会如实报
+  "挑图要说明按什么挑"（诚实，用户能改），`stage` 会当成"没给条件"**按画像挑一张**放进
+  `next`（不切屏、不计数，但**不是你要的那个条件**）。要修就是把那条搬运规则从
+  `_STEPS` 放宽到"除 `tags` 以外"，属于改工具行为，得单独做（T10-6 只记不改）。
 - **预处理照官方口径**：`cv2` 读 → BGR→RGB → **压扁**到 256×256 → 原始 0-255。
   不要"改成等比 letterbox"：那会跑到模型训练分布之外（`preprocessor_config.json` 就是
   256×256 压扁，归一化已烧进 rknn）。
@@ -291,6 +383,7 @@ python tests/test_wallpaper.py        # 游标 / 工具 / match 透传 / "换成
 python tests/test_siglip.py           # SigLIP 双塔（板端才跑模型那几条）
 python tests/board/siglip_align.py    # 搬运对齐（仓库版 vs 板端实验树 sig/）
 python tests/board/tag_quality.py     # 命中率 / 预处理 A/B / IP 检索（板端，§8 的数字出自它）
+python tests/board/t10_accept.py      # 三格窗口 + 画像挑图 + 队列动作（板端；§6.2 的窗口原文出自它）
 ```
 
 板端验收用 `tests/data/wallpaper_tags/truth.json` 里的人工真值算每轴 top-1/top-2

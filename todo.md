@@ -1469,6 +1469,61 @@ Phase 7 T9 — 用户画像（**Agent 内部能力, 不是工具**; 你定的六
       **不该再 sed**; 之后所有脚本都直接 scp 不再动行尾。
 ⚑ 下一步: 等 T9-4 验收; 通过后 T9 整批提交/推送 + 板端归一化, 然后进 Phase 8
 
+Phase 7 T10 — **画像驱动的切换**（你定的六条 + A1~A5; "暂不应用"到此结束）
+☑ T10-1 **壁纸三格窗口**（`agent/core/wallpaper.py`）: `prev`(只留 1 张真实历史)/`current`/`next`;
+      `advance()` = next→current、current→prev、next 清空; `back()` = 对调, `prev` 空就按文件名
+      往前翻并把翻之前那张记成 prev（A5）; `step()` 真换一张才动窗口（`step=0` 不动）
+☑ T10-2 **画像被消费**（`agent/core/user_profile.py` 配方 + `Runtime`）:
+      · 挑图 `RANK_WALLPAPER_WEIGHTS = ip 0.7 / mood 0.2 / fresh 0.1`
+        （IP 相似度 = **排序名次代理** `1 - rank/N`, 池子按 IP 缓存 —— 不必再过 NPU）
+      · 挑歌 `RANK_TRACK_WEIGHTS = artist 0.7 / mood 0.2 / fresh 0.1`; 心情→标签有 `MOOD_TO_TAGS`
+      · `profile_basis()` 判"画像太薄"; `mood=unknown` 那一项**不给分**（不惩罚）
+      · **只有 Agent 读**: 不进 prompt、不是工具（T9 定的边界没破）
+☑ T10-3 **接线**（`Runtime._choose_next/_rank_next_by_profile/_refill_next` + 工具加 `stage`）:
+      · `_choose_next()` 优先级 = `match/sort` 条件 > 画像 > **文件名顺序回退**
+        （⚠ 回退**故意不是**"用得最少的": 拿它当回退会把 T8-6 的 `test_a_plain_switch_walks_forward`
+        撞红 —— 连叫 4 次每次都挑回 `01_a.png`）
+      · 永远跳过窗口里的 `prev`/`current`（补 next 时连当前那个 next 一起跳）
+      · `next`: 没有 next 就先挑一个放进去; `pick/least/most`: **替换 next → 推进 → 再补一个**;
+        `prev`: 走 `back()`; 新动作 `stage` = **只预备下一个**（不切屏、不推送、不计数）
+      · 画像构建完（`_build_profile_task`）→ `_refill_next()` 重挑"下一个"（你定的第 3 条②）
+      · ⚠ prompt 预算: 加 `stage` 时清单从 3522 涨到 **3562/3600**（离红线只剩 38 字符,
+        加之前先把 `next_wallpaper` 的 description/枚举措辞压了一遍）
+☑ T10-4 **两段式补歌**（`MusicPlayer.set_target/target/queue_ids/refill`）: 目标 **30 首**、缺即补;
+      ① 本地库（按歌手偏好排）② 不够**只按画像里的歌手**去 PC 搜（你改的那条: "只根据歌手补"）;
+      上限 `search_per_cycle 3`（**按尝试次数**算）/`search_limit 10`/`search_backoff_s 300`;
+      搜到的歌用搜索元数据直接入队（`verify=False`, 不逐首 `track_detail`）并**登记进本地库**
+☑ T10-5 **队列动作**（`Runtime._apply_profile_effects/_remove_from_playback/_reset_queue_on_mood_change`）:
+      · 负反馈点名的歌/歌手 -> `similar_tracks()` 找**类似的全部**移出队列; 正在放的那首被移出时
+        **立刻跳下一首**（`remove()` 把环形光标退一格 + `step(1)`）; 之后**马上补队列**
+      · **只有两个已知心情不同**才重置队列（`unknown` 不算）; 重置时**留住正在放的那首**在队首
+⚑ 顺手记两条**验收脚本的坑**（都不是产品问题, 是"怎么验"的问题）:
+      ① `tags.artist` 是**列表**不是字符串 —— 探针里拿它当 str 用会选出个假的歌手名;
+      ② 负反馈后**立刻补歌**要读的是**已落盘的**画像（`muted` 名单在里面）:
+         `_build_profile_task()` 的顺序是 `append_record()` **先**、`_apply_profile_effects()` **后** ——
+         验收脚本里反过来调, 就会看到"刚去掉又被补回来"（**产品路径没这个问题**, 已按真顺序跑过）
+☑ T10-6 **文档 + 板端真跑**（`tests/board/t10_accept.py` 新 + tagging/music/profile/architecture/
+      config-sources/Readme）: 板端 `python3 tests/board/t10_accept.py` —— **全部通过**
+      · A 三格窗口（真目录 40 张 + 真索引/画像副本）: `next` 两次换两张、`prev` 回到真实历史、
+        `stage` **不切屏/不推送/不计使用次数**、推进后屏幕上就是刚预备的那张（`Rei_1.png`）、
+        `pick "ip=EVA"` 报 `rank=2/40`; 画像不可用 -> `basis=order`（按文件名）
+      · 画像挑图原文: `画像挑出来的『下一个』: wallhaven-858vpj_1200x1920.png
+        （basis=profile; 像 SNF（0.70）；还没看过）`
+      · B 负反馈（真 `build_profile` + 真音乐库副本）: 点名 高橋洋子 -> `affected` 10 首,
+        队列里 4 首被移出, **补回 6 首且没把那 4 首补回来**（队列变成 宇多田ヒカル/米津玄師）;
+        心情 happy→tired: `清掉 6 首, 留住正在放的 1824020873`; 心情没变/unknown -> `None`
+      · C 端到端（真 `_profile_tick()`）: 攒 **259 字/4 轮**（触发线 60 字, 临时) -> 后台构建
+        **12.4s** -> 副本画像 **+1 行** -> 负反馈 3 条、`cleared.tracks=1`;
+        `开始播放 2060973088 地球儀`（正在放的那首被移出 -> 当场跳下一首）;
+        队列 6 -> 6 首, 全是 米津玄師; 记录里**没有**无关的那句对话（"豆豆"不在）
+      · D **只动副本**: 真 `config/*.jsonl` 三个文件 `md5` 跑前跑后**逐字节一致** ✔
+      · 验收脚本进仓库（`tests/board/t10_accept.py`, 要真数据/真目录/真模型, 不进常规清单）;
+        `--llm` 可起本机 llama-server 真问一次心情
+⚑ 已知边界（如实记, 没修）: 参数归一化里 `ip_query` -> `match` 的搬运**只覆盖 `next/prev/repeat`**,
+      `pick`/`stage` 填错位置搬不了 —— `pick` 会如实报错（诚实）, `stage` 会**当没给条件按画像挑**
+      （不切屏、不计数, 但不是你要的那个条件）。要修就是把规则放宽到"除 `tags` 以外", 属于改
+      工具行为, 得单独做（T10-6 只记不改; 见 `docs/tagging.md` §7）
+
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档

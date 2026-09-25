@@ -41,8 +41,8 @@ GUI 读它的 `gui:` 段、读写它的 `llm:` 段、**只读**它的 `scheduler
 |---|---|---|---|---|
 | `config/config.yaml` | **唯一真源** | 否（只提交 `config.example.yaml`） | 人 / GUI（设置页、模型测试页）/ **Agent（只在"删掉已触发的一次性日程"这一件事上，见 §3.1）** | Agent、GUI |
 | `config/wall_data.jsonl` | **派生数据**（第一行 = 标签向量缓存，其后一行一张图: 标签 + 图像向量 + 使用次数，Phase 7 T7-2 / T8-6） | 否（`.gitignore` 里单列一行） | `agent/vision/wall_data.py`（唯一写者）: `assistant tag --apply` 打标签，以及**运行期换壁纸时给那一张 `used` +1** | Agent（挑图/检索/按用量挑）、`assistant tag` 自己（算增量 + 复用词表向量） |
-| `config/music_library.jsonl` | **本地数据**（一行一首歌: id + tags + 播放次数，Phase 7 T8-3） | 否（`.gitignore` 里单列一行） | `agent/media/music_library.py`（唯一写者）: `assistant music` 导入/打标、以及运行期"听满 30 秒计一次" | Agent（挑歌）、`assistant music` |
-| `config/user_profile.jsonl` | **本地数据**（一次构建一行: IP/歌手**权重** + 心情 + 清零记录，Phase 7 T9-2） | 否（`.gitignore` 里单列一行） | `agent/core/user_profile.py`（唯一写者）: Agent 在"纯对话攒到 2000 字"时构建（T9-3） | Agent（暂不应用）；**模型看不到**（不是工具） |
+| `config/music_library.jsonl` | **本地数据**（一行一首歌: id + tags + 播放次数，Phase 7 T8-3） | 否（`.gitignore` 里单列一行） | `agent/media/music_library.py`（唯一写者）: `assistant music` 导入/打标、运行期"听满 30 秒计一次"、以及**T10-4 自动补歌把搜到的歌登记进库**（库会因此长大，见 [`music.md`](music.md) §4.4） | Agent（挑歌/**补歌**）、`assistant music` |
+| `config/user_profile.jsonl` | **本地数据**（一次构建一行: IP/歌手**权重** + 心情 + 清零记录，Phase 7 T9-2） | 否（`.gitignore` 里单列一行） | `agent/core/user_profile.py`（唯一写者）: Agent 在"纯对话攒到 2000 字"时构建（T9-3） | Agent 自己（**T10 起真在消费**: 挑下一个壁纸 / 补歌 / 判负反馈 / 心情变了重置队列，见 [`profile.md`](profile.md) §8）；**模型看不到**（不是工具） |
 | `config/netease_cookie.json` | **T8-1 的保险条目**（板端**不放** cookie；登录态住在 PC 上 neteasecli 自己的 store） | 否（`.gitignore` 里单列一行） | 谁都不写（T8-7 核对过: 代码里没有任何地方读它） | — |
 | `llm/config/llm.env` | **派生**（喂 llama-server） | 否 | `ConfigSyncer`（GUI 保存时、或 `gui_config_sync` CLI） | llama-server 启动脚本 |
 | `config/config.example.yaml` | 模板 | **是** | 人 | 人（`cp` 起步） |
@@ -115,7 +115,16 @@ L2 归一化、只能按余弦 —— 全部写死在 `agent/vision/siglip/confi
 | `file` | `agent/core/user_profile.py` | 画像落盘路径，默认 `config/user_profile.jsonl`（相对路径按仓库根） |
 
 ⚠ 这一段的**消费者只有 Agent 自己**：模型看不到画像（它不是工具），GUI 也不读它。
+**T10 起 Agent 会消费画像**（挑"下一个"壁纸 / 补歌 / 判负反馈 / 心情变了重置队列）——
+但那是**读画像文件**，不是读这一段配置：这三个消费者**不从这里拿任何键**，
+权重配方与心情→标签的映射都在 `agent/core/user_profile.py` 的常量里
+（消费者清单见 [`profile.md`](profile.md) §8）。
 ⚠ `profile.md` 里有三路口径（权重配方 / 两层清零 / 心情那次模型调用）的完整说明。
+
+⚠ **壁纸那三格窗口（`prev`/`current`/`next`）没有配置键**（T10-3 定的）：窗口是
+**进程内状态**，不落盘、可配的只有"排队时用什么画像权重"（写死在 `user_profile.py`）。
+同理，**音乐队列的目标长度在 `music.autofill` 段**（那张表在 [`music.md`](music.md) §5），
+不在 `profile:` 里 —— 画像只说"喜欢谁"，"补到几首"是音乐自己的配置。
 
 ## 3. 单向性（最容易踩的一条）
 

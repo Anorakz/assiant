@@ -206,7 +206,8 @@ agent/
 | 事实（板端实测） | 数字 |
 | --- | --- |
 | 三个工具的清单（STUDY） | **3274 字符 ≈ 1309 token**（中文≈1 字/token，JSON 键/标点≈3~4 字/token） |
-| ↑ T8-6 加了 `least`/`most` 两个 action 之后 | **3522 字符**（≈ +40 token；离 3600 的守卫只剩 78 字符 —— 再想加东西就得先想"能不能改措辞"） |
+| ↑ T8-6 加了 `least`/`most` 两个 action 之后 | **3522 字符**（≈ +40 token） |
+| ↑ T10-3 又加了 `stage`（只预挑不切屏）之后 | **3562 字符**（离 3600 的守卫只剩 **38 字符** —— 加之前先把 `next_wallpaper` 的 description 与枚举措辞压了一遍才塞进去） |
 | 第一轮 prompt | 1495 token（T8-5b 测得；T8-6 之后约 1535，`ctx_size` 4096 —— **没有重量过板端**） |
 | 加一个 **action**（enum 多一个值） | ≈ 十几 token |
 | 加一个**工具**（像样的 description + schema） | ≈ 250~750 token |
@@ -233,6 +234,7 @@ agent/
 | | `action="most_used"｜"used_desc"` | `action="most"` |
 | | 只给 `sort="used_asc"`（没给 action） | `action="least"`（落成 `pick` 会撞"pick 需要 match"） |
 | | 只给 `match`（没给 action） | `action="pick"` |
+| | `action="stage"`（只把挑中的放进"下一个"，**不切屏**） | 原样保留（T10-3；改 `next` 槽、不改 `current`、不计数）—— ⚠ `ip_query` 搬运那条规则只覆盖 `next/prev/repeat`（`_STEPS`），`stage`/`pick` 填错位置**不会**被搬（`pick` 会如实报"要说明按什么挑"，`stage` 会当没给条件按画像挑）—— 见 `tagging.md` §7 |
 | `next_music` | `action="play"｜"add"｜"push"｜"clear"` | `enqueue` / `clear_queue`（老版本工具名/同义写法） |
 | | 没给 `action`，但给了 `track_id`/`keyword`/`tag`/`sort`/`limit` | `action="enqueue"`（语义就一个） |
 | | `track_id="none"｜""｜"null"` | 删掉（走"按条件挑"） |
@@ -431,6 +433,9 @@ gui/src/
 | Agent → GUI | Unix socket | topic 推送（状态、LLM 输出、壁纸、音乐） |
 | PC → 板端 | SSH / scp | `deploy.ps1`（Agent + `.so`）、`sync-gui.ps1`（GUI 源码） |
 | 对话 → 内存 → 画像 | **进程内**（无通道） | `ChatMemory` 攒纯对话（不落盘）→ 攒到 2000 字时 Agent **自己**构建一次用户画像 → `config/user_profile.jsonl`；模型看不到画像（**不是工具**）。见 [`profile.md`](profile.md) |
+| 画像 → 壁纸"下一个" | **进程内**（无通道） | 画像构建完由 `_build_profile_task()` 调 `_refill_next()`：没给 `match`/`sort` 时按画像排序挑 `next`（`ip 0.7 / mood 0.2 / fresh 0.1`）；太薄就退回**文件名顺序**。见 [`tagging.md`](tagging.md) §6.2 |
+| 画像 → 播放队列 | **进程内**（无通道） | 轮询周期里 `MusicPlayer.refill()` 把队列补到 **30** 首：①本地库按画像排 ②不够**只按画像里的歌手**去 PC 搜；队列里的歌 `MusicPlayer.remove()` 由负反馈去掉。见 [`music.md`](music.md) §4.4/§4.5 |
+| 画像 → 心情重置 | **进程内**（无通道） | 两个**已知**心情不同 → 留住正在放的、清其余、按新心情补满（`_reset_queue_on_mood_change()`）；`unknown` 不算变化 |
 
 ---
 

@@ -209,7 +209,10 @@ def normalize(args: Dict[str, Any]) -> Dict[str, Any]:
                                                    几张里翻", 老版本 `next_wallpaper(step,
                                                    match)` 本来就长这样; 板端实测模型这么写过）
     `action="next"` + `ip_query="scene=anime"`     `match` 拿过来（`ip_query` 只有 `tags`
-                                                   用得上; 板端实测模型把条件填进过它）
+                                                   用得上; 板端实测模型把条件填进过它。
+                                                   ⚠ 只覆盖 `next/prev/repeat`: `pick` 会
+                                                   如实报错、`stage` 会当没给条件, 见
+                                                   docs/tagging.md §7）
     `step=1 / -1 / 0`（老参数名）                  `action=next / prev / repeat`
     `action="least_used"` / `"used_asc"` / `"fewest"`  `action="least"`（T8-6: 同一个意思的各种写法;
                                                         板端实测模型不会为"用得最少"去设 `sort=`）
@@ -248,6 +251,9 @@ def normalize(args: Dict[str, Any]) -> Dict[str, Any]:
             out.pop(key)
 
     # 翻页类动作下, 把填错位置的 `ip_query` 当 match 用
+    # ⚠ 只覆盖 `_STEPS`（next/prev/repeat）—— `pick`/`stage` 不在里面: `pick` 会如实报
+    #   "挑图要说明按什么挑"（诚实, 用户能改）, `stage` 会当"没给条件"按画像挑一张。
+    #   要放宽到"除 tags 以外"就是改工具行为, 单独做（T10-6 只记不改, 见 docs/tagging.md §7）。
     if out.get("action") in _STEPS and not out.get("match") and out.get("ip_query"):
         out["match"] = out["ip_query"]
 

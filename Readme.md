@@ -35,10 +35,10 @@ agent/
 │   │   ├── label_spec.py        # 标签/条件的**统一小语法**（壁纸 match= 与音乐 tag= 共用，T8-5b）
 │   │   ├── read_intents.py      # **只读问句直连**（在放什么/库里有什么/壁纸标签/哪张用得最少，0 次模型推理，T8-5c/T8-6）
 │   │   ├── chat_memory.py       # **纯对话记忆**（有界、不落盘；记"谁说的/说了什么/当时哪个模式"，T9-1）
-│   │   ├── user_profile.py      # **用户画像内核**（IP/歌手**权重** + 心情调模型 + 负反馈清零，T9-2）
+│   │   ├── user_profile.py      # **用户画像内核**（IP/歌手**权重** + 心情调模型 + 负反馈清零 + 挑图/补歌配方，T9-2/T10）
 │   │   ├── scheduler.py         # 日程检查 + 定时触发 + 终端命令监听
-│   │   ├── wallpaper.py         # 壁纸目录 + 游标（可在挑出来的候选里翻，T7-3）
-│   │   └── music.py             # 播放内核: 环形队列 / 轮询真实进度 / 30 秒计一次 (T8-4/5b)
+│   │   ├── wallpaper.py         # 壁纸目录 + 游标 + **三格窗口 prev/current/next**（可在候选里翻，T7-3/T10-3）
+│   │   └── music.py             # 播放内核: 环形队列 / 轮询真实进度 / 30 秒计一次 / **补歌到目标长度** (T8-4/T10-4)
 │   ├── media/                   # 本地媒体库 (T8-3)
 │   │   └── music_library.py     # config/music_library.jsonl: 读写/合并/打标/挑选（纯 Python）
 │   ├── tools/                   # 具体工具 (Phase 7; T8-5b 合并成三个):
@@ -99,16 +99,16 @@ agent/
 │   ├── test_cli.py              # CLI 八条命令 / 窗口与尾巴 / cleanup / tag
 │   ├── test_tools.py            # 工具层: 注册 / 状态权限 / 参数校验 / 缺依赖跳过 (T1)
 │   ├── test_tool_permissions.py # 状态权限表: 4 状态 × 每个工具, 禁止的组合真的被拒 (T4)
-│   ├── test_wallpaper.py        # 壁纸目录游标 / next_wallpaper 工具与命令 (T3)
+│   ├── test_wallpaper.py        # 壁纸目录游标 / 三格窗口(prev/current/next) / next_wallpaper 工具与命令 (T3/T10-3)
 │   ├── test_netease_cli.py      # ssh 调 PC 的第三方 neteasecli: 命令行 / 信封 / 四类错误 (T8-2)
 │   ├── test_music_library.py    # 本地音乐库: 读写 / 合并 / 打标 / 挑选 (T8-3)
-│   ├── test_music_player.py     # 播放内核: 环形队列 / 30 秒计一次 / 曲终自动下一首 (T8-4/5b)
+│   ├── test_music_player.py     # 播放内核: 环形队列 / 30 秒计一次 / 曲终自动下一首 / 补歌两段式 (T8-4/T10-4)
 │   ├── test_label_spec.py       # 统一标签语法: 拆键 / 拆值 / 多轴 / 壁纸那边只用这一份 (T8-5b)
 │   ├── test_merged_tools.py     # 三个工具: action 分派 / 缺依赖跳过 / 清单**预算守卫** (T8-5b/5c)
 │   ├── test_tool_normalize.py   # 参数归一化: 真实错法 → 规范形 / 校验前跑 / 边界 (T8-5c)
 │   ├── test_read_intents.py     # 只读问句直连: 该直连的/不该截胡的/拿不到数据 (T8-5c)
 │   ├── test_chat_memory.py      # 纯对话记忆: 只收对话源 / 有界 / **不碰盘** / 场景与时间 (T9-1)
-│   ├── test_user_profile.py     # 用户画像: 权重配方 / 负反馈清零(两层) / 心情解析 / 落盘 (T9-2)
+│   ├── test_user_profile.py     # 用户画像: 权重配方 / 负反馈清零(两层) / 心情解析 / 落盘 / 消费方 (T9-2/T10)
 │   ├── mocks/                   # mock_agent_native: native 替身
 │   ├── host/                    # 需要 numpy 的绑定层测试 (按需手动跑)
 │   └── board/                   # 板端真机验收脚本
@@ -117,9 +117,9 @@ agent/
 │   ├── deploy.md                # 部署与双机同步规则
 │   ├── config-sources.md        # 配置来源: 谁写 / 谁读 / 谁派生
 │   ├── cli.md                   # 板端控制 CLI (assistant) 使用手册
-│   ├── tagging.md               # 壁纸标签化: 词表 / wall_data.jsonl / IP 检索 / 实测数字 (T7)
-│   ├── music.md                 # 音乐: 板端 ssh 调 PC neteasecli / 本地库 / 工具四件套 (T8)
-│   ├── profile.md               # 用户画像: 纯对话记忆 / IP·歌手权重 / 负反馈两层清零 / 心情 (T9)
+│   ├── tagging.md               # 壁纸标签化: 词表 / wall_data.jsonl / IP 检索 / 三格窗口与画像挑图 (T7/T10-3)
+│   ├── music.md                 # 音乐: 板端 ssh 调 PC neteasecli / 本地库 / 工具四件套 / 自动补歌 (T8/T10-4)
+│   ├── profile.md               # 用户画像: 纯对话记忆 / IP·歌手权重 / 负反馈两层清零 / 心情 / **谁在消费它** (T9/T10)
 │   ├── llm.md                   # LLM 三模式 / edge 接 llama-server / 工具循环 / 降级
 │   ├── ipc-protocol.md          # Agent ⇄ GUI 协议 (线上格式唯一真源)
 │   ├── gui.md                   # GUI 构建与使用
@@ -233,7 +233,8 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
   | `STUDY` | ✓ | ✓ | ✓ |
 
   **T8-5b 把七个工具合并成三个**（每个工具用 `action` 分派具体动作）：
-  `next_wallpaper` = 翻页/按内容挑/**按用量挑**（`action=least`/`most`，T8-6）/看标签；
+  `next_wallpaper` = 翻页/按内容挑/**按用量挑**（`action=least`/`most`，T8-6）/
+  **只预备下一个**（`action=stage`，T10-3）/看标签；
   `next_music` = 排队列/清空/清单/搜/状态/标签/音量
   （transport 交给 GUI 四个按钮）；`back_to_desktop` = 回桌面（无参数，只 STUDY）。
   动机是 **prompt 预算**：T8-5 实测 7 个工具的工具清单占第一轮 prompt 的 90%
@@ -547,6 +548,9 @@ config.save_config("config", {...})    # 写 config.yaml 并同步刷新缓存
 ## 关键约定
 
 - 板端不手改代码，`agent/`、`.so`、`VERSION` 由 `deploy.ps1` 覆盖。
+- **壁纸是"三格窗口"**（`prev`/`current`/`next`，进程内、不落盘）：换图 = `next` 变当前并**立刻**按画像补一个新的 `next`；`action=stage` 只预挑不切屏（T10-3）。
+- **用户画像只被 Agent 自己读**（挑下一个壁纸 / 补歌 / 判负反馈 / 心情变了重置队列），模型既看不到也调不到它（T9 定、T10 消费，见 [`docs/profile.md`](docs/profile.md) §8）。
+- **音乐队列维持 30 首**：缺了先吃本地库、不够**只按画像里的歌手**去 PC 搜（`music.autofill`，T10-4）；负反馈把类似的歌整批移出队列。
 - `send_key` / `send_mouse` / `send_hotkey` 必须释放 GIL，不阻塞 asyncio。
 - Agent ⇄ GUI 走**同机 Unix domain socket**（`/tmp/agent.sock`），两个方向的信封不同 —— 见 [`docs/ipc-protocol.md`](docs/ipc-protocol.md)。
 - 固件升级后重拉 sysroot 并重新交叉编译，否则 glibc 不匹配。
