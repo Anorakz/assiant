@@ -136,6 +136,7 @@ class TestSettle(unittest.TestCase):
         self.assertEqual(dropped, 20 - DEFAULT_KEEP_AFTER_SETTLE)
         self.assertEqual(len(memory), DEFAULT_KEEP_AFTER_SETTLE)
         self.assertLess(memory.chars(), before, "触发计数从剩下的那几句重新长")
+        self.assertEqual(memory.pending_chars(), 0, "触发计数归零（保留的尾巴不算）")
         self.assertEqual(memory.entries()[-1].text, "回复 9", "留下的是最新那几条")
 
         memory.add_user("结算之后又说了一句", source="gui")
@@ -146,6 +147,33 @@ class TestSettle(unittest.TestCase):
         self.assertEqual(memory.settle(), 0)
         memory.add_user("就一句", source="gui")
         self.assertEqual(memory.settle(), 0, "还不到保留条数 -> 一条都不用丢")
+
+    def test_pending_is_what_the_trigger_counts(self):
+        """触发口径是"自上次结算以来攒的"——保留的那几条不算（T9-3 接线时抓到的坑）。
+
+        不然保留的尾巴自己就能顶满触发线, 于是每轮都满足条件、构建一遍又一遍。
+        """
+        memory = ChatMemory()
+        memory.add_user("x" * 100, source="gui")
+        memory.add_reply("y" * 50, source="gui")
+        self.assertEqual((memory.pending_chars(), memory.pending_turns()), (150, 1))
+        self.assertEqual(memory.settle(), 0)
+        self.assertEqual(memory.chars(), 150, "全清? 不 —— 还不到保留条数, 一条没丢")
+        self.assertEqual(memory.pending_chars(), 0, "但触发计数归零了")
+        self.assertEqual(memory.pending_turns(), 0)
+        memory.add_user("新的一句", source="gui")
+        self.assertEqual(memory.pending_chars(), 4, "从 0 重新长")
+        self.assertEqual(memory.pending_turns(), 1)
+
+    def test_pending_survives_eviction(self):
+        """内存挤掉老条目**不该**把触发计数也挤掉（挤掉的是话, 不是"攒过"这件事）。"""
+        memory = ChatMemory(max_entries=2, max_chars=10 ** 6)
+        for index in range(4):
+            memory.add_user("第 %d 句" % index, source="gui")
+        self.assertEqual(len(memory), 2)
+        self.assertEqual(memory.chars(), 10, "内存里只剩 2 条")
+        self.assertEqual(memory.pending_chars(), 20, "但攒过 4 条 —— 触发照旧算这 4 条")
+        self.assertEqual(memory.pending_turns(), 4)
 
 
 class TestExcerpt(unittest.TestCase):

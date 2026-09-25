@@ -68,18 +68,23 @@ def make_memory(pairs, states=None):
 
 
 class FakeLLM(object):
-    """判心情用的替身: 记下提示词, 回一个预置答案（或抛异常）。"""
+    """替身: 判心情走 `chat`（记下提示词）; 对话走 `chat_with_tools`（回一句现成的）。"""
 
     def __init__(self, reply="calm", exc=None):
         self.reply = reply
         self.exc = exc
         self.prompts = []
+        self.turns = []
 
     async def chat(self, user_input, context=None):
         self.prompts.append(user_input)
         if self.exc is not None:
             raise self.exc
         return self.reply
+
+    async def chat_with_tools(self, text, context):
+        self.turns.append(text)
+        return {"ok": True, "text": "好的", "tool_calls": []}
 
 
 def fake_sources(ips=("EVA", "Nier"), hits=None, mentions_ok=True, tracks=None,
@@ -392,6 +397,184 @@ class TestPersistence(unittest.TestCase):
         self.assertEqual(leftovers, [], "原子写不留半截临时文件")
         with open(self.path, "r", encoding="utf-8") as handle:
             self.assertTrue(handle.read().endswith("\n"), "一行一条, 结尾有换行")
+
+
+class TestItIsNotATool(unittest.IsolatedAsyncioTestCase):
+    """你 T9 定的: **不是工具**, 是 Agent 结构的一部分 —— 模型看不到、也调不到。
+
+    ⚠ 用 `IsolatedAsyncioTestCase` + `async def`: 板端 Python 3.8 里
+      `Runtime.__init__` 会建 `asyncio.Event()`, 那要求当前线程**有事件循环** ——
+      写成同步用例只在开发机（3.14）上绿, 板端一跑就
+      `RuntimeError: There is no current event loop`（这个坑板端当场抓到了）。
+    """
+
+    def test_the_tool_modules_still_only_have_three(self):
+        from agent.tools import TOOL_MODULES
+
+        self.assertEqual(TOOL_MODULES, ("back_to_desktop", "wallpaper", "music"))
+        self.assertNotIn("user_profile", TOOL_MODULES)
+        self.assertNotIn("profile", TOOL_MODULES)
+
+    def test_there_is_no_tool_module_for_it(self):
+        import agent.tools as tools
+
+        with self.assertRaises(ImportError):
+            __import__("agent.tools.user_profile")
+        self.assertFalse(hasattr(tools, "user_profile"))
+
+    async def test_the_runtime_advertises_only_the_three_tools(self):
+        from agent.main import Runtime
+
+        runtime = Runtime(config={"ipc": {"socket_path": ""}}, start_native=False,
+                          start_terminal=False, log=logging.getLogger("test.profile"))
+        runtime.tools = None                     # 还没起工具那一步 -> 清单为空
+        self.assertIsNone(runtime.tools)
+        for name in ("build_user_profile", "user_profile", "profile"):
+            self.assertFalse(hasattr(runtime, name), "画像不该长成一个工具方法")
+
+
+class TestRuntimeTrigger(unittest.IsolatedAsyncioTestCase):
+    """T9-3: 攒到触发线 -> **Agent 自己**在后台构建一次（不赌模型, 也不堵对话）。"""
+
+    def _runtime(self, tmp, **profile_cfg):
+        from unittest import mock
+
+        import agent.core.user_profile as profile_module
+        from agent.main import Runtime
+
+        self.profile_path = os.path.join(tmp, "user_profile.jsonl")
+        self.sources, self.cleared_walls, self.cleared_plays = fake_sources(
+            hits={"EVA": ["/w/1.png", "/w/2.png"]}, tracks=[a_track("1", plays=4)])
+        self.patcher = mock.patch.object(profile_module, "repo_sources",
+                                         lambda config=None: self.sources)
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+        config = {"ipc": {"socket_path": ""},
+                  "profile": dict({"file": self.profile_path, "trigger_chars": 20,
+                                   "trigger_turns": 99}, **profile_cfg)}
+        self.runtime = Runtime(config=config, start_native=False, start_terminal=False,
+                               log=logging.getLogger("test.profile"))
+        self.llm = FakeLLM("calm")
+        self.runtime.llm = self.llm
+        self.runtime.state = None
+        return self.runtime
+
+    async def _one_turn(self, text="今天有点累，想看点安静的东西", source="gui"):
+        await self.runtime._start_profile()
+        self.runtime.read_services = lambda: {}          # 别让直连把话截走
+        return await self.runtime.handle_event({"source": source, "text": text})
+
+    async def test_below_the_threshold_nothing_happens(self):
+        runtime = self._runtime(tempfile.mkdtemp(prefix="profile-rt-"))
+        await self._one_turn("嗨")
+        self.assertIsNone(runtime._profile_task, "没攒够就不该构建")
+        self.assertEqual(read_records(self.profile_path), [])
+
+    async def test_crossing_the_threshold_builds_in_the_background(self):
+        runtime = self._runtime(tempfile.mkdtemp(prefix="profile-rt-"))
+        await self._one_turn("今天有点累，想看点安静的东西，别太亮也别太吵，谢谢")
+        task = runtime._profile_task
+        self.assertIsNotNone(task, "攒够了就该起一个后台构建")
+        record = await task
+        self.assertIsNotNone(record)
+        self.assertEqual(record["trigger"]["reason"], "chat_chars")
+        self.assertEqual(record["mood"]["label"], "calm", "心情来自模型")
+        records = read_records(self.profile_path)
+        self.assertEqual(len(records), 1, "一次构建一行")
+        self.assertLessEqual(len(runtime.chat_memory), 6, "构建完要结算（只留最新几条）")
+        self.assertEqual(runtime.chat_memory.pending_chars(), 0,
+                         "**触发计数归零**：保留的那几条不算下一次的量")
+        runtime._profile_tick()
+        self.assertIsNone(runtime._profile_task, "结算之后不该立刻又构建一遍")
+
+    async def test_the_turn_is_not_blocked_by_the_build(self):
+        runtime = self._runtime(tempfile.mkdtemp(prefix="profile-rt-"))
+        reply = await self._one_turn("今天有点累，想看点安静的东西，别太亮也别太吵，谢谢")
+        self.assertIsNotNone(reply, "回复照旧")
+        self.assertIsNotNone(runtime._profile_task, "构建在后台排队")
+        await runtime._profile_task
+
+    async def test_scheduler_turns_do_not_trigger_anything(self):
+        runtime = self._runtime(tempfile.mkdtemp(prefix="profile-rt-"))
+        await self._one_turn("该学习了该学习了该学习了该学习了该学习了该学习了", source="schedule")
+        self.assertIsNone(runtime._profile_task, "定时提示不是纯对话")
+        self.assertEqual(read_records(self.profile_path), [])
+
+    async def test_disabled_means_no_build(self):
+        runtime = self._runtime(tempfile.mkdtemp(prefix="profile-rt-"), enabled=False)
+        await self._one_turn("今天有点累，想看点安静的东西，别太亮也别太吵，谢谢")
+        self.assertIsNone(runtime._profile_task)
+        self.assertEqual(read_records(self.profile_path), [])
+
+    async def test_turns_are_the_fallback_trigger(self):
+        runtime = self._runtime(tempfile.mkdtemp(prefix="profile-rt-"),
+                                trigger_chars=10 ** 6, trigger_turns=2)
+        await self._one_turn("嗨")
+        self.assertIsNone(runtime._profile_task)
+        await self._one_turn("在吗")
+        self.assertIsNotNone(runtime._profile_task, "字数不够但轮数够了也要构建")
+        record = await runtime._profile_task
+        self.assertEqual(record["trigger"]["reason"], "chat_turns")
+        self.assertEqual(record["trigger"]["turns"], 2)
+
+    async def test_a_failed_build_does_not_break_the_turn_and_backs_off(self):
+        runtime = self._runtime(tempfile.mkdtemp(prefix="profile-rt-"))
+
+        def boom():
+            raise ProfileError("壁纸数据读不了")           # 构建第一步就炸
+
+        self.sources.list_walls = boom
+        reply = await self._one_turn("今天有点累，想看点安静的东西，别太亮也别太吵，谢谢")
+        self.assertIsNotNone(reply, "画像失败绝不能影响对话")
+        task = runtime._profile_task
+        self.assertIsNone(await task, "失败 -> 没有记录")
+        self.assertEqual(read_records(self.profile_path), [])
+        self.assertGreater(runtime.chat_memory.pending_chars(), 20, "失败**不结算**（下次再试）")
+        self.assertGreater(runtime._profile_failed_at, 0, "记下失败时间")
+        runtime._profile_tick()
+        self.assertIsNone(runtime._profile_task, "60 秒内不重试（免得每轮都问一次模型）")
+
+    async def test_a_failing_model_only_costs_the_mood(self):
+        """判心情失败**不算构建失败** —— 记录照落, 心情写 unknown（有据可查）。"""
+        runtime = self._runtime(tempfile.mkdtemp(prefix="profile-rt-"))
+        runtime.llm = FakeLLM(exc=RuntimeError("模型炸了"))
+        reply = await self._one_turn("今天有点累，想看点安静的东西，别太亮也别太吵，谢谢")
+        self.assertIsNotNone(reply)
+        record = await runtime._profile_task
+        self.assertIsNotNone(record, "照样落一行")
+        self.assertEqual(record["mood"]["label"], MOOD_UNKNOWN)
+        self.assertFalse(record["mood"]["ok"])
+        self.assertIn("模型炸了", record["mood"]["error"])
+        self.assertEqual(len(read_records(self.profile_path)), 1)
+        self.assertEqual(runtime.chat_memory.pending_chars(), 0, "构建成功 -> 照旧结算")
+
+    async def test_a_broken_wall_file_is_only_a_warning(self):
+        runtime = self._runtime(tempfile.mkdtemp(prefix="profile-rt-"))
+
+        def boom():
+            raise ProfileError("壁纸数据读不了")
+
+        self.sources.list_walls = boom
+        reply = await self._one_turn("今天有点累，想看点安静的东西，别太亮也别太吵，谢谢")
+        self.assertIsNotNone(reply)
+        self.assertIsNone(await runtime._profile_task)
+        self.assertEqual(read_records(self.profile_path), [])
+
+    async def test_negative_feedback_also_zeroes_the_source_files(self):
+        runtime = self._runtime(tempfile.mkdtemp(prefix="profile-rt-"))
+        await self._one_turn("EVA 的图我看腻了，别再给我看了，换点别的吧谢谢")
+        await runtime._profile_task
+        self.assertEqual(self.cleared_walls, [["/w/1.png", "/w/2.png"]],
+                         "源文件（wall_data.jsonl）也要清 0")
+
+    async def test_the_stop_step_cancels_a_running_build(self):
+        runtime = self._runtime(tempfile.mkdtemp(prefix="profile-rt-"))
+        await self._one_turn("今天有点累，想看点安静的东西，别太亮也别太吵，谢谢")
+        task = runtime._profile_task
+        self.assertIsNotNone(task)
+        component = [c for c in runtime._components if c.name == "profile"][0]
+        await component.do_stop()
+        self.assertIsNone(runtime._profile_task)
 
 
 if __name__ == "__main__":

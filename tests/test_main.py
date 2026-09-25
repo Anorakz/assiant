@@ -71,6 +71,9 @@ EXPECTED_ORDER = [
     # 但组件照旧注册 —— 组件列表是"步骤"的清单, 不是"真跑了什么"的清单）
     "llm_service",
     "llm_provider",
+    # T9-3: 用户画像（**不是工具**: 不进 TOOL_MODULES、模型看不到）。
+    # 它在 llm_provider 之后 —— 判心情那一步要问模型; 步骤本身只读配置。
+    "profile",
     "scheduler",
     "ipc",
     "terminal_input",

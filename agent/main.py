@@ -67,6 +67,11 @@ from agent.config import ConfigError, ConfigNotFoundError, config_path, load_con
 from agent.core import Scheduler, State, StateMachine, ToolRouter
 from agent.core import read_intents
 from agent.core.chat_memory import ChatMemory
+from agent.core.user_profile import (
+    DEFAULT_RETRY_S as DEFAULT_PROFILE_RETRY_S,
+    DEFAULT_TRIGGER_CHARS,
+    DEFAULT_TRIGGER_TURNS,
+)
 from agent.io import (
     ChatInputBus,
     ImageReader,
@@ -293,6 +298,15 @@ class Runtime:
         #: ⚠ 它不是模型的上下文（板端 LLM 每轮无状态, 见 agent/core/chat_memory.py 模块头）。
         self.chat_memory = ChatMemory()
 
+        #: 用户画像（T9-2 内核 + T9-3 触发）: 纯对话攒到触发线就**由 Agent 自己**构建一次。
+        #: ⚠ **不是工具**: 不进 `TOOL_MODULES`、模型看不到也调不到; 触发只有"攒够字数"一条路。
+        self.profile_file: str = ""
+        self._profile_enabled = False
+        self._profile_trigger_chars = DEFAULT_TRIGGER_CHARS
+        self._profile_trigger_turns = DEFAULT_TRIGGER_TURNS
+        self._profile_task: Optional[Any] = None      # 后台构建任务（一次只跑一个）
+        self._profile_failed_at = 0.0                 # 上次失败的时间（退避用）
+
         #: 回复钩子: 每产生一条 LLM 回复就调一次 (IPC 层用它推 llm 消息)。
         #: 默认 None —— 没有 IPC 时行为与以前完全一样。
         #: Phase 6 D4: 之前 handle_event() 的回复被主循环直接丢掉, 推不出去。
@@ -362,6 +376,8 @@ class Runtime:
         "_start_state_and_tools",
         "_start_llm_service",
         "_start_llm",
+        # ⚠ 画像在 LLM 之后: 判心情那一步要问模型（构建是后台任务, 步骤本身只是读配置）
+        "_start_profile",
         "_start_scheduler",
         "_start_ipc",
         "_start_terminal_input",
@@ -916,6 +932,96 @@ class Runtime:
                 self._music_task = None
 
         await self._guarded(_Component("music", _start, _stop), fatal=False)
+
+    # ---- 3.7) 用户画像 (T9-3) ----
+    async def _start_profile(self) -> None:
+        """按配置接上"用户画像"（T9-2 的内核 + T9-3 的触发）。
+
+        ⚠ **它不是工具**: 不进 `TOOL_MODULES`、模型看不到也调不到; 触发只有一条路 ——
+          `_profile_tick()` 发现"纯对话攒到触发线"就后台构建一次（你 T9 定的）。
+        @note 关掉时什么都不做（`profile.enabled=false`）。
+        """
+        from agent.core import user_profile
+
+        async def _start() -> None:
+            self._profile_enabled = bool(self._cfg("profile", "enabled", default=True))
+            self.profile_file = user_profile.resolve_profile_file(self._cfg("profile", "file"))
+            self._profile_trigger_chars = max(1, int(
+                self._cfg("profile", "trigger_chars", default=DEFAULT_TRIGGER_CHARS)
+                or DEFAULT_TRIGGER_CHARS))
+            self._profile_trigger_turns = max(1, int(
+                self._cfg("profile", "trigger_turns", default=DEFAULT_TRIGGER_TURNS)
+                or DEFAULT_TRIGGER_TURNS))
+            self.log.info("用户画像: %s (纯对话攒到 %d 字触发一遍; 文件 %s)",
+                          "开" if self._profile_enabled else "关",
+                          self._profile_trigger_chars, self.profile_file)
+
+        async def _stop() -> None:
+            task = self._profile_task
+            self._profile_task = None
+            if task is not None and not task.done():
+                task.cancel()
+
+        await self._guarded(_Component("profile", _start, _stop), fatal=False)
+
+    def _profile_tick(self) -> None:
+        """每轮答完检查一次: **纯对话攒够了**就起一个后台构建（只有 Agent 会触发）。
+
+        @note 三条"不做": 没开不做 / 已有构建在跑不做 / 刚失败过（60 秒内）不做。
+        @note 构建本身在后台任务里（要问一次模型, 板端可能几十秒）—— 不堵住对话。
+        """
+        if not self._profile_enabled or self._profile_task is not None:
+            return
+        chars, turns = self.chat_memory.pending_chars(), self.chat_memory.pending_turns()
+        hit_chars = chars >= self._profile_trigger_chars
+        hit_turns = turns >= self._profile_trigger_turns
+        if not (hit_chars or hit_turns):
+            return
+        if self._profile_failed_at and (time.time() - self._profile_failed_at) < DEFAULT_PROFILE_RETRY_S:
+            return
+        trigger = {"reason": "chat_chars" if hit_chars else "chat_turns",
+                   "chars": chars, "turns": turns,
+                   "threshold": {"chars": self._profile_trigger_chars,
+                                 "turns": self._profile_trigger_turns}}
+        self.log.info("用户画像: 自上次构建以来攒了 %d 字 / %d 轮 -> 构建一次", chars, turns)
+        self._profile_task = asyncio.ensure_future(self._build_profile_task(trigger))
+
+    async def _build_profile_task(self, trigger: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """后台构建一次画像: 读本地数据 + 问一次模型（判心情）-> 落盘 -> 结算纯对话。
+
+        @note 失败**不结算**（下次再试）也不抛: 画像失败绝不能影响对话。
+        @note "结算" = `ChatMemory.settle()` 只留最新几条（新来的那几句自动留着, 因为
+              它留的是**最新的** N 条）。
+        """
+        from agent.core import user_profile
+
+        started = time.time()
+        try:
+            record = await user_profile.build_profile(
+                self.chat_memory, config=self.config, llm=self.llm, trigger=trigger,
+                clock=time.strftime("%H:%M"),
+                history=user_profile.read_records(self.profile_file))
+            user_profile.append_record(self.profile_file, record)
+            self._profile_failed_at = 0.0
+            dropped = self.chat_memory.settle()
+            walls = record["walls"]["ip"][:2]
+            artists = record["music"]["artist"][:2]
+            self.log.info(
+                "用户画像: 构建完成 (%.1fs) 心情=%s/%s 置信=%s; IP=%s; 歌手=%s; "
+                "清零 图%d/歌%d; 结算掉 %d 条",
+                time.time() - started, record["mood"]["label"], record["mood"]["zh"],
+                record["mood"]["confidence"],
+                "、".join("%s %.2f" % (row["name"], row["weight"]) for row in walls) or "-",
+                "、".join("%s %.2f" % (row["name"], row["weight"]) for row in artists) or "-",
+                record["cleared"]["wall_images"], record["cleared"]["tracks"], dropped)
+            return record
+        except Exception as exc:        # noqa: BLE001 - 画像失败只记 warning
+            self._profile_failed_at = time.time()
+            self.log.warning("用户画像: 构建失败 (已忽略, %.0f 秒后再试): %r",
+                             DEFAULT_PROFILE_RETRY_S, exc)
+            return None
+        finally:
+            self._profile_task = None
 
     async def _music_loop(self) -> None:
         """每 `poll_interval_s` 问一次 PC 的真实进度, 变化就推给 GUI。"""
@@ -1594,7 +1700,17 @@ class Runtime:
           "现在在放什么 / 库里有什么歌 / 壁纸有哪些标签 / 哪张壁纸用得最少"这类问题的
           答案只存在于设备状态里, 板端实测 0.6B 既不肯调 `status` 也编不出来,
           所以直接用真实数据拼一句话回, **一次模型推理都不花**。写意图照旧进模型。
+
+        ⚠ T9-3: 每轮答完都走一次 `_profile_tick()`（**放在 finally 里**, 成功/直连/失败
+          三条路都算一轮对话）: 纯对话攒到触发线就在后台构建一次用户画像。
         """
+        try:
+            return await self._handle_event(event)
+        finally:
+            self._profile_tick()
+
+    async def _handle_event(self, event: Dict[str, Any]) -> Optional[str]:
+        """`handle_event` 的正身（记记忆 -> 直连或模型 -> 回复 -> 计统计）。"""
         source = event.get("source", "?")
         text = event.get("text", "")
         self.stats["events"] += 1

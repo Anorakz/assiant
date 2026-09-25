@@ -48,6 +48,9 @@ __all__ = [
     "PROFILE_VERSION",
     "DEFAULT_PROFILE_FILE",
     "DEFAULT_IP_FILE",
+    "DEFAULT_TRIGGER_CHARS",
+    "DEFAULT_TRIGGER_TURNS",
+    "DEFAULT_RETRY_S",
     "MOOD_LABELS",
     "MOOD_ZH",
     "MOOD_UNKNOWN",
@@ -102,6 +105,15 @@ ARTIST_WEIGHTS = {"plays": 0.7, "mention": 0.3}
 
 #: "近期"的窗口（天）: 30 天前的算 0 分, 越新越接近 1
 RECENCY_DAYS = 30.0
+
+#: 触发线（T9-3）: **纯对话**攒到这么多字就构建一次（你定的 2000）；
+#: `trigger_turns` 只是兜底（有人一直发很短的话时, 别永远攒不满）。
+#: ⚠ 触发者**只有 Agent 一个**（`Runtime._profile_tick`）—— 模型看不到、也调不到它。
+DEFAULT_TRIGGER_CHARS = 2000
+DEFAULT_TRIGGER_TURNS = 12
+
+#: 构建失败后多久内不再重试（免得每轮都去问一次模型）
+DEFAULT_RETRY_S = 60.0
 
 
 class ProfileError(ValueError):
@@ -486,7 +498,12 @@ async def build_profile(entries: Sequence[Any], *, config: Optional[Mapping[str,
     """
     src = sources or repo_sources(config)
     moment = _aware(now)
-    items = list(entries or ())
+    # ⚠ `entries` 经常直接是 `ChatMemory`（它有 `entries()` 也有 `__iter__`）——
+    #   这里两种都收（集成时才发现 `list(ChatMemory)` 曾经是空的, 见 T9-3 的接线测试）。
+    if hasattr(entries, "entries"):
+        items = list(entries.entries())
+    else:
+        items = list(entries or ())
     previous = list(history or ())
 
     walls = src.list_walls()

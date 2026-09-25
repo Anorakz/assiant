@@ -24,8 +24,11 @@ agent/core/chat_memory.py — **纯对话记忆**（Phase 7 T9-1）
 ⚠ 两个容易搞错的语义（都有测试钉着）
     · **"轮"= 用户说了几条**（`turns()`）—— 助手的回复不算一轮, 它跟着那一轮。
     · `settle()` **不是全清**: 保留最后 `keep_after_settle`(6) 条。构建画像是"把攒下的
-      对话结算掉", 而那几句最新的话下一个画像还用得上; 于是触发线从"剩下的那几句"
-      重新长起来（而不是从 0）。要全清就是 `keep_after_settle=0`。
+      对话结算掉", 而那几句最新的话下一个画像还用得上。
+    · ⚠ **触发口径是 `pending_chars()`（自上次构建以来攒的）, 不是 `chars()`（内存里一共多少）**:
+      结算后保留的那 6 条**不算**下一次的触发量 —— 否则"保留的尾巴"可能自己就超过触发线,
+      于是每轮都满足条件、构建一遍又一遍（T9-3 的接线测试当场抓到过这一幕）。
+      `settle()` 把 pending 归零, 计数从 0 重新长。
 """
 
 from __future__ import annotations
@@ -98,6 +101,9 @@ class ChatMemory:
         self._keep_after_settle = max(0, int(keep_after_settle))
         self._clock = clock or time.time
         self._entries: List[Entry] = []
+        #: 自上次 `settle()` 以来攒了多少（**触发口径** —— 见模块头那段说明）
+        self._pending_chars = 0
+        self._pending_turns = 0
 
     # ------------------------------------------------------------ 记 ---
     def add(self, role: str, text: str, source: str = "gui",
@@ -124,6 +130,9 @@ class ChatMemory:
         entry = Entry(role=role, text=body, ts=float(self._clock()),
                       state=str(state or ""), truncated=truncated)
         self._entries.append(entry)
+        self._pending_chars += entry.chars
+        if role == ROLE_USER:
+            self._pending_turns += 1
         self._evict()
         return entry
 
@@ -148,11 +157,21 @@ class ChatMemory:
         """用户说了几条（助手的回复不算一轮）。"""
         return sum(1 for entry in self._entries if entry.role == ROLE_USER)
 
+    def pending_chars(self) -> int:
+        """**自上次 `settle()` 以来**攒了多少字 —— T9-3 的触发口径就是它。"""
+        return self._pending_chars
+
+    def pending_turns(self) -> int:
+        """自上次 `settle()` 以来用户说了几条（`trigger_turns` 兜底用）。"""
+        return self._pending_turns
+
     def stats(self) -> Dict[str, Any]:
         """给日志/画像记录用的一眼摘要（不落盘, 只是算出来）。"""
         states = [entry.state for entry in self._entries if entry.state]
         return {"chars": self.chars(), "entries": len(self._entries),
                 "turns": self.turns(), "states": sorted(set(states)),
+                "pending_chars": self._pending_chars,
+                "pending_turns": self._pending_turns,
                 "since": self._entries[0].ts if self._entries else None,
                 "last": self._entries[-1].ts if self._entries else None}
 
@@ -186,15 +205,18 @@ class ChatMemory:
 
     # ------------------------------------------------------------ 结算 ---
     def settle(self) -> int:
-        """构建完画像后"结算"：只保留最后 `keep_after_settle` 条。
+        """构建完画像后"结算"：只保留最后 `keep_after_settle` 条, 并把**触发计数归零**。
 
         @return 丢掉了几条（日志用）
-        @note **不是全清**（见模块头）: 最新那几句下一个画像还用得上。
+        @note **不是全清**（见模块头）: 最新那几句下一个画像还用得上; 但它们**不计入**
+              下一次的触发量（`pending_*` 归 0）—— 否则保留的尾巴自己就能顶满触发线。
         """
         keep = self._keep_after_settle
         dropped = max(0, len(self._entries) - keep)
         if dropped:
             self._entries = self._entries[-keep:] if keep else []
+        self._pending_chars = 0
+        self._pending_turns = 0
         return dropped
 
     # ------------------------------------------------------------ 内部 ---
@@ -206,6 +228,10 @@ class ChatMemory:
 
     def __len__(self) -> int:
         return len(self._entries)
+
+    def __iter__(self):
+        """按时间顺序遍历（`list(memory)` 能用 —— 画像内核就是直接吃 entries 的）。"""
+        return iter(list(self._entries))
 
     def __repr__(self) -> str:
         return "<ChatMemory %d 条 / %d 字 / %d 轮>" % (len(self._entries), self.chars(),
