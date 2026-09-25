@@ -46,9 +46,14 @@ from agent.core.user_profile import (  # noqa: E402
     detect_negative_feedback,
     latest_record,
     mood_prompt,
+    mood_tags,
     parse_mood,
+    profile_basis,
+    rank_tracks,
+    rank_wallpapers,
     read_records,
     repo_sources,
+    similar_tracks,
     wallpaper_weights,
 )
 
@@ -676,6 +681,194 @@ class TestRepoSourcesWiring(unittest.TestCase):
         sources = repo_sources({})
         self.assertEqual(sources.wall_dir, DEFAULT_WALLPAPER_DIR)
         self.assertEqual(sources.ip_names, [])
+
+
+def a_profile(*, ip=None, artist=None, mood="calm", thin=()):
+    """一份最小画像（够 T10 的排序用）。"""
+    return {
+        "version": 1,
+        "walls": {"ip": [{"name": name, "weight": weight, "parts": {"hits": 1}}
+                         for name, weight in (ip or {}).items()]},
+        "music": {"artist": [{"name": name, "weight": weight, "parts": {"plays": 3}}
+                             for name, weight in (artist or {}).items()]},
+        "mood": {"label": mood, "ok": mood not in ("", "unknown")},
+        "thin": list(thin),
+    }
+
+
+class TestProfileBasis(unittest.TestCase):
+    def test_a_rich_profile_is_usable(self):
+        basis = profile_basis(a_profile(ip={"EVA": 0.7}, artist={"米津玄師": 0.5}))
+        self.assertEqual(basis, {"ip": True, "artist": True, "mood": True,
+                                 "wallpaper": True, "music": True})
+
+    def test_thin_samples_are_not_usable(self):
+        basis = profile_basis(a_profile(ip={"EVA": 0.7}, artist={"米津玄師": 0.5},
+                                        thin=["壁纸用量", "音乐库"]))
+        self.assertFalse(basis["ip"], "`thin` 里点名的轴一律当没有（宁可回退）")
+        self.assertFalse(basis["artist"])
+        self.assertTrue(basis["mood"], "心情与样本薄不薄无关")
+        self.assertTrue(basis["wallpaper"], "还能靠心情挑")
+        self.assertTrue(basis["music"], "一样: 心情还可用")
+        thin_all = profile_basis(a_profile(ip={"EVA": 0.7}, artist={"米津玄師": 0.5},
+                                           mood="unknown", thin=["壁纸用量", "音乐库"]))
+        self.assertFalse(thin_all["wallpaper"])
+        self.assertFalse(thin_all["music"], "样本薄 + 心情不知道 -> 整条回退")
+
+    def test_an_unknown_mood_gives_no_preference(self):
+        basis = profile_basis(a_profile(ip={"EVA": 0.7}, mood="unknown"))
+        self.assertFalse(basis["mood"])
+        self.assertEqual(mood_tags("unknown"), ())
+
+    def test_no_profile_is_not_usable(self):
+        self.assertEqual(profile_basis(None),
+                         {"ip": False, "artist": False, "mood": False,
+                          "wallpaper": False, "music": False})
+
+
+class TestRankWallpapers(unittest.TestCase):
+    CANDIDATES = ["/w/a.png", "/w/b.png", "/w/c.png"]
+
+    def _rank(self, profile, **kwargs):
+        similarity = kwargs.pop("ip_similarity", None) or (
+            lambda name, path: {"EVA": {"/w/a.png": 0.9, "/w/b.png": 0.2,
+                                        "/w/c.png": 0.1}}.get(name, {}).get(path, 0.0))
+        mood_of = kwargs.pop("mood_of", None) or (
+            lambda path: ["calm"] if path == "/w/b.png" else [])
+        usage = kwargs.pop("usage", None) or (lambda path: 0)
+        return rank_wallpapers(profile, self.CANDIDATES, ip_similarity=similarity,
+                               mood_of=mood_of, usage=usage, **kwargs)
+
+    def test_the_best_match_wins_and_says_why(self):
+        rows = self._rank(a_profile(ip={"EVA": 0.7}))
+        self.assertEqual([row["path"] for row in rows], ["/w/a.png", "/w/b.png", "/w/c.png"])
+        top = rows[0]
+        self.assertAlmostEqual(top["parts"]["ip"], 0.7 * 0.9, places=4)
+        self.assertIn("像 EVA", top["why"][0])
+        self.assertIn("还没看过", top["why"])
+
+    def test_a_mood_hit_beats_a_slightly_better_ip_match(self):
+        """心情是**加分项**: 权重很低时它能翻盘（IP 权重 0.1 -> 0.07 的主信号）。"""
+        rows = self._rank(a_profile(ip={"EVA": 0.1}))
+        self.assertEqual(rows[0]["path"], "/w/b.png")
+        self.assertIn("命中 calm", rows[0]["why"])
+
+    def test_a_strong_ip_preference_still_leads(self):
+        """但主信号够强时心情盖不过去（0.7 的 IP 权重 = 0.49 的主信号 > 0.2 的心情分）。"""
+        rows = self._rank(a_profile(ip={"EVA": 0.7}))
+        self.assertEqual(rows[0]["path"], "/w/a.png", "最像最喜欢的 IP 的那张优先")
+
+    def test_the_less_used_one_wins_a_tie(self):
+        usage = {"/w/a.png": 5, "/w/b.png": 0}
+        rows = self._rank(a_profile(ip={"EVA": 0.7}),
+                          ip_similarity=lambda name, path: 0.5,
+                          mood_of=lambda path: [],
+                          usage=lambda path: usage.get(path, 0))
+        self.assertEqual(rows[0]["path"], "/w/b.png", "\"没怎么看过\"的优先")
+        self.assertIn("还没看过", rows[0]["why"])
+
+    def test_without_a_usable_profile_it_says_so_and_still_sorts(self):
+        rows = self._rank(a_profile(ip={}, mood="unknown"))
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all("回退" in row["why"][0] for row in rows),
+                        "算不出偏好就如实说（调用方据此回退老规则）")
+
+    def test_limit_is_honoured(self):
+        rows = self._rank(a_profile(ip={"EVA": 0.7}), limit=1)
+        self.assertEqual(len(rows), 1)
+
+
+class TestRankTracks(unittest.TestCase):
+    TRACKS = [
+        {"id": "1", "name": "A", "tags": {"artist": ["米津玄師"], "mood": ["calm"]}, "plays": 4},
+        {"id": "2", "name": "B", "tags": {"artist": ["别人"], "mood": ["calm"]}, "plays": 0},
+        {"id": "3", "name": "C", "tags": {"artist": ["米津玄師"], "mood": ["energetic"]}, "plays": 0},
+    ]
+
+    def test_artist_weight_leads_and_says_why(self):
+        rows = rank_tracks(a_profile(artist={"米津玄師": 0.8}), self.TRACKS)
+        self.assertEqual([row["id"] for row in rows][:2], ["1", "3"],
+                         "喜欢的歌手在前; 同歌手之间按\"听得少的\"")
+        self.assertIn("喜欢 米津玄師", rows[0]["why"][0])
+
+    def test_a_mood_hit_helps(self):
+        rows = rank_tracks(a_profile(mood="calm"), self.TRACKS)
+        self.assertEqual(rows[-1]["id"], "3", "不命中心情的那首排在最后")
+        self.assertEqual({rows[0]["id"], rows[1]["id"]}, {"1", "2"}, "命中的两首在前")
+        self.assertIn("命中 calm", rows[0]["why"])
+
+    def test_excludes_and_muted_names(self):
+        rows = rank_tracks(a_profile(artist={"米津玄師": 0.8}), self.TRACKS,
+                           exclude=["1"], muted_artists=["米津玄師"])
+        self.assertEqual([row["id"] for row in rows], ["2"], "队列里已有的/不想听的都别给")
+        rows = rank_tracks(a_profile(artist={"米津玄師": 0.8}), self.TRACKS,
+                           muted_tracks=["C"])
+        self.assertEqual([row["id"] for row in rows], ["1", "2"], "点名不想听的那首也排除")
+
+    def test_a_frontier_track_is_still_offered_when_the_profile_is_empty(self):
+        rows = rank_tracks(a_profile(artist={}, mood="unknown"), self.TRACKS)
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all("回退" in row["why"][0] for row in rows))
+
+
+class TestSimilarTracks(unittest.TestCase):
+    TRACKS = [
+        {"id": "1", "name": "A", "tags": {"artist": ["米津玄師"], "mood": ["calm"],
+                                          "genre": ["日语"]}},
+        {"id": "2", "name": "B", "tags": {"artist": ["宇多田ヒカル"], "mood": ["calm"],
+                                          "genre": ["日语"]}},
+        {"id": "3", "name": "C", "tags": {"artist": ["别人"], "mood": ["energetic"],
+                                          "genre": ["欧美"]}},
+    ]
+
+    def test_same_artist_or_shared_mood(self):
+        self.assertEqual(similar_tracks(self.TRACKS, self.TRACKS[0]), ["1", "2"],
+                         "自己 + 同 mood 的（2）; 不同歌手又不同 mood 的（3）不进来")
+
+    def test_genre_alone_is_not_enough_by_default(self):
+        tracks = [{"id": "1", "name": "A", "tags": {"genre": ["日语"], "mood": ["calm"]}},
+                  {"id": "9", "name": "Z", "tags": {"genre": ["日语"], "mood": ["x"]}}]
+        self.assertEqual(similar_tracks(tracks, tracks[0]), ["1"],
+                         "默认不看 genre（板端那口袋太大, 一清就清空整个库）")
+        self.assertEqual(similar_tracks(tracks, tracks[0], tags=("genre", "mood")),
+                         ["1", "9"], "要开就显式配上")
+
+    def test_an_unknown_target_is_empty(self):
+        self.assertEqual(similar_tracks(self.TRACKS, {}), [])
+        self.assertEqual(similar_tracks(self.TRACKS, None), [])
+
+
+class TestTrackLevelFeedback(unittest.IsolatedAsyncioTestCase):
+    async def test_naming_a_song_clears_the_similar_ones_too(self):
+        """你定的第 5 条: 不想听某一首 -> **类似的全部**（同歌手/同 mood）+ T9 行为。"""
+        tracks = [
+            {"id": "1", "name": "JANE DOE", "plays": 5, "last_played": "t",
+             "tags": {"artist": ["米津玄師"], "mood": ["calm"]}},
+            {"id": "2", "name": "别的", "plays": 3, "last_played": "t",
+             "tags": {"artist": ["米津玄師"], "mood": ["energetic"]}},
+            {"id": "9", "name": "无关", "plays": 4, "last_played": "t",
+             "tags": {"artist": ["别人"], "mood": ["energetic"]}},
+        ]
+        memory = make_memory([(ROLE_USER, "不想听 JANE DOE 了")])
+        sources, _w, cleared_plays = fake_sources(tracks=tracks)
+        record = await build_profile(memory.entries(), sources=sources, llm=None, now=NOW)
+        self.assertEqual(record["cleared"]["track_ids"], ["1", "2"],
+                         "同歌手的（2）一起清; 无关那首（9）不动")
+        self.assertEqual(cleared_plays, [["1", "2"]])
+        muted_ids = [item["name"] for item in record["muted"]["track"]]
+        self.assertEqual(muted_ids, ["1", "2"], "记进 muted（T10-5 清队列 / 补歌时不再补）")
+        self.assertEqual(record["feedback"][0]["axis"], "track")
+        self.assertEqual(record["feedback"][0]["affected"], ["1", "2"])
+
+    async def test_naming_an_artist_clears_its_songs(self):
+        tracks = [{"id": "1", "name": "A", "plays": 5, "tags": {"artist": ["米津玄師"]}},
+                  {"id": "2", "name": "B", "plays": 1, "tags": {"artist": ["别人"]}}]
+        memory = make_memory([(ROLE_USER, "不想听米津玄師了")])
+        sources, _w, cleared_plays = fake_sources(tracks=tracks)
+        record = await build_profile(memory.entries(), sources=sources, llm=None, now=NOW)
+        self.assertEqual(cleared_plays, [["1"]])
+        self.assertEqual(record["cleared"]["track_ids"], ["1"],
+                         "给 T10-5 清队列用的 id 列表")
 
 
 if __name__ == "__main__":

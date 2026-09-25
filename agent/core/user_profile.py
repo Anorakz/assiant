@@ -54,16 +54,24 @@ __all__ = [
     "MOOD_LABELS",
     "MOOD_ZH",
     "MOOD_UNKNOWN",
+    "MOOD_TO_TAGS",
     "NEGATIVE_CUES",
     "IP_WEIGHTS",
     "ARTIST_WEIGHTS",
+    "RANK_WALLPAPER_WEIGHTS",
+    "RANK_TRACK_WEIGHTS",
+    "DEFAULT_SIMILAR_TAGS",
     "RECENCY_DAYS",
     "Feedback",
     "ProfileError",
     "Sources",
     "resolve_profile_file",
     "count_hits",
-    "Sources",
+    "mood_tags",
+    "profile_basis",
+    "rank_wallpapers",
+    "rank_tracks",
+    "similar_tracks",
     "detect_negative_feedback",
     "wallpaper_weights",
     "artist_weights",
@@ -161,10 +169,12 @@ class Feedback:
 
 
 def detect_negative_feedback(entries: Sequence[Any], known_ips: Sequence[str],
-                             known_artists: Sequence[str]) -> List[Feedback]:
+                             known_artists: Sequence[str],
+                             known_tracks: Sequence[str] = ()) -> List[Feedback]:
     """从纯对话里挑出"不想听/看某个实体"的话。
 
     @param entries `ChatMemory.entries()`（只要 `role == "user"` 的会被看）
+    @param known_tracks 歌名与 id（两边都认 —— 用户一般说歌名, 偶尔念 id）
     @return 识别出来的负反馈（**实体名对不上就一条都不产生** —— 宁可不猜）
     @note 判据是"负向词 + 实体名同时出现"。同一句话里同时骂两个也会各记一条。
     """
@@ -175,6 +185,9 @@ def detect_negative_feedback(entries: Sequence[Any], known_ips: Sequence[str],
     for name in known_artists or ():
         if str(name).strip():
             lookup.append(("artist", str(name).strip()))
+    for name in known_tracks or ():
+        if str(name).strip():
+            lookup.append(("track", str(name).strip()))
 
     found: List[Feedback] = []
     for entry in entries or ():
@@ -195,15 +208,15 @@ def detect_negative_feedback(entries: Sequence[Any], known_ips: Sequence[str],
 def muted_from_records(records: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """把历史记录里的"不想看/听"名单汇总出来（**最新的那次说了算**）。
 
-    @return {"ip": {名字: {...}}, "artist": {名字: {...}}}
+    @return {"ip": {名字: {...}}, "artist": {...}, "track": {id: {...}}}
     @note 顺序: 老 -> 新, 后面的覆盖前面的（用户后来又想听了就再构建一次即可）。
     """
-    muted: Dict[str, Dict[str, Any]] = {"ip": {}, "artist": {}}
+    muted: Dict[str, Dict[str, Any]] = {"ip": {}, "artist": {}, "track": {}}
     for record in records or ():
         blob = record.get("muted") if isinstance(record, Mapping) else None
         if not isinstance(blob, Mapping):
             continue
-        for axis in ("ip", "artist"):
+        for axis in ("ip", "artist", "track"):
             for item in blob.get(axis) or ():
                 if isinstance(item, Mapping) and str(item.get("name") or ""):
                     muted[axis][str(item["name"])] = dict(item)
@@ -505,6 +518,246 @@ def repo_sources(config: Optional[Mapping[str, Any]] = None,
                    wall_dir=wall_dir)
 
 
+#: 心情 -> **内容标签**（壁纸与音乐共用同一套 mood 词表, 见 tag_vocab.MOOD）。
+#: 心情是"人现在的状态", 标签是"东西给人的感觉" —— 这张表就是两者之间的桥:
+#: 累了/烦躁 -> 要安静的; 开心 -> 来点活力/可爱的; 专注 -> 安静但别太软。
+#: ⚠ 只映射到词表里真有的那 8 个标签; `unknown`（判不出来）**不给任何偏好**。
+MOOD_TO_TAGS: Dict[str, Tuple[str, ...]] = {
+    "focused": ("calm", "minimal")[:1],      # 专注: 安静（minimal 在 scene 轴上, 不混）
+    "relaxed": ("cozy", "calm"),
+    "happy": ("energetic", "cute"),
+    "tired": ("calm", "cozy"),
+    "stressed": ("calm",),
+    "calm": ("calm",),
+}
+
+#: 排序配方（与"画像怎么算"那两个配方分开: 这两个是"画像怎么用"）。
+#: **主信号（IP/歌手）为主, 心情是加分项, "没怎么用过"破平局** —— 这样解释起来简单:
+#: 用户明确喜欢的东西优先, 心情只在差不多的时候起作用（0.3 会让"心情命中"几乎追平
+#: 一个满分的 IP 匹配, 那就说不清谁说了算了）。
+RANK_WALLPAPER_WEIGHTS = {"ip": 0.7, "mood": 0.2, "fresh": 0.1}
+RANK_TRACK_WEIGHTS = {"artist": 0.7, "mood": 0.2, "fresh": 0.1}
+
+#: "类似"的判据（T10 你定的 A1）: **同歌手** 永远算; 另外这些 tag 轴共有也算。
+#: ⚠ 默认**不含 genre**: 板端库里 `genre` 是"日语/流行"这种大口袋, 一句"不想听"
+#:   会把整个库都清掉（比"去掉类似的"过头太多）。要开就改配置。
+DEFAULT_SIMILAR_TAGS: Tuple[str, ...] = ("mood",)
+
+
+def mood_tags(label: Optional[str]) -> Tuple[str, ...]:
+    """画像里的心情 -> 内容标签（认不出/unknown -> 空, **不给偏好**）。"""
+    return tuple(MOOD_TO_TAGS.get(str(label or "").strip().lower(), ()))
+
+
+def profile_basis(profile: Optional[Mapping[str, Any]]) -> Dict[str, bool]:
+    """这份画像**能不能拿来挑东西**（T10-3/T10-4 靠它决定"用画像"还是"回退老规则"）。
+
+    @return {"ip": 有 IP 权重, "artist": 有歌手权重, "mood": 心情已知,
+             "wallpaper": 壁纸可用, "music": 音乐可用}
+    @note **薄样本不算可用**: `thin` 里点了名的那些轴一律当没有（宁可回退, 不装）。
+    """
+    data = profile if isinstance(profile, Mapping) else {}
+    thin = {str(item) for item in (data.get("thin") or ())}
+    walls = [(data.get("walls") or {}).get("ip") or []]
+    artists = [(data.get("music") or {}).get("artist") or []]
+    has_ip = any(float(row.get("weight") or 0) > 0 for row in walls[0]) and "壁纸用量" not in thin
+    has_artist = (any(float(row.get("weight") or 0) > 0 for row in artists[0])
+                  and "音乐库" not in thin)
+    label = str((data.get("mood") or {}).get("label") or MOOD_UNKNOWN)
+    has_mood = bool(mood_tags(label))
+    return {"ip": bool(has_ip), "artist": bool(has_artist), "mood": has_mood,
+            "wallpaper": bool(has_ip or has_mood), "music": bool(has_artist or has_mood)}
+
+
+def _freshness(count: Any) -> float:
+    """"没怎么看过/听过"的加分: 1/(1+次数)（0 次 = 1.0）。"""
+    try:
+        value = max(0, int(count or 0))
+    except (TypeError, ValueError):
+        value = 0
+    return 1.0 / (1.0 + value)
+
+
+def rank_wallpapers(profile: Optional[Mapping[str, Any]], candidates: Sequence[str], *,
+                    ip_similarity: Optional[Callable[[str, str], float]] = None,
+                    usage: Optional[Callable[[str], int]] = None,
+                    mood_of: Optional[Callable[[str], Sequence[str]]] = None,
+                    limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """按画像把候选壁纸排一遍（**纯函数**: 外部的相似度/用量/标签都从参数进来）。
+
+    @param profile 一条画像记录（`build_profile()` 的产物; None/空 = 没有画像）
+    @param candidates 候选路径（一般就是目录里那些图）
+    @param ip_similarity `(IP 名, 路径) -> 0..1`（调用方用标签索引的向量算; 测试给假的）
+    @param usage `路径 -> 用过几次`（默认都算 0）
+    @param mood_of `路径 -> 它的 mood 标签`（默认空）
+    @return [{path, score, parts:{ip,mood,fresh}, why:[…]}] 按分数降序
+    @note 分数是**相对**的（画像权重本身是占比）, 只用于排序 —— 不要当概率。
+    """
+    data = profile if isinstance(profile, Mapping) else {}
+    basis = profile_basis(data)
+    ip_rows = [row for row in ((data.get("walls") or {}).get("ip") or [])
+               if float(row.get("weight") or 0) > 0]
+    tags = mood_tags((data.get("mood") or {}).get("label")) if basis["mood"] else ()
+
+    out: List[Dict[str, Any]] = []
+    for path in candidates or ():
+        text = str(path)
+        why: List[str] = []
+        best_ip, best_name = 0.0, ""
+        if basis["ip"] and ip_similarity is not None:
+            for row in ip_rows:
+                try:
+                    similarity = float(ip_similarity(str(row.get("name")), text) or 0.0)
+                except Exception:                     # noqa: BLE001 - 相似度算不出来就当 0
+                    similarity = 0.0
+                score = float(row.get("weight") or 0) * max(0.0, min(1.0, similarity))
+                if score > best_ip:
+                    best_ip, best_name = score, str(row.get("name"))
+        mood_hit = 0.0
+        if tags and mood_of is not None:
+            try:
+                labels = {str(item) for item in (mood_of(text) or ())}
+            except Exception:                         # noqa: BLE001
+                labels = set()
+            hit = labels & set(tags)
+            if hit:
+                mood_hit = 1.0
+                why.append("命中 %s" % "、".join(sorted(hit)))
+        used = 0
+        if usage is not None:
+            try:
+                used = max(0, int(usage(text) or 0))
+            except Exception:                         # noqa: BLE001
+                used = 0
+        fresh = _freshness(used)
+        score = (RANK_WALLPAPER_WEIGHTS["ip"] * best_ip
+                 + RANK_WALLPAPER_WEIGHTS["mood"] * mood_hit
+                 + RANK_WALLPAPER_WEIGHTS["fresh"] * fresh)
+        if best_ip > 0:
+            why.insert(0, "像 %s（%.2f）" % (best_name, best_ip))
+        if used == 0:
+            why.append("还没看过")
+        elif used <= 2:
+            why.append("只看过 %d 次" % used)
+        if not (basis["ip"] or basis["mood"]):
+            # 画像给不出偏好时**要说清是回退**（调用方据此决定要不要走老规则, 日志里也一眼看得出来）
+            why.insert(0, "画像里没有可用的偏好（回退到看得最少的）")
+        if not why:
+            why.append("画像里没有可用的偏好（回退）")
+        out.append({"path": text, "score": round(score, 4),
+                    "parts": {"ip": round(best_ip, 4), "mood": mood_hit,
+                              "fresh": round(fresh, 4), "used": used},
+                    "why": why})
+    out.sort(key=lambda item: (-item["score"], item["path"]))
+    return out[:int(limit)] if limit else out
+
+
+def rank_tracks(profile: Optional[Mapping[str, Any]], tracks: Sequence[Mapping[str, Any]], *,
+                exclude: Sequence[str] = (), muted_artists: Sequence[str] = (),
+                muted_tracks: Sequence[str] = (),
+                limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """按画像把候选歌排一遍（纯函数, 同 `rank_wallpapers`）。
+
+    @param exclude 不要的 id（已经在队列里的 / 正在放的）
+    @param muted_artists / muted_tracks 画像里"不想听"的名单（歌手名 / 歌名或 id）
+    @return [{id, name, score, parts:{artist,mood,fresh,plays}, why:[…]}] 降序
+    """
+    data = profile if isinstance(profile, Mapping) else {}
+    basis = profile_basis(data)
+    artist_rows = {str(row.get("name")): float(row.get("weight") or 0)
+                   for row in ((data.get("music") or {}).get("artist") or [])
+                   if float(row.get("weight") or 0) > 0}
+    tags = mood_tags((data.get("mood") or {}).get("label")) if basis["mood"] else ()
+    skip = {str(item) for item in (exclude or ())}
+    skip_artists = {str(item) for item in (muted_artists or ())}
+    skip_tracks = {str(item) for item in (muted_tracks or ())}
+
+    out: List[Dict[str, Any]] = []
+    for track in tracks or ():
+        if not isinstance(track, Mapping):
+            continue
+        track_id = str(track.get("id") or "")
+        name = str(track.get("name") or track_id)
+        if not track_id or track_id in skip:
+            continue
+        if track_id in skip_tracks or name in skip_tracks:
+            continue
+        artists = _artists_of(track)
+        if any(artist in skip_artists for artist in artists):
+            continue
+        best_artist, best_name = 0.0, ""
+        if basis["artist"]:
+            for artist in artists:
+                weight = float(artist_rows.get(artist) or 0.0)
+                if weight > best_artist:
+                    best_artist, best_name = weight, artist
+        why: List[str] = []
+        mood_hit = 0.0
+        if tags:
+            values = {str(item) for item in ((track.get("tags") or {}).get("mood") or ())}
+            hit = values & set(tags)
+            if hit:
+                mood_hit = 1.0
+                why.append("命中 %s" % "、".join(sorted(hit)))
+        try:
+            plays = max(0, int(track.get("plays") or 0))
+        except (TypeError, ValueError):
+            plays = 0
+        fresh = _freshness(plays)
+        score = (RANK_TRACK_WEIGHTS["artist"] * best_artist
+                 + RANK_TRACK_WEIGHTS["mood"] * mood_hit
+                 + RANK_TRACK_WEIGHTS["fresh"] * fresh)
+        if best_artist > 0:
+            why.insert(0, "喜欢 %s（%.2f）" % (best_name, best_artist))
+        if plays == 0:
+            why.append("还没听过")
+        elif plays <= 2:
+            why.append("只听过 %d 次" % plays)
+        if not (basis["artist"] or basis["mood"]):
+            why.insert(0, "画像里没有可用的偏好（回退到听得最少的）")
+        if not why:
+            why.append("画像里没有可用的偏好（回退）")
+        out.append({"id": track_id, "name": name, "score": round(score, 4),
+                    "parts": {"artist": round(best_artist, 4), "mood": mood_hit,
+                              "fresh": round(fresh, 4), "plays": plays},
+                    "why": why})
+    out.sort(key=lambda item: (-item["score"], item["id"]))
+    return out[:int(limit)] if limit else out
+
+
+def similar_tracks(tracks: Sequence[Mapping[str, Any]], target: Mapping[str, Any],
+                   tags: Sequence[str] = DEFAULT_SIMILAR_TAGS) -> List[str]:
+    """"差不多是同一类"的歌（T10 你定的 A1: **同歌手** + 共有所配置的 tag）。
+
+    @param target 被点名的那首（本地库记录）
+    @return 这些歌的 id（**含被点名的那首**）; 认不出目标就返回空
+    @note 判据是"或": 同歌手 **或** 共有一个 `tags` 轴上的值。
+    @note ⚠ 默认只看 `mood` 轴, **不看 genre** —— 板端库里 genre 是"日语/流行"这种大口袋,
+          一句"不想听"会把整个库清空（比"去掉类似的"过头太多）。
+    """
+    if not isinstance(target, Mapping) or not str(target.get("id") or ""):
+        return []
+    want_id = str(target.get("id"))
+    want_artists = set(_artists_of(target))
+    axes = [str(axis) for axis in (tags or ()) if str(axis)]
+    want_tags = {str(value) for axis in axes
+                 for value in ((target.get("tags") or {}).get(axis) or ())}
+    picked: List[str] = []
+    for track in tracks or ():
+        if not isinstance(track, Mapping) or not str(track.get("id") or ""):
+            continue
+        track_id = str(track.get("id"))
+        if track_id == want_id:
+            picked.append(track_id)
+            continue
+        same_artist = bool(want_artists & set(_artists_of(track)))
+        shared = {str(value) for axis in axes
+                  for value in ((track.get("tags") or {}).get(axis) or ())} & want_tags
+        if same_artist or shared:
+            picked.append(track_id)
+    return picked
+
+
 def _artists_of(track: Mapping[str, Any]) -> List[str]:
     tags = track.get("tags") or {}
     values = tags.get("artist") if isinstance(tags, Mapping) else None
@@ -589,12 +842,43 @@ async def build_profile(entries: Sequence[Any], *, config: Optional[Mapping[str,
     artist_rows = artist_weights(plays, artist_mentions, artist_last, per_artist_tracks)
 
     # ---- 3) 负反馈: 清零（画像 + **源文件**）----
-    feedback = detect_negative_feedback(items, src.ip_names, artist_names)
+    known_tracks = sorted(({str(track.get("name") or "") for track in tracks}
+                           | {str(track.get("id") or "") for track in tracks}) - {""})
+    feedback = detect_negative_feedback(items, src.ip_names, artist_names, known_tracks)
     muted = muted_from_records(previous)
-    cleared = {"wall_images": 0, "tracks": 0}
+    cleared: Dict[str, Any] = {"wall_images": 0, "tracks": 0, "track_ids": []}
     unmatched: List[Dict[str, Any]] = []
+    feedback_done: List[Dict[str, Any]] = []
+
+    def _zero_tracks(ids: Sequence[str], text: str, axis: str) -> None:
+        """把这几首按 T9 的口径处理: 清库里的 plays + 进 muted（给 T10-5 清队列用）。"""
+        wanted = [str(item) for item in ids if str(item)]
+        if not wanted:
+            return
+        cleared["tracks"] += int(src.clear_plays(wanted) or 0)
+        cleared["track_ids"] = sorted(set(cleared["track_ids"]) | set(wanted))
+        at = moment.isoformat(timespec="seconds")
+        for track_id in wanted:
+            entry = {"axis": "track", "name": track_id, "at": at, "text": text,
+                     "by": axis}
+            muted["track"][track_id] = entry
+
     for item in feedback:
         axis, name = item.axis, item.name
+        if axis == "track":
+            # 点名一首歌 -> **类似的全部**（同歌手 + 共有 mood）一起清（你定的第 5 条）
+            target = next((track for track in tracks
+                           if str(track.get("id")) == name
+                           or str(track.get("name") or "") == name), None)
+            if target is None:
+                unmatched.append(item.to_dict())
+                continue
+            ids = similar_tracks(tracks, target)
+            _zero_tracks(ids, item.text, "track")
+            done = item.to_dict()
+            done["affected"] = list(ids)
+            feedback_done.append(done)
+            continue
         row = next((r for r in (wall_rows if axis == "ip" else artist_rows)
                     if r["name"] == name), None)
         if row is None:
@@ -606,9 +890,10 @@ async def build_profile(entries: Sequence[Any], *, config: Optional[Mapping[str,
             row["parts"] = {key: 0 for key in row["parts"]}
             row["images"] = []
             row["last_used"] = None
+            affected: List[str] = []
         else:
-            ids = [str(x) for x in row.get("tracks") or ()]
-            cleared["tracks"] += int(src.clear_plays(ids) or 0)
+            affected = [str(x) for x in row.get("tracks") or ()]
+            _zero_tracks(affected, item.text, "artist")
             row["parts"] = {key: 0 for key in row["parts"]}
             row["tracks"] = []
             row["last_played"] = None
@@ -617,6 +902,9 @@ async def build_profile(entries: Sequence[Any], *, config: Optional[Mapping[str,
         row["muted_text"] = item.text
         muted[axis][name] = {"axis": axis, "name": name, "at": row["muted_at"],
                              "text": item.text}
+        done = item.to_dict()
+        done["affected"] = affected
+        feedback_done.append(done)
 
     # 继承下来的 muted: 每次重建都要**重新套用**（否则源文件里的老用量会把它顶回来）
     for axis, rows in (("ip", wall_rows), ("artist", artist_rows)):
@@ -684,9 +972,10 @@ async def build_profile(entries: Sequence[Any], *, config: Optional[Mapping[str,
                  "error": mood.get("error"),
                  "ms": mood.get("ms", 0),
                  "prompt_chars": mood.get("prompt_chars", 0)},
-        "feedback": [item.to_dict() for item in feedback],
+        "feedback": feedback_done,
         "unmatched_feedback": unmatched,
-        "muted": {"ip": list(muted["ip"].values()), "artist": list(muted["artist"].values())},
+        "muted": {"ip": list(muted["ip"].values()), "artist": list(muted["artist"].values()),
+                  "track": list(muted["track"].values())},
         "cleared": cleared,
         "thin": thin,
     }
