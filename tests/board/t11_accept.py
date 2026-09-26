@@ -803,7 +803,7 @@ async def part_h_video_cli(runtime, sock, seen, tmp):
         gui_log = gui.log_text()
         check("H: GUI 那边真的执行了播放控制（日志里有那条）",
               "Agent 让播放器 pause" in gui_log,
-              [ln for ln in gui_log.splitlines() if "播放控制" in ln][-1:] or "-")
+              [ln for ln in gui_log.splitlines() if "Agent 让播放器" in ln][-1:] or "-")
 
         # ---- 2) 同一个动作幂等：已经暂停 -> 不发命令 ----
         rc, out, err = await run_cli(sock, "video", "pause")
@@ -851,7 +851,7 @@ async def part_h_video_cli(runtime, sock, seen, tmp):
         gui.stop()
         await asyncio.sleep(0.5)
     print("  --- GUI 日志里的播放控制行 ---")
-    print("\n".join([ln for ln in gui.log_text().splitlines() if "播放控制" in ln][-6:] or ["-"]))
+    print("\n".join([ln for ln in gui.log_text().splitlines() if "Agent 让播放器" in ln][-6:] or ["-"]))
 
 # ---------------------------------------------------------------------------
 #  F. 双路识别真跑 + 关键词优先
