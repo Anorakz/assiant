@@ -34,13 +34,17 @@
 #  ⚠ 向量编解码与余弦**复用 `agent/core/game_anchors.py`**（它又复用
 #    `agent/vision/wall_data.py` 的 base64(float16)，一张 ≈ 2 KB）—— 同一个能力
 #    只留一条实现，别在这里再写一份（T13-1 刚因为"两套接口"删过一次东西）。
-#    余弦是**纯 Python**（几百条 × 768 维够用），开发机没装 numpy 也能跑单测。
+#    **纯 Python**（不需要 numpy，开发机没装 numpy 也能跑单测）。
+#    板端实测（RK3568, 满库 1000 条 × 768 维）: 逐条 `cosine()` = 0.83 s/次
+#    （其中 base64(float16) 解码 0.31 s）；**解码缓存 + 归一化退化成点积 = 0.255 s**
+#    （3.2×，两者数学上等价 —— 见 `_dot` 的说明与那条钉住它的单测）。
 # ============================================================================
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -92,6 +96,34 @@ _CATEGORY_ALIASES = {
 
 class StudyAnchorError(RuntimeError):
     """锚点库读不了 / 写不了 / 配置不合法（消息给人看）。"""
+
+
+def _unit(values: Sequence[float]) -> List[float]:
+    """向量 -> **单位**向量（全零/空 -> 原样返回，它匹配不上任何人）。"""
+    total = 0.0
+    for value in values:
+        total += value * value
+    if total <= 0.0:
+        return [float(value) for value in values]
+    norm = math.sqrt(total)
+    return [float(value) / norm for value in values]
+
+
+def _dot(unit_a: Sequence[float], unit_b: Sequence[float]) -> float:
+    """两个**单位**向量的点积 —— 它就是余弦。
+
+    @note 为什么这里有个"第二份相似度": 板端实测（`t13_2_prof.py`, RK3568）——
+          1000 条锚点上一次 match, 逐条调 `cosine()` 是 **0.83 s**（其中解码 0.31 s）,
+          而"解码缓存 + 两边先归一化 + 只算点积"是 **0.255 s**（3.2×）。
+          两者数学上是一回事（实测最大差 1.1e-16，阈值一次只动 0.01）,
+          并且有一条单测拿 `cosine()` 当基准钉住它别漂。
+          ⚠ 余弦的**定义**仍然只有 `game_anchors.cosine` 一份 —— 这里只是"已经归一化了,
+            所以省掉两次范数"的快速路径, 不是第二套相似度。
+    """
+    score = 0.0
+    for left, right in zip(unit_a, unit_b):        # 实测显式 for 比 sum(map(...)) 快一倍
+        score += left * right
+    return score
 
 
 def _repo_root() -> str:
@@ -169,6 +201,12 @@ class StudyAnchors(object):
         self.log = log or _log
         self._rows: List[Dict[str, Any]] = []
         self._prototypes: Optional[Dict[str, List[float]]] = None
+        self._units: Optional[List[Tuple[str, List[float]]]] = None
+
+    def _invalidate(self) -> None:
+        """库变了 -> 缓存（解码后的单位向量、类原型）全作废。"""
+        self._prototypes = None
+        self._units = None
 
     # ------------------------------------------------------------ 读 ---
     def __len__(self) -> int:
@@ -221,7 +259,7 @@ class StudyAnchors(object):
     def load(self) -> int:
         """读索引文件（不在 = 空库，不是错误）。@return 读进来几条。"""
         self._rows = []
-        self._prototypes = None
+        self._invalidate()
         if not os.path.exists(self.path):
             return 0
         try:
@@ -253,17 +291,30 @@ class StudyAnchors(object):
                 self.log.warning("study_anchors: 一条锚点解不出来（跳过）: %s", exc)
         return out
 
-    def prototypes(self) -> Dict[str, List[float]]:
-        """每个子标签的**类原型**（它所有锚点的逐维平均）—— 板端标定的第二种打法。
+    def unit_vectors(self) -> List[Tuple[str, List[float]]]:
+        """[(子标签, **单位**向量)] —— 匹配真正用的那份（解码一次就缓存）。
 
-        @note 算一次就缓存（`add` / `reset` 会失效）；几百条 × 768 维在 Python 里
-              也就几十毫秒，但没必要每帧重算。
+        @note 板端实测: 1000 条锚点上, "每次 match 重新解码 0.31 s + 逐条 cosine 0.50 s"
+              是 0.83 s; 缓存解码 + 归一化后退化成点积是 **0.255 s**。
+              库变了（add / reset / prune / load）会作废缓存。
+        """
+        if self._units is None:
+            self._units = [(cls, _unit(vec)) for cls, vec in self.vectors()]
+        return [(cls, list(vec)) for cls, vec in self._units]
+
+    def prototypes(self) -> Dict[str, List[float]]:
+        """每个子标签的**类原型**（它所有锚点的**单位向量**逐维平均）—— 板端标定的第二种打法。
+
+        @note 为什么平均的是单位向量而不是原始向量: SigLIP 的图像塔本来输出 L2 归一化向量,
+              但 float16 落盘会带一点缩放；先归一化再平均, 得到的是"平均方向"
+              （不受某条向量模长偏大的影响），也正好与匹配的快速路径一致。
+        @note 算一次就缓存（库变了就作废）。
         """
         if self._prototypes is not None:
             return {key: list(value) for key, value in self._prototypes.items()}
         sums: Dict[str, List[float]] = {}
         counts: Dict[str, int] = {}
-        for cls, vector in self.vectors():
+        for cls, vector in self.unit_vectors():
             bucket = sums.get(cls)
             if bucket is None:
                 bucket = [0.0] * len(vector)
@@ -279,7 +330,7 @@ class StudyAnchors(object):
             count = counts.get(cls) or 0
             if not count:
                 continue
-            out[cls] = [value / count for value in bucket]
+            out[cls] = _unit([value / count for value in bucket])
         self._prototypes = out
         return {key: list(value) for key, value in out.items()}
 
@@ -302,14 +353,16 @@ class StudyAnchors(object):
         """
         if not vector:
             return None
+        wanted = str(method or "anchor").lower()
         samples: Iterable[Tuple[str, Sequence[float]]]
-        if str(method or "anchor").lower() == "prototype":
+        if wanted == "prototype":
             samples = list(self.prototypes().items())
         else:
-            samples = self.vectors()
+            samples = self.unit_vectors()
+        query = _unit([float(item) for item in vector])
         best: Dict[str, float] = {}
         for cls, anchor in samples:
-            score = cosine(vector, anchor)
+            score = _dot(query, anchor)
             if cls not in best or score > best[cls]:
                 best[cls] = score
         if not best:
@@ -345,7 +398,7 @@ class StudyAnchors(object):
             "category_runner_up_score": round(cat_runner, 4),
             "category_margin": round(cat_score - cat_runner, 4),
             "counts": counts,
-            "method": "prototype" if str(method or "anchor").lower() == "prototype" else "anchor",
+            "method": "prototype" if wanted == "prototype" else "anchor",
         }
 
     # ------------------------------------------------------------ 写 ---
@@ -378,7 +431,7 @@ class StudyAnchors(object):
                                            time.localtime(when or time.time()))}
         previous = list(self._rows)
         self._rows.append(row)
-        self._prototypes = None
+        self._invalidate()
         dropped = self.prune(save=False)
         try:
             if dropped:
@@ -390,7 +443,7 @@ class StudyAnchors(object):
         except (OSError, StudyAnchorError) as exc:
             # 落盘失败: 内存那份也退回去, 别留下"库里有、文件里没有"的不一致
             self._rows = previous
-            self._prototypes = None
+            self._invalidate()
             raise StudyAnchorError("锚点写不进去（%s）: %s" % (self.path, exc)) from exc
         self.log.info("study_anchors: 记了一个锚点 %s（%s, 现在 %d 个%s）", name, note or "-",
                       len(self._rows), "，丢了 %d 条最旧的" % dropped if dropped else "")
@@ -419,7 +472,7 @@ class StudyAnchors(object):
             self.log.info("study_anchors: %s 超过上限（%d > %d），丢了最旧的 %d 条",
                           name, len(same), limit, cut)
         if dropped:
-            self._prototypes = None
+            self._invalidate()
             if save:
                 self._rewrite()
         return dropped
@@ -438,7 +491,7 @@ class StudyAnchors(object):
             before = len(self._rows)
             self._rows = [row for row in self._rows if str(row.get("cls") or "") != name]
             removed = before - len(self._rows)
-        self._prototypes = None
+        self._invalidate()
         if removed and save:
             self._rewrite()
         return removed

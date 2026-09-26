@@ -146,6 +146,45 @@ class TestReuse(TempDirCase):
         self.assertAlmostEqual(vec[1], -0.25, places=3)
         self.assertAlmostEqual(vec[2], 0.125, places=3)
 
+    def test_the_fast_path_equals_the_real_cosine(self):
+        """快速路径（归一化 + 点积）必须与 `game_anchors.cosine` 一模一样。
+
+        ⚠ 它是"省掉两次范数"的优化（板端实测 0.83 s -> 0.255 s），
+        数学上等价，但**得有人盯着**：漂了就会变成第二套相似度，阈值全部失准。
+        """
+        worst = 0.0
+        for seed in range(1, 40):
+            left = [((seed * (index + 3)) % 97) / 97.0 - 0.5 for index in range(DIM)]
+            right = [((seed * (index + 11)) % 89) / 89.0 - 0.5 for index in range(DIM)]
+            fast = sa._dot(sa._unit(left), sa._unit(right))
+            worst = max(worst, abs(fast - game_anchors.cosine(left, right)))
+        self.assertLess(worst, 1e-9, "快速路径与真余弦的差太大了: %.3e" % worst)
+
+    def test_a_zero_vector_matches_nobody(self):
+        self.assertEqual(sa._unit([0.0] * 4), [0.0] * 4)
+        self.assertEqual(sa._unit([]), [])
+        self.assertEqual(sa._dot(sa._unit([0.0] * 4), sa._unit([1.0, 0.0, 0.0, 0.0])), 0.0)
+
+    def test_unit_vectors_are_cached_and_invalidated(self):
+        anchors = self.make_anchors()
+        anchors.add(cls="code", vector=vector(3.0, 4.0))
+        first = anchors.unit_vectors()
+        self.assertAlmostEqual(first[0][1][0], 0.6, places=6)      # 3/5
+        self.assertAlmostEqual(first[0][1][1], 0.8, places=6)      # 4/5
+        anchors.add(cls="doc", vector=vector(1.0, 0.0))
+        self.assertEqual(len(anchors.unit_vectors()), 2)           # 缓存失效了
+
+    def test_match_scores_agree_with_the_raw_cosine(self):
+        """端到端钉一遍: match 给的分 == 拿原始向量算的余弦。"""
+        anchors = self.make_anchors()
+        anchors.add(cls="code", vector=vector(1.0, 0.0, 0.0))
+        anchors.add(cls="anime", vector=vector(0.0, 1.0, 0.0))
+        query = vector(0.8, 0.6, 0.0)
+        hit = anchors.match(query)
+        self.assertAlmostEqual(hit["score"], game_anchors.cosine(query, vector(1.0, 0.0, 0.0)),
+                               places=3)
+        self.assertAlmostEqual(hit["score"], 0.8, places=3)
+
 
 # ===========================================================================
 #  读 / 写 / 上限
@@ -391,14 +430,24 @@ class TestMatch(TempDirCase):
 
 
 class TestPrototypes(TempDirCase):
-    def test_prototype_is_the_mean_of_its_anchors(self):
+    def test_prototype_is_the_mean_direction_of_its_anchors(self):
+        """原型 = 单位向量的平均方向（再归一化）—— 模长偏大的那条不该带偏它。"""
         anchors = self.make_anchors()
         anchors.add(cls="code", vector=vector(1, 0, 0))
         anchors.add(cls="code", vector=vector(0, 1, 0))
         proto = anchors.prototypes()["code"]
-        self.assertAlmostEqual(proto[0], 0.5, places=3)
-        self.assertAlmostEqual(proto[1], 0.5, places=3)
+        self.assertAlmostEqual(proto[0], 0.7071, places=3)
+        self.assertAlmostEqual(proto[1], 0.7071, places=3)
         self.assertAlmostEqual(proto[2], 0.0, places=3)
+        norm = sum(value * value for value in proto) ** 0.5
+        self.assertAlmostEqual(norm, 1.0, places=6)
+
+    def test_a_long_anchor_does_not_outvote_a_short_one(self):
+        anchors = self.make_anchors()
+        anchors.add(cls="code", vector=vector(1, 0, 0))
+        anchors.add(cls="code", vector=vector(0, 0.001, 0))     # 模长极小, 方向仍算一票
+        proto = anchors.prototypes()["code"]
+        self.assertAlmostEqual(proto[0], proto[1], places=3)
 
     def test_prototypes_are_cached_but_invalidated_by_add(self):
         anchors = self.make_anchors()
@@ -407,7 +456,7 @@ class TestPrototypes(TempDirCase):
         anchors.add(cls="code", vector=vector(0, 1))
         second = anchors.prototypes()["code"]
         self.assertAlmostEqual(first[0], 1.0, places=3)
-        self.assertAlmostEqual(second[0], 0.5, places=3)
+        self.assertAlmostEqual(second[0], 0.7071, places=3)
 
     def test_prototypes_are_copies(self):
         anchors = self.make_anchors()
