@@ -101,6 +101,7 @@ agent/
 │   ├── test_tool_permissions.py # 状态权限表: 4 状态 × 每个工具, 禁止的组合真的被拒 (T4)
 │   ├── test_wallpaper.py        # 壁纸目录游标 / 三格窗口(prev/current/next) / next_wallpaper 工具与命令 (T3/T10-3)
 │   ├── test_netease_cli.py      # ssh 调 PC 的第三方 neteasecli: 命令行 / 信封 / 四类错误 (T8-2)
+│   ├── test_bilibili_api.py     # B 站唯一网络层: 搜索/详情/直链(单文件 vs DASH)/cookie/错误话术 (T11-1)
 │   ├── test_music_library.py    # 本地音乐库: 读写 / 合并 / 打标 / 挑选 (T8-3)
 │   ├── test_music_player.py     # 播放内核: 环形队列 / 30 秒计一次 / 曲终自动下一首 / 补歌两段式 (T8-4/T10-4)
 │   ├── test_label_spec.py       # 统一标签语法: 拆键 / 拆值 / 多轴 / 壁纸那边只用这一份 (T8-5b)

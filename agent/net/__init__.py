@@ -7,6 +7,8 @@
 #                       /serverinfo /applist /launch → app_version + sessionUrl0
 #      NeteaseCli       **在 PC 上**跑第三方 neteasecli（T8）:
 #                       ssh → `neteasecli --json …` → 解析 JSON（播放/进度/歌词/搜索）
+#      BilibiliApi      **板端直连** B 站公开接口（T11）:
+#                       search / view / playurl / nav（标准库 urllib，匿名 buvid3 引导）
 #
 #  为什么握手在这一层而不在 native: 47984 是 TLS + 客户端证书, 而 C++ 侧不想为它
 #  引入 OpenSSL。细节见 sunshine_client.py 的文件头。
@@ -14,6 +16,23 @@
 #  ⚠ 本包 import 时不联网、也不 import native; 只有真正调用方法才发请求/起进程。
 # ============================================================================
 
+from .bilibili_api import (
+    DEFAULT_COOKIE_FILE,
+    DEFAULT_TIMEOUT_S as BILIBILI_DEFAULT_TIMEOUT_S,
+    HOME_URL as BILIBILI_HOME_URL,
+    BilibiliApi,
+    BilibiliAuthError,
+    BilibiliError,
+    BilibiliNetworkError,
+    BilibiliNotFound,
+    BilibiliPayloadError,
+    BilibiliRiskError,
+    UrllibTransport as BilibiliTransport,
+    clean_title,
+    load_cookie_file,
+    parse_duration_text,
+    quality_label,
+)
 from .netease_cli import (
     DEFAULT_BINARY,
     DEFAULT_TIMEOUT_S,
@@ -66,6 +85,22 @@ __all__ = [
     "DEFAULT_BINARY",
     "DEFAULT_TIMEOUT_S",
     "ssh_available",
+    # B 站（T11: 板端直连公开接口, 标准库 urllib）
+    "BilibiliApi",
+    "BilibiliError",
+    "BilibiliNetworkError",
+    "BilibiliRiskError",
+    "BilibiliAuthError",
+    "BilibiliNotFound",
+    "BilibiliPayloadError",
+    "BilibiliTransport",
+    "DEFAULT_COOKIE_FILE",
+    "BILIBILI_DEFAULT_TIMEOUT_S",
+    "BILIBILI_HOME_URL",
+    "clean_title",
+    "parse_duration_text",
+    "quality_label",
+    "load_cookie_file",
     # 异常
     "SunshineError",
     "SunshineConfigError",
