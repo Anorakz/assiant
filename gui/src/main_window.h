@@ -31,6 +31,7 @@ class QVariantAnimation;
 class ChatPanel;
 class SchedulePanel;
 class BottomBar;
+class CoverLoader;
 class LocalClient;
 class MainPage;
 class ModePanel;
@@ -84,6 +85,10 @@ public:
 
     /// 验收辅助：点一下视频区的「下一集」
     void demoNextBilibili();
+    /// 验收辅助：点一下视频区的「上一集」
+    void demoPrevBilibili();
+    /// 验收辅助：点一下预览栏第 index 格（0 起）—— 走真实控件，不是直接发协议
+    void demoPickBilibili(int index);
     /// 验收辅助：触发视频区某个占位项的说明（上一集/全屏/倍速）
     void demoVideoNote(const QString& what);
     /// 验收辅助：切换内嵌控制条的播放/暂停
@@ -123,6 +128,9 @@ private:
     QVector<RegionHost*> regions() const;
 
     void onMessage(const QString& topic, const QJsonObject& data);
+    /// T11-7: 给 Agent 发一条命令（没连上就只记日志，不回对话区刷屏）。
+    /// @return 真的发出去了吗
+    bool sendToAgent(const QString& action, const QJsonObject& payload = QJsonObject());
     /// 把「Agent 链路 + 串流主机」合成一个三态结论刷到顶栏；状态变化时写日志。
     void refreshLinkState();
     /// 换壁纸：加载 → 交叉淡入 200ms；读不到就记错并在主区给灰字提示
@@ -168,5 +176,7 @@ private:
     QString repoRoot_;
     QTimer* monitorTimer_ = nullptr;
     QTimer* scheduleTimer_ = nullptr;    ///< 日程区的定时刷新（S5，60 秒）
+    /// T11-7：B 站封面的取图器（预览栏与下区域封面**共用**一份内存缓存）
+    CoverLoader* coverLoader_ = nullptr;
     TopBar::LinkState lastLinkState_ = TopBar::LinkState::Disconnected;
 };

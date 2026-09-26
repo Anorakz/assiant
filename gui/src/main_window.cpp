@@ -7,14 +7,18 @@
 // ============================================================================
 #include "main_window.h"
 
+#include "core/bilibili_format.h"
 #include "core/config_store.h"
 #include "core/idle_watcher.h"
 #include "core/image_fit.h"
 #include "core/schedule_model.h"
 #include "services/local_client.h"
 #include "services/onboard_ctl.h"
+#include "ui/bilibili_cover.h"
+#include "ui/bilibili_preview.h"
 #include "ui/bottom_bar.h"
 #include "ui/chat_panel.h"
+#include "ui/cover_loader.h"
 #include "ui/mode_panel.h"
 #include "ui/music_bar.h"
 #include "ui/pages.h"
@@ -197,6 +201,35 @@ QToolButton#VideoSpeed {
 }
 QToolButton#VideoSpeed:hover { background: rgba(40, 42, 47, 0.86); }
 QToolButton#VideoSpeed::menu-indicator { image: none; }
+/* T11-7：预览栏 + 地址栏 + 下区域封面 */
+QWidget#BilibiliPreview { background: transparent; }
+QLabel#BilibiliCaption { color: #9AA0A6; font-size: 14px; background: transparent; }
+QLineEdit#BilibiliAddress {
+    background: rgba(20, 21, 24, 0.72); border: 1px solid #3A3D42; border-radius: 6px;
+    color: #C9CED6; font-size: 14px; padding: 2px 8px;
+}
+QLineEdit#BilibiliAddress:read-only { color: #9AA0A6; }
+QLabel#BilibiliSource { color: #7AA2F7; font-size: 14px; background: transparent; }
+QLabel#BilibiliHint { color: #6F757C; font-size: 15px; background: transparent; padding-left: 4px; }
+QListWidget#BilibiliList {
+    background: transparent; border: none; outline: none;
+}
+QListWidget#BilibiliList::item {
+    background: rgba(20, 21, 24, 0.62); border: 1px solid #33363B; border-radius: 8px;
+    color: #C9CED6; font-size: 12px; padding: 2px;
+}
+QListWidget#BilibiliList::item:selected {
+    border: 1px solid #7AA2F7; background: rgba(122, 162, 247, 0.18); color: #E6E6E6;
+}
+QWidget#BilibiliCover { background: transparent; }
+QLabel#BilibiliCoverImage {
+    background: rgba(20, 21, 24, 0.62); border: 1px solid #33363B; border-radius: 8px;
+    color: #6F757C; font-size: 15px;
+}
+QLabel#BilibiliCoverTitle { color: #E6E6E6; font-size: 19px; font-weight: bold; background: transparent; }
+QLabel#BilibiliCoverMeta { color: #9AA0A6; font-size: 15px; background: transparent; }
+QLabel#BilibiliCoverPosition { color: #9AA0A6; font-size: 14px; background: transparent; }
+QLabel#BilibiliCoverSource { color: #7AA2F7; font-size: 14px; background: transparent; }
 /* 内嵌控制条：**没有整条背景**，只有一个半透明胶囊（验收：不要实体化） */
 QWidget#VideoOverlay { background: transparent; }
 QWidget#VideoPill {
@@ -303,6 +336,8 @@ MainWindow::MainWindow(QWidget* parent)
             [this](const QJsonObject& d) { onMessage(QStringLiteral("wallpaper"), d); });
     connect(client_, &LocalClient::musicReceived, this,
             [this](const QJsonObject& d) { onMessage(QStringLiteral("music"), d); });
+    connect(client_, &LocalClient::bilibiliReceived, this,
+            [this](const QJsonObject& d) { onMessage(QStringLiteral("bilibili"), d); });
 
     // ---- T5：主页面右区域的交互接线 ----
     if (mainPage_ != nullptr && mainPage_->modePanel() != nullptr) {
@@ -355,6 +390,55 @@ MainWindow::MainWindow(QWidget* parent)
         // T9：全屏按钮 → 画面铺满整个屏幕（隐藏四区域面板）
         connect(mainPage_->videoPanel(), &VideoPanel::fullscreenToggled, this,
                 [this](bool on) { setVideoFullscreen(on); });
+    }
+
+    // ---- T11-7：B 站那几条线（预览栏 / 上一集 / 进度回报 / 格数上报）----
+    //  取图器一份，预览栏与下区域封面**共用**（同一张封面只下一次）。
+    coverLoader_ = new CoverLoader(this);
+    if (mainPage_ != nullptr) {
+        if (mainPage_->videoPanel() != nullptr) {
+            mainPage_->videoPanel()->setCoverLoader(coverLoader_);
+        }
+        if (mainPage_->bottomBar() != nullptr && mainPage_->bottomBar()->bilibiliCover() != nullptr) {
+            mainPage_->bottomBar()->bilibiliCover()->setCoverLoader(coverLoader_);
+        }
+    }
+    if (mainPage_ != nullptr && mainPage_->videoPanel() != nullptr) {
+        VideoPanel* video = mainPage_->videoPanel();
+        // 「上一集」→ prev_bilibili（T11-7 从占位转正）
+        connect(video, &VideoPanel::prevBilibiliRequested, this, [this]() {
+            if (client_ == nullptr || !agentUp_) {
+                if (mainPage_->chatPanel() != nullptr) {
+                    mainPage_->chatPanel()->appendSystem(
+                        QStringLiteral("没发出去：与 Agent 未连接"));
+                }
+                return;
+            }
+            client_->sendCommand(QStringLiteral("prev_bilibili"), QJsonObject());
+        });
+        // 点预览图第 index 格 → bilibili_pick{index}（**只有用户点才会播**）
+        connect(video, &VideoPanel::pickBilibiliRequested, this, [this](int index) {
+            if (client_ == nullptr || !agentUp_) {
+                if (mainPage_->chatPanel() != nullptr) {
+                    mainPage_->chatPanel()->appendSystem(
+                        QStringLiteral("没发出去：与 Agent 未连接"));
+                }
+                return;
+            }
+            client_->sendCommand(QStringLiteral("bilibili_pick"),
+                                 QJsonObject{{QStringLiteral("index"), index}});
+        });
+        // 预览栏格数变了 → bilibili_viewport{visible}（Agent 用它定队列目标 = 3N）
+        connect(video, &VideoPanel::viewportChanged, this, [this](int visible) {
+            sendToAgent(QStringLiteral("bilibili_viewport"),
+                        QJsonObject{{QStringLiteral("visible"), visible}});
+        });
+        // 真实进度回报（不进 LLM：这是 Agent 自己要看的事实）
+        connect(video, &VideoPanel::videoStateReported, this,
+                [this](qint64 positionMs, qint64 durationMs, bool playing, bool eof) {
+                    sendToAgent(QStringLiteral("video_state"),
+                                bilibili::videoStatePayload(positionMs, durationMs, playing, eof));
+                });
     }
 
     // T9：内嵌控制条的 活动/锁定 —— **自己的 watcher、自己的 idle_ms**，
@@ -505,6 +589,26 @@ void MainWindow::demoNextBilibili()
     if (mainPage_ != nullptr && mainPage_->videoPanel() != nullptr
         && mainPage_->videoPanel()->nextButton() != nullptr) {
         mainPage_->videoPanel()->nextButton()->click();
+    }
+}
+
+void MainWindow::demoPrevBilibili()
+{
+    if (mainPage_ != nullptr && mainPage_->videoPanel() != nullptr
+        && mainPage_->videoPanel()->previousButton() != nullptr) {
+        mainPage_->videoPanel()->previousButton()->click();
+    }
+}
+
+void MainWindow::demoPickBilibili(int index)
+{
+    // 走**真实控件**那条路（`activateItem` 就是真点击调用的同一个入口）
+    if (mainPage_ == nullptr || mainPage_->videoPanel() == nullptr) {
+        return;
+    }
+    BilibiliPreview* preview = mainPage_->videoPanel()->preview();
+    if (preview != nullptr) {
+        preview->activateItem(index);
     }
 }
 
@@ -719,9 +823,20 @@ void MainWindow::demoSend(const QString& text)
     }
 }
 
-void MainWindow::onMessage(const QString& topic, const QJsonObject& data)
+bool MainWindow::sendToAgent(const QString& action, const QJsonObject& payload)
 {
-    const QString raw = QString::fromUtf8(QJsonDocument(data).toJson(QJsonDocument::Compact));
+    if (client_ == nullptr || !agentUp_) {
+        // ⚠ 这类是**自动回报**（进度/格数），断了就断在这里，**不往对话区刷屏**
+        //   —— 用户没点什么，却每 2 秒冒一句"没发出去"会更糟。
+        qDebug().noquote() << QStringLiteral("[bilibili] 与 Agent 未连接，这条不发: %1").arg(action);
+        return false;
+    }
+    client_->sendCommand(action, payload);
+    return true;
+}
+
+void MainWindow::onMessage(const QString& topic, const QJsonObject& data)
+{    const QString raw = QString::fromUtf8(QJsonDocument(data).toJson(QJsonDocument::Compact));
     view_.applyMessage(topic, data, raw);
     if (debug_) {
         // debug 只影响日志详细程度（验收要求：不要把 agent/主机细节塞在界面上）
@@ -744,6 +859,17 @@ void MainWindow::onMessage(const QString& topic, const QJsonObject& data)
         if (topic == QLatin1String("music") && mainPage_->bottomBar() != nullptr
             && mainPage_->bottomBar()->musicBar() != nullptr) {
             mainPage_->bottomBar()->musicBar()->setMusic(view_.musicTitle(), view_.musicPlaying());
+        }
+        // T11-7：B 站队列 —— 预览栏 + 地址栏 + 下区域封面，**同一份载荷**喂两处；
+        //   `stream` 由视频区自己决定换不换源（板端是 FIFO 路径，不是 URL）。
+        if (topic == QLatin1String("bilibili")) {
+            if (mainPage_->videoPanel() != nullptr) {
+                mainPage_->videoPanel()->setBilibili(data);
+            }
+            if (mainPage_->bottomBar() != nullptr
+                && mainPage_->bottomBar()->bilibiliCover() != nullptr) {
+                mainPage_->bottomBar()->bilibiliCover()->setData(data);
+            }
         }
         if (topic == QLatin1String("llm") && mainPage_->chatPanel() != nullptr) {
             mainPage_->chatPanel()->setThinking(false);   // 回复到了，收起"思考中…"

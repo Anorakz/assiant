@@ -37,6 +37,7 @@ const char kTopicStatus[]    = "status";
 const char kTopicLlm[]       = "llm";
 const char kTopicWallpaper[] = "wallpaper";
 const char kTopicMusic[]     = "music";
+const char kTopicBilibili[]  = "bilibili";   // T11-7: B 站队列/当前条/缓冲状态
 
 //: 断线后固定 1 秒重连 (按任务约定: 不做指数退避)
 constexpr int kReconnectDelayMs = 1000;
@@ -244,6 +245,8 @@ void LocalClient::processLine(const QByteArray& line)
         emit wallpaperReceived(data);
     } else if (topic == QLatin1String(kTopicMusic)) {
         emit musicReceived(data);
+    } else if (topic == QLatin1String(kTopicBilibili)) {
+        emit bilibiliReceived(data);
     } else {
         // 协议 §6: 不认识的 topic 是"忽略", 不是错误 —— 可能对端版本更新了
         qDebug().noquote() << "[ipc] 忽略未知 topic:" << topic;

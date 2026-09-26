@@ -7,7 +7,7 @@
 //  (/tmp/agent.sock), 把字节流按 '\n' 切成一行行 NDJSON:
 //
 //      · 收: 解析信封 {"topic": str, "data": object, "timestamp": number},
-//            按 topic 发出对应 Qt 信号 (status / llm / wallpaper / music)
+//            按 topic 发出对应 Qt 信号 (status / llm / wallpaper / music / bilibili)
 //      · 发: sendCommand() 写一行 {"action": str, "payload": object}\n
 //      · 断线后固定 1 秒自动重连 (stop() 之后不再重连)
 //
@@ -78,6 +78,10 @@ signals:
     void llmReceived(QJsonObject data);
     void wallpaperReceived(QJsonObject data);
     void musicReceived(QJsonObject data);
+    /// T11-7: B 站队列（载荷是 `{queue[], index, current, stream, …}`，
+    /// 字段表见 docs/ipc-protocol.md §3）。负载里带数组，所以不像其它 topic
+    /// 那样进 ViewState，而由视频区/封面区直接消化。
+    void bilibiliReceived(QJsonObject data);
 
     /// 与 Agent 的连接状态发生变化（只报变化，不重复报）。T4 起给顶栏用。
     void connectionChanged(bool connected);
@@ -95,7 +99,6 @@ private:
 
     /// 把 sock_ 的信号接到本对象上 (start()/重连会重复使用同一个 socket 对象)
     void wireSocket();
-
     /// 断开信号 -> abort -> 释放 socket。先断信号是为了让 abort() 不触发重连。
     void teardownSocket();
 

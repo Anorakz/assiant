@@ -80,6 +80,8 @@ struct Options {
     bool inputMenuDemo = false;    ///< 启动后展开输入源菜单（配合 scrot 抓图）
     QString musicNoteDemo;         ///< 非空 = 启动后触发音乐条某个占位说明（验收用）
     bool nextBilibiliDemo = false;  ///< 启动后点一下视频区"下一集"（验收用）
+    bool prevBilibiliDemo = false;  ///< 启动后点一下视频区"上一集"（验收用）
+    int bilibiliPickDemo = -1;      ///< >=0 时点一下预览栏第 N 格（验收用）
     bool videoPlayDemo = false;     ///< 启动后切一次播放/暂停（验收用）
     bool videoFullscreenDemo = false; ///< 启动后切一次全屏（验收用）
     bool watchdogDemo = false;      ///< 启动后点一下看门狗（验收用）
@@ -117,6 +119,8 @@ void printUsage()
         "  --music-note-demo <歌词|歌手|专辑|进度>  触发音乐条占位说明（验收用）\n"
         "  --video <文件>       主区视频源（本地文件；验收用）\n"
         "  --next-bilibili-demo 启动后点一下视频区「下一集」（验收用）\n"
+        "  --prev-bilibili-demo 启动后点一下视频区「上一集」（验收用）\n"
+        "  --bilibili-pick-demo <n>  启动后点一下预览栏第 n 格（0 起，验收用）\n"
         "  --video-play-demo    启动后切一次播放/暂停（验收用）\n"
         "  --video-fullscreen-demo 启动后切一次全屏（覆盖整屏，验收用）\n"
         "  --watchdog-demo     启动后点一下看门狗（验收用）\n"
@@ -193,6 +197,19 @@ Options parseArgs(int argc, char** argv)
             opt.videoFile = optionValue(arg, QStringLiteral("--video"), i, argc, argv, opt);
         } else if (arg == QLatin1String("--next-bilibili-demo")) {
             opt.nextBilibiliDemo = true;
+        } else if (arg == QLatin1String("--prev-bilibili-demo")) {
+            opt.prevBilibiliDemo = true;
+        } else if (arg == QLatin1String("--bilibili-pick-demo")
+                   || arg.startsWith(QLatin1String("--bilibili-pick-demo="))) {
+            const QString value =
+                optionValue(arg, QStringLiteral("--bilibili-pick-demo"), i, argc, argv, opt);
+            bool ok = false;
+            const int index = value.toInt(&ok);
+            if (!ok || index < 0) {
+                opt.error = QStringLiteral("--bilibili-pick-demo 需要一个 >=0 的整数");
+            } else {
+                opt.bilibiliPickDemo = index;
+            }
         } else if (arg == QLatin1String("--video-play-demo")) {
             opt.videoPlayDemo = true;
         } else if (arg == QLatin1String("--video-fullscreen-demo")) {
@@ -544,6 +561,14 @@ int runGuiMode(const Options& opt, int argc, char** argv)
     }
     if (opt.nextBilibiliDemo) {
         QTimer::singleShot(2500, &window, [&window]() { window.demoNextBilibili(); });
+    }
+    if (opt.prevBilibiliDemo) {
+        QTimer::singleShot(2500, &window, [&window]() { window.demoPrevBilibili(); });
+    }
+    if (opt.bilibiliPickDemo >= 0) {
+        const int index = opt.bilibiliPickDemo;
+        // 比"下一集"晚一点：预览栏要先收到队列才会有点得着的格子
+        QTimer::singleShot(3000, &window, [&window, index]() { window.demoPickBilibili(index); });
     }
     if (!opt.videoNoteDemo.isEmpty()) {
         const QString what = opt.videoNoteDemo;

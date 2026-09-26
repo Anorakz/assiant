@@ -64,6 +64,8 @@ add_library(gui_services STATIC
     src/core/config_sync.cpp
     src/core/view_state.h
     src/core/view_state.cpp
+    src/core/bilibili_format.h
+    src/core/bilibili_format.cpp
     src/core/idle_watcher.h
     src/core/idle_watcher.cpp
     src/core/lyrics.h
@@ -100,6 +102,12 @@ add_library(gui_widgets STATIC
     src/ui/bottom_bar.cpp
     src/ui/video_panel.h
     src/ui/video_panel.cpp
+    src/ui/bilibili_preview.h
+    src/ui/bilibili_preview.cpp
+    src/ui/bilibili_cover.h
+    src/ui/bilibili_cover.cpp
+    src/ui/cover_loader.h
+    src/ui/cover_loader.cpp
     src/ui/sys_page.h
     src/ui/sys_page.cpp
     src/ui/model_page.h

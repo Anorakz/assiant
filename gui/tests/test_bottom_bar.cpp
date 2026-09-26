@@ -3,13 +3,16 @@
 //
 //  覆盖：music 数据 → 曲目名与播放徽标；占位块点击 → 说明文案 + 信号；
 //        GAME ↔ 非游戏 的页面互斥切换；歌词接口的占位实现。
+//        T11-7：封面页从"未接入"占位换成真控件（BilibiliCover）后的那几条。
 // ============================================================================
+#include <QJsonObject>
 #include <QLabel>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QtTest/QtTest>
 
 #include "core/lyrics.h"
+#include "ui/bilibili_cover.h"
 #include "ui/bottom_bar.h"
 #include "ui/music_bar.h"
 
@@ -23,6 +26,9 @@ private slots:
     void placeholderClickShowsNote();
     void gameModeSwitchesToCoverPage();
     void nullLyricsProviderIsUnavailable();
+    void coverPageIsTheRealWidgetAndSaysWhereItComesFrom();
+    void coverTitleIsElidedInsteadOfStretchingTheLayout();
+    void coverPageFallsBackToAPlaceholderWithoutACurrentItem();
 };
 
 void TestBottomBar::musicUpdatesTitleAndState()
@@ -140,6 +146,111 @@ void TestBottomBar::nullLyricsProviderIsUnavailable()
     core::NullLyricsProvider provider;
     QVERIFY(!provider.available());
     QVERIFY(provider.currentLine().isEmpty());
+}
+
+void TestBottomBar::coverPageIsTheRealWidgetAndSaysWhereItComesFrom()
+{
+    BottomBar bar;
+    QVERIFY(bar.bilibiliCover() != nullptr);
+    QCOMPARE(bar.coverPage(), static_cast<QWidget*>(bar.bilibiliCover()));   // 老名字还是同一个控件
+    QVERIFY(!bar.bilibiliCover()->hasVideo());                              // 还没收到队列
+    // 让布局真的摆一遍：先切到封面页（QStackedLayout 只给当前页排版），
+    // 标题是按**实际宽度**截断的（见下面那条"不许撑开版面"）
+    bar.setMode(QStringLiteral("GAME"));
+    bar.resize(900, 190);
+    bar.show();
+    QTest::qWait(20);
+
+    QJsonObject current;
+    current.insert(QStringLiteral("bvid"), QStringLiteral("BV1xx411c7mD"));
+    current.insert(QStringLiteral("title"), QStringLiteral("Luna say maybe"));
+    current.insert(QStringLiteral("author"), QStringLiteral("某 UP"));
+    current.insert(QStringLiteral("duration_s"), 184);
+    current.insert(QStringLiteral("play"), 1289221);
+
+    QJsonObject data;
+    data.insert(QStringLiteral("current"), current);
+    data.insert(QStringLiteral("index"), 2);
+    data.insert(QStringLiteral("count"), 18);
+    data.insert(QStringLiteral("target"), 18);
+    data.insert(QStringLiteral("keyword"), QStringLiteral("luna say maybe"));
+    data.insert(QStringLiteral("source"), QStringLiteral("dialogue"));
+    bar.bilibiliCover()->setData(data);
+    QTest::qWait(20);
+
+    QVERIFY(bar.bilibiliCover()->hasVideo());
+    QCOMPARE(bar.bilibiliCover()->currentBvid(), QStringLiteral("BV1xx411c7mD"));
+    QCOMPARE(bar.bilibiliCover()->titleLabel()->text(), QStringLiteral("Luna say maybe"));
+    QCOMPARE(bar.bilibiliCover()->titleLabel()->toolTip(), QStringLiteral("Luna say maybe"));
+    QVERIFY(bar.bilibiliCover()->metaLabel()->text().contains(QStringLiteral("某 UP")));
+    QVERIFY(bar.bilibiliCover()->metaLabel()->text().contains(QStringLiteral("128.9万")));
+    QVERIFY(bar.bilibiliCover()->positionLabel()->text().contains(QStringLiteral("第 3 / 18 条")));
+    QCOMPARE(bar.bilibiliCover()->sourceLabel()->text(), QStringLiteral("你说的：luna say maybe"));
+
+    // 画面认出来的游戏：来源那一行说清是画面，不是用户说的
+    QJsonObject screen = data;
+    screen.insert(QStringLiteral("keyword"), QStringLiteral("white album"));
+    screen.insert(QStringLiteral("source"), QStringLiteral("screen"));
+    bar.bilibiliCover()->setData(screen);
+    QCOMPARE(bar.bilibiliCover()->sourceLabel()->text(), QStringLiteral("画面认出：white album"));
+
+    // ⚠ 清晰度**不进这一层**（你定的：只走聊天气泡）
+    QJsonObject withQuality = data;
+    withQuality.insert(QStringLiteral("quality"), QStringLiteral("360P"));
+    bar.bilibiliCover()->setData(withQuality);
+    const QStringList texts = {bar.bilibiliCover()->titleLabel()->text(),
+                               bar.bilibiliCover()->metaLabel()->text(),
+                               bar.bilibiliCover()->positionLabel()->text(),
+                               bar.bilibiliCover()->sourceLabel()->text()};
+    for (const QString& text : texts) {
+        QVERIFY2(!text.contains(QStringLiteral("360P")), qPrintable(text));
+    }
+}
+
+void TestBottomBar::coverTitleIsElidedInsteadOfStretchingTheLayout()
+{
+    // 板端实测的坑：B 站标题一行能到 1280+ 像素，QLabel 会**按文字要宽度** →
+    // 整个主区被推宽、地址栏与预览栏一起被挤出屏幕。现在一律按宽度截断（tooltip 给全文）。
+    BottomBar bar;
+    bar.setMode(QStringLiteral("GAME"));       // 封面页要是当前页，标签才拿得到宽度
+    bar.resize(520, 190);
+    bar.show();
+    QTest::qWait(20);
+
+    const QString longTitle = QStringLiteral("初星学園「Luna say maybe」Official Music Video ")
+                              + QString(120, QLatin1Char('长'));
+    QJsonObject current;
+    current.insert(QStringLiteral("bvid"), QStringLiteral("BV1xx411c7mD"));
+    current.insert(QStringLiteral("title"), longTitle);
+    QJsonObject data;
+    data.insert(QStringLiteral("current"), current);
+    data.insert(QStringLiteral("index"), 0);
+    data.insert(QStringLiteral("count"), 18);
+    bar.bilibiliCover()->setData(data);
+    QTest::qWait(20);
+
+    const QString shown = bar.bilibiliCover()->titleLabel()->text();
+    QVERIFY2(shown.size() < longTitle.size(), "长标题必须被截断，不能整条塞进去");
+    QVERIFY2(shown.endsWith(QStringLiteral("\u2026")), qPrintable(shown.right(8)));
+    QCOMPARE(bar.bilibiliCover()->titleLabel()->toolTip(), longTitle);   // 全文在 tooltip 里
+}
+
+void TestBottomBar::coverPageFallsBackToAPlaceholderWithoutACurrentItem()
+{
+    BottomBar bar;
+    bar.setMode(QStringLiteral("GAME"));
+    bar.resize(900, 190);
+    bar.show();
+    QTest::qWait(20);
+
+    QJsonObject data;                       // 队列空 / 没接上 Agent
+    bar.bilibiliCover()->setData(data);
+
+    QVERIFY(!bar.bilibiliCover()->hasVideo());
+    QVERIFY(bar.bilibiliCover()->titleLabel()->toolTip().contains(QStringLiteral("未接入")));
+    QVERIFY(!bar.bilibiliCover()->titleLabel()->text().isEmpty());
+    QVERIFY(bar.bilibiliCover()->metaLabel()->text().isEmpty());
+    QVERIFY(bar.bilibiliCover()->positionLabel()->text().isEmpty());
 }
 
 QTEST_MAIN(TestBottomBar)

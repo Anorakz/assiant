@@ -3,13 +3,14 @@
 //
 //  方案 §3.3：同一位置**二选一**（互斥）：
 //      非游戏模式 → 音乐条（MusicBar）
-//      游戏模式   → B站视频封面缩略图（T9 填充，现在只有"未接入"占位页）
+//      游戏模式   → B 站封面/标题（T9 留的占位，**T11-7 填成真东西**）
 // ============================================================================
 #pragma once
 
 #include <QString>
 #include <QWidget>
 
+class BilibiliCover;
 class MusicBar;
 class QStackedWidget;
 
@@ -26,11 +27,13 @@ public:
     QString pageName() const;
 
     MusicBar* musicBar() const { return music_; }
-    /// T9 会往这个页面里塞真正的封面缩略图
-    QWidget* coverPage() const { return cover_; }
+    /// 封面页本体（T11-7：封面/标题/作者/第几条/队列来源）
+    BilibiliCover* bilibiliCover() const { return cover_; }
+    /// 兼容老名字：同一个控件（返回 QWidget*）
+    QWidget* coverPage() const;
 
 private:
     QStackedWidget* stack_ = nullptr;
     MusicBar* music_ = nullptr;
-    QWidget* cover_ = nullptr;
+    BilibiliCover* cover_ = nullptr;
 };

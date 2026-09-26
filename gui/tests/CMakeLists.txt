@@ -39,7 +39,7 @@ add_test(NAME test_local_client COMMAND test_local_client)
 # --------------------------------------------------- T2: core 层单测 ---
 # 配置读写（文本级键路径替换）/ 配置同步（config.yaml → 派生的 llm.env）/
 # 协议→显示状态。都不需要 Widgets，也不碰仓库里的真实配置文件。
-foreach(core_test test_config_store test_config_sync test_view_state test_idle_watcher test_onboard_ctl test_image_fit test_system_stats test_schedule_model)
+foreach(core_test test_config_store test_config_sync test_view_state test_idle_watcher test_onboard_ctl test_image_fit test_system_stats test_schedule_model test_bilibili_format)
     add_executable(${core_test} ${core_test}.cpp)
     target_link_libraries(${core_test} PRIVATE
         gui_services        # ConfigStore / ConfigSyncer / ViewState
@@ -63,7 +63,7 @@ target_compile_definitions(test_schedule_model PRIVATE
 # ------------------------------------------------- T5/T7: 控件级测试 ---
 # 真的点控件（输入框 / 发送按钮 / 模式按钮 / 音乐条占位块），所以需要
 # QApplication + Widgets，跑的时候用 offscreen 平台插件。
-foreach(gui_test test_main_page test_bottom_bar test_video_panel test_sys_page test_model_page test_bench_runner test_settings_page test_schedule_panel test_icons)
+foreach(gui_test test_main_page test_bottom_bar test_video_panel test_bilibili_preview test_cover_loader test_sys_page test_model_page test_bench_runner test_settings_page test_schedule_panel test_icons)
     add_executable(${gui_test} ${gui_test}.cpp)
     # 控件测试里用到图标（VideoPanel/MusicBar）→ 把资源一起编进来
     target_sources(${gui_test} PRIVATE ../resources/icons.qrc)

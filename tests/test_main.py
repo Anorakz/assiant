@@ -938,6 +938,9 @@ class TestBilibiliWiring(unittest.IsolatedAsyncioTestCase):
             self.source = ""
             self.current_item = {"bvid": "BV1", "title": "标题"}
             self.index = 0
+            #: T11-7: GUI 预览栏靠 `bilibili_state()["queue"]` 渲染 —— 假的也要有
+            self.items = [{"bvid": "BV1", "title": "标题"},
+                          {"bvid": "BV2", "title": "第二条"}]
 
         def target(self):
             return 18
@@ -1036,6 +1039,15 @@ class TestBilibiliWiring(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_action_is_rejected(self):
         rt = self._runtime()
         self.assertFalse(rt.bilibili_control("dance")["ok"])
+
+    async def test_state_carries_the_queue_the_preview_bar_renders(self):
+        """⚠ T11-7 补的漏项: 载荷里**必须有 `queue`**, 否则 GUI 预览栏是空的。"""
+        rt = self._runtime()
+        state = rt.bilibili_state()
+        self.assertTrue(state["ok"])
+        self.assertEqual([item["bvid"] for item in state["queue"]], ["BV1", "BV2"])
+        self.assertEqual(state["current"]["bvid"], "BV1")
+        self.assertEqual(state["index"], 0)
 
     async def test_without_bilibili_the_commands_say_why(self):
         rt = make_runtime()

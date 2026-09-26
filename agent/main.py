@@ -1661,10 +1661,16 @@ class Runtime:
 
     # ---- B 站视频（T11-6: 队列 / 观察器 / 缓冲; GUI 命令与工具都走这里）----
     def bilibili_state(self) -> Dict[str, Any]:
-        """队列 + 当前那条 + 缓冲现状（**只读**, 给工具/日志/GUI 用）。"""
+        """队列 + 当前那条 + 缓冲现状（**只读**, 给工具/日志/GUI 用）。
+
+        @note ⚠ T11-7 补的一个**真缺口**: T11-6 起这里只带 `current`, **没带 `queue`** ——
+              于是 GUI 的预览栏**一条都画不出来**（协议文档 §3 的表里 `queue` 一直是有的,
+              是实现的漏项）。现在把窗口里的每一条都放进去。
+        """
         if self.bilibili is None:
             return {"ok": False, "error": "B 站视频没开（config.yaml 的 bilibili.enabled）"}
         out = dict(self.bilibili.state())
+        out["queue"] = self.bilibili.items        # 预览栏要的那一串（窗口 = 3×格数）
         out["ok"] = True
         out["stream"] = self._bilibili_stream
         out["quality"] = self._bilibili_quality
