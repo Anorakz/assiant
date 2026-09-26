@@ -79,6 +79,9 @@ PROMPTS = {
 
 CLASSES = ["code", "doc", "real", "anime", "game"]
 
+#: 提示词摊平（**一次调完**用的; 见 `text_scores` 的 ⚠）。
+FLAT_PROMPTS = [(name, text) for name in CLASSES for text in PROMPTS[name]]
+
 
 # ---------------------------------------------------------------------------
 #  管线: 直接用生产里那一份（`agent/vision/frame_pipeline.py`）
@@ -148,6 +151,65 @@ def confusion(true_labels, pred_labels, labels):
     return table, (right / float(total) if total else 0.0)
 
 
+def category_prototype_holdout(vectors, labels):
+    """M5: **大类原型 + 相对分** —— 直接回答"像不像学习"这个问题。
+
+    为什么要它: 生产口径的 `category_score` 是"大类里最像的**那一条锚点**"的绝对余弦,
+    而 UI 截图之间本来就长得像 —— 实测所有帧的绝对余弦挤在 0.72–0.98, 于是 study 与
+    not_study 的分布**重叠**, 单一绝对阈值会把 **69%** 的帧判成"判不出来"（h1 实测）。
+    这里换成"大类原型 + 相对分"再看一遍:
+      · 大类原型 = 留一之后该类所有锚点的**单位向量平均方向**（与 `match(method="prototype")` 同一件事）;
+      · 相对分 = `cos(帧, study 原型) - cos(帧, not_study 原型)` —— 只看"更像哪边"。
+
+    @return [(预测大类, study 余弦, not_study 余弦, 相对分), ...]
+    """
+    from agent.core.study_anchors import _dot, _unit
+
+    units = [_unit(list(vector)) for vector in vectors]
+    categories = [CATEGORY_OF[name] for name in labels]
+    out = []
+    for held in range(len(units)):
+        prototypes = {}
+        for category in ("study", "not_study"):
+            members = [units[index] for index in range(len(units))
+                       if index != held and categories[index] == category]
+            if not members:
+                prototypes[category] = None
+                continue
+            width = len(members[0])
+            mean = [0.0] * width
+            for member in members:
+                for axis, value in enumerate(member):
+                    mean[axis] += value
+            prototypes[category] = _unit([value / len(members) for value in mean])
+        if prototypes.get("study") is None or prototypes.get("not_study") is None:
+            out.append(("", 0.0, 0.0, 0.0))
+            continue
+        study = _dot(units[held], prototypes["study"])
+        not_study = _dot(units[held], prototypes["not_study"])
+        relative = study - not_study
+        out.append(("study" if relative > 0 else "not_study", study, not_study, relative))
+    return out
+
+
+def relative_sweep(true_cats, rel_rows, bands=(0.0, 0.01, 0.02, 0.05, 0.10)):
+    """相对分 + 一条"没把握带"（|相对分| < band -> 判不出来）的取舍表。"""
+    out = []
+    for band in bands:
+        decided = []
+        for (_guess, _s, _n, relative), truth in zip(rel_rows, true_cats):
+            if abs(relative) < band:
+                decided.append("")
+            else:
+                decided.append("study" if relative > 0 else "not_study")
+        errors = two_class_errors(true_cats, decided)
+        right = sum(1 for truth, guess in zip(true_cats, decided) if truth == guess)
+        errors["band"] = band
+        errors["accuracy"] = right / float(len(true_cats)) if true_cats else 0.0
+        out.append(errors)
+    return out
+
+
 def print_matrix(table, labels, indent="    "):
     short = {name: name[:4] for name in labels}
     header = indent + "%-8s" % "真\\预测" + "".join("%7s" % short[name] for name in labels)
@@ -192,11 +254,16 @@ def clamp(value, low, high):
 #  方法
 # ---------------------------------------------------------------------------
 def text_scores(model, frame):
-    """M1: 每个子标签取"它那几条提示词里的最高分"。"""
-    out = {}
-    for name in CLASSES:
-        scores = model.similarities(frame, PROMPTS[name])
-        out[name] = max(float(s) for s in scores)
+    """M1: 每个子标签取"它那几条提示词里的最高分"。
+
+    ⚠ **一次把 21 条提示词算完**, 别按类别分 5 次调 `model.similarities()` ——
+      它每次都会重新 `encode_image()`: 39 张 × 5 次 = 195 次重复编码,
+      h1 实测 **356 s**; 一次调完只要 39 次 ≈ 70 s。分数完全一样（同一批文本向量）。
+    """
+    flat = model.similarities(frame, [text for _name, text in FLAT_PROMPTS])
+    out = {name: -1.0 for name in CLASSES}
+    for (name, _text), score in zip(FLAT_PROMPTS, flat):
+        out[name] = max(out[name], float(score))
     return out
 
 
@@ -421,6 +488,17 @@ def main():
         m4_cat = [cat if cat else truth for cat, truth in zip(anchor_cat, true_cats)]
         m4_err = two_class_errors(true_cats, m4_cat)
 
+        # M5 = 大类原型 + 相对分（直接回答"像不像学习"）
+        rel_rows = category_prototype_holdout(vectors, labels)
+        rel_pred = [row[0] for row in rel_rows]
+        rel_table, rel_acc = confusion(true_cats, rel_pred, ["study", "not_study"])
+        rel_errors = two_class_errors(true_cats, rel_pred)
+        rel_study = [row[3] for row, name in zip(rel_rows, labels)
+                     if CATEGORY_OF[name] == "study"]
+        rel_not = [row[3] for row, name in zip(rel_rows, labels)
+                   if CATEGORY_OF[name] == "not_study"]
+        sweep = relative_sweep(true_cats, rel_rows)
+
         print("\n   -- M1 文本提示词（零样本）: 5 类 %.0f%% / 2 类 %.0f%%（编码 %.1f s）"
               % (text_acc * 100, (1 - text_err["nag_rate"] - text_err["miss_rate"]
                                   - text_err["unknown_rate"]) * 100, text_s))
@@ -443,6 +521,26 @@ def main():
         print("\n   -- M4 图像锚点 + 进程名: **截图数据集上测不了**（数据集里没有「当时 PC 上跑着什么」）;")
         print("      上界（假设进程名总是对且总是有）: 误打扰 %d / 监督失效 %d / 判不出 0"
               % (m4_err["nag"], m4_err["miss"]))
+
+        print("\n   -- M5 大类原型 + 相对分（这才是「像不像学习」的直接打法）: 2 类 %.0f%%"
+              % (rel_acc * 100))
+        print_matrix(rel_table, ["study", "not_study"])
+        print("      两个方向: 误打扰 %d / 监督失效 %d" % (rel_errors["nag"], rel_errors["miss"]))
+        if rel_study and rel_not:
+            print("      相对分分布: study 最小 %.3f / 中位 %.3f / 最大 %.3f"
+                  % (min(rel_study), statistics.median(rel_study), max(rel_study)))
+            print("                  not_study 最小 %.3f / 中位 %.3f / 最大 %.3f"
+                  % (min(rel_not), statistics.median(rel_not), max(rel_not)))
+            separable = min(rel_study) > max(rel_not)
+            print("      两个大类在相对分上%s（study 的最小 %.3f vs not_study 的最大 %.3f）"
+                  % ("**分得开**" if separable else "**仍有重叠**",
+                     min(rel_study), max(rel_not)))
+        print("      没把握带（|相对分| < band 就判不出来）的取舍:")
+        print("        %-8s %-10s %-10s %-10s %-10s" % ("band", "准确率", "误打扰", "监督失效", "判不出"))
+        for row in sweep:
+            print("        %-8.2f %-10s %-10d %-10d %-10d（%.0f%%）"
+                  % (row["band"], "%.0f%%" % (row["accuracy"] * 100), row["nag"], row["miss"],
+                     row["unknown"], row["unknown_rate"] * 100))
 
         # 分数分布 -> 起始阈值
         study_scores = [row[1] for row, label in zip(anchor_holdout, labels)
@@ -482,6 +580,10 @@ def main():
             "m2_prototype": {"acc5": round(proto_acc, 4)},
             "m3_fusion": {"acc5": round(fuse_acc, 4), "errors": fuse_err},
             "m4_upper_bound": m4_err,
+            "m5_relative": {"acc2": round(rel_acc, 4), "errors": rel_errors,
+                            "study_relative": [round(v, 4) for v in rel_study],
+                            "not_study_relative": [round(v, 4) for v in rel_not],
+                            "bands": sweep},
             "scores": {"study": study_scores, "not_study": not_scores,
                        "study_margin": study_margins, "not_margin": not_margins},
             "suggested": {"confident_score": suggest_score,
@@ -496,13 +598,15 @@ def main():
     if args.all and len(hypotheses) > 1:
         print("\n" + "=" * 74)
         print("== 四种管线对照（2 类准确率 = 1 - 误打扰率 - 监督失效率 - 判不出率）")
-        print("   %-6s %-12s %-12s %-12s %-12s" % ("管线", "M1 文本", "M2 锚点", "M3 融合", "判不出"))
+        print("   %-6s %-12s %-12s %-12s %-16s" % ("管线", "M1 文本", "M2 锚点", "M3 融合",
+                                                   "M5 大类原型"))
         for key in hypotheses:
             row = report["hypotheses"][key]
+
             def acc_of(entry):
                 errors = entry["errors"]
                 return 1 - errors["nag_rate"] - errors["miss_rate"] - errors["unknown_rate"]
-            print("   %-6s %-12s %-12s %-12s %-12s"
+            print("   %-6s %-12s %-12s %-12s %-16s"
                   % (key,
                      "%.0f%% (5类%.0f%%)" % (acc_of(row["m1_text"]) * 100,
                                              row["m1_text"]["acc5"] * 100),
@@ -510,7 +614,10 @@ def main():
                                              row["m2_anchor"]["acc5"] * 100),
                      "%.0f%% (5类%.0f%%)" % (acc_of(row["m3_fusion"]) * 100,
                                              row["m3_fusion"]["acc5"] * 100),
-                     "%.0f%%" % (row["m2_anchor"]["errors"]["unknown_rate"] * 100)))
+                     "%.0f%% (误打扰 %d / 失效 %d)"
+                     % (row["m5_relative"]["acc2"] * 100,
+                        row["m5_relative"]["errors"]["nag"],
+                        row["m5_relative"]["errors"]["miss"])))
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as handle:
