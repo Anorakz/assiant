@@ -177,6 +177,80 @@ music:
   count_after_s: 30
 
 # ---------------------------------------------------------------------------
+# B 站视频 (Phase 7 T11)
+# ---------------------------------------------------------------------------
+# 目标: GAME 模式下 **画面认出你在玩什么**（或你在对话里点名）-> 去 B 站搜一批
+# 排成队列 -> 封面与地址推给 GUI -> **你点预览图/上一集/下一集才开始播**。
+# 视频在**板端**放, 内容只在缓冲里、**不落盘**; 完整说明见 docs/bilibili.md。
+#
+# ⚠ 三条板端实测定下来的硬约束 (改链路前先看 docs/bilibili.md §1):
+#    · 板端 souphttpsrc **是坏的** -> 不走 HTTP 供流, 改成
+#      **ffmpeg -c copy -> MPEG-TS -> FIFO**, GUI 读本地路径;
+#    · 直链与封面**都要带 UA + Referer**, 否则 CDN 回 403;
+#    · 解码靠板端已装的 **MPP 硬解** (mppvideodec), ffmpeg **只做重封装、不转码**。
+bilibili:
+  # 关掉它 = B 站工具整个不装、队列/缓冲/观察器都不起 (与音乐同一条口径)
+  enabled: true
+
+  # ---- 凭据 (清晰度) ----
+  # 板端手写的 JSON: {"SESSDATA": "...", "bili_jct": "...", "DedeUserID": "..."}
+  # **已进 .gitignore, 永远不要提交** (docs/config-sources.md §2)。
+  #   · 文件不在 / 为空  -> 匿名, 单文件阶梯 (实测 360P~720P, 视视频而定)
+  #   · 有 SESSDATA      -> DASH 可以到 1080P (ffmpeg 合流, 播放端硬解)
+  # ⚠ 键名写错 (例如多打一个 E 的 `SEESSDATA`) B 站不认: 代码会认下来并提醒,
+  #   实测那种写法 nav 回 -101。实际拿到多少清晰度就报多少, **界面上一处都不显示**,
+  #   只作为一条聊天气泡如实说 (你定的)。
+  cookie_file: config/bilibili_cookie.json
+  # 单次 HTTP 超时(秒)。板端到 B 站接口实测够用。
+  timeout_s: 15
+
+  # ---- 队列 (滑动窗口) ----
+  # 目标长度 = 3 × GUI 预览栏能放下的格数 N (GUI 上报 bilibili_viewport{visible:N})。
+  # 上一集往**前**补一页、下一集往**后**补一页; 偏离太远的另一侧丢掉。
+  queue:
+    # GUI 还没上报格数时的兜底 (6 格 -> 18 条)
+    viewport_fallback: 6
+    # 窗口硬上限: 防止"窗口拉得特别大"把队列推到几百条
+    max: 60
+
+  # ---- 缓冲 (内存滑动窗口, 全程不落盘) ----
+  buffer:
+    # FIFO 放哪个目录 (每换一条都会新建一个 bilibili-<bvid>.ts)
+    dir: /tmp
+    # 起播门槛: 攒够这么多秒才把流交给播放器 (没攒够会说一句"网络慢")
+    initial_s: 15
+    # 封顶: **播放中**领先 initial_s; **暂停时**放宽到这么多秒 (你定的)
+    max_s: 60
+    # 内存水位: MemAvailable 低于它就停止预取, 让管道堵住 ffmpeg (天然背压)
+    mem_watermark_mb: 400
+
+  # ---- 画面 -> 游戏 (双路识别 + 自纠错) ----
+  game_watch:
+    # 关掉"问 PC 进程"这一路 = 只靠画面锚点 (认不出就什么都不做)
+    enabled: true
+    # 多久认一次 (秒)。只在 GAME 模式跑; **有对话关键词就整个跳过** (一帧都不抓)
+    interval_s: 60
+    # "有把握"的门槛 (T11-0 标定: 13 张里认 6 张、零误判) —— 不够就问 PC 进程
+    confident_score: 0.82
+    confident_margin: 0.05
+    # 锚点索引 (派生数据, 已进 .gitignore)。一行一锚点:
+    # 游戏名 + 768 维向量 + 截图路径 + 来源 + 时间; 截图在同目录的 <游戏>/ 下
+    anchor_file: config/game_anchors.jsonl
+    # 进程名 -> 游戏名。**进程路是"真值"**: 画面与它不一致时以它为准, 并把那一帧
+    # 记成该游戏的锚点 (自纠错)。⚠ 窗口标题在 sshd 的 session 0 里恒为空, 拿不到,
+    # 所以只能按**进程名**认 (名字可以带 .exe, 比较时不区分大小写)。
+    process_names:
+      WHITE ALBUM Memories like Falling Snow.exe: white album
+      hatsuyuki.exe: 初雪樱
+      Amakano3.exe: 甜蜜女友3
+      hoi4.exe: hearts of iron iv
+      stellaris.exe: stellaris
+    # 加载/保持 SigLIP 之前先看 MemAvailable (与 buffer.mem_watermark_mb 同一个意思)
+    mem_watermark_mb: 400
+  # ⚠ 这一路复用 `music:` 段的 ssh 配置 (pc_host / pc_user / pc_port / ssh) ——
+  #   音乐与认游戏问的是**同一台 PC**, 不另配一套。
+
+# ---------------------------------------------------------------------------
 # 壁纸 (Phase 7 T3)
 # ---------------------------------------------------------------------------
 wallpaper:

@@ -1567,6 +1567,19 @@ Phase 7 T11 — **B 站视频**（图像锚点认游戏 -> 搜 B 站 -> 板端�
         （板子**没重启**、`dmesg` 只有 SKWIFI 调试行、没有掉线报错, 大概率是 Windows 热点侧
         踢客户端）。**规矩改了: 不留后台进程、一切套 `timeout`、`souphttpsrc` 一律不碰**。
 
+☑ T11-1 **网络层**（`agent/net/bilibili_api.py`）: **唯一**的 B 站客户端（上层只用它给的形状）:
+      匿名会话（先 GET 一次首页收 `buvid3`/`b_nut`，只存内存 —— 不带它打接口实测 **412**）/
+      cookie 文件（认 `SESSDATA`，**容错 `SEESSDATA` 笔误并提醒**；空/缺 = 匿名）/
+      `search`（`order=totalrank` + 分页 + 清洗：去 `<em>`、解实体、`MM:SS`/`H:MM:SS` → 秒）/
+      `view`（cid/分P/时长/封面）/ `playurl`（**两条路都问、取清晰度高的那条**；有 cookie 才问 DASH）/
+      错误话术（412·-352 风控、-404 没了、-101 cookie 失效、超时断了）/ `ffmpeg_input_args`
+      （`-user_agent` + `Referer`，实测不带 CDN 直接 403）
+      37 项**离线**单测（假 transport；匹配针**长针优先**，否则 `fnval=1` 会截走 `fnval=16`）
+☑ T11-2 **队列内核**（`agent/core/bilibili.py`）: 页缓存 + **窗口**（目标 = 3 × 预览栏格数，
+      兜底 6、上限 60）; `set_viewport` / `search(keyword, source)` / `more()` / `move(±1)` /
+      `pick(index)` / `clear()` / `state()`; 边界**按 `numPages` 与 `page>=1` 判**（实测
+      `page > numPages` **不报错、会回一坨重复内容**，所以不能拿"返回空"当边界）;
+      窗口内按 `bvid` 去重; 翻页失败**继续走**并把原因如实放进 `why`。32 项单测
 ☑ T11-3 **缓冲代理**（`agent/core/bilibili_buffer.py`）: ffmpeg `-c copy` -> **MPEG-TS** -> stdout
       -> 内存窗口 -> **FIFO**（GUI 播一个本地路径）。15 s 起播门槛 / 播放中窗口封顶 15 s /
       **暂停延到 60 s** / 内存水位（`MemAvailable < 400 MB` 就不读, ffmpeg 堵管道=背压）/
@@ -1581,6 +1594,64 @@ Phase 7 T11 — **B 站视频**（图像锚点认游戏 -> 搜 B 站 -> 板端�
          改成**读/写两个线程**（读只看窗口和内存水位, 写只管往管道灌）—— 这条是测试逼出来的。
       ③ **账目少算一块**: 一块从窗口摘下来、还没写进管道的瞬间,"窗口+已写"会少 64 KB（板端差 0.58 s）。
          现在记 **在途** 并加 `progress()` **一次原子读完三个数**（分别读会被读写线程"搬家"骗到）。
+☑ T11-4 **游戏锚点库 + 观察器 + PC 探针**（`agent/core/game_anchors.py`、`game_watch.py`、
+      `agent/net/pc_probe.py`）:
+      · 锚点: `config/game_anchors.jsonl`（一行一锚点）+ 截图 `config/game_anchors/<游戏>/`（都 gitignore）;
+        复用 `wall_data` 的 768 维 float16 编解码 + **纯 Python 余弦**（不为这一件事装 numpy）
+      · 观察器: 60 s 一次、置信门槛 `top1 ≥ 0.82 且余量 ≥ 0.05`（T11-0 标定: 13 张里 6 张、**零误判**）;
+        **锚点空/不够分就问 PC 进程**；**两路不一致 -> 以进程为准，并把这一帧登记成该游戏的锚点**（自纠错）;
+        **有对话关键词 -> 整个跳过**（一帧都不抓）; 没帧 -> 跳过; SigLIP 在 **STUDY·GAME 常驻**、离开卸载、
+        加载前看 `MemAvailable`
+      · PC 探针: 复用 `netease_cli._ssh_argv`，**只读进程名**（实测窗口标题在 sshd 的 session 0 里恒为空）
+      34 项离线单测（768 维假向量 + 假编码器 + 假进程读数）
+☑ T11-5 **工具**（`agent/tools/bilibili.py`，**只在 GAME**）: `NAME=bilibili_search`、
+      schema **只有一个必填 `keyword`**（1~64）、`normalize()` 只做等价搬运（**不猜内容**）、
+      描述如实写"只排不播 / 板端放 / GAME / 可能 360P / 高清要 cookie"；权限表与预算守卫
+      **扩成四状态各量一遍** —— STUDY **3562 不变**（它进的是 GAME 那份清单：544 字符）。19 项单测
+☑ T11-6 **Runtime + IPC**（`agent/main.py`、`agent/ipc/*`）: topic `bilibili` + 五条命令
+      （`next_bilibili`/`prev_bilibili`/`bilibili_pick`/`bilibili_viewport`/`video_state`）;
+      `UNWIRED_COMMAND_NOTES` **清空**（最后一条也接上了）; **只有 GUI 操作才起播**、
+      `viewport`/`video_state` **不播**; 放完（`eof`）自动下一集; 起播时推一条**清晰度聊天气泡**;
+      GAME 里的观察循环心跳 2 s（"该不该看"由观察器按 60 s 判）
+☑ T11-7 **GUI**（`gui/src/ui/bilibili_preview|bilibili_cover|cover_loader`、`video_panel`、`bottom_bar`）:
+      **预览栏**（缩略图 + 标题 + `时长 · 播放量`，点第 N 格 -> `bilibili_pick`）+
+      **只读地址栏**（`https://www.bilibili.com/video/<bvid>`）+ **下区域封面/标题**;
+      封面由 GUI 自己取（**UA + Referer**、内存缓存、失败不重试）;
+      上一集**转正**（`prev_bilibili`）、下一集不再假报"未接入"; 每 2 秒 + 片尾回报
+      `video_state{position_s,duration_s,playing,eof}`; 可见格数上报 `bilibili_viewport`;
+      **界面上一处清晰度都没有**（你定的）
+⚑ T11-7 板端抓出来的**三个真问题**（都修了 + 有单测/回归）:
+      ① **T11-6 的载荷漏了 `queue`** —— 只带 `current`，GUI 一条预览图都画不出来
+         （协议文档里 `queue` 一直有，是实现漏项）;
+      ② **量不出宽度就上报 `visible=1`** —— 布局还没算完时报了 1，队列目标会被压成 3 条;
+         现在预览栏盯**列表可见区的 resize**，宽度不够一格就**先不上报**;
+      ③ **版面被顶宽** —— 不换行的 `IconMode` 列表 + B 站长标题的 `QLabel` 都会"按内容要宽度"，
+         封面一张张到齐后主区越涨越宽（实测 `visible` 从 6 涨到 9、地址栏与封面被挤出屏幕）;
+         现在列表/页面层"宽度只由布局决定"，封面文字按宽度截断（全文进 tooltip）
+☑ T11-8 **文档**（本任务）: 新 `docs/bilibili.md`（链路与三条硬约束 / 队列窗口与边界 /
+      缓冲 15·60·水位 / **清晰度与 cookie 的实测真相** / 双路认游戏与自纠错 / 工具与权限 /
+      配置键表 / **已知边界** / 怎么验 / 手动试的命令）; `config/config.example.yaml` 加
+      `bilibili:` 段（逐键注释 + `process_names` 映射例子）; `docs/config-sources.md` 加
+      **凭据**（`bilibili_cookie.json`）与**派生数据**（`game_anchors.jsonl`）两行 + §2.4;
+      `docs/architecture.md` §7 加五行数据流（画面→游戏→队列 / 队列→GUI / GUI→FIFO 播放 /
+      进度回报）+ §4.1 权限表加一列（工具从 3 个变 4 个）+ 预算表补一行;
+      `docs/gui-agent-integration.md` 补 `bilibili` topic 与五条命令、§5 占位清单划掉三处;
+      `Readme.md` 树/工具表/启动顺序/关键约定; 本块;
+      另加一项**模板守卫** `tests/test_bilibili_config.py`（5 例: 模板能被真构造器吃下 /
+      键不多不少 / 默认值与代码一致 / 老板给的三个 exe 映射在模板里）—— 配置写错不报错,
+      所以这条守卫是"模板真的能用"的机械证据
+⚑ T11-8 顺手补的两个**漏项**（都不是新功能，是"守卫没盯住"）:
+      ① **写入者守卫扫不到追加写**: `WRITE_PRIMITIVES` 原来只认 `os.replace`/`mkstemp`/
+         `write_text(_atomic)` —— `agent/core/game_anchors.py` 用 `open(path, "a")` 往 `config/`
+         追加锚点，**明明在写却不在名单上**。现在正则认追加写，六个写入者都进名单
+         （`test_the_writer_scan_is_not_vacuous` 正好逼出这一条）;
+      ② **`bilibili` 被当成"未知 topic"计数**: `ViewState` 只存标量型 topic，`bilibili` 的负载是数组
+         （由视频区消化），原来会走"未知 topic"分支 -> 设置页"忽略的 topic 数"一直涨，
+         看着像界面没认它。现在它是**已知但不在这里存**（`schedule` 那条"故意不认"的契约不动）
+□ T11-9 **板端验收**（`tests/board/t11_accept.py` + 真 GUI）: 真搜索 -> 队列 = 3N -> 真封面下到 ->
+      点预览图起播（15 s 门槛日志 + `position_s` 递增 + 出声）-> 上一集/下一集换条 -> 暂停缓冲涨到
+      60 s -> 断网诚实报错 -> cookie 三态三句话 -> 识别双路真跑 + 锚点自纠错多一行 -> 关键词在时
+      **日志证明没抓帧** -> 真数据/配置不动 + PC/板端全套测试全绿
 
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查

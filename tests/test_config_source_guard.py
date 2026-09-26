@@ -209,9 +209,14 @@ class TestNoGuiConfigLeftovers(unittest.TestCase):
 #: 写文件的**原语**（不是"读"，也不是"提到路径"）。
 #: ⚠ 这是 R3 新增的边界：在那之前 agent/ **一个字节都不写配置**，现在多了一条
 #:   "一次性日程触发后把它从 config.yaml 里删掉"。写入者每多一处，都该是一次明确的决定。
-WRITE_PRIMITIVES = r"(os\.replace|mkstemp|\.write_text\(|write_text_atomic\()"
+#: ⚠ T11-8 补的一个**真漏项**：原来只认"整篇重写"那几种原语（`os.replace` / `mkstemp` /
+#:   `write_text` / `write_text_atomic`）—— **追加写的（`open(path, "a")` + `write`）一个都扫不到**。
+#:   于是 `agent/core/game_anchors.py`（T11-4 往 `config/game_anchors.jsonl` 追加锚点）
+#:   明明是第 6 个写入者，这条守卫却看不见它。现在把追加写也算进来。
+WRITE_PRIMITIVES = (r"(os\.replace|mkstemp|\.write_text\(|write_text_atomic\("
+                    r"|open\([^)]*,\s*[\"']a)")
 
-#: 允许出现写入原语的文件（**只有**这四个）。
+#: 允许出现写入原语的文件（**只有**这六个）。
 ALLOWED_WRITERS = {
     "agent/config.py",               # write_text_atomic: 全仓唯一的"原子写文本"实现
     "agent/core/schedule_config.py", # 唯一被允许的调用方: 删掉已触发的一次性日程
@@ -227,6 +232,12 @@ ALLOWED_WRITERS = {
     # ⚠ 一次构建一行; 真源仍然只有 config.yaml。写入者只有画像内核这一条路径
     #   （T9-3 由 Agent 在"纯对话攒到 2000 字"时触发; 模型看不到、也调不到它）。
     "agent/core/user_profile.py",
+    # T11-4 新增的第六个写入者: **游戏锚点库**（config/game_anchors.jsonl）。
+    # ⚠ 这是**追加写**（`open(path, "a")`），一行一锚点: 游戏名 + 768 维 float16 向量 +
+    #   截图路径 + 来源 + 时间。它不是配置真源，是识别用的派生数据；
+    #   运行期只有一条写入路径 —— 画面与 PC 进程**不一致**时把那一帧登记成锚点（自纠错）。
+    #   截图文件（config/game_anchors/<游戏>/*.jpg）也由它写。
+    "agent/core/game_anchors.py",
 }
 
 
@@ -253,7 +264,11 @@ class TestWhoWritesTheConfig(unittest.TestCase):
                       % (", ".join(sorted(ALLOWED_WRITERS)), "\n  ".join(offenders)))
 
     def test_the_writer_scan_is_not_vacuous(self):
-        """反空转：白名单里那两个文件**真的**命中了写入原语，否则这条守卫什么都没查。"""
+        """反空转：白名单里那六个文件**真的**命中了写入原语，否则这条守卫什么都没查。
+
+        ⚠ T11-8：这条断言正是"补上追加写"的理由 —— 只把 `game_anchors.py` 加进白名单
+        而正则不认 `open(path, "a")`，这里就会红（那份白名单是假的）。
+        """
         hits = {}
         for path in _agent_python_files():
             rel = path.relative_to(_PROJECT_ROOT).as_posix()

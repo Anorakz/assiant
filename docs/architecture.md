@@ -208,9 +208,14 @@ agent/
 | 三个工具的清单（STUDY） | **3274 字符 ≈ 1309 token**（中文≈1 字/token，JSON 键/标点≈3~4 字/token） |
 | ↑ T8-6 加了 `least`/`most` 两个 action 之后 | **3522 字符**（≈ +40 token） |
 | ↑ T10-3 又加了 `stage`（只预挑不切屏）之后 | **3562 字符**（离 3600 的守卫只剩 **38 字符** —— 加之前先把 `next_wallpaper` 的 description 与枚举措辞压了一遍才塞进去） |
+| ↑ T11-5 加了第四个工具 `bilibili_search` | **STUDY 一个字符都不涨**（仍 3562）—— 它**只在 GAME 可用**，所以走进的是 GAME 那份清单：**544 字符**（GAME 本来零工具，空间充裕） |
 | 第一轮 prompt | 1495 token（T8-5b 测得；T8-6 之后约 1535，`ctx_size` 4096 —— **没有重量过板端**） |
 | 加一个 **action**（enum 多一个值） | ≈ 十几 token |
 | 加一个**工具**（像样的 description + schema） | ≈ 250~750 token |
+
+> ⚠ **"把工具放进哪个状态"是预算问题，不只是权限问题**（T11-5 的教训）：同一个工具放进
+> STUDY 会让清单从 3562 涨到 4139（**超 539**），放进 GAME 则**一点不占**别人的额度。
+> 所以 T11 的 B 站工具选了 **GAME-only**（也是你定的：视频就是游戏模式主区在放的东西）。
 
 `tests/test_merged_tools.py::TestPromptBudget` 按**字符**卡上限（`TOOL_BLOCK_BUDGET_CHARS = 3600`、
 单工具 `TOOL_BUDGET_CHARS = 2000`）—— 也就是"再加一个像样的工具就会红"，逼着人先想
@@ -243,12 +248,12 @@ agent/
 
 **权限表（T4，唯一写下来的地方是 `tests/test_tool_permissions.py::EXPECTED`）**：
 
-| 状态 | `back_to_desktop` | `next_wallpaper` | `next_music` |
-| --- | --- | --- | --- |
-| `SLEEP` | ✗ | ✗ | ✗ |
-| `IDLE` | ✗ | ✓ | ✓ |
-| `STUDY` | ✓ | ✓ | ✓ |
-| `GAME` | ✗ | ✗ | ✗ |
+| 状态 | `back_to_desktop` | `next_wallpaper` | `next_music` | `bilibili_search` |
+| --- | --- | --- | --- | --- |
+| `SLEEP` | ✗ | ✗ | ✗ | ✗ |
+| `IDLE` | ✗ | ✓ | ✓ | ✗ |
+| `STUDY` | ✓ | ✓ | ✓ | ✗ |
+| `GAME` | ✗ | ✗ | ✗ | ✓ |
 
 > **T8-5b: 七个工具合并成三个**（每个工具用 `action` 分派具体动作）。动机是 prompt 预算 ——
 > T8-5 板端实测 7 个工具的工具清单占第一轮 prompt 的 **90%**（1699 / 1898 token），
@@ -257,9 +262,15 @@ agent/
 > `back_to_desktop`（无参数）。标签写法两边共用 `agent/core/label_spec.py`。
 > ⚠ **缺一个入口就整个工具不装**（不是"少一个动作"）—— 模型看到的 action 列表必须与
 > 真实可用的完全一致。链路见 [music.md](music.md)、[tagging.md](tagging.md)。
+>
+> **T11-5: 第四个工具 `bilibili_search`（GAME-only、只有一个必填 `keyword`）** —— 它的职责
+> **只有"把对话里的关键词交给 B 站队列"**：搜 + 排 + 填预览栏，**不播**（播不播由 GUI 操作决定，
+> 见 [bilibili.md](bilibili.md) §7）。清队列/切集/选片**都不进 LLM**（那些只走 GUI 命令与
+> Agent 自己的循环）—— 所以它没有 `action` 枚举，也就长得特别小（508 字符）。
 
-- **SLEEP / GAME 一个都不给**：SLEEP 是"别动系统里的任何东西"；GAME 的主区是视频区，
-  换壁纸等于白换，而"回到桌面"是**学习收尾**的动作（T1 的决定）。
+- **SLEEP 一个都不给**：SLEEP 是"别动系统里的任何东西"。
+- **GAME 只给 B 站那一个**（T11）：主区是视频区，换壁纸等于白换，而"回到桌面"是**学习收尾**的
+  动作（T1 的决定）；游戏模式下唯一有意义的新工具就是"给队列一个关键词"。
 - **给模型的候选清单也按状态过滤**（`ToolRouter.allowed_tools()`）：不可用的工具根本不该
   出现在候选里 —— 否则 SLEEP/GAME 下模型会看到 `back_to_desktop`、试着调、吃一个拒绝，
   白花一轮。执行期的 fail-closed 校验照旧（是**少给**，不是放宽）。
@@ -430,12 +441,17 @@ gui/src/
 | Python → Sunshine（输入） | Moonlight 输入通道 | pybind11 **直调** `LiSendKeyboardEvent`，释放 GIL |
 | 终端 → Agent | stdin | asyncio reader → **Chat Input Bus** |
 | GUI → Agent | Unix socket | 命令信封 → **Chat Input Bus** / 命令处理器 |
-| Agent → GUI | Unix socket | topic 推送（状态、LLM 输出、壁纸、音乐） |
+| Agent → GUI | Unix socket | topic 推送（状态、LLM 输出、壁纸、音乐、**B 站队列**、日程事实） |
 | PC → 板端 | SSH / scp | `deploy.ps1`（Agent + `.so`）、`sync-gui.ps1`（GUI 源码） |
 | 对话 → 内存 → 画像 | **进程内**（无通道） | `ChatMemory` 攒纯对话（不落盘）→ 攒到 2000 字时 Agent **自己**构建一次用户画像 → `config/user_profile.jsonl`；模型看不到画像（**不是工具**）。见 [`profile.md`](profile.md) |
 | 画像 → 壁纸"下一个" | **进程内**（无通道） | 画像构建完由 `_build_profile_task()` 调 `_refill_next()`：没给 `match`/`sort` 时按画像排序挑 `next`（`ip 0.7 / mood 0.2 / fresh 0.1`）；太薄就退回**文件名顺序**。见 [`tagging.md`](tagging.md) §6.2 |
 | 画像 → 播放队列 | **进程内**（无通道） | 轮询周期里 `MusicPlayer.refill()` 把队列补到 **30** 首：①本地库按画像排 ②不够**只按画像里的歌手**去 PC 搜；队列里的歌 `MusicPlayer.remove()` 由负反馈去掉。见 [`music.md`](music.md) §4.4/§4.5 |
 | 画像 → 心情重置 | **进程内**（无通道） | 两个**已知**心情不同 → 留住正在放的、清其余、按新心情补满（`_reset_queue_on_mood_change()`）；`unknown` 不算变化 |
+| 画面 → 游戏名 → 队列 | **进程内**（无通道） | GAME 模式里 Agent 自己的循环（**不走 LLM 工具**）：`ImageReader` 抓一帧 → SigLIP 编码 → 与 `config/game_anchors.jsonl` 的锚点算余弦；不够有把握就问 **PC 进程名**（ssh，复用 `music:` 那套），**两路不一致以进程为准并把这一帧写回锚点库**（自纠错）。**有对话关键词就整个跳过**（一帧都不抓）。认出的游戏**变了**才重搜队列。见 [`bilibili.md`](bilibili.md) §3 |
+| 对话/GUI → 视频队列 | **进程内**（无通道） | 关键词只从**对话**（工具 `bilibili_search`，只在 GAME 可见）或**画面**来 → `agent/core/bilibili.py` 维护"3×预览栏格数"的滑动窗口（只存地址，不下载视频） |
+| 队列 → GUI | Unix socket | topic `bilibili{queue[],index,current,stream,…}`（变化时推、客户端连上时补推）→ 预览栏 + 地址栏 + 下区域封面。**播放只由 GUI 操作触发** |
+| GUI → 播放的流 | **本机 FIFO**（不是网络） | 你点预览图/上一集/下一集 → Agent 取直链（带 UA+Referer）→ `ffmpeg -c copy` → **MPEG-TS** → 内存窗口（15 s 起播门槛）→ `/tmp/bilibili-<bvid>.ts` → GUI 用 `QMediaPlayer` 读它（GStreamer 选 **`mppvideodec`** 硬解）。⚠ 板端 `souphttpsrc` 是坏的，所以**不走 HTTP**；**内容不落盘**。见 [`bilibili.md`](bilibili.md) §1/§4 |
+| GUI → Agent（进度） | Unix socket | 命令 `video_state{position_s,duration_s,playing,eof}` 每 2 秒一次（**真进度，不是估算**）：Agent 靠它知道"暂停了"（于是把预取放宽到 60 s）与"放完了"（自动下一集） |
 
 ---
 

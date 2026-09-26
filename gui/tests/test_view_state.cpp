@@ -32,6 +32,7 @@ private slots:
     void llmWallpaperMusicApply();
     void unknownTopicIsIgnoredNotAnError();
     void scheduleTopicIsStillIgnoredByTheGui();
+    void bilibiliTopicIsKnownButNotStoredHere();
     void missingFieldCountsAsDroppedButKeepsOthers();
     void resetClearsEverything();
 };
@@ -143,6 +144,26 @@ void TestViewState::scheduleTopicIsStillIgnoredByTheGui()
     QCOMPARE(state.ignoredTopicCount(), 2);
     QCOMPARE(state.droppedCount(), 0);          // 忽略 ≠ 收到坏消息
     QVERIFY(!state.hasStatus());                // 也没顺手改别的东西
+}
+
+void TestViewState::bilibiliTopicIsKnownButNotStoredHere()
+{
+    // T11-7: `bilibili` 的负载是数组（queue[]），由视频区/封面区自己消化 ——
+    // ViewState 不存它，但它**是已知 topic**：不能算进"忽略的 topic 数"
+    //（设置页那个计数器一旦涨，会让人以为界面没认这条推送）。
+    ViewState state;
+    const QJsonObject payload{
+        {QStringLiteral("queue"), QJsonArray{QJsonObject{{QStringLiteral("bvid"), QStringLiteral("BV1")}}}},
+        {QStringLiteral("index"), 0},
+        {QStringLiteral("stream"), QStringLiteral("/tmp/bilibili-BV1.ts")}};
+
+    QVERIFY(!state.applyMessage(QStringLiteral("bilibili"), payload));
+    QVERIFY(!state.applyMessage(QStringLiteral("bilibili"), QJsonObject()));
+
+    QCOMPARE(state.ignoredTopicCount(), 0);     // 认它，只是不在这儿存
+    QCOMPARE(state.droppedCount(), 0);          // 也不是坏消息
+    QVERIFY(!state.hasStatus());
+    QCOMPARE(state.lastTopic(), QStringLiteral("bilibili"));   // 诊断面板仍看得到最近一条
 }
 
 void TestViewState::missingFieldCountsAsDroppedButKeepsOthers()

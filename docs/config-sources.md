@@ -44,17 +44,21 @@ GUI 读它的 `gui:` 段、读写它的 `llm:` 段、**只读**它的 `scheduler
 | `config/music_library.jsonl` | **本地数据**（一行一首歌: id + tags + 播放次数，Phase 7 T8-3） | 否（`.gitignore` 里单列一行） | `agent/media/music_library.py`（唯一写者）: `assistant music` 导入/打标、运行期"听满 30 秒计一次"、以及**T10-4 自动补歌把搜到的歌登记进库**（库会因此长大，见 [`music.md`](music.md) §4.4） | Agent（挑歌/**补歌**）、`assistant music` |
 | `config/user_profile.jsonl` | **本地数据**（一次构建一行: IP/歌手**权重** + 心情 + 清零记录，Phase 7 T9-2） | 否（`.gitignore` 里单列一行） | `agent/core/user_profile.py`（唯一写者）: Agent 在"纯对话攒到 2000 字"时构建（T9-3） | Agent 自己（**T10 起真在消费**: 挑下一个壁纸 / 补歌 / 判负反馈 / 心情变了重置队列，见 [`profile.md`](profile.md) §8）；**模型看不到**（不是工具） |
 | `config/netease_cookie.json` | **T8-1 的保险条目**（板端**不放** cookie；登录态住在 PC 上 neteasecli 自己的 store） | 否（`.gitignore` 里单列一行） | 谁都不写（T8-7 核对过: 代码里没有任何地方读它） | — |
+| `config/bilibili_cookie.json` | **凭据**（B 站 `SESSDATA`，Phase 7 T11）：有它 DASH 才能到 **1080P**，没有就只有单文件的 360P~720P | 否（`.gitignore` 里单列一行） | **人**（手写；键名 `SESSDATA`，`SEESSDATA` 这种笔误代码会认下来并提醒） | `agent/net/bilibili_api.py`（**只读**，空/缺 = 匿名） |
+| `config/game_anchors.jsonl` | **派生数据**（一行一锚点: 游戏名 + 768 维 float16 向量 + 截图路径 + 来源 + 时间，T11-4） | 否（`.gitignore` 里单列一行；截图目录 `config/game_anchors/` 一并忽略） | `agent/core/game_anchors.py`（唯一写者）: 画面与 PC 进程**不一致时把那一帧登记成该游戏的锚点**（自纠错） | `agent/core/game_watch.py`（识别时算余弦） |
 | `llm/config/llm.env` | **派生**（喂 llama-server） | 否 | `ConfigSyncer`（GUI 保存时、或 `gui_config_sync` CLI） | llama-server 启动脚本 |
 | `config/config.example.yaml` | 模板 | **是** | 人 | 人（`cp` 起步） |
 
 > ⚠ `config/` 下现在有**三类**东西：**真源**（`config.yaml`，人/GUI 写）、**派生/本地数据**
-> （`wall_data.jsonl`、`music_library.jsonl`、`user_profile.jsonl`，机器写）、**凭据**（只剩
-> `netease_cookie.json` 这个位子 —— T8-7 核对后确认它是 **T8-1 留下的空保险**：登录态其实在
-> **PC 上** `neteasecli` 自己的 store 里，板端不存、代码也不读）。
+> （`wall_data.jsonl`、`music_library.jsonl`、`user_profile.jsonl`、`game_anchors.jsonl`，机器写）、
+> **凭据**（`netease_cookie.json` 那个空保险 + T11 起真的要用的 `bilibili_cookie.json`）。
 > 别因为"都在 config 目录里"就以为都能手改 —— 手改 `wall_data.jsonl` **基本没意义**
 > （下次打标签或换壁纸会覆盖那一行；只有 `used`/`last_used` 是运行期真的会被改的字段，
 > 想清零就直接删文件重打标签，见 [`tagging.md`](tagging.md) §6.1）；
 > `music_library.jsonl` 手改**有意义**（它就是"我的本地歌单"，格式见 [`music.md`](music.md)）。
+> `game_anchors.jsonl` **可以补**，但别手写：一行里的向量是 **768 维 float16 的 base64**
+> （`game + vector + shot + source + when`），照格式**用脚本**加（T11-0 标定时就是这么填的）；
+> 运行期 Agent 也会自己往里加（画面与进程不一致时），见 [`bilibili.md`](bilibili.md) §3）。
 
 `llm.env` 里可推导的只有 8 个键：`LLM_MODEL_PATH`、`LLM_MODEL_NAME`、`LLM_PORT`、
 `LLM_CTX_SIZE`、`LLM_BATCH_SIZE`、`LLM_THREADS`、`LLM_THREADS_BATCH`、`LLM_API_KEY`
@@ -126,6 +130,25 @@ L2 归一化、只能按余弦 —— 全部写死在 `agent/vision/siglip/confi
 同理，**音乐队列的目标长度在 `music.autofill` 段**（那张表在 [`music.md`](music.md) §5），
 不在 `profile:` 里 —— 画像只说"喜欢谁"，"补到几首"是音乐自己的配置。
 
+### 2.4 `bilibili:` 段给 B 站视频用（T11）
+
+| 键 | 谁读 | 说明 |
+| --- | --- | --- |
+| `enabled` | `agent/net/bilibili_api.py::from_config`（`agent/main.py::_start_bilibili` 装配） | `false` → 工具整个不装、队列/缓冲/观察器都不起 |
+| `cookie_file` | 同上 | **凭据**（`config/bilibili_cookie.json`，相对路径按仓库根）；空/缺 = 匿名 360P |
+| `timeout_s` | 同上 | 单次 HTTP 超时 |
+| `queue.viewport_fallback` / `queue.max` | `agent/main.py::_start_bilibili` → `BilibiliQueue` | 预览栏还没上报格数时的兜底 / 窗口硬上限（目标 = 3×格数） |
+| `buffer.dir` / `initial_s` / `max_s` / `mem_watermark_mb` | `agent/core/bilibili_buffer.py` | FIFO 目录 / 起播门槛 / 暂停时的封顶 / 内存水位 |
+| `game_watch.enabled` / `interval_s` / `confident_score` / `confident_margin` | `agent/core/game_watch.py` | 双路识别：多久认一次、"有把握"的门槛 |
+| `game_watch.anchor_file` | `agent/core/game_anchors.py` | 锚点索引（**派生数据**，见 §2 表） |
+| `game_watch.process_names` | `agent/net/pc_probe.py` | **进程名 → 游戏名**的映射；ssh 参数复用 `music:` 段（同一台 PC） |
+| `game_watch.mem_watermark_mb` | `agent/core/game_watch.py` | 加载/保持 SigLIP 前的 `MemAvailable` 检查 |
+
+⚠ 这一段的消费者**只有 Agent**：GUI 不读它（界面上的东西都是 Agent 推过去的 topic），
+模型也读不到它。逐键注释与实测数字见 [`bilibili.md`](bilibili.md)（§4 缓冲、§6 清晰度、§8 配置）。
+⚠ **它一个字节都不写**：队列与缓冲都是进程内状态（重启即空），只有**锚点库**会追加写
+（见 §3.1 的写入者名单）。
+
 ## 3. 单向性（最容易踩的一条）
 
 派生是**单向**的，所以：
@@ -174,7 +197,12 @@ Agent 会把它**从那一条所在的 `oneoff:` 序列里删掉**。规则与�
 > ⚠ 打开它意味着 **Agent 成为 `config.yaml` 的第二个写入者**。默认关就是这个原因：
 > 这是"程序自动改真源"的行为，该由人显式决定。
 > **守卫**：`tests/test_config_source_guard.py::TestWhoWritesTheConfig` —— `agent/` 里出现写入原语的
-> 只能是 `agent/config.py`（唯一实现）与 `agent/core/schedule_config.py`（唯一调用方）。
+> 只能是这六个，且**每个都必须是"派生数据/本地数据"，不能是真源**：
+> `agent/config.py`（唯一的原子写实现）、`agent/core/schedule_config.py`（唯一允许改真源的调用方）、
+> `agent/vision/wall_data.py`、`agent/media/music_library.py`、`agent/core/user_profile.py`、
+> `agent/core/game_anchors.py`（T11-4 的锚点库，**追加写**）。
+> ⚠ **T11-8 补的漏项**：这条守卫原来只认"整篇重写"那几种原语，**追加写（`open(path, "a")`）扫不到** ——
+> 于是 `game_anchors.py` 明明在写 `config/` 却不在名单上。现在追加写也算，六个写入者都在名单里。
 
 ## 4. Agent 只认一份配置
 

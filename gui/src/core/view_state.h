@@ -1,8 +1,12 @@
 // ============================================================================
 //  gui/src/core/view_state.h — 协议 → 显示状态（不依赖 QWidgets，可单测）
 //
-//  输入：docs/ipc-protocol.md §3 的四个 topic（status / llm / wallpaper / music）
+//  输入：docs/ipc-protocol.md §3 的 topic（status / llm / wallpaper / music）
 //  输出：界面要显示什么（模式、连接、最近回复、壁纸、曲目）+ 诊断计数
+//
+//  ⚠ 这里**只存"标量型"的那几个 topic**：`bilibili`（队列是数组）由视频区自己消化，
+//    它算**已知** topic（T11-7 起不再计入 `ignoredTopicCount`），只是不在这里存；
+//    `schedule` 是 GUI **故意不认**的（契约见 tests/test_view_state.cpp）。
 //
 //  处理规则（与协议 §6「一条坏消息只影响它自己」对齐）
 //  ---------------------------------------------------------------------------

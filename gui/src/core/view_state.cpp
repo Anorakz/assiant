@@ -116,6 +116,13 @@ bool ViewState::applyMessage(const QString& topic, const QJsonObject& data,
         return changed;
     }
 
+    // T11-7: `bilibili` 是**已知** topic，只是它的负载是数组（`queue[]` + `current`），
+    //   由视频区/封面区自己消化（MainWindow -> VideoPanel / BilibiliCover）。
+    //   ⚠ 别把它算进"忽略的 topic 数"：设置页那个计数器会让人以为界面没认它（其实认了）。
+    if (topic == QLatin1String("bilibili")) {
+        return false;
+    }
+
     // 未知 topic：按协议"忽略"，不是错误
     ++ignoredTopicCount_;
     return false;

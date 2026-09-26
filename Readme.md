@@ -65,10 +65,14 @@ agent/
 │       └── _native.py           # native 解析 + 专属单线程执行器 (SPSC)
 │   └── net/                     # 对外服务客户端
 │       ├── sunshine_client.py   # Sunshine 串流主机 API
-│       └── netease_cli.py       # 板端 ssh 调 PC 上第三方 neteasecli（PC 出声，T8-2）
+│       ├── netease_cli.py       # 板端 ssh 调 PC 上第三方 neteasecli（PC 出声，T8-2）
+│       ├── bilibili_api.py      # B 站唯一网络层: 匿名会话/cookie/搜索/直链/错误话术（T11-1）
+│       └── pc_probe.py          # 问 PC 上跑着什么进程（认游戏的"真值"那一路，T11-4）
 ├── gui/                         # Qt5 C++ GUI (在板端编译: src/ tests/ tools/)
+│                                 #   GAME 主区: 视频区 + 预览栏 + 只读地址栏 (T9/T11-7)
+│                                 #   下区域 GAME=封面 / 其它=音乐条
 ├── config/                      # 配置模板 (真实配置不入 git)
-│   ├── config.example.yaml      # 唯一真源模板: llm.* / wallpaper.* / gui.* / sunshine.* / ipc.*
+│   ├── config.example.yaml      # 唯一真源模板: llm.* / bilibili.* / wallpaper.* / gui.* / sunshine.* / ipc.*
 │   ├── user_profile.example.yaml# 用户画像
 ├── scripts/                     # 构建 / 部署 / 测试 / 配对工具
 │   ├── build.ps1                # aarch64 交叉编译
@@ -104,8 +108,9 @@ agent/
 │   ├── test_bilibili_api.py     # B 站唯一网络层: 搜索/详情/直链(单文件 vs DASH)/cookie/错误话术 (T11-1)
 │   ├── test_bilibili_queue.py   # B 站队列: 3×预览栏格数的滑动窗口 / 往哪边走往哪边补页 / 边界 (T11-2)
 │   ├── test_bilibili_buffer.py  # B 站缓冲代理: ffmpeg 合流->MPEG-TS->FIFO / 15 s 门槛 / 暂停延到 60 s (T11-3)
-│   ├── test_game_watch.py       # 游戏观察器: 画面锚点 vs PC 进程双路 / 自学习纠错 / 常驻策略 (T11-4)
 │   ├── test_bilibili_tool.py    # B 站工具: 只有一个 keyword / 只在 GAME 可见 / 参数归一化 (T11-5)
+│   ├── test_bilibili_config.py  # B 站配置守卫: 模板能被真构造器吃下 / 键不多不少 / 默认值对齐 (T11-8)
+│   ├── test_game_watch.py       # 游戏观察器: 画面锚点 vs PC 进程双路 / 自学习纠错 / 常驻策略 (T11-4)
 │   ├── test_music_library.py    # 本地音乐库: 读写 / 合并 / 打标 / 挑选 (T8-3)
 │   ├── test_music_player.py     # 播放内核: 环形队列 / 30 秒计一次 / 曲终自动下一首 / 补歌两段式 (T8-4/T10-4)
 │   ├── test_label_spec.py       # 统一标签语法: 拆键 / 拆值 / 多轴 / 壁纸那边只用这一份 (T8-5b)
@@ -125,6 +130,7 @@ agent/
 │   ├── tagging.md               # 壁纸标签化: 词表 / wall_data.jsonl / IP 检索 / 三格窗口与画像挑图 (T7/T10-3)
 │   ├── music.md                 # 音乐: 板端 ssh 调 PC neteasecli / 本地库 / 工具四件套 / 自动补歌 (T8/T10-4)
 │   ├── profile.md               # 用户画像: 纯对话记忆 / IP·歌手权重 / 负反馈两层清零 / 心情 / **谁在消费它** (T9/T10)
+│   ├── bilibili.md              # B 站视频: 队列滑动窗口 / 缓冲 FIFO / 清晰度与 cookie 真相 / 双路认游戏 / 实测数字 (T11)
 │   ├── llm.md                   # LLM 三模式 / edge 接 llama-server / 工具循环 / 降级
 │   ├── ipc-protocol.md          # Agent ⇄ GUI 协议 (线上格式唯一真源)
 │   ├── gui.md                   # GUI 构建与使用
@@ -231,11 +237,12 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
   **Phase 7 起丢给模型的候选也按状态过滤**（`allowed_tools()`）—— 不可用的工具不该出现在
   候选里。当前这张权限表（`tests/test_tool_permissions.py::EXPECTED` 是唯一真源）：
 
-  | 状态 | `back_to_desktop` | `next_wallpaper` | `next_music` |
-  | --- | --- | --- | --- |
-  | `SLEEP` / `GAME` | ✗ | ✗ | ✗ |
-  | `IDLE` | ✗ | ✓ | ✓ |
-  | `STUDY` | ✓ | ✓ | ✓ |
+  | 状态 | `back_to_desktop` | `next_wallpaper` | `next_music` | `bilibili_search` |
+  | --- | --- | --- | --- | --- |
+  | `SLEEP` | ✗ | ✗ | ✗ | ✗ |
+  | `IDLE` | ✗ | ✓ | ✓ | ✗ |
+  | `STUDY` | ✓ | ✓ | ✓ | ✗ |
+  | `GAME` | ✗ | ✗ | ✗ | ✓ |
 
   **T8-5b 把七个工具合并成三个**（每个工具用 `action` 分派具体动作）：
   `next_wallpaper` = 翻页/按内容挑/**按用量挑**（`action=least`/`most`，T8-6）/
@@ -245,6 +252,12 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
   动机是 **prompt 预算**：T8-5 实测 7 个工具的工具清单占第一轮 prompt 的 90%
   （1699 / 1898 token），第二轮 2131 直接撞穿 ctx。链路见
   [`docs/music.md`](docs/music.md) 与 [`docs/tagging.md`](docs/tagging.md)。
+
+  **T11-5 加了第四个工具 `bilibili_search`**（**只在 GAME**）：只有一个必填 `keyword`、
+  没有 `action` 枚举，职责**只有"把对话里的关键词交给 B 站队列"**（搜+排+填预览栏，**不播**）。
+  放在 GAME 而不是 STUDY 有**预算**上的道理：放进 STUDY 会把清单从 3562 顶到 4139（超预算），
+  放 GAME 则一个字符都不占别人的额度（GAME 那份清单 544 字符）。链路见
+  [`docs/bilibili.md`](docs/bilibili.md)。
 
   **T7-3 撤掉了 T6① 的一半**：以前 GUI 的 `next_wallpaper` 命令与 LLM 的工具共用这张表
   （命令路径问 `ToolRouter.allowed_in_current_state()`）。按需求**手动换壁纸已删除**
@@ -305,12 +318,17 @@ python3 agent/main.py --dry-run       # 不连串流/不读 stdin, 只验证装�
 AGENT_RUN_SECONDS=5 python3 agent/main.py   # 跑 5 秒自动退出 (冒烟)
 ```
 
-启动顺序（按依赖，停止时**严格反向**）：
+启动顺序（按依赖，停止时**严格反向**）—— 就是 `Runtime._STEPS` 那一串：
 
 ```
-日志 → config → native → ChatInputBus → io 层 → StateMachine
-     → ToolRouter → LLMProvider → Scheduler → IPC → 终端输入
+日志 → config → native → ChatInputBus → io 层
+     → music（工具要在建的时候就位）→ bilibili（同上）
+     → StateMachine + ToolRouter → llama-server 服务 → LLMProvider
+     → profile（判心情要问模型）→ Scheduler → IPC → 终端输入
 ```
+
+> ⚠ **音乐与 B 站都排在"建工具"之前**：`agent/tools/` 里的那几个工具要**建的时候**就知道
+> 对应子系统"开没开"（没开就整个不装）—— 顺序错了会变成"工具装了但一调就报错"。
 
 约定：
 
@@ -556,6 +574,8 @@ config.save_config("config", {...})    # 写 config.yaml 并同步刷新缓存
 - **壁纸是"三格窗口"**（`prev`/`current`/`next`，进程内、不落盘）：换图 = `next` 变当前并**立刻**按画像补一个新的 `next`；`action=stage` 只预挑不切屏（T10-3）。
 - **用户画像只被 Agent 自己读**（挑下一个壁纸 / 补歌 / 判负反馈 / 心情变了重置队列），模型既看不到也调不到它（T9 定、T10 消费，见 [`docs/profile.md`](docs/profile.md) §8）。
 - **音乐队列维持 30 首**：缺了先吃本地库、不够**只按画像里的歌手**去 PC 搜（`music.autofill`，T10-4）；负反馈把类似的歌整批移出队列。
+- **B 站视频只在板端放、内容不落盘**：队列只存地址（3× 预览栏格数的滑动窗口），**只有 GUI 操作才开始播**（点预览图/上一集/下一集），流走 **ffmpeg `-c copy` → MPEG-TS → FIFO**（板端 `souphttpsrc` 是坏的，不走 HTTP），解码用板端 MPP 硬解；清晰度只走聊天气泡、界面不显示 —— 见 [`docs/bilibili.md`](docs/bilibili.md)。
+- **认游戏是"画面筛一遍 + PC 进程裁决"**：两路不一致时**以进程为准**并把那一帧写回锚点库（自纠错）；**有对话关键词就一帧都不抓**（T11）。
 - `send_key` / `send_mouse` / `send_hotkey` 必须释放 GIL，不阻塞 asyncio。
 - Agent ⇄ GUI 走**同机 Unix domain socket**（`/tmp/agent.sock`），两个方向的信封不同 —— 见 [`docs/ipc-protocol.md`](docs/ipc-protocol.md)。
 - 固件升级后重拉 sysroot 并重新交叉编译，否则 glibc 不匹配。
