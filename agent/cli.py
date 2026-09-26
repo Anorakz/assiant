@@ -45,11 +45,15 @@ from agent.core.state_machine import StateMachine
 from agent.ipc.local_client import IpcClientError, LocalClient
 from agent.ipc.protocol import (
     COMMAND_CHAT_INPUT,
+    COMMAND_MUSIC_NEXT,
+    COMMAND_MUSIC_PLAY_PAUSE,
+    COMMAND_MUSIC_PREV,
     COMMAND_QUERY_SCHEDULE,
     COMMAND_SWITCH_MODE,
     MODES,
     SOCKET_PATH,
     TOPIC_LLM,
+    TOPIC_MUSIC,
     TOPIC_SCHEDULE,
     TOPIC_STATUS,
 )
@@ -62,6 +66,24 @@ EXIT_USAGE = 2
 #: 等一条推送的默认超时（秒）。Agent 只在**状态变化**时推 status，
 #: 所以 status 命令必须能"等不到也不报错"。
 DEFAULT_TIMEOUT = 3.0
+
+#: `music` 命令连上之后先等一小会儿**补推**（T8-4: 新客户端连上就会收到当前曲目与在不在放）。
+#: 只有靠它，"播放/暂停"才做得成**语义上的**播放与暂停 —— 协议里只有一个 toggle。
+MUSIC_STATE_WAIT = 0.8
+
+#: 音乐命令 -> 线格式动作（三个都在协议里；`agent/ipc/__init__.py` 接进 `Runtime.music_control`）。
+#: ⚠ 协议**只有一个** toggle（`music_play_pause`），没有单独的 play/pause —— 所以
+#:   `assistant music play|pause` 靠"先问清现在在不在放，再决定发不发"来实现幂等意图。
+MUSIC_COMMANDS: Dict[str, str] = {
+    "play": COMMAND_MUSIC_PLAY_PAUSE,
+    "pause": COMMAND_MUSIC_PLAY_PAUSE,
+    "toggle": COMMAND_MUSIC_PLAY_PAUSE,
+    "next": COMMAND_MUSIC_NEXT,
+    "prev": COMMAND_MUSIC_PREV,
+}
+
+#: 音乐子命令能取的动作（argparse 的 choices 也用它，别写两遍）
+MUSIC_ACTIONS: Tuple[str, ...] = ("play", "pause", "toggle", "next", "prev")
 
 #: watch 打印一条推送时，单个值最长多少字符（超出截断并标总长）
 WATCH_VALUE_LIMIT = 120
@@ -349,6 +371,121 @@ async def cmd_mode(args: argparse.Namespace) -> int:
         print("Agent 没切过去：当前仍是 %s —— 非法转换会被状态机拒掉（协议 §4）。"
               % current, file=sys.stderr)
         return EXIT_ERROR
+    finally:
+        await client.close()
+
+
+def music_decision(action: str, playing: Optional[bool]) -> str:
+    """**纯逻辑**：这条音乐命令要不要真发出去（单测钉它）。
+
+    @param action  `play` / `pause` / `toggle` / `next` / `prev`
+    @param playing 连上补推里拿到的"现在在不在放"；**None = 没问出来**
+    @return "already"（已经是那个状态，别发）/ "send"（发）
+
+    ⚠ 为什么要有它：协议里音乐只有 **一个** `music_play_pause`（toggle），
+      没有单独的 play / pause。直接发的话，`assistant music play` 在一首**正在放**的歌上
+      会把它**暂停**掉 —— 那不是用户说的"播放"。所以先看状态：
+      已经在放就别发（幂等）；状态问不出来就照发（宁可按 toggle 办，也要如实说出来）。
+    """
+    if action not in ("play", "pause") or playing is None:
+        return "send"
+    want_playing = (action == "play")
+    return "already" if bool(playing) == want_playing else "send"
+
+
+def music_state_text(data: Dict[str, Any]) -> str:
+    """把一条 `music` 推送说成人话（曲目 + 在放/暂停）。"""
+    title = str(data.get("title") or "").strip() or "（没说是哪首）"
+    playing = data.get("playing")
+    if playing is True:
+        return "%s（正在播放）" % title
+    if playing is False:
+        return "%s（已暂停）" % title
+    return title
+
+
+async def cmd_music(args: argparse.Namespace) -> int:
+    """音乐传输控制（给 ssh / 脚本用）：`play` / `pause` / `toggle` / `next` / `prev`。
+
+    走的是**现成的** IPC 命令（`music_play_pause` / `music_next` / `music_prev`，
+    T8-4 已接进 `Runtime.music_control`）—— 这里不新增协议。
+
+    三条口径：
+      · **成功看 `music` 推送**（Agent 成功时会推一条当前曲目/在不在放），不自己编状态；
+      · **失败看 `llm` 推送**（音乐没开 / PC 上没在放 / 队列是空的，Agent 会把原因说出来）
+        —— 原话照抄，退出码 1；
+      · `play` / `pause` 是**幂等意图**：已经在那个状态就只打印一句、**不发命令**
+        （协议只有 toggle，发了会反过来，见 `music_decision`）。
+    """
+    action = str(args.action)
+    path = _resolve_path(args)
+    client = LocalClient(path)
+
+    state: Dict[str, Any] = {}
+    failure: Dict[str, Any] = {}
+    kind = {"what": ""}
+    arrived = asyncio.Event()
+
+    def on_message(topic: str, data: dict) -> None:
+        if topic == TOPIC_MUSIC:
+            state.clear()
+            state.update(data)
+            kind["what"] = "music"
+            arrived.set()
+        elif topic == TOPIC_LLM:
+            failure.clear()
+            failure.update(data)
+            kind["what"] = "llm"
+            arrived.set()
+
+    client.on_message(on_message)
+    try:
+        await client.connect()
+    except IpcClientError as exc:
+        print(connect_hint(path, exc), file=sys.stderr)
+        return EXIT_ERROR
+
+    try:
+        # ---- 1) 先等一小会儿连上补推的那条 music（"现在在不在放"）----
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(arrived.wait(), timeout=MUSIC_STATE_WAIT)
+        playing = state.get("playing") if kind["what"] == "music" else None
+        if kind["what"] == "music":
+            print("现在是：%s" % music_state_text(state))
+
+        # ---- 2) 决定发不发 ----
+        if music_decision(action, playing) == "already":
+            print("已经是%s了 —— 没发命令。" % ("播放" if action == "play" else "暂停"))
+            return EXIT_OK
+
+        arrived.clear()
+        kind["what"] = ""
+        await client.send_command(MUSIC_COMMANDS[action], {})
+        if getattr(args, "no_wait", False):
+            print("已发送：music %s" % action)
+            return EXIT_OK
+
+        # ---- 3) 等回执：music（成功）或 llm（失败）----
+        try:
+            await asyncio.wait_for(arrived.wait(), timeout=args.timeout)
+        except asyncio.TimeoutError:
+            print("已发出 music %s，但 %.1f 秒内没等到回执（Agent 既没推 music 也没推 llm）。"
+                  % (action, args.timeout), file=sys.stderr)
+            return EXIT_ERROR
+
+        if kind["what"] == "llm":
+            print("没做成：%s" % (failure.get("text") or "Agent 没说原因"), file=sys.stderr)
+            return EXIT_ERROR
+
+        text = music_state_text(state)
+        want = {"play": True, "pause": False}.get(action)
+        if want is not None and state.get("playing") is not want:
+            print("命令发出去了，但状态还是：%s —— Agent 那边没按预期变。" % text,
+                  file=sys.stderr)
+            return EXIT_ERROR
+        print("%s：%s" % ({"play": "播放中", "pause": "已暂停", "toggle": "现在是",
+                           "next": "下一首", "prev": "上一首"}[action], text))
+        return EXIT_OK
     finally:
         await client.close()
 
@@ -1271,8 +1408,19 @@ def build_parser() -> argparse.ArgumentParser:
                         help="发出去就返回，不等 status 确认")
     p_mode.set_defaults(func=cmd_mode)
 
-    p_watch = sub.add_parser("watch", help="持续打印 Agent 的推送（Ctrl-C 退出；无 --timeout）",
-                             parents=[_common_options(suppress_defaults=True,
+    p_music = sub.add_parser(
+        "music",
+        help="音乐传输控制：%s（成功看 music 推送、失败看 Agent 的原话）"
+             % "/".join(MUSIC_ACTIONS),
+        parents=[_common_options(suppress_defaults=True)])
+    p_music.add_argument("action", choices=list(MUSIC_ACTIONS),
+                         help="play = 播放（已经在放就不发）；pause = 暂停（已经暂停就不发）；"
+                              "toggle = 直接切一下；next / prev = 上一首下一首")
+    p_music.add_argument("--no-wait", action="store_true",
+                         help="发出去就返回，不等 music/llm 回执")
+    p_music.set_defaults(func=cmd_music)
+
+    p_watch = sub.add_parser("watch", help="持续打印 Agent 的推送（Ctrl-C 退出；无 --timeout）",                             parents=[_common_options(suppress_defaults=True,
                                                       with_timeout=False)])
     p_watch.add_argument("--topics", help="只看这些 topic（逗号分隔；默认全看）")
     p_watch.add_argument("--count", type=int, default=0,

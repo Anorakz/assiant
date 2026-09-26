@@ -1,7 +1,7 @@
 # 板端控制 CLI（`assistant`）
 
 Agent 有**两条前端**：板端那块屏上的 GUI，和这里的 CLI。CLI 给 ssh / 脚本用 ——
-看一眼状态、发一条消息、切模式、盯推送、查日程、做体检。
+看一眼状态、发一条消息、切模式、控音乐、盯推送、查日程、做体检。
 
 | 项 | 值 |
 | --- | --- |
@@ -62,7 +62,7 @@ python3 -m agent.cli status          # ⚠ 用 -m，不要在 agent/ 里直接 p
 
 ---
 
-## 4. 八条命令
+## 4. 九条命令
 
 ### `status` —— 看一眼当前模式与串流连接
 
@@ -82,6 +82,43 @@ $ assistant status
 ```
 
 > 这就是"不编一个 IDLE 出来"：CLI 不 import Agent 去读它的内存，所以它**只能**报它真的收到的东西。
+
+### `music` —— 音乐传输控制（播放 / 暂停 / 上一首 / 下一首）
+
+```bash
+$ assistant music play
+现在是：夜曲（已暂停）
+播放中：夜曲（正在播放）
+
+$ assistant music play          # 已经在放 -> 不发命令（幂等）
+现在是：夜曲（正在播放）
+已经是播放了 —— 没发命令。
+
+$ assistant music pause
+现在是：夜曲（正在播放）
+已暂停：夜曲（已暂停）
+
+$ assistant music next          # 下一首
+现在是：夜曲（正在播放）
+下一首：晴天（正在播放）
+
+$ assistant music prev
+$ assistant music toggle        # 直接切一下（不看当前状态）
+$ assistant music next --no-wait        # 发出去就返回
+$ assistant music next --timeout 15     # 音乐要走一趟 PC（neteasecli/mpv），慢就加
+```
+
+三条口径（都写进单测了）：
+
+| 事 | 怎么办 |
+| --- | --- |
+| **走哪条协议** | 用**现成的**三条命令：`music_play_pause` / `music_next` / `music_prev`（T8-4 已接进 Runtime）——**没有新增协议** |
+| **`play` / `pause` 为什么不是 toggle** | 协议里音乐**只有一个 toggle**。所以 CLI 连上后先等一小会儿**补推的 `music{playing}`**，已经在那个状态就**只打印、不发命令**（否则"播放"会把正在放的歌暂停掉）。状态问不出来就照发，并如实说 |
+| **成功/失败看什么** | **成功**看 Agent 推的 `music`（当前曲目 + 在不在放）；**失败**看 `llm`（音乐没开 / PC 上没在放 / 队列是空的）——**Agent 的原话照抄**并退出码 1。命令发出去了但 `playing` 没按预期变，也是**错误**（不假装成功） |
+
+> ⚠ 音乐**放什么**由**对话**决定（`assistant chat 放首周杰伦`）；这里只管传输。
+> 音乐没开（`music.enabled: false`）时，Agent 会回一句 `音乐没开（config.yaml 的 music.enabled）`，
+> CLI 原样打印并返回 1 —— 不会静默无事发生。
 
 ### `chat` —— 发一条消息给 Agent 并等回复
 

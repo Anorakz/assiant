@@ -972,6 +972,168 @@ class _FakeAgent:
         return False
 
 
+class TestMusicCommand(unittest.TestCase):
+    """`assistant music play|pause|toggle|next|prev`（T11-10c）—— 走**现成的**三个命令。
+
+    ⚠ 协议里音乐只有**一个** toggle（`music_play_pause`），没有单独的 play/pause：
+      所以"播放/暂停"是**幂等意图**（先问状态再决定发不发），下面把这条逻辑钉住。
+    """
+
+    def parse(self, *argv):
+        return cli.build_parser().parse_args(list(argv))
+
+    def test_every_action_parses(self):
+        for action in cli.MUSIC_ACTIONS:
+            args = self.parse("music", action)
+            self.assertIs(args.func, cli.cmd_music)
+            self.assertEqual(args.action, action)
+            self.assertFalse(args.no_wait)
+
+    def test_the_wire_commands_are_the_existing_ones(self):
+        # 不新增协议：play/pause/toggle 都走 music_play_pause，next/prev 各走自己那条
+        self.assertEqual(cli.MUSIC_COMMANDS["play"], "music_play_pause")
+        self.assertEqual(cli.MUSIC_COMMANDS["pause"], "music_play_pause")
+        self.assertEqual(cli.MUSIC_COMMANDS["toggle"], "music_play_pause")
+        self.assertEqual(cli.MUSIC_COMMANDS["next"], "music_next")
+        self.assertEqual(cli.MUSIC_COMMANDS["prev"], "music_prev")
+        self.assertEqual(sorted(cli.MUSIC_COMMANDS), sorted(cli.MUSIC_ACTIONS))
+
+    def test_a_bad_action_is_a_usage_error(self):
+        with self.assertRaises(SystemExit) as caught:
+            self.parse("music", "dance")
+        self.assertEqual(caught.exception.code, 2)          # argparse: 参数错 = 2
+
+    def test_no_wait_is_accepted_and_socket_can_come_first(self):
+        args = self.parse("--socket", "/tmp/x.sock", "music", "next", "--no-wait")
+        self.assertTrue(args.no_wait)
+        self.assertEqual(args.socket, "/tmp/x.sock")
+
+    def test_play_is_idempotent_when_already_playing(self):
+        # 已经在放 -> 不发命令（发了反而会暂停 —— 那不是"播放"）
+        self.assertEqual(cli.music_decision("play", True), "already")
+        self.assertEqual(cli.music_decision("pause", False), "already")
+
+    def test_the_opposite_state_sends(self):
+        self.assertEqual(cli.music_decision("play", False), "send")
+        self.assertEqual(cli.music_decision("pause", True), "send")
+
+    def test_unknown_state_still_sends(self):
+        # 状态问不出来（Agent 没补推/还没放）-> 照发 toggle，并且**如实说**
+        self.assertEqual(cli.music_decision("play", None), "send")
+        self.assertEqual(cli.music_decision("pause", None), "send")
+
+    def test_next_and_toggle_always_send(self):
+        for action in ("next", "prev", "toggle"):
+            self.assertEqual(cli.music_decision(action, True), "send")
+            self.assertEqual(cli.music_decision(action, False), "send")
+            self.assertEqual(cli.music_decision(action, None), "send")
+
+    def test_state_text_says_what_is_playing(self):
+        self.assertEqual(cli.music_state_text({"title": "夜曲", "playing": True}),
+                         "夜曲（正在播放）")
+        self.assertEqual(cli.music_state_text({"title": "夜曲", "playing": False}),
+                         "夜曲（已暂停）")
+        self.assertEqual(cli.music_state_text({"playing": True}), "（没说是哪首）（正在播放）")
+        self.assertEqual(cli.music_state_text({"title": "夜曲"}), "夜曲")
+
+
+@unittest.skipUnless(UNIX_SOCKET_SUPPORTED, "需要 AF_UNIX (Windows 的 CPython 不支持)")
+class TestMusicAgainstRealServer(unittest.IsolatedAsyncioTestCase):
+    """音乐命令对着**真的** LocalServer 跑一遍（与其它 CLI 用例同一套夹具）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cli-music-")
+        self.path = os.path.join(self.tmp, "agent.sock")
+        self.agent = _FakeAgent(self.path)
+
+    async def asyncSetUp(self):
+        await self.agent.start()
+        self.addAsyncCleanup(self.agent.stop)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def push_on_connect(self, title, playing):
+        """真 Agent 连上时会补推一条 music（T8-4），这里照做。"""
+        async def push_soon():
+            self.assertTrue(await self.agent.wait_for_client(), "CLI 没连上来")
+            await self.agent.push(TOPIC_MUSIC, {"title": title, "playing": playing})
+
+        return asyncio.ensure_future(push_soon())
+
+    async def test_play_on_an_already_playing_track_sends_nothing(self):
+        args = cli.build_parser().parse_args(["music", "play", "--socket", self.path,
+                                             "--timeout", "2"])
+        pusher = self.push_on_connect("夜曲", True)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = await cli.cmd_music(args)
+        await pusher
+
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("正在播放", out.getvalue())
+        self.assertIn("没发命令", out.getvalue())
+        self.assertEqual(self.agent.commands, [], "已经在放就不该再发 toggle")
+
+    async def test_pause_sends_the_toggle_and_reports_the_new_state(self):
+        args = cli.build_parser().parse_args(["music", "pause", "--socket", self.path,
+                                             "--timeout", "2"])
+        self.agent.reply_with("music_play_pause", TOPIC_MUSIC,
+                              lambda payload: {"title": "夜曲", "playing": False})
+        pusher = self.push_on_connect("夜曲", True)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = await cli.cmd_music(args)
+        await pusher
+
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertEqual(self.agent.commands, [("music_play_pause", {})])
+        self.assertIn("已暂停", out.getvalue())
+
+    async def test_next_reports_the_new_track(self):
+        args = cli.build_parser().parse_args(["music", "next", "--socket", self.path,
+                                             "--timeout", "2"])
+        self.agent.reply_with("music_next", TOPIC_MUSIC,
+                              lambda payload: {"title": "晴天", "playing": True})
+        pusher = self.push_on_connect("夜曲", True)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = await cli.cmd_music(args)
+        await pusher
+
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertEqual(self.agent.commands, [("music_next", {})])
+        self.assertIn("晴天", out.getvalue())
+
+    async def test_a_failure_prints_the_agents_words(self):
+        args = cli.build_parser().parse_args(["music", "next", "--socket", self.path,
+                                             "--timeout", "2"])
+        self.agent.reply_with("music_next", TOPIC_LLM,
+                              lambda payload: {"text": "队列是空的 —— 先让我放一首"})
+        pusher = self.push_on_connect("夜曲", True)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = await cli.cmd_music(args)
+        await pusher
+
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("队列是空的", err.getvalue())
+
+    async def test_a_state_change_that_did_not_happen_is_an_error(self):
+        """Agent 回了 music，但 `playing` 没按预期变（例如 PC 上 mpv 拒了）—— 如实报错。"""
+        args = cli.build_parser().parse_args(["music", "pause", "--socket", self.path,
+                                             "--timeout", "2"])
+        self.agent.reply_with("music_play_pause", TOPIC_MUSIC,
+                              lambda payload: {"title": "夜曲", "playing": True})
+        pusher = self.push_on_connect("夜曲", True)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = await cli.cmd_music(args)
+        await pusher
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("没按预期变", err.getvalue())
+
+
 @unittest.skipUnless(UNIX_SOCKET_SUPPORTED, "需要 AF_UNIX (Windows 的 CPython 不支持)")
 class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
     def setUp(self):

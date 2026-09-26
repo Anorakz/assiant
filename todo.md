@@ -1667,6 +1667,30 @@ Phase 7 T11 — **B 站视频**（图像锚点认游戏 -> 搜 B 站 -> 板端�
       ⚑① 板端到 `api.bilibili.com` **有 IPv6**: 只 REJECT IPv4 堵不住（urllib 会走 v6），
         所以那段用"REJECT IPv4 + 不可达地址"两条一起验（都过了）
 
+Phase 7 T11 收尾 — **FIFO 播放 + CLI 控制**（你点名的两件事, 2026-09-26）
+☑ **FIFO 排查（先查后改）**: 结论是**我们写端没问题**, 卡在播放器那一侧 ——
+      · `dd` 与 `filesrc ! fakesink` 12 秒读走 **291 s** 的量（FIFO/写端正常）;
+      · `filesrc ! decodebin ! fakesink` **210 s**（GStreamer 能读能解）;
+      · `filesrc ! tsdemux ! h264parse ! mppvideodec` / `fdsrc` / `+queue` 全都
+        `pipeline doesn't want to preroll`（0.4~3.9 s）;
+      · **`playbin uri=file://<FIFO>`（≈ QMediaPlayer 的后端）一个字节都不读（0.0 s）**,
+        换容器（matroska）也一样 → 根因是 **playbin 对"不可 seek 的 FIFO"起不来**,
+        与容器/写端/解码器无关。
+      → 修法: (a) 本地 HTTP + 把坏掉的 `souphttpsrc` 压下去让 `curlhttpsrc` 上来（先试）;
+        (b) 失败再让 GUI 自己起 `filesrc ! decodebin` 管线（绕开 playbin）
+☑ **CLI 音乐接入**（T11-10c）: `assistant music play|pause|toggle|next|prev` ——
+      **不新增协议**, 走现成的 `music_play_pause`/`music_next`/`music_prev`;
+      `play`/`pause` 做成**幂等意图**（连上先读补推的 `music{playing}`, 已经在那个状态就只打印不发,
+      否则"播放"会把正在放的歌暂停掉）; 成功看 `music` 推送、失败**照抄 Agent 的 `llm` 原话**并退出 1;
+      "发了但状态没按预期变"也算错误（不假装成功）。
+      板端真跑（真 Agent + 真 IPC + 真 PC 音乐链）: `play` -> `播放中：赤き月（正在播放）`、
+      `pause` -> `已暂停`、`next` -> `心よ原始に戻れ 2020`、`prev` -> 回到 `赤き月`、
+      `toggle` -> 切一下, **退出码全 0**, Agent 日志里每条都有对应的 `开始播放 …` ✔
+□ **FIFO 修法 A**（本地 HTTP + 强制 curlhttpsrc）—— 先试; 失败转 B（GUI 自带 decodebin 管线）
+□ **CLI 视频接入**（T11-10a/b/c 的视频部分）: 新命令 `video_control{play|pause|toggle}` +
+      topic `bilibili` 加 `control/seq`（Agent→GUI 让它切播放器）+ `assistant video play|pause|toggle|next|prev`
+      —— 排在 FIFO 修好之后（要有能播的画面才验得出暂停）
+
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档

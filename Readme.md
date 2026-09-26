@@ -100,7 +100,7 @@ agent/
 │   ├── test_docs.py             # 文档守卫: 链接有效 + 过时说法黑名单
 │   ├── test_config_source_guard.py  # 配置真源守卫: agent/ 只认 config/config.yaml
 │   ├── test_schedule_config.py  # 文本级删掉已触发的一次性日程
-│   ├── test_cli.py              # CLI 八条命令 / 窗口与尾巴 / cleanup / tag
+│   ├── test_cli.py              # CLI 九条命令（T11-10c 加了 music 传输控制）/ 窗口与尾巴 / cleanup / tag
 │   ├── test_tools.py            # 工具层: 注册 / 状态权限 / 参数校验 / 缺依赖跳过 (T1)
 │   ├── test_tool_permissions.py # 状态权限表: 4 状态 × 每个工具, 禁止的组合真的被拒 (T4)
 │   ├── test_wallpaper.py        # 壁纸目录游标 / 三格窗口(prev/current/next) / next_wallpaper 工具与命令 (T3/T10-3)
