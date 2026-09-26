@@ -173,6 +173,7 @@ Agent 里唯一会碰 `config.yaml` 的地方是 `agent/core/schedule_config.py`
 | --- | --- | --- |
 | 删哪些 | **只删 oneoff**；`recurring` 一条不动 | recurring 删了明天就不响了 |
 | 怎么写 | **文本级**：只删属于那条的行区间，其余**逐字节**不变（`agent/core/schedule_config.py`） | 本文件的注释就是各字段的事实约定来源，整体重排 + 丢注释不可接受 |
+| 读写都不翻译换行 | 读用 `open(..., newline="")`；写走 `write_text_atomic()`（它也是 `newline=""`） | 文本模式会把 `\n` 翻成 `os.linesep`：同一个 CRLF 文件在 Linux 上被写成 LF、在 Windows 上被写成 `\r\r\n`。"逐字节不变"就破了（T12-5 板端实测抓到的） |
 | 原子性 | `agent/config.py::write_text_atomic()`（同目录临时文件 + `os.replace`）—— **全仓唯一实现**，`save_config()` 也走它 | "临时文件必须与目标文件系统相同"这条细节只写一遍 |
 | 备份 | 原文件旁留 `config.yaml.bak`（覆盖上一份），与 GUI 的 ConfigStore 同一约定 | 出问题能回退 |
 | 核对 | 写前**重新读盘**，`state` + `date` + `start` 三者都要对上（T12-4 前是 `title`），对不上就**不删** | 配置可能被人/GUI 改过，宁可不动也不误删 |

@@ -250,6 +250,18 @@ class TestSave(ConfigTestBase):
         leftovers = [p.name for p in self.tmp.iterdir() if p.name.endswith(".tmp")]
         self.assertEqual(leftovers, [])
 
+    def test_write_text_atomic_does_not_translate_line_endings(self):
+        """⚠ T12-5 板端实测抓到的：文本模式会把 `\\n` 翻成 `os.linesep`。
+
+        同一个 CRLF 文本要是被翻译一次，在 Linux 上就变成 LF、在 Windows 上变成 `\\r\\r\\n` ——
+        而"文本级改配置"承诺的是"除了目标那几行，其余**字节**不变"。所以这一层必须逐字节写。
+        """
+        target = self.tmp / "crlf.yaml"
+        cfg.write_text_atomic(target, "a: 1\r\nb: 2\r\n")
+        self.assertEqual(target.read_bytes(), b"a: 1\r\nb: 2\r\n")
+        cfg.write_text_atomic(target, "a: 1\nb: 2\n")
+        self.assertEqual(target.read_bytes(), b"a: 1\nb: 2\n")
+
     def test_temp_file_is_created_in_target_directory(self):
         # 临时文件必须与目标同目录: 否则 os.replace 跨设备会抛 OSError(EXDEV),
         # 原子换入就退化成"复制+删除"。这里通过挂在 mkstemp 上的探针确认 dir 参数。

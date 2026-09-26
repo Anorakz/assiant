@@ -1813,9 +1813,15 @@ T12-5 — **日程配置的写入器**（文本级增删；工具 `set_schedule`
       `oneoff:` 后面还有别的段时（板端真配置后面就是 `gui:`），删一条 oneoff 会把后面的段
       整段删掉。R3 默认关着所以一直没露头，T12-5 的"加一条"直接踩在上面（新条目被加到了
       文件末尾）才翻出来。现在区间在**缩进回退那一行**收住，并加了一组专门的用例
+☑ ⚠ **顺手修掉第二个老 bug（板端实测抓到的）**：`Path.read_text()` / 文本模式写盘会**翻译换行** ——
+      读的时候 CRLF 被翻成 LF，`write_text_atomic` 写的时候 `\n` 又被翻成 `os.linesep`。
+      结果: 同一个 CRLF 配置文件在 Linux 上被写成 LF、在 Windows 上会被写成 `\r\r\n`，
+      "逐字节不变"直接破功（PC 上因为两边都翻译一次、正好抵消，测试是绿的；板端才露）。
+      现在 `schedule_config._read_text()` 与 `agent/config.py::write_text_atomic()` 都是
+      `newline=""`（逐字节），并各加了一条专门的用例
 ☑ 单测: `tests/test_schedule_config.py` 57 项（文本形状 + 行区间 + 通用查找 + 新增 + 文件级 +
       **往返**（写进去的文本用真的 `ScheduleEvent.from_config` 读回来还是同一条））;
-      `tests/test_scheduler.py::TestEntryMatcher` +6
+      `tests/test_scheduler.py::TestEntryMatcher` +6; `tests/test_config.py` +1（逐字节写）
 ☑ 文档: `docs/config-sources.md` §3.1 拆成"(一) R3 的删 / (二) T12-5 的增删"两张规矩表;
       `Readme.md` 的文件树补上 `schedule_config.py`
 

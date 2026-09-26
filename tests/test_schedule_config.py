@@ -735,10 +735,15 @@ class TestAddAndRemoveInFile(unittest.TestCase):
             schedule_config.remove_entry_in_file(self.tmp / "nope.yaml", lambda f: True)
 
     def test_crlf_survives_a_file_write(self):
-        self.path.write_text(self.original.replace("\n", "\r\n"), encoding="utf-8")
+        # ⚠ 用 bytes 写：`Path.write_text` 走文本模式，换行会被翻译 —— 造不出"确定的 CRLF"
+        self.path.write_bytes(self.original.replace("\n", "\r\n").encode("utf-8"))
         schedule_config.add_entry_in_file(self.path, {"state": "study", "start": "09:30"})
         raw = self.path.read_bytes().decode("utf-8")
         self.assertNotIn("\n", raw.replace("\r\n", ""), "混进了 LF")
+        self.assertEqual(raw.count("\r\n"), raw.count("\n"), "CRLF 数必须与 LF 数相等")
+        # .bak 也要逐字节等于原文（含 CRLF）
+        self.assertEqual(Path(str(self.path) + ".bak").read_bytes(),
+                         self.original.replace("\n", "\r\n").encode("utf-8"))
 
     @unittest.skipIf(os.name == "nt", "只读目录在 Windows 上不拦 root/管理员")
     @unittest.skipIf(IS_ROOT, "root 无视目录权限（板端就是 root）")

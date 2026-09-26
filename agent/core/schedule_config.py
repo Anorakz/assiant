@@ -117,6 +117,17 @@ def _split_lines(text: str) -> List[str]:
     return text.splitlines(keepends=True)
 
 
+def _read_text(path: Path) -> str:
+    """读配置文件：**逐字节**读进来，不做换行翻译。
+
+    ⚠ `Path.read_text()` 走的是文本模式（`newline=None`），在 POSIX 上会把 CRLF 翻成 LF ——
+      于是"读出来再写回去"就把整个文件的换行悄悄改成 LF 了（T12-5 板端实测抓到）。
+      这个模块的全部承诺就是"除了目标那几行，其余**字节**不变"，所以两头都不能做翻译。
+    """
+    with open(str(path), "r", encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
 def _ending_of(line: str) -> str:
     """这一行用的是哪种行尾（新加的行跟着它走）。"""
     return "\r\n" if line.endswith("\r\n") else "\n"
@@ -561,7 +572,7 @@ def _read_write(config_file: Any, transform: Callable[[str], Tuple[str, str]]
     @raise OSError 读/写盘失败 —— 原样抛出，调用方（工具 / CLI / Scheduler）自己决定怎么报
     """
     path = Path(config_file)
-    original = path.read_text(encoding="utf-8")
+    original = _read_text(path)
     new_text, why = transform(original)
     if why:
         return False, why
@@ -589,7 +600,7 @@ def remove_entry_in_file(config_file: Any, matches: Callable[[Dict[str, str]], b
     @return (删了吗, 原因, 找到的那条)。没匹配上/写法不支持时 `(False, 原因, None)`。
     """
     path = Path(config_file)
-    original = path.read_text(encoding="utf-8")
+    original = _read_text(path)
     new_text, why, found = remove_entry(original, matches)
     if why:
         return False, why, found

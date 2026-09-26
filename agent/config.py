@@ -255,6 +255,9 @@ def write_text_atomic(path: Union[str, Path], text: str, encoding: str = "utf-8"
     @note 全仓只有这一处实现"原子写文本"：`save_config()` 与核心侧的"删掉已触发的
           一次性日程"（agent/core/schedule_config.py）都走它 —— "临时文件必须落在目标
           同目录（同一文件系统才能原子换入）"这条细节只写一遍。
+    @note ⚠ `newline=""`：**逐字节**写进去，不做换行翻译。文本模式默认会把 `\n` 翻成
+          `os.linesep`，于是同一个 CRLF 文本在 Linux 上被写成 LF、在 Windows 上被写成
+          `\r\r\n` —— 而"文本级改配置"要求的是"除了那几行，其余字节不变"（T12-5 板端实测）。
     @raise OSError 写盘失败（权限、磁盘满……）—— 原样抛出, 不吞
     """
     target = Path(path)
@@ -263,7 +266,7 @@ def write_text_atomic(path: Union[str, Path], text: str, encoding: str = "utf-8"
 
     fd, tmp_name = tempfile.mkstemp(prefix=".%s." % target.name, suffix=".tmp", dir=str(base))
     try:
-        with os.fdopen(fd, "w", encoding=encoding) as fh:
+        with os.fdopen(fd, "w", encoding=encoding, newline="") as fh:
             fh.write(text)
         os.replace(tmp_name, target)
     except BaseException:
