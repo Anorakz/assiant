@@ -219,7 +219,9 @@ WRITE_PRIMITIVES = (r"(os\.replace|mkstemp|\.write_text\(|write_text_atomic\("
 #: 允许出现写入原语的文件（**只有**这六个）。
 ALLOWED_WRITERS = {
     "agent/config.py",               # write_text_atomic: 全仓唯一的"原子写文本"实现
-    "agent/core/schedule_config.py", # 唯一被允许的调用方: 删掉已触发的一次性日程
+    "agent/core/schedule_config.py", # 唯一被允许的调用方: 删掉已触发的一次性日程 (R3) +
+                                     # 工具 `set_schedule` 的增删 (T12-5) —— 都是**文本级**
+                                     # 手术: 只动目标条目的那几行, 其余逐字节不变 + 留 .bak
     # T7-2 新增的第三个写入者: 壁纸**标签数据**（config/wall_data.jsonl）。
     # ⚠ 它写的不是配置真源，是**机器派生数据**（SigLIP 打出来的标签 + 向量）——
     #   真源仍然只有 config.yaml 一份。写入者只有 `assistant tag --apply` 这条路径。

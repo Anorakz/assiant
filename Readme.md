@@ -37,6 +37,7 @@ agent/
 │   │   ├── chat_memory.py       # **纯对话记忆**（有界、不落盘；记"谁说的/说了什么/当时哪个模式"，T9-1）
 │   │   ├── user_profile.py      # **用户画像内核**（IP/歌手**权重** + 心情调模型 + 负反馈清零 + 挑图/补歌配方，T9-2/T10）
 │   │   ├── scheduler.py         # 日程检查 + 定时触发 + 终端命令监听
+│   │   ├── schedule_config.py   # 日程的**文本级**增删（只动目标那几行 + `.bak`，R3/T12-5）
 │   │   ├── wallpaper.py         # 壁纸目录 + 游标 + **三格窗口 prev/current/next**（可在候选里翻，T7-3/T10-3）
 │   │   └── music.py             # 播放内核: 环形队列 / 轮询真实进度 / 30 秒计一次 / **补歌到目标长度** (T8-4/T10-4)
 │   ├── media/                   # 本地媒体库 (T8-3)
@@ -94,12 +95,12 @@ agent/
 │   ├── test_wall_data.py        # 壁纸词表 / 标签数据文件 / 增量计划 (T7-2)
 │   ├── test_main.py             # 进程装配: 启停顺序 / 异常隔离 / 主循环
 │   ├── test_ipc_protocol.py     # IPC 线格式契约 (字节级)
-│   ├── test_scheduler.py        # 日程触发 / 去重 / 终端命令识别
+│   ├── test_scheduler.py        # 日程触发 / 去重 / 终端命令识别 / 文本级增删用的匹配器
 │   ├── test_chat_bus.py         # ChatInputBus 单测
 │   ├── test_io.py               # image_reader / input_sender
 │   ├── test_docs.py             # 文档守卫: 链接有效 + 过时说法黑名单
 │   ├── test_config_source_guard.py  # 配置真源守卫: agent/ 只认 config/config.yaml
-│   ├── test_schedule_config.py  # 文本级删掉已触发的一次性日程
+│   ├── test_schedule_config.py  # 日程配置的文本级增删（R3 的删 + T12-5 的加）
 │   ├── test_cli.py              # CLI 十条命令（T11-10c/f 加了 music / video 传输控制）/ 窗口与尾巴 / cleanup / tag
 │   ├── test_tools.py            # 工具层: 注册 / 状态权限 / 参数校验 / 缺依赖跳过 (T1)
 │   ├── test_tool_permissions.py # 状态权限表: 4 状态 × 每个工具, 禁止的组合真的被拒 (T4)

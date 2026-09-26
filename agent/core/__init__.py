@@ -27,6 +27,8 @@ from .scheduler import (
     ScheduleEvent,
     Scheduler,
     SchedulerError,
+    entry_matcher,
+    oneoff_matcher,
     normalize_command,
     parse_clock,
     parse_command_config,
@@ -56,6 +58,9 @@ __all__ = [
     "parse_clock",
     "normalize_command",
     "parse_command_config",
+    # 文本级增删日程用的匹配器（T12-5）
+    "entry_matcher",
+    "oneoff_matcher",
     "DEFAULT_INTERVAL_MIN",
     "DEFAULT_WINDOW_MIN",
     "DEFAULT_HISTORY_LIMIT",

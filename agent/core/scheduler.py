@@ -76,10 +76,14 @@ __all__ = [
     "ScheduleEvent",
     "CommandBinding",
     "SchedulerError",
+    "SkippedScheduleEntry",
     "TERMINAL_SOURCE",
     "parse_clock",
     "normalize_command",
     "parse_command_config",
+    "entry_matcher",
+    "oneoff_matcher",
+    "legacy_field_notes",
     "WEEKDAYS",
     "DEFAULT_INTERVAL_MIN",
     "DEFAULT_WINDOW_MIN",
@@ -470,35 +474,82 @@ def _as_action(value: Any, label: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 #  Scheduler
 # ---------------------------------------------------------------------------
-def oneoff_matcher(event: "ScheduleEvent") -> Callable[[Dict[str, str]], bool]:
-    """造一个"匹配这条 oneoff"的 predicate，给**文本级删除**用（`schedule_config`）。
+def _days_text(value: str) -> Set[int]:
+    """配置里那个裸标量 `days` 文本 -> 星期集合（`[mon, wed]` / `[0, 2]` / `mon` / 空）。
 
-    @param event  要匹配的那条日程（用它自己的 `state` / `on` / `start`）
+    @raise SchedulerError 认不出的写法
+    @note 只处理**文本级**增删抽出来的那种形状（`schedule_config._fields_of` 给的是
+          strip_scalar 之后的裸文本，方括号还在）。认不出就抛，调用方当成"不匹配"。
+    """
+    text = (value or "").strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    if not text.strip():
+        return set()
+    days: Set[int] = set()
+    for item in text.split(","):
+        token = item.strip()
+        if not token:
+            continue
+        if token.lstrip("-").isdigit():
+            days.add(_weekday_index(int(token)))
+        else:
+            days.add(_weekday_index(token))
+    return days
+
+
+def entry_matcher(event: "ScheduleEvent") -> Callable[[Dict[str, str]], bool]:
+    """造一个"匹配这条日程"的 predicate，给**文本级增删**用（`schedule_config`）。
+
+    @param event  要匹配的那条日程（用它自己的 `state` / `start` / `days` / `on`）
     @return matches(fields) -> bool；fields 是从配置**文件**里抽出来的裸标量
-            （已去引号与行尾注释），键是 state / date / start
+            （已去引号与行尾注释），键是 state / start / days / date
 
-    @note T12-4: 匹配的三个键从 `title+date+start` 换成 **`state+date+start`**（日程没有
-          title 了）。归一化在这里做、不在 `schedule_config` 里：`start` 走 `parse_clock`
-          （所以文件里写 `9:30` 还是 `"09:30"` 都认），`date` 走 `date.fromisoformat`，
-          `state` 走 `_coerce_state`（大小写不敏感）。这样"懂日程语义"与"只懂文本"两层
-          不用互相 import，也保证 Agent 与 CLI 两边**同一套**匹配规则。
+    @note 归一化在这里做、不在 `schedule_config` 里：`start` 走 `parse_clock`
+          （文件里写 `9:30` 还是 `"09:30"` 都认）、`state` 走 `_coerce_state`（大小写不敏感）、
+          `date` 走 `date.fromisoformat`、`days` 走 `_days_text`。这样"懂日程语义"与
+          "只懂文本"两层不用互相 import，Agent / CLI / 工具三边也是**同一套**匹配规则。
+    @note T12-5: 这条是通用版（recurring 比 `days`、oneoff 比 `date`）—— 工具 `set_schedule`
+          的"删"和"查重"都用它；R3 的 `oneoff_matcher` 现在只是它的一层窄包装。
     """
     def matches(fields: Dict[str, str]) -> bool:
         if _coerce_state(fields.get("state")) is not event.state:
-            return False
-        try:
-            if date.fromisoformat((fields.get("date") or "").strip()) != event.on:
-                return False
-        except ValueError:
             return False
         try:
             if parse_clock(fields.get("start") or "") != event.start:
                 return False
         except SchedulerError:
             return False
-        return True
+        if event.on is not None:
+            try:
+                return date.fromisoformat((fields.get("date") or "").strip()) == event.on
+            except ValueError:
+                return False
+        raw_days = fields.get("days")
+        if raw_days is None:
+            return not event.days              # 文件里没写 days = 每天
+        try:
+            return _days_text(raw_days) == set(event.days)
+        except SchedulerError:
+            return False
 
     return matches
+
+
+def oneoff_matcher(event: "ScheduleEvent") -> Callable[[Dict[str, str]], bool]:
+    """造一个"匹配这条 oneoff"的 predicate，给 R3 的**文本级删除**用（`schedule_config`）。
+
+    @param event  要匹配的那条 oneoff（用它自己的 `state` / `on` / `start`）
+    @return matches(fields) -> bool；fields 是从配置**文件**里抽出来的裸标量
+            （已去引号与行尾注释），键是 state / date / start
+
+    @note T12-4: 匹配的三个键从 `title+date+start` 换成 **`state+date+start`**（日程没有
+          title 了）。T12-5 起真正的规则收在 `entry_matcher()` 里，这里只是"这条必须是
+          oneoff"的窄包装 —— 两个版本各写一遍匹配逻辑迟早会漂。
+    """
+    if event.on is None:
+        raise SchedulerError("oneoff_matcher 只能用在 oneoff 上（这条没有 date）")
+    return entry_matcher(event)
 
 
 class Scheduler:

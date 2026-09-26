@@ -40,7 +40,9 @@ from agent.core import (  # noqa: E402
     SchedulerError,
     State,
     StateMachine,
+    entry_matcher,
     normalize_command,
+    oneoff_matcher,
     parse_clock,
     parse_command_config,
 )
@@ -298,6 +300,82 @@ class TestConfig(unittest.TestCase):
     def test_entry_must_be_object(self):
         with self.assertRaises(SchedulerError):
             make_scheduler({"recurring": ["not an object"]})
+
+
+# ===========================================================================
+#  文本级增删用的匹配器（T12-5）
+# ===========================================================================
+class TestEntryMatcher(unittest.TestCase):
+    """`entry_matcher()` / `oneoff_matcher()`：从**文件**里抽出来的裸标量 vs 真日程。
+
+    这一层是"文本级增删"和"日程语义"之间的接缝：文件里写 `9:30` / `MON` / `"2026-09-22"`
+    都得跟语义侧算出的事件对上，否则工具会"加进去一条、删不掉那一条"。
+    """
+
+    @staticmethod
+    def _event(mapping):
+        from agent.core.scheduler import ScheduleEvent
+        return ScheduleEvent.from_config(mapping, 0)
+
+    def test_recurring_matches_state_and_start_across_writing_styles(self):
+        event = self._event({"state": "study", "start": "09:30", "days": ["mon"]})
+        matches = entry_matcher(event)
+        self.assertTrue(matches({"state": "STUDY", "start": "9:30", "days": "[mon]"}))
+        self.assertTrue(matches({"state": "study", "start": "0930", "days": "[MON]"}))
+        self.assertFalse(matches({"state": "study", "start": "9:30", "days": "[mon, tue]"}))
+        self.assertFalse(matches({"state": "game", "start": "9:30", "days": "[mon]"}))
+        self.assertFalse(matches({"state": "study", "start": "10:30", "days": "[mon]"}))
+
+    def test_days_absent_means_every_day(self):
+        every = self._event({"state": "study", "start": "09:30"})
+        self.assertTrue(entry_matcher(every)({"state": "study", "start": "09:30"}))
+        self.assertTrue(entry_matcher(every)({"state": "study", "start": "09:30", "days": ""}))
+        self.assertFalse(entry_matcher(every)({"state": "study", "start": "09:30",
+                                               "days": "[mon]"}))
+        one_day = self._event({"state": "study", "start": "09:30", "days": ["mon"]})
+        self.assertFalse(entry_matcher(one_day)({"state": "study", "start": "09:30"}))
+
+    def test_oneoff_matches_by_date(self):
+        event = self._event({"state": "sleep", "start": "22:30", "date": "2026-09-22"})
+        matches = entry_matcher(event)
+        self.assertTrue(matches({"state": "sleep", "start": "22:30", "date": "2026-09-22"}))
+        self.assertFalse(matches({"state": "sleep", "start": "22:30", "date": "2026-09-23"}))
+        self.assertFalse(matches({"state": "sleep", "start": "22:30"}), "缺 date 不算这条")
+
+    def test_bad_scalars_never_match(self):
+        event = self._event({"state": "study", "start": "09:30", "days": ["mon"]})
+        matches = entry_matcher(event)
+        for fields in ({"state": "study", "start": "坏的", "days": "[mon]"},
+                       {"state": "study", "start": "25:00", "days": "[mon]"},
+                       {"state": "study", "start": "09:30", "days": "[noday]"},
+                       {"state": "study", "start": "09:30", "days": "[9]"},
+                       {"state": "banana", "start": "09:30", "days": "[mon]"},
+                       {}):
+            with self.subTest(fields=fields):
+                self.assertFalse(matches(fields))
+
+    def test_oneoff_matcher_is_the_narrow_wrapper(self):
+        oneoff = self._event({"state": "sleep", "start": "22:30", "date": "2026-09-22"})
+        self.assertTrue(oneoff_matcher(oneoff)(
+            {"state": "sleep", "start": "22:30", "date": "2026-09-22"}))
+        recurring = self._event({"state": "sleep", "start": "22:30"})
+        with self.assertRaises(SchedulerError):
+            oneoff_matcher(recurring)
+
+    def test_matcher_agrees_with_the_writer(self):
+        """接缝的另一半：`entry_matcher` 说"是它"，`add_entry` 就该查重命中。"""
+        from agent.core import schedule_config
+        event = self._event({"state": "study", "start": "09:30", "days": ["mon"]})
+        text = ("scheduler:\n"
+                "  recurring:\n"
+                "    - state: study\n"
+                "      days: [mon]\n"
+                "      start: \"09:30\"\n")
+        again, why = schedule_config.add_entry(
+            text, {"state": "study", "start": "09:30", "days": ["mon"]},
+            matches=entry_matcher(event))
+        self.assertEqual(again, text)
+        self.assertIn("已经有一条一样的了", why)
 
 
 # ===========================================================================

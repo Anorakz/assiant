@@ -1794,6 +1794,31 @@ T12-3 — **展示层跟着改**（CLI + GUI 同一行格式）
 ☑ `config/config.example.yaml` 的 `scheduler:` 段注释重写 + `docs/{architecture,config-sources,cli,gui}.md`
       + `Readme.md`; `tests/test_docs.py` 黑名单加 `日程提醒` / `kind=fired title=`
 
+T12-5 — **日程配置的写入器**（文本级增删；工具 `set_schedule` 的地基）
+☑ `schedule_config` 里把"只删 oneoff"扩成**通用增删**：`find_entry()`（recurring 与 oneoff 都找，
+      报告序列名 + 抽到的字段）→ `remove_entry()`；新增 `add_entry()` / `render_entry_lines()`
+☑ 新增的规矩（都在单测里逐字节钉着）: 有 `date` 就写进 oneoff、否则 recurring（与读的一侧同判据）;
+      插在序列**尾部**（不动别人写的顺序）; 缩进跟文件里已有的条目走; `key: []` 重写成块状写法;
+      **绝不新建第二个 `scheduler:` 段**（同名键后者胜，会把 `interval_min`/`commands` 整段吞掉）;
+      没有 `scheduler:` 段才在文件末尾补一整段
+☑ 引号: `start` 与 `date` **一律加引号** —— 不加引号的 `9:30` 在 YAML 1.1 里是六十进制整数、
+      `2026-09-22` 是 date 类型；加引号后 PyYAML / yaml-cpp 看到的都一定是字符串
+☑ 查重: 调用方给 predicate（`scheduler.entry_matcher`），命中就**一个字节都不改**，
+      只说"已经有一条一样的了"（幂等: 模型重复说"加个 9 点学习"不该长出两条）
+☑ 落盘: `add_entry_in_file()` / `remove_entry_in_file()` —— 写前重新读盘 + `.bak` + 原子写，
+      与 R3 那套同纪律；失败原样抛 OSError
+☑ `scheduler.entry_matcher()`（通用: recurring 比 `days`、oneoff 比 `date`）+ `_days_text()`；
+      `oneoff_matcher()` 收成它的一层窄包装（两版匹配逻辑各写一遍迟早会漂）
+☑ ⚠ **顺手修掉一个老 bug**：`_sequence_items()` 把最后一条的区间结束记成 `len(lines)` ——
+      `oneoff:` 后面还有别的段时（板端真配置后面就是 `gui:`），删一条 oneoff 会把后面的段
+      整段删掉。R3 默认关着所以一直没露头，T12-5 的"加一条"直接踩在上面（新条目被加到了
+      文件末尾）才翻出来。现在区间在**缩进回退那一行**收住，并加了一组专门的用例
+☑ 单测: `tests/test_schedule_config.py` 57 项（文本形状 + 行区间 + 通用查找 + 新增 + 文件级 +
+      **往返**（写进去的文本用真的 `ScheduleEvent.from_config` 读回来还是同一条））;
+      `tests/test_scheduler.py::TestEntryMatcher` +6
+☑ 文档: `docs/config-sources.md` §3.1 拆成"(一) R3 的删 / (二) T12-5 的增删"两张规矩表;
+      `Readme.md` 的文件树补上 `schedule_config.py`
+
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档
