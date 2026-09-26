@@ -31,6 +31,7 @@
 □ llm/provider.py：edge/cloud/disabled 三模式切换
 □ llm/rule_engine.py：disabled 时的兜底规则
 □ vision/siglip_encoder.py：RKNN-Toolkit-Lite2 推理封装（先 mock）
+    → 已废弃：真实现走 vision/siglip/（T7-1），空接口本身 T13-1 删除
 □ vision/roi.py：ROI 配置解析
 □ config/loader.py + config/schema.py：YAML 加载 + 校验
 □ main.py：装配所有组件，启动 asyncio 事件循环

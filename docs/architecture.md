@@ -135,7 +135,7 @@ agent/
 ├── core/              state_machine.py / tool_router.py / scheduler.py / wallpaper.py
 ├── io/                chat_bus.py / image_reader.py / input_sender.py / _native.py
 ├── llm/               provider.py（edge / cloud / disabled；细节见 docs/llm.md）/ rule_engine.py
-├── vision/            roi.py / siglip_encoder.py（实时帧那条路，仍是 mock）/ siglip/（真 RKNN 双塔，离线打标签/检索）
+├── vision/            roi.py / siglip/（真 RKNN 双塔：图像+文本，打标签/检索/零样本）/ tag_index.py / wall_data.py
 ├── ipc/               protocol.py / local_server.py / local_client.py
 ├── net/               sunshine_client.py（HTTPS 47984 握手）
 └── tools/             具体工具（Phase 7）：`build_tools(router)` + 每个工具一个模块
@@ -353,15 +353,16 @@ edge 挂了**不装作答过**：`chat()` 照抛；`chat_with_tools()` 退回规
 这不是模型答的（GUI 只看正文），结果里另有 `degraded` 写原因，`main.py` 记 warning。
 板端实测数据（`/no_think`、耗时、降级）与验证步骤见 [`llm.md`](llm.md)。
 
-### 4.3 视觉层：两条 SigLIP 路径（T7-1）
+### 4.3 视觉层：只有一条 SigLIP 路径（T7-1 落地，T13-1 收口）
 
-| 路径 | 是什么 | 谁用 |
+| 模块 | 是什么 | 谁用 |
 | --- | --- | --- |
-| `agent/vision/siglip_encoder.py` | **mock**（由图像内容决定的确定性伪随机向量，`ready` 恒 False） | 给"板端实时帧 → embedding"占位；**目前没有调用方** |
-| `agent/vision/siglip/` | **真实现**：SigLIP 双塔 RKNN（图像塔 + 文本塔），走 NPU | **离线**打标签 / 图像检索（`assistant tag`、`next_wallpaper(action="tags"/"pick")`） |
+| `agent/vision/siglip/` | **真实现**：SigLIP 双塔 RKNN（图像塔 + 文本塔），走 NPU | 图像塔 → 向量：**离线**打标签 / 图像检索（`assistant tag`、`next_wallpaper(action="tags"/"pick")`）、**认游戏**、学习监督；文本塔 → 零样本分类（`tag_vocab` 的固定词表） |
 
-两条路**接口不同**（前者只 encode 图像；后者是完整双塔：`encode_image` / `encode_text` /
-`similarities` / `rank`），不是同一个东西的两个实现 —— 别拿 mock 那条去算文本相似度。
+> ⚠ **T13-1 删掉了那个 mock**：`agent/vision/siglip_encoder.py::SigLIPEncoder` **已经不在了**（原因是
+> 它由图像内容决定一个确定性伪随机向量、`ready` 恒 False、**从来没有调用方**）。"板端实时帧 → 向量"
+> 由 `SiglipModel.encode_image()` 承担 —— **一个能力只能有一条实现**，留着一个永远不 ready 的
+> 第二套接口只会让人分不清走哪条（`tests/test_docs.py` 的过时说法黑名单盯着它别回来）。
 
 **`agent/vision/siglip/` 的三条规矩**（都是实测逼出来的，别改）：
 

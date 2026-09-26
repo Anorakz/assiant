@@ -1,33 +1,27 @@
 # ============================================================================
-#  agent/vision/__init__.py — 视觉层: ROI 解析 + SigLIP 图像编码
+#  agent/vision/__init__.py — 视觉层: ROI 解析 + SigLIP 图像/文本编码
 #
 #      parse_roi("100,100,200,200")  -> {"x","y","w","h","x2","y2","area","space"}
-#      SigLIPEncoder(model_path)     -> encode(256×256×3) -> (dim,) float32   (mock)
 #      siglip.SiglipModel            -> 真 RKNN 双塔 (图像塔 + 文本塔), 见下
 #
-#  ⚠ 两条 SigLIP 路径别搞混（Phase 7 T7-1 的现状）
+#  ⚠ 只有**一条** SigLIP 路径（T13-1 收口）
 #  ---------------------------------------------------------------------------
-#  · `siglip_encoder.SigLIPEncoder` —— **仍是 mock**（确定性伪随机向量, ready 恒 False）,
-#    给"板端实时帧 → embedding"那条链路占位用, **目前没有调用方**。
 #  · `siglip.SiglipModel` —— **真实现**（从板端实验树 sig/ 搬进仓库, 读 config.yaml 的
-#    `vision:` 段）, 走 NPU。它是**离线打标签 / 图像检索**用的（agent/vision/siglip/）。
-#    两者接口不同: 前者只 encode 图像, 后者是完整双塔（图像 + 文本 + 余弦）。
+#    `vision:` 段）, 走 NPU。图像塔 → 向量（打标签 / 检索 / 认游戏 / 学习监督）,
+#    文本塔 → 零样本分类。**这是唯一的编码入口**。
+#  · 曾经还有一个 `siglip_encoder.SigLIPEncoder`（确定性伪随机向量的 mock, `ready` 恒 False,
+#    注释里写着"给实时帧→embedding 那条链路占位, 目前没有调用方"）—— **T13-1 已删**:
+#    真帧编码由 `SiglipModel.encode_image()` 承担, 留一个永远不 ready 的第二套接口
+#    只会让人分不清"走哪条"。（`tests/test_docs.py` 的黑名单盯着它别回来。）
 #
-#  ⚠ 本包不强制依赖 numpy / rknnlite / tokenizers: 没有它们时 encode() 退化成
-#    list[float]（mock 路径）, 或者真模型在**调用时**才报带安装提示的错
-#    （真模型那条路是三样都延迟导入的, 所以宿主机上照样能 import 本包）。
+#  ⚠ 本包不强制依赖 numpy / rknnlite / tokenizers: 真模型在**调用时**才报带安装提示的错
+#    （三样都延迟导入）, 所以宿主机上照样能 import 本包。
 #
 #  T7-3 起这里还多了一条**不碰 NPU** 的路: `tag_index.TagIndex` —— 读数据文件里
 #  已经存好的向量做挑图（纯 Python 点积, 开发机也能跑）。它只读、不写、不读配置。
 # ============================================================================
 
 from .roi import DEFAULT_ROI, ROI_SPACE, RoiError, is_valid_roi, parse_roi
-from .siglip_encoder import (
-    DEFAULT_EMBEDDING_DIM,
-    EXPECTED_SHAPE,
-    SigLIPEncoder,
-    SigLIPError,
-)
 from .siglip import SiglipConfig, SiglipError, SiglipModel
 from .tag_index import MatchResult, TagIndex, TagIndexError
 
@@ -38,12 +32,7 @@ __all__ = [
     "RoiError",
     "ROI_SPACE",
     "DEFAULT_ROI",
-    # SigLIP —— mock 的实时帧编码器
-    "SigLIPEncoder",
-    "SigLIPError",
-    "DEFAULT_EMBEDDING_DIM",
-    "EXPECTED_SHAPE",
-    # SigLIP —— 真 RKNN 双塔（离线打标签 / 检索）
+    # SigLIP —— 真 RKNN 双塔（图像 + 文本；打标签 / 检索 / 零样本分类）
     "SiglipModel",
     "SiglipConfig",
     "SiglipError",

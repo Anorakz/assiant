@@ -54,8 +54,7 @@ agent/
 │   │   └── local_client.py      # 客户端 (板端脚本 / 活体验证用)
 │   ├── vision/                  # 视觉层
 │   │   ├── roi.py               # ROI 字符串解析 ("x,y,w,h")
-│   │   ├── siglip_encoder.py    # 实时帧那条路 (⚠ 仍是 mock)
-│   │   ├── siglip/              # 真 RKNN 双塔: 离线打标签 / 图像检索 (T7-1)
+│   │   ├── siglip/              # 真 RKNN 双塔: 实时帧/离线打标签/图像检索 (T7-1；T13-1 删空接口)
 │   │   ├── tag_vocab.py         # 三轴标签词表 (T7-2)
 │   │   ├── wall_data.py         # config/wall_data.jsonl 的唯一写者 (T7-2)
 │   │   ├── tagger.py            # 打标签 (板端 NPU, T7-2)
@@ -470,13 +469,14 @@ oneoff:
 ## 视觉层
 
 ```python
-from agent.vision import parse_roi, SigLIPEncoder
+from agent.vision import parse_roi, SiglipModel
 
 roi = parse_roi("100,100,200,200")   # {"x","y","w","h","x2","y2","area","space","clamped",...}
 frame[y2:y1, x2:x1] = ...            # x2/y2 是开区间边界，可直接切片
 
-encoder = SigLIPEncoder("models/siglip.rknn")
-emb = encoder.encode(frame)          # (768,) float32；encoder.ready 为 False
+model = SiglipModel.from_config(cfg["vision"])   # None = 全用默认值；构造不加载
+model.load()                                     # 真 RKNN 双塔，板端 NPU
+emb = model.encode_image(frame)                  # frame 必须是 (1,256,256,3) uint8 0-255
 ```
 
 约定：
@@ -487,9 +487,9 @@ emb = encoder.encode(frame)          # (768,) float32；encoder.ready 为 False
   超界是语义问题不是格式问题（`"100,100,200,200"` 在 256 平面上确实超界，
   但那是很自然的写法）；报错会卡死链路，静默截断又会让"以为 200×200、实际 156×156"
   查不出来。格式错误（字段数/非整数/空字段/w,h≤0/负坐标）仍然抛 `RoiError`。
-- `SigLIPEncoder` 目前是 **mock**：返回由图像内容决定的**确定性**伪随机向量
-  （同一张图恒得同一向量，便于上层逻辑先写先测），但**没有语义**，别拿它做识别。
-  `ready` 恒为 `False`。真实现只需替换 `encode()`。
+- 视觉层**只有一条 SigLIP 路径**：`agent/vision/siglip/`（真 RKNN 双塔）。
+  早期那个返回确定性伪随机向量的空接口 `SigLIPEncoder` **已在 T13-1 删除**——
+  它没有语义、`ready` 恒为 `False`，留着只会让人误以为"实时帧那条路已经能用了"。
 - 视觉层**不做**预处理（native 已做）也**不做** embedding 缓存（失效策略依赖调用场景）。
 
 ---

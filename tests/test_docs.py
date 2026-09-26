@@ -17,6 +17,11 @@ tests/test_docs.py — 文档守卫：相对链接有效 + 过时声明不得回
      这些是"文档说 A、代码做 B"里已经被清掉的说法。每发现一种新的漂移，
      就往 STALE_CLAIMS 里加一条 —— 这样它就不会再回来。
 
+     条目可以带第三个元素 `exempt`：**行内命中这个正则就不算过时声明**。
+     给的是"这句话在讲它已经不在了"的写法 —— 删掉一个东西之后，文档里
+     那句"X 已在 T<编号> 删除"是**现状**而不是漂移，没有这个口子就只能
+     二选一（要么不记，要么把守卫关掉）。
+
 为什么单独有这个文件
     文档漂移不会让任何测试变红，所以它总是最后才被发现的（Phase 6 就吃过一次：
     `ipc-protocol.md` 说命令用 topic 信封、GUI 实际发 action 信封，两边都"有文档"
@@ -47,9 +52,10 @@ DOC_FILES = ["Readme.md"]
 DOC_GLOBS = ["docs/*.md", "docs/**/*.md"]
 
 # ---------------------------------------------------------------------------
-#  过时声明黑名单: (正则, 为什么)
+#  过时声明黑名单: (正则, 为什么[, 免检正则])
 # ---------------------------------------------------------------------------
 #: 每条都对应一次真实的漂移。加新条目时写清"为什么它过时了"。
+#: 可选的第三项 = 免检正则: 该行命中它就不算过时声明（用于"它已经删了"这种现状陈述）。
 STALE_CLAIMS = [
     (r"ZeroMQ",
      "IPC 早就改成同机 Unix domain socket (/tmp/agent.sock) 了, 没有消息队列"),
@@ -86,7 +92,25 @@ STALE_CLAIMS = [
     (r"kind=fired title=",
      "T12-4 起日程事实里是 `state`（没有 `title` 了）: `assistant watch` 打的那行是 "
      "`kind=fired state=study date=… scheduled_at=… fired_at=…`"),
+    (r"SigLIPEncoder",
+     "T13-1 删掉了那个空接口: 视觉层只有 agent/vision/siglip/（真 RKNN 双塔）一条路。"
+     "现状类文档里再出现 SigLIPEncoder 就是漂移 —— 实时帧要 embedding 就用 "
+     "SiglipModel.from_config(cfg[\"vision\"]) + encode_image(frame)",
+     r"已删|删掉|删除|移除|不在了|废弃"),
 ]
+
+
+def _entry_hits(entry, line):
+    """这一行是否命中**这一条**过时声明（带免检词的行一律不算）。
+
+    抽成函数是为了能对本机制本身写测试 —— 一个写得太宽的免检正则会让条目
+    静默失效（守卫永远绿），那比没有守卫更糟。
+    """
+    pattern = entry[0]
+    exempt = entry[2] if len(entry) > 2 else None
+    if exempt and re.search(exempt, line, re.IGNORECASE):
+        return False
+    return bool(re.search(pattern, line, re.IGNORECASE))
 
 
 def _locally_ignored(paths):
@@ -168,15 +192,27 @@ class TestNoStaleClaims(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             rel = path.relative_to(_PROJECT_ROOT).as_posix()
             for lineno, line in enumerate(text.splitlines(), 1):
-                for pattern, why in STALE_CLAIMS:
-                    if re.search(pattern, line, re.IGNORECASE):
+                for entry in STALE_CLAIMS:
+                    if _entry_hits(entry, line):
                         found.append("%s:%d  命中 /%s/\n      %s\n      原因: %s"
-                                     % (rel, lineno, pattern, line.strip(), why))
+                                     % (rel, lineno, entry[0], line.strip(), entry[1]))
 
         if found:
             self.fail("文档里出现了 %d 处过时声明 (改掉, 或如果是合理例外就调整"
                       " STALE_CLAIMS 并说明原因):\n  %s"
                       % (len(found), "\n  ".join(found)))
+
+    def test_exempt_marker_only_waives_marked_lines(self):
+        """免检正则的语义: 只有**写了免检词**的行被放过, 别的行照样命中。"""
+        fake = (r"FooBar", "假条目: 只用来验机制", r"已删|删掉|删除")
+        self.assertTrue(_entry_hits(fake, "实时帧那条路还是 FooBar (⚠ 仍是 mock)"))
+        self.assertFalse(_entry_hits(fake, "FooBar 已在 T13-1 删除"))
+
+    def test_the_siglip_entry_actually_has_teeth(self):
+        """真实条目自己也要有牙: 一条"它还在"的描述必须被抓到。"""
+        entry = next(e for e in STALE_CLAIMS if e[0] == r"SigLIPEncoder")
+        self.assertTrue(_entry_hits(entry, "实时帧那条路是 SigLIPEncoder (⚠ 仍是 mock)"))
+        self.assertFalse(_entry_hits(entry, "SigLIPEncoder 已在 T13-1 删除"))
 
     def test_the_scan_actually_covers_something(self):
         """防止正则写错导致"零命中"这种假绿灯。"""
