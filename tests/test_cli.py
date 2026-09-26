@@ -37,6 +37,7 @@ from agent.ipc.protocol import (  # noqa: E402
     COMMAND_QUERY_SCHEDULE,
     COMMAND_SWITCH_MODE,
     SOCKET_PATH,
+    TOPIC_BILIBILI,
     TOPIC_LLM,
     TOPIC_MUSIC,
     TOPIC_SCHEDULE,
@@ -1132,6 +1133,247 @@ class TestMusicAgainstRealServer(unittest.IsolatedAsyncioTestCase):
         await pusher
         self.assertEqual(code, cli.EXIT_ERROR)
         self.assertIn("没按预期变", err.getvalue())
+
+
+class TestVideoCommand(unittest.TestCase):
+    """`assistant video play|pause|toggle|next|prev`（T11-10f）—— 纯逻辑那部分。
+
+    ⚠ 与音乐不同: 视频这边**新增了一条协议** `video_control{action}`（GUI 那颗按钮只有
+      "本地点"，原来没有任何命令能让 Agent/CLI 去按它）。下面把线映射与"幂等意图"钉住。
+    """
+
+    def parse(self, *argv):
+        return cli.build_parser().parse_args(list(argv))
+
+    def test_every_action_parses(self):
+        for action in cli.VIDEO_ACTIONS:
+            args = self.parse("video", action)
+            self.assertIs(args.func, cli.cmd_video)
+            self.assertEqual(args.action, action)
+            self.assertFalse(args.no_wait)
+            self.assertFalse(args.wait_player)
+
+    def test_the_wire_commands(self):
+        # play/pause/toggle 都走新的 video_control；next/prev 走现成的那两条
+        self.assertEqual(cli.VIDEO_COMMANDS["play"], "video_control")
+        self.assertEqual(cli.VIDEO_COMMANDS["pause"], "video_control")
+        self.assertEqual(cli.VIDEO_COMMANDS["toggle"], "video_control")
+        self.assertEqual(cli.VIDEO_COMMANDS["next"], "next_bilibili")
+        self.assertEqual(cli.VIDEO_COMMANDS["prev"], "prev_bilibili")
+        self.assertEqual(sorted(cli.VIDEO_COMMANDS), sorted(cli.VIDEO_ACTIONS))
+
+    def test_a_bad_action_is_a_usage_error(self):
+        with self.assertRaises(SystemExit) as caught:
+            self.parse("video", "rewind")
+        self.assertEqual(caught.exception.code, 2)          # argparse: 参数错 = 2
+
+    def test_wait_player_and_no_wait_are_accepted(self):
+        args = self.parse("--socket", "/tmp/x.sock", "video", "pause",
+                          "--wait-player", "--no-wait")
+        self.assertTrue(args.wait_player)
+        self.assertTrue(args.no_wait)
+        self.assertEqual(args.socket, "/tmp/x.sock")
+
+    def test_play_pause_are_idempotent_intents(self):
+        self.assertIsNone(cli.video_control_action("play", True))       # 已经在放 -> 不发
+        self.assertIsNone(cli.video_control_action("pause", False))     # 已经暂停 -> 不发
+        self.assertEqual(cli.video_control_action("play", False), "play")
+        self.assertEqual(cli.video_control_action("pause", True), "pause")
+
+    def test_unknown_state_still_sends_and_toggle_is_passed_through(self):
+        # 状态问不出来（没在播/没补推）-> 照用户说的办
+        self.assertEqual(cli.video_control_action("play", None), "play")
+        self.assertEqual(cli.video_control_action("pause", None), "pause")
+        # toggle 交给 Agent 按**它自己的真值**解析（不让两侧各自猜）
+        for state in (True, False, None):
+            self.assertEqual(cli.video_control_action("toggle", state), "toggle")
+
+    def test_next_and_prev_need_no_playback_control(self):
+        for action in ("next", "prev"):
+            self.assertIsNone(cli.video_control_action(action, True))
+            self.assertIsNone(cli.video_control_action(action, None))
+
+    def test_playing_truth_is_saw_playing_and_playing(self):
+        # ⚠ 缓冲的 playing 默认就是 True（还没起播时也是）—— "在放"要 saw_playing 也真
+        self.assertIsNone(cli.video_playing({"buffer": {"playing": True}}))
+        self.assertTrue(cli.video_playing({"buffer": {"playing": True, "saw_playing": True}}))
+        self.assertFalse(cli.video_playing({"buffer": {"playing": False, "saw_playing": True}}))
+        self.assertIsNone(cli.video_playing({}))                      # 没补推 -> 问不出来
+        self.assertIsNone(cli.video_playing({"buffer": None}))
+
+    def test_state_text_says_which_video_and_whether_it_plays(self):
+        data = {"current": {"title": "Luna say maybe"},
+                "buffer": {"playing": True, "saw_playing": True}}
+        self.assertEqual(cli.video_state_text(data), "Luna say maybe（正在播放）")
+        data["buffer"]["playing"] = False
+        self.assertEqual(cli.video_state_text(data), "Luna say maybe（已暂停）")
+        # 队列里没 title 就用缓冲里的；都没有就如实说"没说放的是哪条"
+        self.assertEqual(cli.video_state_text({"buffer": {"title": "只缓冲里有"}}), "只缓冲里有")
+        self.assertEqual(cli.video_state_text({}), "（Agent 没说放的是哪条）")
+
+
+@unittest.skipUnless(UNIX_SOCKET_SUPPORTED, "需要 AF_UNIX (Windows 的 CPython 不支持)")
+class TestVideoAgainstRealServer(unittest.IsolatedAsyncioTestCase):
+    """视频命令对着**真的** LocalServer 跑一遍。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cli-video-")
+        self.path = os.path.join(self.tmp, "agent.sock")
+        self.agent = _FakeAgent(self.path)
+
+    async def asyncSetUp(self):
+        await self.agent.start()
+        self.addAsyncCleanup(self.agent.stop)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def payload(playing, *, saw_playing=True, index=0, title="第一条", bvid=None, extra=None):
+        data = {"count": 18, "index": index,
+                "current": {"bvid": bvid or ("BV%d" % index), "title": title},
+                "queue": [{"bvid": "BV0", "title": "第一条"},
+                          {"bvid": "BV1", "title": "第二条"}],
+                "stream": "http://127.0.0.1:8765/stream/%s?v=t" % (bvid or "BV0"),
+                "buffer": {"playing": playing, "saw_playing": saw_playing, "title": title,
+                           "state": "serving" if playing else "paused"}}
+        if extra:
+            data.update(extra)
+        return data
+
+    async def push_bilibili(self, data):
+        self.assertTrue(await self.agent.wait_for_client(), "CLI 没连上来")
+        await self.agent.push(TOPIC_BILIBILI, data)
+
+    def push_on_connect(self, data):
+        return asyncio.ensure_future(self.push_bilibili(data))
+
+    async def run_cli(self, *argv):
+        args = cli.build_parser().parse_args(list(argv) + ["--socket", self.path,
+                                                          "--timeout", "1.5"])
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = await cli.cmd_video(args)
+        return code, out.getvalue(), err.getvalue()
+
+    async def test_pause_on_an_already_paused_video_sends_nothing(self):
+        pusher = self.push_on_connect(self.payload(False))
+        code, out, err = await self.run_cli("video", "pause")
+        await pusher
+
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("已经是暂停了", out)
+        self.assertEqual(self.agent.commands, [], "已经暂停就不该再发命令")
+
+    async def test_pause_sends_the_control_and_reports_the_ack(self):
+        self.agent.reply_with("video_control", TOPIC_BILIBILI,
+                              lambda payload: self.payload(False, extra={
+                                  "control": {"action": "pause", "seq": 3}}))
+        pusher = self.push_on_connect(self.payload(True))
+        code, out, err = await self.run_cli("video", "pause")
+        await pusher
+
+        self.assertEqual(code, cli.EXIT_OK, err)
+        self.assertEqual(self.agent.commands, [("video_control", {"action": "pause"})])
+        self.assertIn("已让播放器暂停", out)
+        self.assertIn("第一条", out)
+
+    async def test_toggle_asks_the_agent_to_decide(self):
+        self.agent.reply_with("video_control", TOPIC_BILIBILI,
+                              lambda payload: self.payload(True, extra={
+                                  "control": {"action": "play", "seq": 4}}))
+        pusher = self.push_on_connect(self.payload(False))
+        code, out, err = await self.run_cli("video", "toggle")
+        await pusher
+
+        self.assertEqual(code, cli.EXIT_OK, err)
+        self.assertEqual(self.agent.commands, [("video_control", {"action": "toggle"})],
+                         "toggle 原样交给 Agent 按它自己的真值解析")
+        self.assertIn("已让播放器播放", out)               # Agent 解析成了 play
+
+    async def test_wait_player_waits_for_the_players_own_report(self):
+        async def handler(received, data):
+            self.agent.commands.append((received, data))
+            if received == "video_control":
+                await self.agent.push(TOPIC_BILIBILI, self.payload(True, extra={
+                    "control": {"action": "pause", "seq": 5}}))
+                await asyncio.sleep(0.05)
+                # GUI 的回报（Agent 转手推成 control_result）—— 这才是"播放器真的按了"
+                await self.agent.push(TOPIC_BILIBILI, self.payload(False, extra={
+                    "control_result": {"seq": 5, "action": "pause", "playing": False}}))
+
+        self.agent.on_command(handler)
+        pusher = self.push_on_connect(self.payload(True))
+        code, out, err = await self.run_cli("video", "pause", "--wait-player")
+        await pusher
+
+        self.assertEqual(code, cli.EXIT_OK, err)
+        self.assertIn("播放器已回报", out)
+
+    async def test_wait_player_times_out_when_the_player_never_reports(self):
+        self.agent.reply_with("video_control", TOPIC_BILIBILI,
+                              lambda payload: self.payload(True, extra={
+                                  "control": {"action": "pause", "seq": 6}}))
+        pusher = self.push_on_connect(self.payload(True))
+        args = cli.build_parser().parse_args(["video", "pause", "--wait-player",
+                                              "--socket", self.path, "--timeout", "0.4"])
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = await cli.cmd_video(args)
+        await pusher
+
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("没等到播放器回报", err)
+
+    async def test_wait_player_reports_a_player_that_did_not_follow(self):
+        async def handler(received, data):
+            self.agent.commands.append((received, data))
+            if received == "video_control":
+                await self.agent.push(TOPIC_BILIBILI, self.payload(False, extra={
+                    "control": {"action": "pause", "seq": 7}}))
+                await self.agent.push(TOPIC_BILIBILI, self.payload(True, extra={
+                    "control_result": {"seq": 7, "action": "pause", "playing": True}}))
+
+        self.agent.on_command(handler)
+        pusher = self.push_on_connect(self.payload(True))
+        code, out, err = await self.run_cli("video", "pause", "--wait-player")
+        await pusher
+
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("没按预期变", err)
+
+    async def test_a_failure_prints_the_agents_words(self):
+        self.agent.reply_with("video_control", TOPIC_LLM,
+                              lambda payload: {"text": "现在没有在播的视频 —— 先点一下预览图"})
+        pusher = self.push_on_connect(self.payload(True))
+        code, out, err = await self.run_cli("video", "pause")
+        await pusher
+
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("现在没有在播的视频", err)
+
+    async def test_next_reports_the_new_title_and_says_it_is_buffering(self):
+        self.agent.reply_with("next_bilibili", TOPIC_BILIBILI,
+                              lambda payload: self.payload(True, index=1, title="第二条",
+                                                           bvid="BV1", saw_playing=False))
+        pusher = self.push_on_connect(self.payload(True))
+        code, out, err = await self.run_cli("video", "next")
+        await pusher
+
+        self.assertEqual(code, cli.EXIT_OK, err)
+        self.assertEqual(self.agent.commands, [("next_bilibili", {})])
+        self.assertIn("下一集", out)
+        self.assertIn("第二条", out)
+        self.assertIn("正在缓冲", out)                      # 攒够 15 s 才开播 —— 如实说
+
+    async def test_no_wait_returns_without_an_ack(self):
+        self.agent.record_only()
+        pusher = self.push_on_connect(self.payload(True))
+        code, out, err = await self.run_cli("video", "pause", "--no-wait")
+        await pusher
+
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("已发送：video pause", out)
 
 
 @unittest.skipUnless(UNIX_SOCKET_SUPPORTED, "需要 AF_UNIX (Windows 的 CPython 不支持)")

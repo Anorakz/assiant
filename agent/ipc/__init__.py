@@ -50,6 +50,7 @@ from .protocol import (
     COMMAND_PREV_BILIBILI,
     COMMAND_QUERY_SCHEDULE,
     COMMAND_SWITCH_MODE,
+    COMMAND_VIDEO_CONTROL,
     COMMAND_VIDEO_STATE,
     COMMANDS,
     ENCODING,
@@ -101,6 +102,7 @@ __all__ = [
     "COMMAND_BILIBILI_PICK",
     "COMMAND_BILIBILI_VIEWPORT",
     "COMMAND_VIDEO_STATE",
+    "COMMAND_VIDEO_CONTROL",
     "COMMAND_QUERY_SCHEDULE",
     "COMMANDS",
     "UNWIRED_COMMAND_NOTES",
@@ -480,6 +482,9 @@ _BILIBILI_ACTIONS: Dict[str, str] = {
     COMMAND_BILIBILI_PICK: "pick",
     COMMAND_BILIBILI_VIEWPORT: "viewport",
     COMMAND_VIDEO_STATE: "video_state",
+    #: T11-10f: 让**播放器**播放/暂停 —— 载荷里的 `action`（play/pause/toggle）由
+    #: `Runtime.bilibili_control` 自己解析（`toggle` 按缓冲的真值解析成 play/pause）。
+    COMMAND_VIDEO_CONTROL: "control",
 }
 
 
@@ -489,7 +494,9 @@ def _handle_bilibili(runtime: Any, push: Any, action: str, payload: dict) -> Non
     · `next` / `prev`: 在队列里走一格, 然后**开始放那一集**（用户按了就是"要看");
     · `pick`: 放队列里的第 index 条（用户点了预览图）—— **只有用户点才播**;
     · `viewport`: GUI 上报预览栏格数 -> 队列目标 = 3×它（**不播**）;
-    · `video_state`: GUI 回报真实进度（**不播**）; `eof=true` -> 自动下一集。
+    · `video_state`: GUI 回报真实进度（**不播**）; `eof=true` -> 自动下一集;
+    · `control`: 让**播放器**播放/暂停（T11-10f; 载荷 `{"action": play|pause|toggle}`）
+      —— Agent 推一条 `bilibili{control{action,seq}}` 下去, **GUI 才是真按播放器的人**。
 
     失败一律推一条 `llm` 说明（点了没反应最难查）; 成功不写气泡（界面上已经变了）。
     """

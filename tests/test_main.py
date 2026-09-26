@@ -984,25 +984,31 @@ class TestBilibiliWiring(unittest.IsolatedAsyncioTestCase):
           自动下一集必须问它 —— 播放器报的 `eof` 在"我们主动收流（换条/清空）"时也会来一次。
         """
 
-        def __init__(self, finished=True):
+        def __init__(self, finished=True, playing=True, saw_playing=True):
             self._finished = bool(finished)
             self.state = "ended" if finished else "serving"
             self.playing_calls = []
+            self.playing = bool(playing)
+            self.saw_playing = bool(saw_playing)
 
         def set_playing(self, playing):
             self.playing_calls.append(bool(playing))
+            self.playing = bool(playing)
 
         def finished(self):
             return self._finished
 
         def snapshot(self):
-            return {"state": self.state}
+            return {"state": self.state, "playing": self.playing,
+                    "saw_playing": self.saw_playing, "bvid": "BV1", "title": "标题"}
 
-    def _runtime(self):
+    def _runtime(self, *, gui=True):
         rt = make_runtime()
         rt.bilibili = self._Queue()
         rt._bilibili_api = type("Api", (), {"cookie_present": False})()
         rt._push_bilibili = lambda **extra: True          # 推送单独测, 这里不掺和
+        #: T11-10f: 播放控制要 GUI 去执行 —— 默认"有一个客户端连上"
+        rt.ipc = type("Ipc", (), {"clients": 1 if gui else 0})()
         return rt
 
     async def test_search_fills_the_queue_from_dialogue(self):
@@ -1088,6 +1094,109 @@ class TestBilibiliWiring(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_action_is_rejected(self):
         rt = self._runtime()
         self.assertFalse(rt.bilibili_control("dance")["ok"])
+
+    # ---------------------------------------------------------------- T11-10f
+    #  "让播放器播放/暂停"（CLI 的 `assistant video play|pause|toggle` 走这条）。
+    #  画面在 GUI 的播放器里，所以 Agent 只能**推一条 control 下去**；这几条钉的是:
+    #  该拒的拒（没在播 / 没 GUI / 不认识的 action）、该推的推、toggle 用我们自己的真值解析。
+
+    async def test_control_is_refused_without_a_playing_video(self):
+        rt = self._runtime()
+        rt._buffer = None
+        out = rt.bilibili_control("control", {"action": "pause"})
+        self.assertFalse(out["ok"])
+        self.assertIn("没有在播的视频", out["tell_user"])
+
+    async def test_control_is_refused_without_a_gui(self):
+        rt = self._runtime(gui=False)
+        rt._buffer = self._Buffer()
+        out = rt.bilibili_control("control", {"action": "pause"})
+        self.assertFalse(out["ok"], "没 GUI 就是没人按那颗按钮 —— 不能假装成功")
+        self.assertIn("没有 GUI 连上", out["tell_user"])
+        self.assertEqual(rt._buffer.playing_calls, [], "拒绝了就别动缓冲")
+
+    async def test_an_unknown_control_is_refused(self):
+        rt = self._runtime()
+        rt._buffer = self._Buffer()
+        out = rt.bilibili_control("control", {"action": "rewind"})
+        self.assertFalse(out["ok"])
+        self.assertIn("play / pause / toggle", out["tell_user"])
+
+    async def test_pause_pushes_the_control_and_flips_the_buffer(self):
+        rt = self._runtime()
+        rt._buffer = self._Buffer(playing=True, saw_playing=True)
+        pushed = []
+        rt._push_bilibili = lambda **extra: pushed.append(extra) or True
+
+        out = rt.bilibili_control("control", {"action": "pause"})
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["control"], "pause")
+        self.assertEqual(rt._buffer.playing_calls, [False], "预取封顶要立刻跟着变")
+        self.assertEqual(len(pushed), 1)
+        control = pushed[0].get("control") or {}
+        self.assertEqual(control.get("action"), "pause")
+        self.assertIsInstance(control.get("seq"), int)
+        self.assertGreaterEqual(control["seq"], 1)
+        # 还欠一条"播放器回报"：GUI 的下一句 video_state 一到就补上（见下面那条）
+        self.assertEqual(rt._bilibili_pending_control, control)
+
+    async def test_play_and_seq_increases(self):
+        rt = self._runtime()
+        rt._buffer = self._Buffer(playing=False, saw_playing=True)
+        pushed = []
+        rt._push_bilibili = lambda **extra: pushed.append(extra) or True
+        rt.bilibili_control("control", {"action": "play"})
+        rt.bilibili_control("control", {"action": "pause"})
+        seqs = [p["control"]["seq"] for p in pushed]
+        self.assertEqual([p["control"]["action"] for p in pushed], ["play", "pause"])
+        self.assertEqual(seqs, sorted(set(seqs)), "seq 必须单调递增（GUI 靠它去重）")
+        self.assertLess(seqs[0], seqs[1])
+
+    async def test_toggle_uses_our_own_truth(self):
+        rt = self._runtime()
+        pushed = []
+        rt._push_bilibili = lambda **extra: pushed.append(extra) or True
+        # 真在放 -> toggle 应该解析成 pause
+        rt._buffer = self._Buffer(playing=True, saw_playing=True)
+        self.assertEqual(rt.bilibili_control("control", {"action": "toggle"})["control"],
+                         "pause")
+        # 还是暂停 -> 解析成 play
+        rt._buffer = self._Buffer(playing=False, saw_playing=True)
+        self.assertEqual(rt.bilibili_control("control", {"action": "toggle"})["control"], "play")
+        # ⚠ 还没真播过（`playing` 默认就是 True）-> 不能当成"在放" -> play
+        rt._buffer = self._Buffer(playing=True, saw_playing=False)
+        self.assertEqual(rt.bilibili_control("control", {"action": "toggle"})["control"], "play")
+
+    async def test_the_players_report_becomes_a_control_result(self):
+        rt = self._runtime()
+        rt._buffer = self._Buffer(playing=True, saw_playing=True)
+        pushed = []
+        rt._push_bilibili = lambda **extra: pushed.append(extra) or True
+        rt.bilibili_control("control", {"action": "pause"})
+        pushed.clear()
+
+        # GUI 的下一句回报（这才是"播放器真的按了"）-> 转手推给所有客户端
+        out = rt.bilibili_control("video_state", {"position_s": 1.0, "playing": False})
+        self.assertTrue(out["ok"])
+        self.assertIsNone(rt._bilibili_pending_control, "回报过了就不该再欠着")
+        self.assertEqual(len(pushed), 1)
+        result = pushed[0].get("control_result") or {}
+        self.assertEqual(result.get("action"), "pause")
+        self.assertEqual(result.get("playing"), False)
+        self.assertEqual(result.get("seq"), 1)
+
+        # 后面再来几句普通回报 -> 不会没完没了地推
+        rt.bilibili_control("video_state", {"position_s": 2.0, "playing": False})
+        self.assertEqual(len(pushed), 1)
+
+    async def test_the_reconnect_push_carries_no_control(self):
+        """补推**不带** `control`/`control_result` —— 否则刚连上的客户端会重放旧命令。"""
+        rt = self._runtime()
+        rt._buffer = self._Buffer(playing=True, saw_playing=True)
+        state = rt.bilibili_state()
+        self.assertNotIn("control", state)
+        self.assertNotIn("control_result", state)
+        self.assertTrue(state["buffer"]["playing"])       # 但"在不在放"要在（CLI 的幂等靠它）
 
     async def test_state_carries_the_queue_the_preview_bar_renders(self):
         """⚠ T11-7 补的漏项: 载荷里**必须有 `queue`**, 否则 GUI 预览栏是空的。"""

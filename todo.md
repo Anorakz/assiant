@@ -1687,9 +1687,10 @@ Phase 7 T11 收尾 — **FIFO 播放 + CLI 控制**（你点名的两件事, 202
       `pause` -> `已暂停`、`next` -> `心よ原始に戻れ 2020`、`prev` -> 回到 `赤き月`、
       `toggle` -> 切一下, **退出码全 0**, Agent 日志里每条都有对应的 `开始播放 …` ✔
 □ **FIFO 修法 A**（本地 HTTP + 强制 curlhttpsrc）—— 先试; 失败转 B（GUI 自带 decodebin 管线）
-□ **CLI 视频接入**（T11-10a/b/c 的视频部分）: 新命令 `video_control{play|pause|toggle}` +
+□ **CLI 视频接入**（T11-10f）: 新命令 `video_control{play|pause|toggle}` +
       topic `bilibili` 加 `control/seq`（Agent→GUI 让它切播放器）+ `assistant video play|pause|toggle|next|prev`
       —— 排在 FIFO 修好之后（要有能播的画面才验得出暂停）
+      → **已做**（见下面 T11-10f 那块）
 
 Phase 7 T11-10 — **缓冲换本机 HTTP**（2026-09-26, 你批准的 a→b→复验→d 顺序）
 ☑ **T11-10a 缓冲换 HTTP**（`agent/core/bilibili_buffer.py`）: `transport` 默认 `http`
@@ -1720,6 +1721,33 @@ Phase 7 T11-10 — **缓冲换本机 HTTP**（2026-09-26, 你批准的 a→b→�
       单测: `tests/test_bilibili_buffer.py` 加 4 条、`tests/test_main.py::TestBilibiliWiring` 加 3 条;
       **老代码下这 4 条 buffer 用例 4/4 红**（用 `git show HEAD:…` 换回老模块跑的, 不是嘴上说）
 □ **CLI 视频接入**（见上）
+
+Phase 7 T11-10f — **视频 CLI**（`assistant video play|pause|toggle|next|prev`, 2026-09-26）
+☑ **新增一条协议** `video_control{action: play|pause|toggle}`（为什么必须新增: GUI 那颗播放/暂停
+      按钮是"本地点", 原来没有任何命令能让 Agent/CLI 去按它; `video_state` 是**回报**, 不兼职）;
+      `_BILIBILI_ACTIONS` 里映射成 `bilibili_control("control", …)`; 协议文档覆盖数 18→19
+☑ **Agent 侧**: `Runtime.bilibili_control("control", …)` —— `toggle` 按**我们自己的真值**
+      （缓冲 `saw_playing and playing`）解析成 play/pause; **没在播的缓冲**/**没 GUI 连上**/
+      不认识的 action **一律如实拒绝**; 当场 `buffer.set_playing(...)`（预取封顶立刻跟着变）;
+      推 `bilibili{control{action,seq}}`（seq 单调递增, **只在这一条推送里** —— 补推不带, 所以
+      新连上的客户端不会重放旧命令）
+☑ **播放器落地**: Agent 推了 `control` 之后, GUI 的下一句 `video_state` 一到就补推一条
+      `control_result{seq,action,playing}`（`playing` 是 **GUI 报回来的原话**, 只推一次）
+☑ **GUI**: `VideoPanel::setBilibili` 认 `control` —— `seq` 不比上一条大就不动手（重复推不重按）;
+      **没源就忽略并记日志**; 动完 200 ms 主动回报一次 `video_state`（CLI 不用等 2 秒定时器）;
+      两个可测的口子 `lastVideoControlSeq()` / `playbackControlsApplied()`
+☑ **CLI 第十条命令** `assistant video …`: `play`/`pause` 是**幂等意图**（先看补推里
+      `buffer.saw_playing/playing`）; 成功看带 `control` 的回执、失败照抄 `llm` 原话并退出 1;
+      `next`/`prev` 看队列真的走位, 文案**如实**写"正在缓冲 —— 攒够 15 秒才让播放器开";
+      `--wait-player` 再等 `control_result`（⚠ 协议没有请求 id, 默认只确认到"Agent 收下并推给
+      GUI 了"; 等不到/播放器回报的不一样都**如实报错退出 1**）
+☑ 单测: `tests/test_cli.py`（纯逻辑 9 条 + 真 socket 9 条）、`tests/test_main.py::TestBilibiliWiring`
+      +8、`tests/test_ipc_protocol.py`（COMMANDS / 文档覆盖数 / 新命令那条）、
+      `tests/test_ipc_local_server.py`（`video_control` 真的落到 `bilibili_control("control")`）3 条、
+      `gui/tests/test_video_panel.cpp` +2（没源忽略 / 同 seq 不重复动手）
+☑ 文档: `docs/cli.md` §4 十条命令 + `video` 一节、`docs/ipc-protocol.md` §3（`control` /
+      `control_result`）+ §4（`video_control`）、`docs/bilibili.md` §4/§7/§10、`Readme.md`
+☑ 板端验收新加 **H 段**（真 CLI 子进程 + 真 GUI）: `--parts` 加 `h`, 默认全跑含它
 
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查

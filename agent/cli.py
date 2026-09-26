@@ -48,10 +48,14 @@ from agent.ipc.protocol import (
     COMMAND_MUSIC_NEXT,
     COMMAND_MUSIC_PLAY_PAUSE,
     COMMAND_MUSIC_PREV,
+    COMMAND_NEXT_BILIBILI,
+    COMMAND_PREV_BILIBILI,
     COMMAND_QUERY_SCHEDULE,
     COMMAND_SWITCH_MODE,
+    COMMAND_VIDEO_CONTROL,
     MODES,
     SOCKET_PATH,
+    TOPIC_BILIBILI,
     TOPIC_LLM,
     TOPIC_MUSIC,
     TOPIC_SCHEDULE,
@@ -84,6 +88,28 @@ MUSIC_COMMANDS: Dict[str, str] = {
 
 #: 音乐子命令能取的动作（argparse 的 choices 也用它，别写两遍）
 MUSIC_ACTIONS: Tuple[str, ...] = ("play", "pause", "toggle", "next", "prev")
+
+#: `video` 命令连上之后先等一小会儿**补推**（T11-6: 新客户端连上就会收到当前队列 + 缓冲现状，
+#: 里面 `buffer.saw_playing/playing` 就是"现在在不在放"）。幂等意图靠它。
+VIDEO_STATE_WAIT = 0.8
+
+#: 视频命令 -> 线格式动作（T11-10f）。
+#: ⚠ 与音乐不同: 视频这边**没有**现成的播放/暂停按钮可复用 —— GUI 那颗按钮是"本地点"的，
+#:   所以新增了一条 `video_control{action}`（Agent 再推 `control` 给 GUI 去按）。
+VIDEO_COMMANDS: Dict[str, str] = {
+    "play": COMMAND_VIDEO_CONTROL,
+    "pause": COMMAND_VIDEO_CONTROL,
+    "toggle": COMMAND_VIDEO_CONTROL,
+    "next": COMMAND_NEXT_BILIBILI,
+    "prev": COMMAND_PREV_BILIBILI,
+}
+
+#: 视频子命令能取的动作（argparse 的 choices 也用它）
+VIDEO_ACTIONS: Tuple[str, ...] = ("play", "pause", "toggle", "next", "prev")
+
+#: `--wait-player` 最多等多久"播放器真的按了"（GUI 每 2 秒回报一次 `video_state`，
+#: 收到控制后还会立刻补报一次；所以 3 秒够，实在慢就 --timeout 抬）。
+VIDEO_PLAYER_WAIT = 3.0
 
 #: watch 打印一条推送时，单个值最长多少字符（超出截断并标总长）
 WATCH_VALUE_LIMIT = 120
@@ -485,6 +511,219 @@ async def cmd_music(args: argparse.Namespace) -> int:
             return EXIT_ERROR
         print("%s：%s" % ({"play": "播放中", "pause": "已暂停", "toggle": "现在是",
                            "next": "下一首", "prev": "上一首"}[action], text))
+        return EXIT_OK
+    finally:
+        await client.close()
+
+
+def video_playing(data: Dict[str, Any]) -> Optional[bool]:
+    """从一条 `bilibili` 推送里读"现在在不在放"（**纯逻辑**，单测钉它）。
+
+    @param data `bilibili` 推送的 data（里面 `buffer` 是缓冲的 `snapshot()`）
+    @return True / False；**None = 问不出来**（没在播 / 没这个字段）
+
+    ⚠ 为什么不能只看 `buffer.playing`：缓冲的 `playing` 默认是 True（还没起播时也是），
+      真正"在放"要 `saw_playing and playing` —— 与 Agent 那边解析 `toggle` 用的是**同一条**真值。
+    """
+    buffer = data.get("buffer")
+    if not isinstance(buffer, dict):
+        return None
+    if not buffer.get("saw_playing"):
+        return None                       # 还没真播过 = 没法说"在放"
+    return bool(buffer.get("playing"))
+
+
+def video_control_action(action: str, playing: Optional[bool]) -> Optional[str]:
+    """把 CLI 的动作翻成推给 GUI 的 `control.action`（**纯逻辑**）。
+
+    @return "play" / "pause" / "toggle"；None = 这条动作不需要播放控制（next/prev）
+    @note `play`/`pause` 是**幂等意图**：已经在那个状态就不用发了（返回 None 由调用方说明）；
+          `toggle` 原样交给 Agent 按它自己的真值解析。
+    """
+    if action not in ("play", "pause", "toggle"):
+        return None
+    if action == "toggle":
+        return "toggle"
+    if playing is None:
+        return action                    # 状态问不出来就照发（宁可按用户说的办）
+    want = (action == "play")
+    return None if bool(playing) == want else action
+
+
+def video_state_text(data: Dict[str, Any]) -> str:
+    """把一条 `bilibili` 推送说成人话（当前那条的视频名 + 在不在放）。"""
+    current = data.get("current") if isinstance(data.get("current"), dict) else {}
+    title = str(current.get("title") or "").strip()
+    if not title:
+        buffer = data.get("buffer") if isinstance(data.get("buffer"), dict) else {}
+        title = str(buffer.get("title") or "").strip()
+    if not title:
+        title = "（Agent 没说放的是哪条）"
+    playing = video_playing(data)
+    if playing is True:
+        return "%s（正在播放）" % title
+    if playing is False:
+        return "%s（已暂停）" % title
+    return title
+
+
+async def cmd_video(args: argparse.Namespace) -> int:
+    """视频传输控制（给 ssh / 脚本用）：`play` / `pause` / `toggle` / `next` / `prev`。
+
+    走的是 T11-10f 那条新命令 `video_control{action}`（play/pause/toggle）与现成的
+    `next_bilibili` / `prev_bilibili`（走队列）—— 队列内容仍旧由**对话/画面**决定，
+    这里只做"传输控制"，与音乐同一条口径。
+
+    三条口径：
+      · **成功看 Agent 的 `bilibili` 回执**（带 `control{action,seq}` 的那条推送）；
+      · **失败看 `llm` 推送**（没在播 / 没 GUI / 到队尾），**原话照抄**，退出码 1；
+      · `play` / `pause` 是**幂等意图**：已经在那个状态就只打印一句、**不发命令**
+        （看的是补推里的 `buffer.saw_playing/playing`）。
+      · `--wait-player` 再等一步"播放器真的按了"（GUI 的 `video_state` 回报）——
+        ⚠ 协议**没有请求 id**，所以默认只能确认到"Agent 收下并推给播放器了"，
+        加这个开关才等到播放器落地。`next`/`prev` 只看队列有没有真的走一格。
+    """
+    action = str(args.action)
+    path = _resolve_path(args)
+    client = LocalClient(path)
+
+    state: Dict[str, Any] = {}          # 最近一条 bilibili 推送（补推也算）
+    failure: Dict[str, Any] = {}        # 失败时 Agent 的 llm 原话
+    ack: Dict[str, Any] = {}            # Agent 收下播放控制的那条 control{action,seq}
+    result: Dict[str, Any] = {}         # 播放器回报的 control_result{seq,action,playing}
+    kind = {"what": ""}
+    arrived = asyncio.Event()
+    result_arrived = asyncio.Event()
+
+    def on_message(topic: str, data: dict) -> None:
+        if topic == TOPIC_BILIBILI:
+            state.clear()
+            state.update(data)
+            control = data.get("control")
+            if isinstance(control, dict) and control:
+                ack.clear()
+                ack.update(control)
+                kind["what"] = "ack"
+                arrived.set()
+            elif not arrived.is_set():
+                kind["what"] = "bilibili"
+                arrived.set()
+            if isinstance(data.get("control_result"), dict) and data["control_result"]:
+                result.clear()
+                result.update(data["control_result"])
+                result_arrived.set()
+        elif topic == TOPIC_LLM:
+            failure.clear()
+            failure.update(data)
+            kind["what"] = "llm"
+            arrived.set()
+
+    client.on_message(on_message)
+    try:
+        await client.connect()
+    except IpcClientError as exc:
+        print(connect_hint(path, exc), file=sys.stderr)
+        return EXIT_ERROR
+
+    try:
+        # ---- 1) 先等一小会儿连上补推的那条 bilibili（"现在在不在放"）----
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(arrived.wait(), VIDEO_STATE_WAIT)
+        playing = video_playing(state)
+        before = dict(state)
+        if state.get("count") or state.get("buffer"):
+            print("现在是：%s" % video_state_text(state))
+
+        # ---- 2) play / pause 是**幂等意图**：已经在那个状态就只打印、不发命令 ----
+        control_action = video_control_action(action, playing)
+        if action in ("play", "pause") and control_action is None:
+            print("已经是%s了 —— 没发命令。" % ("在播" if action == "play" else "暂停"))
+            return EXIT_OK
+
+        old_current = before.get("current") if isinstance(before.get("current"), dict) else {}
+        old_bvid = old_current.get("bvid") or ""
+        old_index = before.get("index")
+
+        arrived.clear()
+        kind["what"] = ""
+        result_arrived.clear()
+        if control_action is not None:
+            await client.send_command(COMMAND_VIDEO_CONTROL, {"action": control_action})
+        else:
+            await client.send_command(VIDEO_COMMANDS[action], {})
+        if getattr(args, "no_wait", False):
+            print("已发送：video %s" % action)
+            return EXIT_OK
+
+        # ---- 3) 等回执 ----
+        #   播放控制: 带 `control` 的那条推送（= Agent 收下并推给 GUI 了）;
+        #   next/prev: 队列真的走了一格（index 或 bvid 变了）;
+        #   失败两条路都是 `llm`（没在播 / 没 GUI / 到队尾 —— Agent 的原话）。
+        deadline = time.monotonic() + float(args.timeout)
+        moved = False
+        while time.monotonic() < deadline:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(arrived.wait(), left)
+            if kind["what"] == "llm":
+                break
+            if control_action is not None and ack.get("action"):
+                break
+            if control_action is None:
+                current = state.get("current") if isinstance(state.get("current"), dict) else {}
+                if state.get("index") != old_index or (current.get("bvid") or "") != old_bvid:
+                    moved = True
+                    break
+            arrived.clear()
+            kind["what"] = ""
+
+        if kind["what"] == "llm":
+            print("没做成：%s" % (failure.get("text") or "Agent 没说原因"), file=sys.stderr)
+            return EXIT_ERROR
+        if control_action is not None and not ack.get("action"):
+            print("已发出 video %s，但 %.1f 秒内没等到 Agent 的 bilibili 回执"
+                  "（既没推 control 也没推 llm）。" % (action, args.timeout), file=sys.stderr)
+            return EXIT_ERROR
+        if control_action is None and not moved:
+            print("已发出 video %s，但 %.1f 秒内队列没有走位（既没推 bilibili 也没推 llm）。"
+                  % (action, args.timeout), file=sys.stderr)
+            return EXIT_ERROR
+
+        # ---- 4) 说结果 ----
+        if control_action is None:
+            current = state.get("current") if isinstance(state.get("current"), dict) else {}
+            title = str(current.get("title") or "").strip() or "（Agent 没说放的是哪条）"
+            verb = "下一集" if action == "next" else "上一集"
+            print("%s：%s（正在缓冲 —— 攒够 15 秒才让播放器开；`assistant watch` 能看到"
+                  "「可以播了」）" % (verb, title))
+            return EXIT_OK
+
+        resolved = str(ack.get("action") or control_action)
+        verb = "播放" if resolved == "play" else "暂停"
+        # ⚠ 协议**没有请求 id**, 所以默认只确认到"Agent 收下并推给 GUI 了";
+        #   `--wait-player` 再等**播放器自己回报**（GUI 的 video_state 会让 Agent
+        #   推一条 `control_result{seq,action,playing}` —— 那是 GUI 的真话）。
+        if not getattr(args, "wait_player", False):
+            print("已让播放器%s：%s" % (verb, video_state_text(state)))
+            return EXIT_OK
+
+        try:
+            await asyncio.wait_for(result_arrived.wait(),
+                                   max(0.5, float(args.timeout)))
+        except asyncio.TimeoutError:
+            print("Agent 收下了 %s（seq=%s），但 %.1f 秒内没等到播放器回报 —— "
+                  "GUI 可能没连上、或者这条已经不在放了。" % (resolved, ack.get("seq"),
+                                                          args.timeout), file=sys.stderr)
+            return EXIT_ERROR
+        want = (resolved == "play")
+        actual = bool(result.get("playing"))
+        if actual != want:
+            print("Agent 收下了 %s，但播放器回报的是%s —— 没按预期变。"
+                  % (resolved, "在播" if actual else "暂停"), file=sys.stderr)
+            return EXIT_ERROR
+        print("已让播放器%s：%s（播放器已回报）" % (verb, video_state_text(state)))
         return EXIT_OK
     finally:
         await client.close()
@@ -1419,6 +1658,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_music.add_argument("--no-wait", action="store_true",
                          help="发出去就返回，不等 music/llm 回执")
     p_music.set_defaults(func=cmd_music)
+
+    p_video = sub.add_parser(
+        "video",
+        help="视频传输控制：%s（成功看 Agent 的 bilibili 回执、失败看它的原话）"
+             % "/".join(VIDEO_ACTIONS),
+        parents=[_common_options(suppress_defaults=True)])
+    p_video.add_argument("action", choices=list(VIDEO_ACTIONS),
+                         help="play = 播放（已经在放就不发）；pause = 暂停（已经暂停就不发）；"
+                              "toggle = 直接切一下；next / prev = 队列里上一集下一集"
+                              "（队列内容由对话/画面决定，这里只做传输控制）")
+    p_video.add_argument("--no-wait", action="store_true",
+                         help="发出去就返回，不等回执")
+    p_video.add_argument("--wait-player", action="store_true",
+                         help="再等一步「播放器真的按了」：等 GUI 那边回报的 control_result"
+                              "（默认只确认到「Agent 收下并推给播放器了」—— 协议没有请求 id，"
+                              "Agent→GUI 是单向的）")
+    p_video.set_defaults(func=cmd_video)
 
     p_watch = sub.add_parser("watch", help="持续打印 Agent 的推送（Ctrl-C 退出；无 --timeout）",                             parents=[_common_options(suppress_defaults=True,
                                                       with_timeout=False)])

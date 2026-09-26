@@ -362,6 +362,13 @@ class Runtime:
         self._last_bilibili_game: str = ""             # 上次认出并搜过的游戏（只在**变了**时重搜）
         self._bilibili_stream: str = ""                # 现在这一条的本地 FIFO 路径
         self._bilibili_quality: str = ""               # 这一条的清晰度（给人看的名字）
+        #: T11-10f: "让播放器播放/暂停"的命令序号（单调递增）—— 推给 GUI 的 `control.seq`,
+        #: GUI 只认**比上一条大**的 seq（同一条重复推不会重复动手）。**不进补推**。
+        self._bilibili_control_seq: int = 0
+        #: T11-10f: 还在等播放器回报的那条播放控制（`{"action","seq"}`）。
+        #: GUI 每 2 秒的 `video_state` 一进来就把它变成 `control_result{seq,action,playing}`
+        #: 推出去（**GUI 的原话**）—— CLI 的 `--wait-player` 等的就是这条。
+        self._bilibili_pending_control: Optional[Dict[str, Any]] = None
         #: bilibili 推送钩子（与 on_music 同款"有就接"）—— IPC 层把它接到 topic `bilibili`
         self.on_bilibili: Optional[Callable[[Dict[str, Any]], Any]] = None
 
@@ -1712,9 +1719,10 @@ class Runtime:
                          ) -> Dict[str, Any]:
         """**GUI 那条路**（IPC 命令的入口）—— 只有它会让视频**真的开始放**。
 
-        @param action next / prev / pick / viewport / video_state
+        @param action next / prev / pick / viewport / video_state / control
         @return {"ok", "tell_user"?} —— ok=False 时 tell_user 是给用户的一句话
         @note `viewport` / `video_state` **不播**（前者是格数上报, 后者是进度回报）。
+        @note `control`（T11-10f）让**播放器**播放/暂停 —— 见 `_bilibili_control_command`。
         """
         if self.bilibili is None:
             return {"ok": False, "error": "bilibili 没开",
@@ -1741,7 +1749,51 @@ class Runtime:
             self._stop_buffer()
             self._push_bilibili()
             return {"ok": True, "why": cleared["why"]}
+        if action == "control":
+            return self._bilibili_control_command(data)
         return {"ok": False, "error": "不认识的 B 站动作 %r" % action}
+
+    def _bilibili_control_command(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """让**播放器**播放/暂停（T11-10f：`assistant video play|pause|toggle` 走这条）。
+
+        @param data 载荷 `{"action": "play"|"pause"|"toggle"}`
+        @return {"ok", "control"?, "tell_user"?}
+
+        ⚠ 为什么不是"Agent 自己把缓冲停了就行"：**画面在 GUI 那边的播放器里**（QMediaPlayer），
+          Agent 只能推一条 `bilibili{control{action,seq}}` 让它去按那颗按钮。所以:
+            · `toggle` 按**我们自己的真值**解析成 play/pause（缓冲的 `saw_playing and playing`）
+              —— 不让两侧各自猜;
+            · **没有在播的缓冲** / **没有 GUI 连上** 一律**如实拒绝**（不假装按了）;
+            · 当场把缓冲的 `set_playing` 也切过来（预取封顶立刻跟着 15 s / 60 s 变）,
+              GUI 那边的 2 秒回报随后会把它校正成播放器的真实状态。
+        """
+        want = str(data.get("action") or "").strip().lower()
+        if want not in ("play", "pause", "toggle"):
+            return {"ok": False, "error": "不认识的播放控制 %r" % data.get("action"),
+                    "tell_user": "只认识 play / pause / toggle 三种播放控制"}
+        if self._buffer is None:
+            return {"ok": False, "error": "没有在播的视频",
+                    "tell_user": "现在没有在播的视频 —— 先在 GAME 里点一下预览图，"
+                                 "或者跟我说个片名"}
+        clients = int(getattr(self.ipc, "clients", 0) or 0) if self.ipc is not None else 0
+        if clients <= 0:
+            # 命令要 GUI 去执行；没 GUI 就是"没人按那颗按钮"—— 如实说，别静默成功
+            return {"ok": False, "error": "没有 GUI 连上",
+                    "tell_user": "现在没有 GUI 连上（板端 agent_gui 没起来），"
+                                 "这条播放控制没人执行"}
+        snapshot = self._buffer.snapshot()
+        if want == "toggle":
+            playing = bool(snapshot.get("saw_playing")) and bool(snapshot.get("playing"))
+            want = "pause" if playing else "play"
+        self._buffer.set_playing(want == "play")
+        self._bilibili_control_seq += 1
+        control = {"action": want, "seq": self._bilibili_control_seq}
+        self._bilibili_pending_control = dict(control)
+        self._push_bilibili(control=control)
+        self.log.info("bilibili: 播放控制 %s（seq=%d, %s）—— 已推给 GUI 去按播放器",
+                      want, control["seq"], (self.bilibili.current() or {}).get("bvid") or "-")
+        return {"ok": True, "control": want, "seq": control["seq"],
+                "bvid": snapshot.get("bvid") or "", "title": snapshot.get("title") or ""}
 
     def _bilibili_play(self) -> Dict[str, Any]:
         """给当前那条**取流 + 起缓冲**（只有 GUI 操作才会调到它）。
@@ -1876,6 +1928,18 @@ class Runtime:
         """
         if self._buffer is not None:
             self._buffer.set_playing(bool(payload.get("playing", True)))
+        # T11-10f: 我们刚让播放器播放/暂停 -> 这条回报就是**播放器的真话**, 转手推给
+        # 所有客户端（`control_result`）—— CLI 的 `--wait-player`、`assistant watch` 都靠它。
+        pending = self._bilibili_pending_control
+        if pending is not None:
+            self._bilibili_pending_control = None
+            playing = bool(payload.get("playing", True))
+            self._push_bilibili(control_result={"seq": pending.get("seq"),
+                                                "action": pending.get("action"),
+                                                "playing": playing})
+            self.log.info("bilibili: 播放器回报 %s（seq=%s, 要的是 %s）",
+                          "在播" if playing else "暂停", pending.get("seq"),
+                          pending.get("action"))
         if not payload.get("eof"):
             return {"ok": True, "position_s": payload.get("position_s")}
         buffer = self._buffer

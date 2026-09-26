@@ -100,7 +100,7 @@ agent/
 │   ├── test_docs.py             # 文档守卫: 链接有效 + 过时说法黑名单
 │   ├── test_config_source_guard.py  # 配置真源守卫: agent/ 只认 config/config.yaml
 │   ├── test_schedule_config.py  # 文本级删掉已触发的一次性日程
-│   ├── test_cli.py              # CLI 九条命令（T11-10c 加了 music 传输控制）/ 窗口与尾巴 / cleanup / tag
+│   ├── test_cli.py              # CLI 十条命令（T11-10c/f 加了 music / video 传输控制）/ 窗口与尾巴 / cleanup / tag
 │   ├── test_tools.py            # 工具层: 注册 / 状态权限 / 参数校验 / 缺依赖跳过 (T1)
 │   ├── test_tool_permissions.py # 状态权限表: 4 状态 × 每个工具, 禁止的组合真的被拒 (T4)
 │   ├── test_wallpaper.py        # 壁纸目录游标 / 三格窗口(prev/current/next) / next_wallpaper 工具与命令 (T3/T10-3)
@@ -372,6 +372,8 @@ ssh 进来不用敲一长串 `python3 -m agent.cli`，板端装了启动器 `/us
 assistant status            # 当前模式 + 串流连接（等不到就如实说没推，不编一个）
 assistant chat 现在几点      # 发一条给 Agent 并等回复（与 GUI 输入框同一条路）
 assistant mode study        # 切模式（大小写不限；非法转换会被状态机拒掉）
+assistant music pause       # 音乐传输控制（play/pause/toggle/next/prev；幂等意图）
+assistant video pause       # 视频传输控制（play/pause/toggle/next/prev；--wait-player 等播放器落地）
 assistant watch             # 盯推送（排障主力；--topics a,b / --count N）
 assistant schedule          # **接下来 24 小时**（--hours 可调）的日程，标出真的触发过的
 assistant cleanup           # 清理**已经过去**的一次性日程（默认只看，--apply 才删）

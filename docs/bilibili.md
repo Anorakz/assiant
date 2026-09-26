@@ -118,6 +118,7 @@ GUI：QMediaPlayer 读**那个本机地址**（GStreamer 经 curlhttpsrc 拉，�
 | 直链过期 | 上游 ffmpeg 非 0 退出（403 等）→ **重取直链 + 带 `-ss` 重连**，重试有限次；对 GUI 透明，日志如实记 |
 | seek | **没有**（chunked 的流没有总长度，播放器也没法跳；GUI 也没有进度条）—— 想跳就换一条 |
 | 片尾 | ffmpeg 退出码 `0/None` = **正常放完**（不重连）→ 缓冲 `finished()` 为真；GUI 报 `eof=true` → Agent **自动下一集**。⚠ `eof` 只是**信号**：换条/清空时我们主动收流，播放器照样收到一次干净的 EOS（板端实测曾因此**一路连跳 6 条**）—— 所以自动下一集要问**我们自己的真值**（缓冲到了 `ended` 才跳） |
+| **谁能让它播放/暂停** | 三处，最后都落到 GUI 的播放器上：① GUI 内嵌控制条那颗按钮（本地点）；② **GAME 里 CLI** `assistant video play\|pause\|toggle`（T11-10f，走新命令 `video_control` → Agent 推 `bilibili{control{action,seq}}` → GUI 按）；③ Agent 侧的 `Runtime.bilibili_control("control", …)`（同一条路，CLI 就是它的前端）。⚠ GUI **没在放就不动手**（日志记一笔）；⚠ Agent 那边**没在播的缓冲 / 没 GUI 连上**都**如实拒绝**，不假装按了 |
 
 内存量级（实测）：720P 码率 ≈ 258 KB/s → 15 s ≈ **3.9 MB**、60 s ≈ **15.5 MB**；360P 更低。
 板端带宽 ≈ 658 KB/s，够 1× 实时（约 2.5× 余量）。
@@ -185,8 +186,12 @@ GUI：QMediaPlayer 读**那个本机地址**（GStreamer 经 curlhttpsrc 拉，�
 | 播不播 | 只有 GUI 操作（点预览图/上一集/下一集）才播 |
 
 其余动作**只走 Agent**：GUI 命令（`bilibili_pick` / `next_bilibili` / `prev_bilibili` /
-`bilibili_viewport` / `video_state`）与 Agent 自己的观察循环。线格式见
+`bilibili_viewport` / `video_state` / **`video_control`**）与 Agent 自己的观察循环。线格式见
 [`ipc-protocol.md`](ipc-protocol.md) §4。
+
+> ⚠ `video_control`（T11-10f）是**唯一**能让播放器播放/暂停的命令 —— 它由 `assistant video …`
+> （或别的客户端）发进来，Agent 再推 `bilibili{control{action,seq}}` 让 **GUI 去按**。
+> 见 [`cli.md`](cli.md) §4 的 `video` 一节。
 
 ---
 
@@ -260,10 +265,11 @@ bilibili:
 | `tests/test_game_watch.py` | 假编码器 + 假进程读数：阈值、自纠错写锚点、防抖、关键词优先 |
 | `tests/test_bilibili_tool.py` | GAME-only、单参数、诚实失败 |
 | `tests/test_bilibili_config.py` | **模板守卫**：`config.example.yaml` 的 `bilibili:` 段能被真构造器吃下、键不多不少、默认值与代码一致 |
-| `tests/test_main.py::TestBilibiliWiring` | 只有 GUI 操作才起播、`eof` 自动下一集、载荷带 `queue` |
+| `tests/test_main.py::TestBilibiliWiring` | 只有 GUI 操作才起播、`eof` 自动下一集、载荷带 `queue`、**播放控制**（`control`：没在播/没 GUI 拒绝、toggle 按真值解析、`control_result` 只在播放器回报后推一条） |
 
 **板端 C++ 单测**（`ctest`，`scripts/sync-gui.ps1 -Test`）：`test_bilibili_format` /
-`test_bilibili_preview` / `test_cover_loader` / `test_video_panel` / `test_bottom_bar`。
+`test_bilibili_preview` / `test_cover_loader` / `test_video_panel`（含**播放控制**
+`control{action,seq}`：没源忽略、同 seq 不重复动手）/ `test_bottom_bar`。
 
 **板端真跑**（`tests/board/t11_accept.py`，见 [`../todo.md`](../todo.md) 的 T11 块）：
 真搜索 → 真队列 3N → 真封面下到 → 点预览图起播（15 s 门槛日志 + `position_s` 递增 + 出声）→

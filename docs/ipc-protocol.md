@@ -146,6 +146,8 @@ GUI 收到后按 `topic` 分发。**不认识的 topic 忽略**。
 | | `stream` | string | **要播的流地址** —— 板端**本机 HTTP**：`http://127.0.0.1:<port>/stream/<bvid>?v=<8位token>`（只绑 127.0.0.1, `chunked` 边下边喂）。⚠ 播放器**读不了 FIFO**（T11-9 实测 `playbin` 对 FIFO 读到 0 字节），所以这里**是 URL 不是文件路径**；GUI 里 `GST_PLUGIN_FEATURE_RANK=souphttpsrc:0` 让 GStreamer 走 `curlhttpsrc` |
 | | `ready` | bool | 缓冲够不够（够了才有 `stream`）；`buffer` 里还有 `buffered_s/written_s/cap_s/state/restarts` 等实情 |
 | | `quality` | string | 这一条的实际清晰度（`"360P"`/`"720P"`/…）。⚠ 清晰度的**提醒只走聊天气泡**（`llm`），GUI 不显示它 |
+| | `control` | object | **Agent 让播放器播放/暂停**（T11-10f）：`{action: "play"｜"pause", seq: n}`。⚠ 只在"真的下了命令"的那一条推送里出现（**补推里没有** → 刚连上的客户端不会重放旧命令）；`seq` 单调递增，GUI 只认**比上一条大**的（同一条重复推不再动手）。CLI 的 `assistant video play\|pause\|toggle` 就是发 `video_control` 让 Agent 推这个 |
+| | `control_result` | object | **播放器自己回报的落地结果**（T11-10f）：`{seq, action, playing}`，`playing` 是 **GUI 报回来的原话**。Agent 推了 `control` 之后，GUI 的下一句 `video_state` 一到就补这一条（所以只出现一次）—— `assistant video --wait-player` 等的就是它 |
 | | `why` / `note` | string | 队列/缓冲如实说的话（认不出、没搜到、只凑到 N 条…），可直接显示 |
 
 > ⚠ `bilibili` 也是**变化时推**：搜到一批、走了一格、缓冲就绪、清空时各推一次；
@@ -220,6 +222,7 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
 | | `duration_s` | number | 时长（秒；流式播放时播放器可能给 0, 以 Agent 从 B 站拿到的为准） |
 | | `playing` | bool | 在放 / 暂停 → Agent 据此调整预取（**暂停时窗口从 15 s 放到 60 s**）。⚠ 只认**真播过之后**的 `playing=false`：换源后播放器还在 Loading 时也报 `false`，那不算暂停（T11-10e） |
 | | `eof` | bool | **这一集放完了**（"该下一集了"的**信号**）→ Agent 自动下一集；到队尾就安静停下。⚠ 信号≠真值：换条/清空时我们主动收流，播放器也会收到一次干净的 EOS —— 所以 Agent 还要问自己缓冲的 `finished()`（ffmpeg 正常收尾），没到就**不跳集** |
+| `video_control` | `action` | string | **让播放器播放/暂停**（T11-10f）：`"play"` / `"pause"` / `"toggle"`。⚠ 与音乐不同, 这是**新增**的一条 —— GUI 那颗播放/暂停按钮是"本地点", 原来没有任何命令能让 Agent/CLI 去按它（`video_state` 是回报, 不兼职）。Agent 收到后推一条 §3 的 `bilibili{control{action,seq}}` 给 GUI 去执行, 再等 GUI 的回报推 `control_result`。失败（没在播 / 没 GUI 连上 / 不认识的 action）一律回 `llm`。CLI 入口: `assistant video …` |
 | `query_schedule` | — | — | 问一句"你最近触发过哪些日程"；`payload` 必须是 `{}`。应答是随后那条 §3 的 `schedule`（`kind:"state"`） |
 | `music_play_pause` | — | — | 暂停/继续**当前这首**（T8-4）；PC 上没在放时**从环形队列当前位置起播**（T8-5b）。应答是随后那条 `music` 推送（§3） |
 | `music_next` / `music_prev` | — | — | 在**环形队列**里前后走一格 —— 到尾回第一首、到首回最后一首（T8-5b）；队列空时回一条 `llm` 说明 |

@@ -57,6 +57,8 @@ public:
 
     /// 协议 topic `bilibili` 的 data：填预览栏 + 地址栏；**有 `stream` 就换源**。
     /// @note `stream` 空 = Agent 那边已经没在缓冲（换条/清空/放完）→ 回到占位态。
+    /// @note T11-10f 起还认 `control{action,seq}`：Agent 让**播放器**播放/暂停
+    ///       （CLI 的 `assistant video ...` 走这条路）—— 见 handleControl()。
     void setBilibili(const QJsonObject& data);
     BilibiliPreview* preview() const { return preview_; }
     void setCoverLoader(CoverLoader* loader);
@@ -66,6 +68,17 @@ public:
     /// 播放/暂停切换（内嵌控制条那颗按钮走这里）
     void togglePlayPause();
     bool isPlaying() const;
+
+    /// Agent 让播放器播放/暂停（T11-10f，topic `bilibili` 的 `control{action,seq}`）。
+    /// @param action "play" / "pause" / "toggle"
+    /// @param seq    Agent 那边的**命令序号**（单调递增）；不比上一条大就当重复推，不动手
+    /// @return 真的动手了（true）/ 忽略了（没源、或同一条重复推）
+    /// @note ⚠ **没源就不动手**（没东西可放，按了也没意义），日志里如实记一句。
+    bool handleControl(const QString& action, int seq);
+    /// 最近一次**真的执行了**的播放控制序号（0 = 还没执行过；给单测/验收看）
+    int lastVideoControlSeq() const { return lastControlSeq_; }
+    /// **真的执行过**几次播放控制（"没源忽略""同 seq 重复推"都不算；给单测看）
+    int playbackControlsApplied() const { return controlsApplied_; }
 
     /// 全屏（覆盖整个屏幕）。面板只负责按钮文案与信号，真正的铺满由 MainWindow 做。
     void setFullscreen(bool on);
@@ -143,4 +156,8 @@ private:
     QString noteText_;
     bool fullscreenOn_ = false;
     bool eofSent_ = false;               ///< 这一条已经报过"放完了"（别重复自动下一集）
+    /// T11-10f: 最近一次真的执行了的播放控制序号（Agent 的 `control.seq`；去重用）
+    int lastControlSeq_ = 0;
+    /// T11-10f: 真的执行过的播放控制次数（忽略的不算）
+    int controlsApplied_ = 0;
 };

@@ -57,7 +57,7 @@ class TestConstants(unittest.TestCase):
         self.assertEqual(p.COMMANDS,
                          ("switch_mode", "chat_input",
                           "next_bilibili", "prev_bilibili", "bilibili_pick",
-                          "bilibili_viewport", "video_state", "query_schedule",
+                          "bilibili_viewport", "video_state", "video_control", "query_schedule",
                           "music_play_pause", "music_next", "music_prev", "music_stop"))
 
     def test_bilibili_commands(self):
@@ -72,6 +72,16 @@ class TestConstants(unittest.TestCase):
                      p.COMMAND_BILIBILI_PICK, p.COMMAND_BILIBILI_VIEWPORT,
                      p.COMMAND_VIDEO_STATE):
             self.assertIn(name, p.COMMANDS)
+
+    def test_video_control_is_a_new_command(self):
+        """T11-10f: 让**播放器**播放/暂停 —— 与音乐的 `music_play_pause` 不同, 这条是**新增**的。
+
+        为什么必须新增: GUI 那颗播放/暂停按钮是"本地点", 协议里原来没有任何一条能让
+        Agent/CLI 去按它; 而 `video_state` 是 GUI 往上的**回报**, 不能兼职当命令。
+        """
+        self.assertEqual(p.COMMAND_VIDEO_CONTROL, "video_control")
+        self.assertIn(p.COMMAND_VIDEO_CONTROL, p.COMMANDS)
+        self.assertNotEqual(p.COMMAND_VIDEO_CONTROL, p.COMMAND_VIDEO_STATE)
 
     def test_music_commands(self):
         # T8-4: 音乐按钮。⚠ 它们**不决定放什么**（那是对话的事）—— 只做"暂停/继续"和
@@ -399,9 +409,9 @@ class TestWireContract(unittest.TestCase):
                                  (topic, data))
 
     def test_every_documented_topic_and_command_is_covered(self):
-        # 防止"文档加了条目但测试漏了"（6 个 topic + 12 条命令 = 18）
+        # 防止"文档加了条目但测试漏了"（6 个 topic + 13 条命令 = 19）
         documented = set(p.TOPICS) | set(p.COMMANDS)
-        self.assertEqual(len(documented), 18)
+        self.assertEqual(len(documented), 19)
 
     def test_one_message_is_exactly_one_line(self):
         # NDJSON 的前提: 消息里不能出现裸换行

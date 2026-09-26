@@ -76,6 +76,8 @@ private slots:
     void videoStateIsReportedWithPositionAndPlaying();
     void endOfMediaIsReportedOnlyOnce();
     void noVideoStateWithoutASource();
+    void agentPlaybackControlIsHonouredOnce();
+    void playbackControlWithoutASourceIsIgnored();
 };
 
 void TestVideoPanel::emptySourceShowsPlaceholder()
@@ -295,6 +297,64 @@ void TestVideoPanel::noVideoStateWithoutASource()
     panel.reportVideoState();
     panel.notifyEndOfMedia();
     QCOMPARE(state.count(), 0);                        // 没在放就别回报（免得 Agent 以为在放）
+}
+
+void TestVideoPanel::agentPlaybackControlIsHonouredOnce()
+{
+    VideoPanel panel;
+    QSignalSpy state(&panel, &VideoPanel::videoStateReported);
+    const QString stream = QStringLiteral("http://127.0.0.1:8765/stream/BV000?v=abcd1234");
+    panel.setBilibili(bilibiliPayload(18, 0, stream));
+    QCOMPARE(panel.source(), stream);
+    QCOMPARE(panel.lastVideoControlSeq(), 0);          // 还没执行过任何播放控制
+    QCOMPARE(panel.playbackControlsApplied(), 0);
+
+    QJsonObject data = bilibiliPayload(18, 0, stream);
+    QJsonObject control;
+    control.insert(QStringLiteral("action"), QStringLiteral("pause"));
+    control.insert(QStringLiteral("seq"), 7);
+    data.insert(QStringLiteral("control"), control);
+    panel.setBilibili(data);
+
+    QCOMPARE(panel.lastVideoControlSeq(), 7);          // 记下了 = 真的执行了
+    QCOMPARE(panel.playbackControlsApplied(), 1);
+    QVERIFY(!panel.isPlaying());                       // 暂停了
+    // 执行完 200 ms 会**主动**回报一次（Agent/CLI 的 --wait-player 就靠它）
+    QTRY_VERIFY_WITH_TIMEOUT(state.count() >= 1, 1500);
+
+    // 同一条重复推（seq 一样）-> 不再动手（`toggle` 按两次就转回去了）
+    panel.setBilibili(data);
+    QCOMPARE(panel.lastVideoControlSeq(), 7);
+    QCOMPARE(panel.playbackControlsApplied(), 1);       // 还是 1 次
+
+    // 新序号 -> 照做
+    QJsonObject again = control;
+    again.insert(QStringLiteral("action"), QStringLiteral("play"));
+    again.insert(QStringLiteral("seq"), 8);
+    QJsonObject data2 = bilibiliPayload(18, 0, stream);
+    data2.insert(QStringLiteral("control"), again);
+    panel.setBilibili(data2);
+    QCOMPARE(panel.lastVideoControlSeq(), 8);
+    QCOMPARE(panel.playbackControlsApplied(), 2);
+}
+
+void TestVideoPanel::playbackControlWithoutASourceIsIgnored()
+{
+    VideoPanel panel;
+    QSignalSpy state(&panel, &VideoPanel::videoStateReported);
+    // 队列有、但还没起播（`stream` 空）—— 此时"暂停"没有对象，如实忽略
+    QJsonObject data = bilibiliPayload(18, 0);
+    QJsonObject control;
+    control.insert(QStringLiteral("action"), QStringLiteral("pause"));
+    control.insert(QStringLiteral("seq"), 3);
+    data.insert(QStringLiteral("control"), control);
+    panel.setBilibili(data);
+
+    QVERIFY(panel.source().isEmpty());
+    QCOMPARE(panel.lastVideoControlSeq(), 0);          // 没动手 -> 序号不前进
+    QCOMPARE(panel.playbackControlsApplied(), 0);
+    QTest::qWait(350);
+    QCOMPARE(state.count(), 0);                        // 也没回报什么
 }
 
 QTEST_MAIN(TestVideoPanel)

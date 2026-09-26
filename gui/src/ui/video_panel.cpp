@@ -10,6 +10,8 @@
 
 #include <QDebug>
 #include <QHBoxLayout>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QLabel>
 #include <QMediaPlayer>
 #include <QMenu>
@@ -246,8 +248,17 @@ void VideoPanel::setBilibili(const QJsonObject& data)
 {
     preview_->setData(data);
 
-    // `stream` 是 Agent 那边缓冲好之后给的**本地 FIFO 路径**（板端 souphttpsrc 是坏的，
-    // 所以不是 URL —— 见 T11-0 与 docs/bilibili.md）。空 = 现在没东西可放。
+    // T11-10f：Agent 让**播放器**播放/暂停（CLI `assistant video play|pause|toggle` 走这条）。
+    //   `control` 只在"真的下了命令"的那条推送里出现 —— 补推里没有它，所以刚连上的
+    //   GUI 不会把上一条老命令重放一遍。`seq` 只是再上一道保险（重复推不动手）。
+    const QJsonValue control = data.value(QStringLiteral("control"));
+    if (control.isObject()) {
+        const QJsonObject cmd = control.toObject();
+        handleControl(cmd.value(QStringLiteral("action")).toString(),
+                      cmd.value(QStringLiteral("seq")).toInt(0));
+    }
+
+    // `stream` 是 Agent 那边缓冲好之后给的本机 http 地址（T11-10 起；老方案是 FIFO 路径）。
     const QString stream = data.value(QStringLiteral("stream")).toString();
     if (stream.isEmpty()) {
         if (!source_.isEmpty()) {
@@ -349,6 +360,44 @@ void VideoPanel::togglePlayPause()
 bool VideoPanel::isPlaying() const
 {
     return player_->state() == QMediaPlayer::PlayingState;
+}
+
+bool VideoPanel::handleControl(const QString& action, int seq)
+{
+    // ⚠ `seq` 去重：Agent 那边只在"下了命令"时推一次，但万一同一条被重放，
+    //   也**不能**再按一次（`toggle` 按两次就转回去了）。
+    if (seq > 0 && seq <= lastControlSeq_) {
+        qInfo().noquote() << QStringLiteral("[bilibili] 播放控制 seq=%1 不比上一条(%2)新 -> 不动手")
+                                 .arg(seq).arg(lastControlSeq_);
+        return false;
+    }
+    if (source_.isEmpty()) {
+        // 没源 = 没东西可放；这是**如实忽略**，不是出错（Agent 那边也会先拦一道）。
+        // ⚠ 忽略时**不记序号** —— 所以"序号没前进"就是"这条命令没被执行"的可测事实。
+        qInfo().noquote() << QStringLiteral("[bilibili] 没在放，Agent 的播放控制 %1 忽略（seq=%2）")
+                                 .arg(action).arg(seq);
+        return false;
+    }
+    if (seq > 0) {
+        lastControlSeq_ = seq;
+    }
+    qInfo().noquote() << QStringLiteral("[bilibili] Agent 让播放器 %1（seq=%2）")
+                             .arg(action).arg(seq);
+    if (action == QLatin1String("play")) {
+        play();
+    } else if (action == QLatin1String("pause")) {
+        pause();
+    } else if (action == QLatin1String("toggle")) {
+        togglePlayPause();
+    } else {
+        qInfo().noquote() << QStringLiteral("[bilibili] 不认识的播放控制 %1（忽略）").arg(action);
+        return false;
+    }
+    ++controlsApplied_;
+    // 立刻回报一次进度/状态：Agent（和 CLI 的 --wait-player）不用等 2 秒定时器。
+    // ⚠ 播放器的状态切换是异步的，所以晚 200 ms 再报 —— 报的是**它真实的**样子。
+    QTimer::singleShot(200, this, [this]() { reportVideoState(); });
+    return true;
 }
 
 void VideoPanel::reportVideoState()

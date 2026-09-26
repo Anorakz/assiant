@@ -1,7 +1,7 @@
 # 板端控制 CLI（`assistant`）
 
 Agent 有**两条前端**：板端那块屏上的 GUI，和这里的 CLI。CLI 给 ssh / 脚本用 ——
-看一眼状态、发一条消息、切模式、控音乐、盯推送、查日程、做体检。
+看一眼状态、发一条消息、切模式、控音乐**与视频**、盯推送、查日程、做体检。
 
 | 项 | 值 |
 | --- | --- |
@@ -62,7 +62,7 @@ python3 -m agent.cli status          # ⚠ 用 -m，不要在 agent/ 里直接 p
 
 ---
 
-## 4. 九条命令
+## 4. 十条命令
 
 ### `status` —— 看一眼当前模式与串流连接
 
@@ -119,6 +119,41 @@ $ assistant music next --timeout 15     # 音乐要走一趟 PC（neteasecli/mpv
 > ⚠ 音乐**放什么**由**对话**决定（`assistant chat 放首周杰伦`）；这里只管传输。
 > 音乐没开（`music.enabled: false`）时，Agent 会回一句 `音乐没开（config.yaml 的 music.enabled）`，
 > CLI 原样打印并返回 1 —— 不会静默无事发生。
+
+### `video` —— 视频传输控制（播放 / 暂停 / 上一集 / 下一集）
+
+```bash
+$ assistant video pause
+现在是：Luna say maybe（正在播放）
+已让播放器暂停：Luna say maybe
+
+$ assistant video pause          # 已经暂停 -> 不发命令（幂等）
+现在是：Luna say maybe（已暂停）
+已经是暂停了 —— 没发命令。
+
+$ assistant video play
+$ assistant video toggle         # 交给 Agent 按它自己的真值解析成 play/pause
+$ assistant video next           # 队列里下一集（队列内容由对话/画面决定）
+下一集：<标题>（正在缓冲 —— 攒够 15 秒才让播放器开；`assistant watch` 能看到「可以播了」）
+$ assistant video prev
+$ assistant video pause --wait-player   # 再等一步"播放器真的按了"（等 GUI 的回报）
+已让播放器暂停：Luna say maybe（播放器已回报）
+$ assistant video next --no-wait        # 发出去就返回
+```
+
+三条口径（都写进单测了）：
+
+| 事 | 怎么办 |
+| --- | --- |
+| **走哪条协议** | `play`/`pause`/`toggle` 走 **T11-10f 新增的 `video_control{action}`**（GUI 那颗播放/暂停按钮是"本地点"，原来没有任何命令能让 Agent/CLI 去按它）；`next`/`prev` 走现成的 `next_bilibili`/`prev_bilibili`。Agent 收到后推一条 `bilibili{control{action,seq}}`，**真正按播放器的是 GUI** |
+| **`play` / `pause` 为什么是幂等意图** | 连上后先看**补推**的 `bilibili`（`buffer.saw_playing/playing` = "现在真的在放吗"），已经在那个状态就**只打印、不发命令**。⚠ 只看 `playing` 不够 —— 它默认就是 true（还没起播时也是），所以要 `saw_playing` 也为真 |
+| **成功/失败看什么** | **成功**看 Agent 推的带 `control` 的 `bilibili`（= 收下并推给 GUI 了）；`next`/`prev` 看队列真的走了一格。**失败**看 `llm`（没在播 / 没 GUI 连上 / 到队尾）——**原话照抄**并退出 1 |
+
+> ⚠ **协议没有请求 id**，Agent→GUI 是单向的：所以默认只确认到"Agent 收下并推给播放器了"。
+> 要确认"播放器真的按了"，加 `--wait-player` —— 它等的是 Agent 转发的 `control_result{seq,action,playing}`
+> （`playing` 是 **GUI 报回来的原话**）。等不到、或播放器回报的和你要的不一样，都**如实报错并退出 1**。
+> ⚠ 视频**放什么**由**对话或画面**决定（`assistant chat 放个 luna say maybe 的视频`）；
+> 这里只管传输控制。没有在播的视频时 Agent 会回一句"现在没有在播的视频 —— 先在 GAME 里点一下预览图"。
 
 ### `chat` —— 发一条消息给 Agent 并等回复
 

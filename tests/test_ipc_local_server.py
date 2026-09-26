@@ -73,6 +73,7 @@ from agent.ipc.protocol import (  # noqa: E402
     COMMAND_NEXT_BILIBILI,
     COMMAND_QUERY_SCHEDULE,
     COMMAND_SWITCH_MODE,
+    COMMAND_VIDEO_CONTROL,
     MAX_LINE_BYTES,
     SOCKET_PATH,
     TOPIC_LLM,
@@ -699,6 +700,54 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(pushed), 1)
         self.assertEqual(pushed[0][0], TOPIC_LLM)
         self.assertIn("没有在放", pushed[0][1]["text"])
+
+    # ---- T11-10f: 让播放器播放/暂停（CLI 的 `assistant video play|pause|toggle`）----
+
+    async def test_video_control_reaches_the_runtime(self):
+        from agent.ipc import _make_command_handler
+
+        calls = []
+
+        class _Runtime(object):
+            def bilibili_control(self, action, payload=None):
+                calls.append((action, dict(payload or {})))
+                return {"ok": True, "control": "pause", "seq": 1}
+
+        pushed = []
+        handler = _make_command_handler(
+            None, runtime=_Runtime(), push=lambda topic, data: pushed.append(topic))
+        await handler(COMMAND_VIDEO_CONTROL, {"action": "pause"})
+        self.assertEqual(calls, [("control", {"action": "pause"})],
+                         "线格式的 video_control 要落到 bilibili_control('control', …)")
+        self.assertEqual(pushed, [], "成功时 Agent 自己推 bilibili(control), 这儿不该多推一条")
+
+    async def test_video_control_failure_is_told_to_the_user(self):
+        from agent.ipc import _make_command_handler
+
+        class _Runtime(object):
+            def bilibili_control(self, action, payload=None):
+                return {"ok": False, "error": "没有在播的视频",
+                        "tell_user": "现在没有在播的视频 —— 先点一下预览图"}
+
+        pushed = []
+        handler = _make_command_handler(
+            None, runtime=_Runtime(),
+            push=lambda topic, data: pushed.append((topic, data)))
+        await handler(COMMAND_VIDEO_CONTROL, {"action": "pause"})
+        self.assertEqual(len(pushed), 1)
+        self.assertEqual(pushed[0][0], TOPIC_LLM)
+        self.assertIn("没有在播的视频", pushed[0][1]["text"])
+
+    async def test_video_control_without_a_runtime_says_bilibili_is_off(self):
+        from agent.ipc import NO_BILIBILI_NOTE, _make_command_handler
+
+        pushed = []
+        handler = _make_command_handler(
+            None, runtime=None, push=lambda topic, data: pushed.append((topic, data)))
+        await handler(COMMAND_VIDEO_CONTROL, {"action": "play"})
+        self.assertEqual(len(pushed), 1)
+        self.assertEqual(pushed[0][0], TOPIC_LLM)
+        self.assertEqual(pushed[0][1]["text"], NO_BILIBILI_NOTE)
 
     async def test_every_music_command_maps_to_an_action(self):
         from agent.ipc import _make_command_handler

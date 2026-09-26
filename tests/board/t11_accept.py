@@ -10,7 +10,7 @@
     python3 tests/board/t11_accept.py --no-netcut        # 跳过 iptables 那一段
     python3 tests/board/t11_accept.py --keyword "..."    # 换个关键词
 
-验的是这七件事（**真代码 + 真网络 + 真 GUI + 真视频**, 只有两处是"替身"且都写在下面）:
+验的是这八件事（**真代码 + 真网络 + 真 GUI + 真视频**, 只有两处是"替身"且都写在下面）:
 
     A. 真搜索 -> 队列 = 3 × 预览栏格数 + 真封面地址（预览图由**真 GUI** 去下, 见 C 的日志）
     B. cookie 三态（有 / 空 / 失效）各给一句**不一样**的话
@@ -21,6 +21,8 @@
     F. 双路识别**真跑**（真 SigLIP + 真锚点副本 + 假进程读数）-> 不一致时**锚点副本多一行**;
        有对话关键词 -> **一帧都不抓**（模型都没加载）
     G. **真数据一个字节都不动**（跑前跑后 md5 对一遍）+ 跑完不留 ffmpeg/GUI 进程
+    H. **视频 CLI**（T11-10f）: 真 CLI 子进程 `assistant video pause|play|next|prev` ->
+       真 IPC -> Agent 推 `control` -> **真 GUI 的播放器真的按了** -> 幂等 / 诚实失败都验
 
 两处替身（都是为了不碰真数据/真 PC, 且都打印出来）:
     · 锚点库指**副本**（真文件在 `config/game_anchors.jsonl`）;
@@ -735,6 +737,120 @@ def part_e_netcut(runtime, keyword, enabled):
 
 
 # ---------------------------------------------------------------------------
+#  H. 视频 CLI（真 CLI 子进程 -> 真 IPC -> Agent -> GUI 真的按了播放器）
+# ---------------------------------------------------------------------------
+async def run_cli(sock, *args, timeout=30):
+    """跑一次**真 CLI 子进程**（`python3 -m agent.cli …`），回 (rc, stdout, stderr)。"""
+    cmd = [sys.executable, "-m", "agent.cli", "--socket", sock, "--timeout", "6"] + list(args)
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, cwd=REPO, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return -1, "", "（%.0f 秒没跑完）" % timeout
+    return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+
+
+async def part_h_video_cli(runtime, sock, seen, tmp):
+    """H. CLI 的视频传输控制（`assistant video play|pause|toggle|next|prev`）。
+
+    这一段的重点是**整条链路真的通了**: 真 CLI 子进程发命令 -> 真 IPC -> Agent 收下并推
+    `bilibili{control{action,seq}}` -> **真 GUI 的播放器真的按了** -> GUI 回报 ->
+    Agent 推 `control_result` -> `--wait-player` 的 CLI 确认落地。
+    """
+    print("\n== H. 视频 CLI（真 CLI 子进程 + 真 GUI）")
+    if not os.path.exists(GUI_BIN):
+        skip("视频 CLI", "没找到 %s（先跑 scripts/sync-gui.ps1）" % GUI_BIN)
+        return
+    gui = GuiRun(sock, os.path.join(tmp, "gui4.log"), "--bilibili-pick-demo", "0")
+    picks_before = sum(1 for a, _, _ in seen if a == "pick")
+    buffer_before = runtime._buffer
+    gui.start()
+    try:
+        await wait_for(lambda: int(getattr(runtime.ipc, "clients", 0) or 0) >= 1, 20, "GUI 连上")
+        got_pick = await wait_for(
+            lambda: sum(1 for a, _, _ in seen if a == "pick") > picks_before, 40, "H: GUI 点预览图")
+        check("H: GUI 点了预览图（起播）", got_pick)
+
+        def snap():
+            buffer = runtime._buffer
+            if buffer is None or buffer is buffer_before:
+                return {}
+            return buffer.snapshot()
+
+        played = await wait_for(lambda: bool(snap().get("playing"))
+                                and bool(snap().get("saw_playing")), 60, "H: 真的在播")
+        check("H: 起播（缓冲自己认 saw_playing 且 playing）", played,
+              str({k: snap().get(k) for k in ("bvid", "playing", "cap_s")}))
+        if not played:
+            return
+
+        # ---- 1) 暂停（带 --wait-player：等 GUI 把"播放器真的按了"报回来）----
+        rc, out, err = await run_cli(sock, "video", "pause", "--wait-player")
+        print("  $ assistant video pause --wait-player -> rc=%s\n    %s"
+              % (rc, (out or err).strip().replace("\n", "\n    ")))
+        check("H: video pause 退出码 0", rc == 0, err.strip()[:120])
+        check("H: 说清了「已让播放器暂停」且等到播放器回报",
+              "已让播放器暂停" in out and "播放器已回报" in out, out.strip()[:120])
+        paused = await wait_for(lambda: bool(snap().get("paused")), 8, "H: 缓冲认下暂停")
+        check("H: 缓冲自己认下暂停（GUI 的回报落到 Agent 了）", paused,
+              str({k: snap().get(k) for k in ("playing", "paused", "cap_s")}))
+        gui_log = gui.log_text()
+        check("H: GUI 那边真的执行了播放控制（日志里有那条）",
+              "Agent 让播放器 pause" in gui_log,
+              [ln for ln in gui_log.splitlines() if "播放控制" in ln][-1:] or "-")
+
+        # ---- 2) 同一个动作幂等：已经暂停 -> 不发命令 ----
+        rc, out, err = await run_cli(sock, "video", "pause")
+        print("  $ assistant video pause -> rc=%s\n    %s" % (rc, out.strip()))
+        check("H: 已经暂停时 video pause 幂等（不发命令、退出码 0）",
+              rc == 0 and "已经是暂停了" in out, (out + err).strip()[:120])
+
+        # ---- 3) 继续播 ----
+        rc, out, err = await run_cli(sock, "video", "play", "--wait-player")
+        print("  $ assistant video play --wait-player -> rc=%s\n    %s" % (rc, out.strip()))
+        check("H: video play 退出码 0 且播放器回报在播",
+              rc == 0 and "已让播放器播放" in out and "播放器已回报" in out,
+              (out + err).strip()[:120])
+        check("H: 缓冲也跟着回到在播", await wait_for(
+            lambda: bool(snap().get("playing")) and not snap().get("paused"), 8, "H: 回到在播"))
+
+        # ---- 4) 队列走位（next -> prev 回到原来那条）----
+        first_bvid = str(snap().get("bvid") or "")
+        rc, out, err = await run_cli(sock, "video", "next")
+        print("  $ assistant video next -> rc=%s\n    %s" % (rc, out.strip()))
+        check("H: video next 退出码 0 且在缓冲", rc == 0 and "下一集" in out and "正在缓冲" in out,
+              (out + err).strip()[:120])
+        moved = await wait_for(lambda: str(snap().get("bvid") or "") not in ("", first_bvid), 25,
+                               "H: 队列走到下一条")
+        check("H: next 之后真的换了一条", moved,
+              "%s -> %s" % (first_bvid, snap().get("bvid")))
+        rc, out, err = await run_cli(sock, "video", "prev")
+        print("  $ assistant video prev -> rc=%s\n    %s" % (rc, out.strip()))
+        check("H: video prev 退出码 0", rc == 0 and "上一集" in out, (out + err).strip()[:120])
+        check("H: prev 回到了刚才那条", await wait_for(
+            lambda: str(snap().get("bvid") or "") == first_bvid, 25, "H: 走回上一条"),
+            "%s -> %s" % (snap().get("bvid"), first_bvid))
+
+        # ---- 5) 诚实失败：没有在播的视频 -> 退出码 1 + Agent 的原话 ----
+        runtime._stop_buffer()
+        await asyncio.sleep(0.3)
+        rc, out, err = await run_cli(sock, "video", "pause")
+        print("  $ assistant video pause（没有在播的视频）-> rc=%s\n    %s"
+              % (rc, err.strip() or out.strip()))
+        check("H: 没在播时 video pause **退出码 1**（不假装成功）", rc == 1,
+              "rc=%s" % rc)
+        check("H: 没做成时照抄 Agent 的原话", "没有在播的视频" in (err + out),
+              (err + out).strip()[:120])
+    finally:
+        gui.stop()
+        await asyncio.sleep(0.5)
+    print("  --- GUI 日志里的播放控制行 ---")
+    print("\n".join([ln for ln in gui.log_text().splitlines() if "播放控制" in ln][-6:] or ["-"]))
+
+# ---------------------------------------------------------------------------
 #  F. 双路识别真跑 + 关键词优先
 # ---------------------------------------------------------------------------
 def part_f_game_watch(runtime, tmp, enabled):
@@ -835,8 +951,8 @@ async def main():
     parser.add_argument("--no-gui", action="store_true", help="不拉真 GUI")
     parser.add_argument("--no-vision", action="store_true", help="不跑 SigLIP")
     parser.add_argument("--no-netcut", action="store_true", help="跳过 iptables 那一段")
-    parser.add_argument("--parts", default="abcdef",
-                        help="只跑哪几段（小写字母, 默认 abcdef 全跑; 调试用, 例如 --parts cd）")
+    parser.add_argument("--parts", default="abcdefh",
+                        help="只跑哪几段（小写字母, 默认 abcdefh 全跑; 调试用, 例如 --parts cd）")
     args = parser.parse_args()
     want = set(args.parts.lower())
 
@@ -910,6 +1026,8 @@ async def main():
                 skip("真 GUI 那两段", "--no-gui")
             if "d" in want:
                 await part_d_pause(runtime, sock, seen, tmp)
+            if "h" in want:
+                await part_h_video_cli(runtime, sock, seen, tmp)
             if "e" in want:
                 part_e_netcut(runtime, args.keyword, not args.no_netcut)
         if "f" in want:

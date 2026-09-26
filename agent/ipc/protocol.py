@@ -52,6 +52,7 @@ __all__ = [
     "COMMAND_BILIBILI_PICK",
     "COMMAND_BILIBILI_VIEWPORT",
     "COMMAND_VIDEO_STATE",
+    "COMMAND_VIDEO_CONTROL",
     "COMMAND_QUERY_SCHEDULE",
     "COMMAND_MUSIC_PLAY_PAUSE",
     "COMMAND_MUSIC_NEXT",
@@ -150,6 +151,17 @@ COMMAND_BILIBILI_VIEWPORT = "bilibili_viewport"
 #: 为什么要有这条: 缓冲代理只知道自己喂了多少, **播放器放到哪只有 GUI 知道** ——
 #: `eof=true` 就是"这一集放完了, 该下一集了"的唯一真值（不靠估算）。
 COMMAND_VIDEO_STATE = "video_state"
+#: 让**播放器**播放/暂停（payload `{"action": "play"|"pause"|"toggle"}`）—— T11-10f。
+#: ⚠ 与音乐**不一样**: 音乐那边现成的 `music_play_pause` 就是 toggle, 所以 CLI 能复用;
+#:   视频这边**必须新增一条**, 因为:
+#:     · GUI 那颗播放/暂停按钮是**本地点**的（`VideoPanel::togglePlayPause`）,
+#:       协议里原来没有任何一条能让 Agent/CLI 去点它;
+#:     · `video_state` 是 GUI 往上的**回报**（进度/在不在放）, 不能兼职当"命令";
+#:     · 所以补上这条"命令"方向 + §3 `bilibili` 推送里的 `control{action,seq}`（Agent->GUI）:
+#:       命令到了 Agent, Agent 推 `control` 给 GUI, **GUI 才是真按播放器的那个人**。
+#: ⚠ `toggle` 的语义: Agent 按**自己的真值**（缓冲 `saw_playing and playing`）解析成
+#:   play / pause 再推下去 —— 不让两侧各自猜, 免得"一个以为在放、一个以为停了"。
+COMMAND_VIDEO_CONTROL = "video_control"
 
 #: ⚠ T7-3 删掉了 `next_wallpaper` 命令（T3 加的）: 换壁纸**只走对话**
 #: （LLM 工具 `next_wallpaper`, 见 agent/tools/wallpaper.py）。手动按钮"只能按文件名
@@ -183,6 +195,7 @@ COMMANDS = (
     COMMAND_BILIBILI_PICK,
     COMMAND_BILIBILI_VIEWPORT,
     COMMAND_VIDEO_STATE,
+    COMMAND_VIDEO_CONTROL,
     COMMAND_QUERY_SCHEDULE,
     COMMAND_MUSIC_PLAY_PAUSE,
     COMMAND_MUSIC_NEXT,
