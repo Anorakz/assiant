@@ -1323,7 +1323,7 @@ class TestVideoAgainstRealServer(unittest.IsolatedAsyncioTestCase):
         await pusher
 
         self.assertEqual(code, cli.EXIT_ERROR)
-        self.assertIn("没等到播放器回报", err)
+        self.assertIn("没等到播放器回报", err.getvalue())
 
     async def test_wait_player_reports_a_player_that_did_not_follow(self):
         async def handler(received, data):

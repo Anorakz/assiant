@@ -1008,8 +1008,33 @@ class TestBilibiliWiring(unittest.IsolatedAsyncioTestCase):
         rt._bilibili_api = type("Api", (), {"cookie_present": False})()
         rt._push_bilibili = lambda **extra: True          # 推送单独测, 这里不掺和
         #: T11-10f: 播放控制要 GUI 去执行 —— 默认"有一个客户端连上"
-        rt.ipc = type("Ipc", (), {"clients": 1 if gui else 0})()
+        #: T11-10f: 播放控制要 GUI 去执行 —— 默认"有一个客户端连上"。
+        #: ⚠ 属性名是 `client_count`（LocalServer 的真实名字）—— 板端验收抓到过
+        #:   写成 `clients` 时 getattr 的默认值把"有 GUI"悄悄吃成 False。
+        rt.ipc = type("Ipc", (), {"client_count": 1 if gui else 0})()
         return rt
+
+    async def test_the_gui_gate_reads_the_real_client_counter(self):
+        """⚠ T11-10f 板端验收抓到的坑: 我一开始写的是 `ipc.clients`。
+
+        `clients` 这个属性**不存在** —— `getattr(..., 0)` 的默认值把它悄悄吃成 0,
+        于是"有 GUI 连上"永远为假、播放控制永远被拒（CLI 报"没有 GUI 连上"），
+        而单测因为假 ipc 也写成 `clients` 全绿。这条把"假的和真的同名"钉住。
+        """
+        from agent.ipc.local_server import NullServer
+
+        self.assertTrue(hasattr(NullServer(), "client_count"),
+                        "真 server 的客户端计数器叫 client_count")
+        fake = self._runtime().ipc
+        self.assertTrue(hasattr(fake, "client_count"), "假 ipc 必须与真 server 同名")
+        self.assertFalse(hasattr(fake, "clients"), "`clients` 这个属性从来不存在")
+
+        rt = self._runtime()
+        rt.ipc = NullServer()                     # 真 server（没人连）
+        rt._buffer = self._Buffer()
+        out = rt.bilibili_control("control", {"action": "pause"})
+        self.assertFalse(out["ok"])
+        self.assertIn("没有 GUI 连上", out["tell_user"])
 
     async def test_search_fills_the_queue_from_dialogue(self):
         rt = self._runtime()

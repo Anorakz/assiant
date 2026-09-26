@@ -333,7 +333,10 @@ async def part_c_playback(runtime, sock, seen, tmp):
         #   只在游戏模式里露出来 —— 不切的话那块页面根本没被排版（实测预览栏可见宽度只有
         #   默认的 100 px），于是"格数上报"没有；视频页不可见还会让 GStreamer 不出画面。
         #   走的是真路径：状态机 on_change -> ipc 推 status{mode}（与按界面按钮同一条）。
-        await wait_for(lambda: int(getattr(runtime.ipc, "clients", 0) or 0) >= 1, 20, "GUI 连上")
+        # ⚠ 属性名是 `client_count`（LocalServer 的真名）—— T11-10f 抓到过: 写成 `clients` 时
+        #   getattr 的默认值把它悄悄吃成 0, 于是这句"等 GUI 连上"其实一直在空等 20 秒。
+        await wait_for(lambda: int(getattr(runtime.ipc, "client_count", 0) or 0) >= 1, 20,
+                       "GUI 连上")
         from agent.core import State
 
         moved = runtime.state.transition(State.GAME, "t11-9 验收: 视频区只在 GAME 里露出来")
@@ -499,7 +502,7 @@ async def part_d_pause(runtime, sock, seen, tmp):
     buffer_before = runtime._buffer
     gui.start()
     try:
-        await wait_for(lambda: int(getattr(runtime.ipc, "clients", 0) or 0) >= 1, 20, "GUI 连上")
+        await wait_for(lambda: int(getattr(runtime.ipc, "client_count", 0) or 0) >= 1, 20, "GUI 连上")
         got_pick = await wait_for(
             lambda: sum(1 for a, _, _ in seen if a == "pick") > picks_before, 40,
             "D: GUI 点预览图")
@@ -620,7 +623,7 @@ async def part_c2_buttons(runtime, sock, seen, tmp):
                  "--prev-bilibili-demo", "--next-bilibili-demo")
     gui.start()
     try:
-        await wait_for(lambda: int(getattr(runtime.ipc, "clients", 0) or 0) >= 1, 20, "GUI2 连上")
+        await wait_for(lambda: int(getattr(runtime.ipc, "client_count", 0) or 0) >= 1, 20, "GUI2 连上")
         from agent.core import State
 
         runtime.state.transition(State.IDLE, "t11-9: 回 IDLE 再进 GAME, 好让 status 再推一次")
@@ -769,7 +772,7 @@ async def part_h_video_cli(runtime, sock, seen, tmp):
     buffer_before = runtime._buffer
     gui.start()
     try:
-        await wait_for(lambda: int(getattr(runtime.ipc, "clients", 0) or 0) >= 1, 20, "GUI 连上")
+        await wait_for(lambda: int(getattr(runtime.ipc, "client_count", 0) or 0) >= 1, 20, "GUI 连上")
         got_pick = await wait_for(
             lambda: sum(1 for a, _, _ in seen if a == "pick") > picks_before, 40, "H: GUI 点预览图")
         check("H: GUI 点了预览图（起播）", got_pick)

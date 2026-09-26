@@ -1775,7 +1775,10 @@ class Runtime:
             return {"ok": False, "error": "没有在播的视频",
                     "tell_user": "现在没有在播的视频 —— 先在 GAME 里点一下预览图，"
                                  "或者跟我说个片名"}
-        clients = int(getattr(self.ipc, "clients", 0) or 0) if self.ipc is not None else 0
+        # ⚠ 真属性名是 `client_count`（LocalServer/NullServer 都有）—— T11-10f 板端验收
+        #   抓到的: 我一开始写的是 `clients`, getattr 的默认值把它悄悄吃成 0, 于是
+        #   "有 GUI 连上"永远为假、播放控制永远被拒（CLI 报"没有 GUI 连上"）。
+        clients = int(getattr(self.ipc, "client_count", 0) or 0) if self.ipc is not None else 0
         if clients <= 0:
             # 命令要 GUI 去执行；没 GUI 就是"没人按那颗按钮"—— 如实说，别静默成功
             return {"ok": False, "error": "没有 GUI 连上",
