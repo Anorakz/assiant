@@ -445,9 +445,14 @@ async def part_c_playback(runtime, sock, seen, tmp):
         if buffer is None:
             skip("暂停预取", "没有缓冲对象")
         else:
+            # ⚠ 只看**这一段之后**新到的回报：前面"放完"那几条也是 playing=false，
+            #   不按下标看的话会立刻匹配上（第一次跑就踩了 —— 于是根本没等到暂停）。
+            mark = len(seen)
             paused = await wait_for(
-                lambda: any(a == "video_state" and p.get("playing") is False for a, p, _ in seen),
-                40, "GUI 报 playing=false")
+                lambda: any(a == "video_state" and p.get("playing") is False
+                            and not p.get("eof") for a, p, _ in seen[mark:]),
+                45, "GUI 报 playing=false")
+            await asyncio.sleep(1.0)                    # 让 set_playing 落到缓冲上
             print("  GUI 自己报了 playing=false: %s（cap_s=%.0f s）" % (paused, buffer.cap_s()))
             check("GUI 点暂停后如实回报 playing=false", paused)
             check("暂停后封顶从 15 s 放到 60 s", buffer.cap_s() >= 60.0, "%.0f" % buffer.cap_s())
@@ -559,32 +564,65 @@ def part_e_netcut(runtime, keyword, enabled):
         return
     rules = []
     try:
-        for ip in ips[:2]:
+        for ip in ips:                       # ⚠ **所有** IPv4 都堵上（解析出来常常不止一个）
             rule = ["iptables", "-I", "OUTPUT", "-d", ip, "-p", "tcp", "--dport", "443",
                     "-j", "REJECT"]
             rc, out = run(rule, timeout=10)
             if rc == 0:
-                rules.append(rule[:3] + rule[4:])       # 记下作删除用
+                rules.append(ip)
                 note("已 REJECT %s:443" % ip)
         if not rules:
             skip("断网那一段", "iptables 规则加不上")
             return
+        # 正控：先证明"确实堵上了"（否则后面"搜到了"到底是网络还是规则没生效都说不清）
+        rc, out = run(["curl", "-sS", "-m", "6", "-o", "/dev/null", "-w", "%{http_code}",
+                       "https://%s/x/web-interface/nav" % API_HOST], timeout=20)
+        print("  正控: curl 探一下被堵的接口 -> rc=%s %s" % (rc, (out or "").strip()[:40]))
+        check("规则真的生效了（curl 也连不上）", rc != 0, "rc=%s %s" % (rc, out.strip()[:40]))
         from agent.net.bilibili_api import BilibiliError, BilibiliNetworkError
 
+        def honest(text):
+            text = str(text)
+            return bool(text.strip()) and ("过一会" in text or "网络" in text
+                                           or "连" in text or "HTTP" in text)
+
+        failure = ""
         try:
             runtime.bilibili.search("断网测试", source="dialogue")
-            check("断网后搜索**不该**成功", False, "居然搜到了？")
         except (BilibiliNetworkError, BilibiliError) as exc:
-            print("  断网后的原话: %s" % exc)
-            check("断网时报的是能照做的话（不是静默/编造）",
-                  bool(str(exc).strip()) and ("过一会" in str(exc) or "网络" in str(exc)
-                                              or "连" in str(exc) or "HTTP" in str(exc)),
-                  str(exc)[:60])
+            failure = str(exc)
+        if failure:
+            print("  断网后的原话: %s" % failure)
+            check("断网后搜索失败，并如实报错", True)
+            check("断网时那句话能照做", honest(failure), failure[:60])
+        else:
+            # ⚑ T11-9 实测：板端到 api.bilibili.com **还有 IPv6 通路**，只堵 IPv4 堵不住
+            #   （curl 走 v4 已经连不上，urllib 换了一条路照样通）。所以再用**真的**
+            #   transport 打一个不可路由的地址（TEST-NET-1）验"网络失败会如实说"。
+            note("IPv4 已堵住但搜索仍成功 —— 板端到 api.bilibili.com 还有 IPv6 通路")
+            import logging as _logging
+
+            import agent.net.bilibili_api as api_mod
+            from agent.net.bilibili_api import BilibiliApi, UrllibTransport
+
+            keep = api_mod.SEARCH_URL
+            probe = ""
+            try:
+                api_mod.SEARCH_URL = "https://192.0.2.1/x/web-interface/search/type"
+                dead = BilibiliApi(cookie_file="", transport=UrllibTransport(4.0),
+                                   log=_logging.getLogger("t11.netcut"))
+                dead.search("断网测试", page=1, limit=1)
+            except BilibiliError as exc:
+                probe = str(exc)
+            finally:
+                api_mod.SEARCH_URL = keep
+            print("  补充（指向不可达地址 192.0.2.1）: %s" % (probe or "居然成功了？"))
+            check("断网时报的是能照做的话（这一条走的是真 socket 失败）", honest(probe), probe[:60])
     finally:
-        for rule in rules:
-            rc, out = run(["iptables", "-D", "OUTPUT", "-d", rule[3], "-p", "tcp",
+        for ip in rules:
+            rc, out = run(["iptables", "-D", "OUTPUT", "-d", ip, "-p", "tcp",
                            "--dport", "443", "-j", "REJECT"], timeout=10)
-            note("撤掉规则（rc=%s）" % rc)
+            note("撤掉 %s 的规则（rc=%s）" % (ip, rc))
     left = run(["iptables", "-S", "OUTPUT"], timeout=10)[1]
     check("规则撤干净了（不留 REJECT）", "REJECT" not in left or API_HOST not in left,
           "OUTPUT 链里还有 REJECT" if "REJECT" in left else "")

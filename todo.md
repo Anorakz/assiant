@@ -1648,10 +1648,24 @@ Phase 7 T11 — **B 站视频**（图像锚点认游戏 -> 搜 B 站 -> 板端�
       ② **`bilibili` 被当成"未知 topic"计数**: `ViewState` 只存标量型 topic，`bilibili` 的负载是数组
          （由视频区消化），原来会走"未知 topic"分支 -> 设置页"忽略的 topic 数"一直涨，
          看着像界面没认它。现在它是**已知但不在这里存**（`schedule` 那条"故意不认"的契约不动）
-□ T11-9 **板端验收**（`tests/board/t11_accept.py` + 真 GUI）: 真搜索 -> 队列 = 3N -> 真封面下到 ->
-      点预览图起播（15 s 门槛日志 + `position_s` 递增 + 出声）-> 上一集/下一集换条 -> 暂停缓冲涨到
-      60 s -> 断网诚实报错 -> cookie 三态三句话 -> 识别双路真跑 + 锚点自纠错多一行 -> 关键词在时
-      **日志证明没抓帧** -> 真数据/配置不动 + PC/板端全套测试全绿
+□ T11-9 **板端验收**（`tests/board/t11_accept.py` + 真 GUI）—— **脚本已进仓库, 34 项绿/2 项未闭合**:
+      跑法: `python3 tests/board/t11_accept.py`（`--parts` 可只跑某几段, `--no-gui/--no-vision/--no-netcut` 可跳过）
+      ✔ 已验: 真搜索 -> 队列 = 3×格数(18) + 载荷带 `queue` + 真封面地址; cookie 三态**三句不同的话**
+        （含"失效"那一句 —— 见下面的 ⚑①）; **真 GUI** 点预览图 -> `pick` -> **15 s 门槛**
+        （buffered+written+inflight ≥ 15）-> 推的是**本地 FIFO 路径** -> GUI 每 2 秒回报
+        `video_state`（位置在涨、`playing=true`）-> 下一集/上一集换条 + **旧 FIFO 立刻释放**;
+        GUI 自己点暂停 -> 如实回报 `playing=false` -> 封顶 15 s → 60 s; 断网（iptables REJECT
+        IPv4 + 正控 curl + 不可达地址）-> **能照做的话** -> 撤规则后恢复; 双路识别真跑
+        （真 SigLIP 2.6 s 加载 / 真锚点副本 / 假进程读数）-> **以进程为准 + 锚点副本多一行**;
+        有对话关键词 -> **模型都不加载、锚点不动**; 真数据 6 个文件 md5 前后一致; 不留 ffmpeg/GUI 进程
+      ⚑② **未闭合（真问题，没修完就不算完）**: GUI 从 **FIFO** 播 MPEG-TS 时**位置只爬到 ~2.4 s 就不动了**
+        （`video_state` 一直报 `position_s≈2.408, playing=true`; 拿**文件**播同一段流是好的 ——
+        T11-7 的证据就是文件, 所以没暴露）。缓冲那一侧是好的（`buffered_s` 15→60、ffmpeg 活着、
+        写端没报错）-> 疑点在**播放器对 FIFO/无时长流**的处理（duration 恒为 0）。
+        要查: 用 `gst-launch-1.0 filesrc location=<FIFO> ! tsdemux ! h264parse ! mppvideodec ! fakesink`
+        量一下 FIFO 到底喂没喂进去、再看 `QMediaPlayer` 那条路卡在哪。
+      ⚑① 板端到 `api.bilibili.com` **有 IPv6**: 只 REJECT IPv4 堵不住（urllib 会走 v6），
+        所以那段用"REJECT IPv4 + 不可达地址"两条一起验（都过了）
 
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
