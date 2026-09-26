@@ -349,11 +349,29 @@ async def cmd_chat(args: argparse.Namespace) -> int:
         await client.close()
 
 
-async def cmd_mode(args: argparse.Namespace) -> int:
-    """发 `switch_mode`，等一条 `status` 确认。
+def mode_path_note(modes_seen: List[str]) -> str:
+    """"路上经过 …"那半句（**纯逻辑**，单测钉它）。
 
-    非法转换会被 Agent **拒掉**，并把真实状态推回来（协议 §4）—— 所以这里
-    "等到的模式 != 想切的模式" 就是被拒，如实报出来并返回 1。
+    @param modes_seen 一路上真的收到的 `status{mode}`（按到达顺序）
+    @return 中间状态的说明；没有中间状态（0 或 1 条）就返回空串
+
+    ⚠ T12-2：跨模式切换（`GAME -> IDLE -> SLEEP`）会推**两条** status。以前 CLI 只看
+      第一条，于是"点了睡眠"会打印"没切过去（当前 IDLE）" —— 明明是成功的。现在等到
+      **目标那个模式**为止，并把中间经过的状态如实说出来。
+    """
+    if len(modes_seen) <= 1:
+        return ""
+    return "（路上经过 %s）" % " → ".join(modes_seen[:-1])
+
+
+async def cmd_mode(args: argparse.Namespace) -> int:
+    """发 `switch_mode`，等到**目标模式**的 `status`（跨模式会经过 IDLE，两跳）。
+
+    @note T12-2：状态机要求"任何切换都经过 IDLE"，所以从 GAME/STUDY 切 SLEEP 会推
+          **两条** status（先 IDLE 再 SLEEP）。这里一直等到目标那个模式为止，并把
+          中间经过的状态写进结果（`已切到 SLEEP（路上经过 IDLE）`）。
+    @note 真正切不动时（已经在那个模式 / 认不出的值）Agent 会把**真实**状态推回来
+          （协议 §4）—— 等不到目标就按"没切过去"如实报，并列出路上看到的。
     """
     want = normalize_mode(args.value)
     if want is None:
@@ -365,6 +383,7 @@ async def cmd_mode(args: argparse.Namespace) -> int:
     client = LocalClient(path)
     seen: Dict[str, Any] = {}
     arrived = asyncio.Event()
+    modes_seen: List[str] = []
 
     def on_message(topic: str, data: dict) -> None:
         if topic == TOPIC_STATUS:
@@ -380,22 +399,39 @@ async def cmd_mode(args: argparse.Namespace) -> int:
         return EXIT_ERROR
 
     try:
+        arrived.clear()
         await client.send_command(COMMAND_SWITCH_MODE, {"value": want})
         if args.no_wait:
             print("已发送：切到 %s" % want)
             return EXIT_OK
-        try:
-            await asyncio.wait_for(arrived.wait(), timeout=args.timeout)
-        except asyncio.TimeoutError:
-            print("已发出 switch_mode(%s)，但 %.1f 秒内没等到 status 确认。"
-                  % (want, args.timeout), file=sys.stderr)
-            return EXIT_ERROR
-        current = str(seen.get("mode") or "?")
-        if current == want:
-            print("已切到 %s" % want)
+
+        deadline = time.monotonic() + float(args.timeout)
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            arrived.clear()
+            try:
+                await asyncio.wait_for(arrived.wait(), left)
+            except asyncio.TimeoutError:
+                break
+            mode = str(seen.get("mode") or "")
+            if mode and (not modes_seen or modes_seen[-1] != mode):
+                modes_seen.append(mode)
+            if mode == want:
+                break
+
+        if modes_seen and modes_seen[-1] == want:
+            print("已切到 %s%s" % (want, mode_path_note(modes_seen)))
             return EXIT_OK
-        print("Agent 没切过去：当前仍是 %s —— 非法转换会被状态机拒掉（协议 §4）。"
-              % current, file=sys.stderr)
+        if modes_seen:
+            print("Agent 没切过去：最后看到的是 %s（%.1f 秒内没等到 %s；路上经过 %s）—— "
+                  "切不动时 Agent 会把真实状态推回来（协议 §4）。"
+                  % (modes_seen[-1], args.timeout, want, " → ".join(modes_seen)),
+                  file=sys.stderr)
+            return EXIT_ERROR
+        print("已发出 switch_mode(%s)，但 %.1f 秒内没等到 status 确认。"
+              % (want, args.timeout), file=sys.stderr)
         return EXIT_ERROR
     finally:
         await client.close()

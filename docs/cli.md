@@ -173,9 +173,17 @@ $ assistant chat 喂 --no-wait     # 发出去就返回，不等 llm 回复
 $ assistant mode study
 已切到 STUDY
 
-$ assistant mode game            # STUDY -> GAME 非法
-Agent 没切过去：当前仍是 STUDY —— 非法转换会被状态机拒掉（协议 §4）。   # stderr, 退出码 1
+$ assistant mode sleep            # 从 GAME/STUDY 去 SLEEP 要经 IDLE（状态机的规矩）
+已切到 SLEEP（路上经过 IDLE）
+
+$ assistant mode game             # 已经在 GAME / 认不出的值 -> 如实报错
+Agent 没切过去：最后看到的是 IDLE（0.4 秒内没等到 GAME；路上经过 IDLE）—— 切不动时
+Agent 会把真实状态推回来（协议 §4）。      # stderr, 退出码 1
 ```
+
+> ⚠ **跨模式切换是两跳**：状态机要求"任何切换都必须经过 IDLE"，所以 `GAME -> SLEEP`
+> 实际是 `GAME -> IDLE -> SLEEP`（每一跳都会释放那个模式里的东西：视频/队列/SigLIP…）。
+> CLI 会一直等到**目标**那个模式的推送，并把中间经过的状态如实写出来（T12-2）。
 
 取值 `SLEEP/IDLE/STUDY/GAME`，大小写不限。CLI **不乐观地**认为切换成功：它等 Agent 推回来的
 `status`，只有线上报的真的是目标模式才算成功。

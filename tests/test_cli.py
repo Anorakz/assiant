@@ -163,6 +163,27 @@ class TestModeNormalization(unittest.TestCase):
         self.assertIsNone(cli.normalize_mode(5))
 
 
+class TestModePathNote(unittest.TestCase):
+    """T12-2: 跨模式切换会推**两条** status —— "路上经过 …" 这半句（纯逻辑）。
+
+    ⚠ 以前 CLI 只看**第一条**, 于是"从 GAME 点睡眠"（GAME->IDLE->SLEEP）会打印
+      "没切过去（当前 IDLE）" —— 明明是成功的。现在等到目标模式为止并把中间状态说出来。
+    """
+
+    def test_no_intermediate_state_means_no_note(self):
+        self.assertEqual(cli.mode_path_note([]), "")
+        self.assertEqual(cli.mode_path_note(["SLEEP"]), "")
+        self.assertEqual(cli.mode_path_note(["STUDY"]), "")
+
+    def test_one_hop_through_idle(self):
+        self.assertEqual(cli.mode_path_note(["IDLE", "SLEEP"]), "（路上经过 IDLE）")
+        self.assertEqual(cli.mode_path_note(["IDLE", "GAME"]), "（路上经过 IDLE）")
+
+    def test_several_hops_are_listed_in_order(self):
+        self.assertEqual(cli.mode_path_note(["IDLE", "STUDY", "SLEEP"]),
+                         "（路上经过 IDLE → STUDY）")
+
+
 class TestTopicFilter(unittest.TestCase):
     def test_none_means_everything(self):
         self.assertIsNone(cli.parse_topics(None))
@@ -1511,7 +1532,7 @@ class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
         self.agent.reply_with(COMMAND_SWITCH_MODE, TOPIC_STATUS,
                               lambda payload: {"mode": "IDLE", "connected": False})
         args = cli.build_parser().parse_args(
-            ["mode", "game", "--socket", self.path, "--timeout", "2"])
+            ["mode", "game", "--socket", self.path, "--timeout", "0.4"])
 
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
@@ -1520,6 +1541,57 @@ class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(code, cli.EXIT_ERROR)
         self.assertIn("没切过去", err.getvalue())
         self.assertIn("IDLE", err.getvalue())
+
+    async def test_mode_walks_through_idle_and_says_so(self):
+        """T12-2: 跨模式两跳（GAME->IDLE->SLEEP）—— 等到 SLEEP 才算成功, 并说出路径。"""
+        async def on_command(action, payload):
+            self.agent.commands.append((action, payload))
+            if action != COMMAND_SWITCH_MODE:
+                return
+            await self.agent.push(TOPIC_STATUS, {"mode": "IDLE", "connected": False})
+            await asyncio.sleep(0.05)
+            await self.agent.push(TOPIC_STATUS,
+                                  {"mode": payload.get("value"), "connected": False})
+
+        self.agent.on_command(on_command)
+        args = cli.build_parser().parse_args(
+            ["mode", "sleep", "--socket", self.path, "--timeout", "2"])
+
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = await cli.cmd_mode(args)
+
+        self.assertEqual(code, cli.EXIT_OK, err.getvalue())
+        self.assertIn("已切到 SLEEP", out.getvalue())
+        self.assertIn("路上经过 IDLE", out.getvalue())
+
+    async def test_mode_that_never_arrives_is_reported_honestly(self):
+        """只走到 IDLE 就没了（真切不过去）: 退出码 1, 并列出路上看到的。"""
+        self.agent.reply_with(COMMAND_SWITCH_MODE, TOPIC_STATUS,
+                              lambda payload: {"mode": "IDLE", "connected": False})
+        args = cli.build_parser().parse_args(
+            ["mode", "sleep", "--socket", self.path, "--timeout", "0.4"])
+
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = await cli.cmd_mode(args)
+
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("没切过去", err.getvalue())
+        self.assertIn("IDLE", err.getvalue())
+        self.assertIn("路上经过 IDLE", err.getvalue())
+
+    async def test_mode_without_any_push_still_says_so(self):
+        self.agent.record_only()
+        args = cli.build_parser().parse_args(
+            ["mode", "game", "--socket", self.path, "--timeout", "0.3"])
+
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = await cli.cmd_mode(args)
+
+        self.assertEqual(code, cli.EXIT_ERROR)
+        self.assertIn("没等到 status 确认", err.getvalue())
 
     # ---- watch ----
     async def _watch(self, extra, pushes):
