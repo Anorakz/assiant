@@ -647,6 +647,16 @@ def _apply(args, groups, cv2, model, report):
 
     hypothesis = args.hypothesis
     suggested = report["suggested"] or {}
+    relative = (report["hypotheses"].get(hypothesis, {}).get("m5_relative") or {})
+    bands = relative.get("bands") or []
+    # 选"没把握带"的口径: **先保证一次都不误打扰**（把学习判成非学习会弹气泡/弹桌面）,
+    # 再在满足它的那些 band 里挑**监督失效最少**的; 并列时取最小的 band（判得多一点）。
+    band = None
+    safe = [row for row in bands if row["nag"] == 0]
+    if safe:
+        fewest = min(row["miss"] for row in safe)
+        band = min(row["band"] for row in safe if row["miss"] == fewest)
+
     anchors = StudyAnchors(keep_shots=False)
     removed = anchors.reset()
     added = 0
@@ -663,20 +673,27 @@ def _apply(args, groups, cv2, model, report):
     stats = StudyStats()
     stats.load()
     for key, value in (("confident_score", suggested.get("confident_score")),
-                       ("confident_margin", suggested.get("confident_margin"))):
+                       ("confident_margin", suggested.get("confident_margin")),
+                       ("relative_band", band)):
         if value is not None:
             stats.set_threshold(key, value)
     stats.set_threshold("learn_score", 0.90)
-    stats.note("T13-4 标定: 起点来自 %d 张截图 / 管线 %s（清掉了旧的 %d 条锚点）"
-               % (added, hypothesis, removed))
+    stats.note("T13-4 标定: %d 张截图 / 管线 %s（清掉了旧的 %d 条锚点）; "
+               "相对分带 %s（口径: 先保证误打扰=0, 再取监督失效最少的那个 band）"
+               % (added, hypothesis, removed, band))
     stats.bump("calib_images", added)
     stats.save()
     print("\n== --apply 落盘")
     print("   锚点: %d 条 -> %s（%s）" % (added, anchors.path, anchors.counts()))
     print("   起始阈值: %s -> %s" % (stats.thresholds(), stats.path))
+    if band is not None:
+        print("   ⚠ 绝对阈值那一对（confident_score/margin）**在这套数据上不好用**"
+              "（两个大类的绝对分重叠, 会判出 60%+ 的「判不出来」）；")
+        print("     真正该用的是大类原型 + **相对分带** %.2f。T13-5 按哪条规则接, 等你定。" % band)
     print("\n   贴进 config.yaml 的 study 段可以是:")
     print("     study:")
     print("       enabled: true")
+    print("       relative_band: %.2f" % (band if band is not None else 0.05))
     print("       confident_score: %.2f" % (suggested.get("confident_score") or 0.80))
     print("       confident_margin: %.2f" % (suggested.get("confident_margin") or 0.03))
     print("       focus_interval_min: 30")
