@@ -1824,6 +1824,9 @@ T12-5 — **日程配置的写入器**（文本级增删；工具 `set_schedule`
       `tests/test_scheduler.py::TestEntryMatcher` +6; `tests/test_config.py` +1（逐字节写）
 ☑ 文档: `docs/config-sources.md` §3.1 拆成"(一) R3 的删 / (二) T12-5 的增删"两张规矩表;
       `Readme.md` 的文件树补上 `schedule_config.py`
+☑ 板端验收脚本 `tests/board/t12_writers_accept.py`（对**真配置的副本**跑 14 项: 加两条 ->
+      真 Scheduler 读回来 -> 查重 -> 删干净后**逐字节回到原文** -> 真 config.yaml md5 不变 ->
+      CRLF 副本仍是纯 CRLF + `.bak` 逐字节；T12-7 往这个脚本里继续加端到端那几段）
 
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
