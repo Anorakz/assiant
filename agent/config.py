@@ -63,6 +63,7 @@ __all__ = [
     "load_config",
     "save_config",
     "write_text_atomic",
+    "read_config_file",
     "get",
     "config_path",
     "config_dir",
@@ -247,6 +248,21 @@ def load_config(name: str = DEFAULT_CONFIG_NAME) -> Dict[str, Any]:
     data = _read_yaml(path)
     _CACHE[stem] = data
     return copy.deepcopy(data)
+
+
+def read_config_file(path: Union[str, Path]) -> Dict[str, Any]:
+    """按**给定路径**读一份 YAML 配置（顶层必须是 mapping）。
+
+    与 `load_config()` 的区别: **不走缓存、不查白名单**, 只读这个文件 —— 谁刚写完
+    它谁就自己负责再读回来。
+    @raise OSError / ConfigError 读不了或不是 mapping（与 `_read_yaml` 同一套口径）
+
+    @note 用途（T12-6）: 工具 `set_schedule` 把日程**写进 config.yaml** 之后, 要立刻
+          让运行中的调度器看到它。走 `load_config("config")` 会按 `AGENT_CONFIG_DIR`
+          重新解析一次路径 —— 那可能与"刚写的那个文件"不是同一个（注入配置 /
+          `--config` 场景）, 于是"写进去了却没生效"。所以这一步按路径读。
+    """
+    return _read_yaml(Path(path))
 
 
 def write_text_atomic(path: Union[str, Path], text: str, encoding: str = "utf-8") -> None:

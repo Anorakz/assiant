@@ -56,6 +56,7 @@ import signal
 import sys
 import threading
 import time
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -63,10 +64,21 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 if __package__ in (None, ""):  # pragma: no cover - 只在直接执行时走
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent.config import ConfigError, ConfigNotFoundError, config_path, load_config
+from agent.config import (ConfigError, ConfigNotFoundError, config_path, load_config,
+                          read_config_file)
 from agent.core import Scheduler, State, StateMachine, ToolRouter
 from agent.core import read_intents
+from agent.core import schedule_config
 from agent.core.chat_memory import ChatMemory
+from agent.core.scheduler import (
+    WEEKDAYS,
+    ScheduleEvent,
+    SchedulerError,
+    SkippedScheduleEntry,
+    entry_matcher,
+    legacy_field_notes,
+    parse_clock,
+)
 from agent.core.user_profile import (
     DEFAULT_RETRY_S as DEFAULT_PROFILE_RETRY_S,
     DEFAULT_TRIGGER_CHARS,
@@ -240,6 +252,28 @@ def _name_and_score(result: Any, limit: int) -> List[Dict[str, Any]]:
             item["score"] = scores[path]
         out.append(item)
     return out
+
+
+def _date_text(value: Any) -> str:
+    """日程条目里的 date（字符串或 date 对象）-> `YYYY-MM-DD`（对不上就原样返回）。"""
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value or "").strip()
+
+
+def _schedule_brief(entries: List[Dict[str, Any]], limit: int = 10) -> str:
+    """把现有日程压成**一行**给人看（`没找到` 时用来给出"现在有什么"）。
+
+    @note 只给状态 + 时刻 + 星期/日期 —— 日程的内容就这些（T12-4）。
+    """
+    if not entries:
+        return "现在一条日程都没有"
+    parts = []
+    for entry in entries[:limit]:
+        when = entry.get("date") or ",".join(entry.get("days") or []) or "每天"
+        parts.append("%s %s->%s" % (entry.get("start"), when, entry.get("state")))
+    more = "" if len(entries) <= limit else "…（还有 %d 条）" % (len(entries) - limit)
+    return "；".join(parts) + more
 
 
 # ---------------------------------------------------------------------------
@@ -649,6 +683,12 @@ class Runtime:
                     # B 站（T11-5/T11-6）: 工具只会"把关键词交给队列"这一件事。
                     # ⚠ **没开就是 None** —— 那个工具会自己跳过（与音乐同款）。
                     "bilibili_search": self.bilibili_search if self.bilibili else None,
+                    # 日程（T12-6）: 工具 `set_schedule` 的增/查/删三条入口。
+                    # ⚠ 调度器是后面几步才起的, 所以这里**不做 None 判断**（绑的是方法,
+                    #   调用时才读 self.scheduler）—— 否则"调度器还没起来"会让工具整个消失。
+                    "schedule_add": self.schedule_add,
+                    "schedule_list": self.schedule_list,
+                    "schedule_remove": self.schedule_remove,
                 },
             )
             registered = self._register_tools(self.tools)
@@ -2057,6 +2097,281 @@ class Runtime:
 
     #: 观察循环的轮询间隔（真正"该不该看"由 GameWatcher 按 60 s 判; 这里只是心跳）
     _GAME_WATCH_TICK_S = 2.0
+
+    # ------------------------------------------------------------ 日程（T12-6）---
+    #  工具 `set_schedule` 的三条入口。分工: **工具**管"模型说的话算不算一条日程"
+    #  （同义动词/中文状态/时间写法 —— 见 agent/tools/schedule.py 的 normalize）,
+    #  这里管**语义与落盘**: 用真的 `ScheduleEvent` 判合法性 -> 文本级写 config.yaml
+    #  -> 让运行中的调度器立刻热生效, 每一处失败都给一句能照做的话。
+
+    def _schedule_path(self, for_write: bool) -> Tuple[Optional[Path], str]:
+        """列表/增删要用的配置文件路径。
+
+        @param for_write True = 只认真源（模板不许写）; False = 读一读无所谓
+        @return (路径, 原因)。路径为 None 时原因是给用户的一句话。
+        """
+        path = self.config_path_used
+        if path is None:
+            return None, ("现在不知道日程写在哪个文件里（配置是注入的），"
+                          "这次改不了")
+        path = Path(path)
+        if not path.is_file():
+            return None, "配置文件不在了：%s" % path
+        if for_write and path.name.endswith(".example.yaml"):
+            return None, ("现在读的是**模板** %s —— 先把它复制成 config/config.yaml"
+                          "（cp 一份）再改日程" % path.name)
+        return path, ""
+
+    def _schedule_section(self, path: Path) -> Dict[str, Any]:
+        """从文件里读出 scheduler 段（**模板/真源都读得出来**）。"""
+        data = read_config_file(path)
+        return Scheduler._scheduler_section(data)
+
+    def _schedule_events(self, path: Path
+                         ) -> Tuple[List[Dict[str, Any]], List[str]]:
+        """把文件里的日程读成"给模型看的条目 + 逐条问题"（T12-4 的语义, 一条都不猜）。
+
+        @return (条目, 问题)。条目形如
+                `{"kind","state","start","days","date","label"}` —— 前四个字段就是
+                模型删这条时该带回来的**身份**, 所以列表直接把它们交出去。
+        @note 用**文件**而不是运行中的 `self.scheduler.events`: 刚写完的文件必须马上
+              看得见, 而调度器还可能是上一分钟的; 顺带在读的时候就把坏条目报出来。
+        """
+        section = self._schedule_section(path)
+        entries: List[Dict[str, Any]] = []
+        problems: List[str] = []
+        for kind in ("recurring", "oneoff"):
+            raw = section.get(kind)
+            if raw is None or isinstance(raw, (list, tuple)) and not raw:
+                continue
+            if not isinstance(raw, (list, tuple)):
+                problems.append("%s 不是列表（Agent 会因此拒绝整份日程）" % kind)
+                continue
+            for index, item in enumerate(raw):
+                if isinstance(item, dict):
+                    problems.extend(legacy_field_notes(item, index))
+                try:
+                    event = ScheduleEvent.from_config(item, index)
+                except SkippedScheduleEntry as exc:
+                    problems.append(str(exc))
+                    continue
+                except SchedulerError as exc:
+                    problems.append("%s #%d: %s" % (kind, index + 1, exc))
+                    continue
+                entries.append({
+                    "kind": kind,
+                    "state": event.state.value,
+                    "start": "%02d:%02d" % event.start,
+                    "days": [WEEKDAYS[day] for day in sorted(event.days)]
+                            if event.days else None,
+                    "date": event.on.isoformat() if event.on else None,
+                    "label": event.label(),
+                })
+        return entries, problems
+
+    def _schedule_reload(self) -> Optional[Dict[str, Any]]:
+        """改完配置后让调度器立刻生效（**从刚写的那个文件**重读）。
+
+        @return `Scheduler.reload()` 的结果（events / bindings / warnings）;
+                调度器没起来就 None（配置照写, 重启后生效）
+        @note ⚠ 必须按**路径**重读: `load_config()` 走缓存 + 按 AGENT_CONFIG_DIR 重新
+              解析 —— 注入配置或 `--config` 的场合会读到另一个文件, 于是"写进去了却没生效"。
+        @note 只热重载**调度器**, 并把新读到的 scheduler 段同步回 `self.config`:
+              别的组件仍用启动时那份（我们只改了日程这一段; 运行中改别的配置是另一个话题）。
+        """
+        if self.scheduler is None:
+            return None
+        path = self.config_path_used
+        if path is None:
+            return None
+        try:
+            data = read_config_file(path)
+            result = self.scheduler.reload(data)
+        except Exception as exc:                            # noqa: BLE001 - 如实报给调用方
+            self.log.warning("schedule: 热重载失败（配置已经写进去了）: %r", exc)
+            raise
+        section = data.get("scheduler") if isinstance(data, dict) else None
+        if isinstance(section, dict) and isinstance(self.config, dict):
+            self.config["scheduler"] = section
+        self.log.info("schedule: 已热重载 -> %d 条日程, %d 条命令, %d 条警告",
+                      result.get("events", 0), result.get("bindings", 0),
+                      len(result.get("warnings") or []))
+        return result
+
+    def schedule_list(self) -> Dict[str, Any]:
+        """**看现有日程**（工具 `set_schedule` 的 action=list）。
+
+        @return {"ok","now","today","weekday","count","entries","problems","source"}
+        @note 顺带把**今天几号**给模型 —— 系统提示里没有时钟, 要写 `date` 就得先问一次。
+        """
+        path, why = self._schedule_path(for_write=False)
+        if path is None:
+            return {"ok": False, "error": why, "tell_user": why}
+        now = datetime.now()
+        try:
+            entries, problems = self._schedule_events(path)
+        except Exception as exc:                            # noqa: BLE001
+            return {"ok": False, "error": str(exc),
+                    "tell_user": "日程读不出来：%s" % exc}
+        out = {"ok": True, "now": now.strftime("%Y-%m-%dT%H:%M"),
+               "today": now.date().isoformat(),
+               "weekday": WEEKDAYS[now.weekday()],
+               "count": len(entries), "entries": entries,
+               "problems": problems, "file": str(path),
+               "source": "agent" if self.scheduler is not None else "config"}
+        if problems:
+            out["note"] = ("有 %d 条日程读不出来（老写法或写坏了），它们不会生效"
+                           % len(problems))
+        return out
+
+    def schedule_add(self, values: Dict[str, Any]) -> Dict[str, Any]:
+        """**加一条日程**（工具 `set_schedule` 的 action=add）。
+
+        @param values {"state","start","days"|"date"}（工具那边已经归一化过）
+        @return {"ok", ...}; 失败时 `tell_user` 是一句能照做的话
+        @note 语义校验走**真的** `ScheduleEvent.from_config` —— 同一个判据既管读也管写,
+              所以"写得进去但读不出来"这种事不会发生。
+        @note 写完**立刻热重载**（`_schedule_reload()`）, 不用重启 Agent。
+        """
+        path, why = self._schedule_path(for_write=True)
+        if path is None:
+            return {"ok": False, "error": why, "tell_user": why}
+        try:
+            event = self._schedule_event(values)
+        except (SchedulerError, SkippedScheduleEntry) as exc:
+            return {"ok": False, "error": str(exc), "tell_user": "这条日程写不了：%s" % exc}
+
+        # 一次性日程写在过去 -> 永远不会触发。多半是模型算错了日期（系统提示里没有时钟）,
+        # 所以**拒绝并把今天的日期给它**, 让它下一轮改对, 而不是安静地收下一条死日程。
+        if event.on is not None and event.on < date.today():
+            today = date.today().isoformat()
+            return {"ok": False, "error": "date 已经过去了: %s" % event.on.isoformat(),
+                    "tell_user": ("%s 已经过去了（今天是 %s）—— 要一次性的就用今天或以后的"
+                                  "日期；每周重复的不用给 date"
+                                  % (event.on.isoformat(), today))}
+
+        try:
+            wrote, reason = schedule_config.add_entry_in_file(
+                path, dict(values), matches=entry_matcher(event))
+        except OSError as exc:
+            return {"ok": False, "error": str(exc),
+                    "tell_user": "日程没写进 %s：%s" % (path.name, exc)}
+        if not wrote:
+            if "已经有一条一样的了" in reason:
+                return {"ok": True, "already": True, "entries": 1,
+                        "note": reason, "file": str(path)}
+            return {"ok": False, "error": reason, "tell_user": "这条日程没写进去：%s" % reason}
+
+        out = {"ok": True, "already": False, "file": str(path),
+               "entry": {"state": event.state.value,
+                         "start": "%02d:%02d" % event.start,
+                         "days": [WEEKDAYS[day] for day in sorted(event.days)]
+                                 if event.days else None,
+                         "date": event.on.isoformat() if event.on else None,
+                         "label": event.label()}}
+        try:
+            reloaded = self._schedule_reload()
+        except Exception as exc:                            # noqa: BLE001
+            out["hot"] = False
+            out["note"] = "配置已经写好了，但这次热重载失败（重启 Agent 后生效）：%s" % exc
+            return out
+        out["hot"] = reloaded is not None
+        if reloaded is not None:
+            out["schedules"] = reloaded.get("events")
+            out["warnings"] = reloaded.get("warnings") or []
+        else:
+            out["note"] = "配置已经写好了，但调度器没在跑（下次启动 Agent 时生效）"
+        return out
+
+    def schedule_remove(self, values: Dict[str, Any]) -> Dict[str, Any]:
+        """**删一条日程**（工具 `set_schedule` 的 action=remove）。
+
+        @param values {"state","start"[,"days"|"date"]}
+        @return {"ok", ...}; 找不到 / 同时刻有多条都**如实说**, 并把手上的条目列出来
+        @note 同时刻有多条（比如"每天 09:00"与"周一 09:00"）而调用方没给 days/date 时,
+              **不猜**哪一条 —— 把候选摆出来让它带上 days/date 再说。删错一条比多问一句贵。
+        """
+        path, why = self._schedule_path(for_write=True)
+        if path is None:
+            return {"ok": False, "error": why, "tell_user": why}
+        state = str(values.get("state") or "").strip().lower()
+        try:
+            start = parse_clock(str(values.get("start") or ""))
+        except SchedulerError as exc:
+            return {"ok": False, "error": str(exc), "tell_user": "时刻不对：%s" % exc}
+
+        try:
+            entries, _problems = self._schedule_events(path)
+        except Exception as exc:                            # noqa: BLE001
+            return {"ok": False, "error": str(exc),
+                    "tell_user": "日程读不出来：%s" % exc}
+
+        wanted_days = values.get("days")
+        wanted_date = values.get("date")
+
+        def _same(entry: Dict[str, Any]) -> bool:
+            if entry["state"] != state or entry["start"] != "%02d:%02d" % start:
+                return False
+            if wanted_date:
+                return entry["date"] == _date_text(wanted_date)
+            if wanted_days:
+                return entry["days"] == list(wanted_days)
+            return True
+
+        candidates = [entry for entry in entries if _same(entry)]
+        if not candidates:
+            return {"ok": False, "error": "没有匹配的日程",
+                    "tell_user": "没找到「%s %02d:%02d」这条日程 —— 现在的日程是：%s"
+                                 % (state, start[0], start[1],
+                                    _schedule_brief(entries)),
+                    "entries": entries}
+        if len(candidates) > 1 and not (wanted_days or wanted_date):
+            return {"ok": False,
+                    "error": "同时刻有多条日程（%d 条）" % len(candidates),
+                    "tell_user": ("%02d:%02d 切到 %s 的有 %d 条（%s）—— 要删哪一条请再给 "
+                                  "days 或 date" % (start[0], start[1], state, len(candidates),
+                                                    "、".join(item["label"] for item in candidates))),
+                    "entries": candidates}
+
+        target = candidates[0]
+        try:
+            event = self._schedule_event({"state": target["state"], "start": target["start"],
+                                          "days": target["days"], "date": target["date"]})
+        except (SchedulerError, SkippedScheduleEntry) as exc:
+            return {"ok": False, "error": str(exc), "tell_user": "这条日程删不了：%s" % exc}
+
+        try:
+            removed, reason, found = schedule_config.remove_entry_in_file(
+                path, entry_matcher(event))
+        except OSError as exc:
+            return {"ok": False, "error": str(exc),
+                    "tell_user": "日程没从 %s 里删掉：%s" % (path.name, exc)}
+        if not removed:
+            return {"ok": False, "error": reason,
+                    "tell_user": "这条日程没删掉：%s" % reason}
+
+        out = {"ok": True, "file": str(path), "removed": target,
+               "kind": (found or {}).get("key") or target["kind"]}
+        try:
+            reloaded = self._schedule_reload()
+        except Exception as exc:                            # noqa: BLE001
+            out["hot"] = False
+            out["note"] = "配置已经改好了，但这次热重载失败（重启 Agent 后生效）：%s" % exc
+            return out
+        out["hot"] = reloaded is not None
+        if reloaded is not None:
+            out["schedules"] = reloaded.get("events")
+        return out
+
+    @staticmethod
+    def _schedule_event(values: Dict[str, Any]) -> ScheduleEvent:
+        """把工具给的字段交给**真的** `ScheduleEvent.from_config`（同一个判据管读写）。"""
+        entry: Dict[str, Any] = {"state": values.get("state"), "start": values.get("start")}
+        if values.get("days"):
+            entry["days"] = list(values["days"])
+        if values.get("date"):
+            entry["date"] = values["date"]
+        return ScheduleEvent.from_config(entry, 0)
 
     def push_current_wallpaper(self) -> bool:
         """把一个 GUI 刚连上来该看到的壁纸补推一次（T6）。

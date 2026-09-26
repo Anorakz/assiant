@@ -525,6 +525,10 @@ def entry_matcher(event: "ScheduleEvent") -> Callable[[Dict[str, str]], bool]:
                 return date.fromisoformat((fields.get("date") or "").strip()) == event.on
             except ValueError:
                 return False
+        # ⚠ 每周的那条**不是**一次性那条: 文件里带了 date 就不算这条
+        #   （不这么判的话，"每天 09:30"会把"某天 09:30"当成自己 —— 加不进去、也删错条）
+        if (fields.get("date") or "").strip():
+            return False
         raw_days = fields.get("days")
         if raw_days is None:
             return not event.days              # 文件里没写 days = 每天

@@ -342,6 +342,19 @@ class TestEntryMatcher(unittest.TestCase):
         self.assertFalse(matches({"state": "sleep", "start": "22:30", "date": "2026-09-23"}))
         self.assertFalse(matches({"state": "sleep", "start": "22:30"}), "缺 date 不算这条")
 
+    def test_a_weekly_entry_is_never_the_one_off_one(self):
+        """T12-6: 两条「同样状态 + 同样时刻」的日程, 一条每周、一条只有那一天。
+
+        不区分的话「每天 09:30」会把「某天 09:30」当成自己（加不进去, 删也会删错条）。
+        """
+        oneoff = self._event({"state": "study", "start": "09:30", "date": "2026-09-26"})
+        every_day = self._event({"state": "study", "start": "09:30"})
+        self.assertFalse(entry_matcher(oneoff)({"state": "study", "start": "09:30"}),
+                         "一次性那条不能匹配没写 date 的条目")
+        self.assertFalse(entry_matcher(every_day)({"state": "study", "start": "09:30",
+                                                   "date": "2026-09-26"}),
+                         "每周那条不能匹配带 date 的条目")
+
     def test_bad_scalars_never_match(self):
         event = self._event({"state": "study", "start": "09:30", "days": ["mon"]})
         matches = entry_matcher(event)

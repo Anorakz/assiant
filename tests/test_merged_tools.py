@@ -42,7 +42,14 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from agent.core.state_machine import State  # noqa: E402
 from agent.core.tool_router import ToolRouter  # noqa: E402
-from agent.tools import back_to_desktop, bilibili, build_tools, music, wallpaper  # noqa: E402
+from agent.tools import (  # noqa: E402
+    back_to_desktop,
+    bilibili,
+    build_tools,
+    music,
+    schedule,
+    wallpaper,
+)
 
 logging.disable(logging.CRITICAL)
 
@@ -100,6 +107,18 @@ def fake_services(**overrides):
         calls.append(("bilibili", keyword))
         return {"ok": True, "count": 12, "index": 0, "keyword": keyword}
 
+    def schedule_add(values):
+        calls.append(("schedule_add", values))
+        return {"ok": True, "hot": True, "entry": values}
+
+    def schedule_list():
+        calls.append(("schedule_list",))
+        return {"ok": True, "count": 0, "entries": []}
+
+    def schedule_remove(values):
+        calls.append(("schedule_remove", values))
+        return {"ok": True, "hot": True, "removed": values}
+
     services = {
         "input_sender": type("S", (), {"show_desktop": lambda self: None})(),
         "next_wallpaper": advance, "wallpaper_tags": tags,
@@ -108,6 +127,8 @@ def fake_services(**overrides):
         "music_queue_clear": music_queue_clear, "music_queue_state": music_queue_state,
         "music_tag": music_tag, "music_control": music_control,
         "bilibili_search": bilibili_search,
+        "schedule_add": schedule_add, "schedule_list": schedule_list,
+        "schedule_remove": schedule_remove,
     }
     services.update(overrides)
     return services, calls
@@ -143,22 +164,32 @@ class TestSkippedWithoutDependencies(unittest.TestCase):
         self.assertIsNone(back_to_desktop.build({}))
         self.assertIsNone(back_to_desktop.build({"input_sender": object()}))
 
-    def test_build_tools_installs_four_when_everything_is_wired(self):
+    def test_build_tools_installs_five_when_everything_is_wired(self):
         services, _calls = fake_services()
         router = ToolRouter(services=services)
         names = [t.name for t in build_tools(router)]
         self.assertEqual(names, ["back_to_desktop", "next_wallpaper", "next_music",
-                                 "bilibili_search"],
-                         "T11-5: 多了一个只在 GAME 可见的 bilibili_search, 顺序按模块清单稳定")
+                                 "bilibili_search", "set_schedule"],
+                         "T11-5 多了只在 GAME 的 bilibili_search, T12-6 多了 set_schedule, "
+                         "顺序按模块清单稳定")
 
-    def test_build_tools_without_music_still_installs_three(self):
+    def test_build_tools_without_music_still_installs_the_others(self):
         services, _calls = fake_services()
         for name in ("music_list", "music_search", "music_state", "music_enqueue",
                      "music_queue_clear", "music_queue_state", "music_tag", "music_control"):
             services[name] = None
         router = ToolRouter(services=services)
         names = [t.name for t in build_tools(router)]
-        self.assertEqual(names, ["back_to_desktop", "next_wallpaper", "bilibili_search"])
+        self.assertEqual(names, ["back_to_desktop", "next_wallpaper", "bilibili_search",
+                                 "set_schedule"])
+
+    def test_schedule_needs_all_three_entries(self):
+        self.assertIsNone(schedule.build({}))
+        services, _calls = fake_services()
+        for name in ("schedule_add", "schedule_list", "schedule_remove"):
+            with self.subTest(missing=name):
+                self.assertIsNone(schedule.build(dict(services, **{name: None})))
+        self.assertIsNone(schedule.build(dict(services, **{"schedule_add": "x"})))
 
     def test_bilibili_needs_its_entry(self):
         self.assertIsNone(bilibili.build({}))
@@ -482,10 +513,17 @@ class TestExecution(unittest.IsolatedAsyncioTestCase):
 #: 板端实测的换算关系（`/tokenize`, STUDY 三个工具）: **3274 字符 ≈ 1309 token**
 #: （中文≈1 字/token, JSON 键与标点≈3~4 字/token —— 混着算下来 ≈ 0.4 token/字符）。
 #:
-#: 预算怎么定的: 现在 3274 字符（≈1309 token, 第一轮 prompt 1495 token, ctx 4096）。
-#: 留 ~10% 余量就封顶 —— 也就是"**再加一个像样的工具（≥600 字符 ≈ 250 token）就会红**",
-#: 逼着人先想"能不能扩 action"（一个 action 只加十几 token）。
-TOOL_BLOCK_BUDGET_CHARS = 3600
+#: 预算怎么定的: T8-5c-3 时 STUDY 是 **3274 字符（≈1309 token，第一轮 prompt 1495 token，
+#: ctx 4096）**, 留 ~10% 余量封顶在 3600 —— 也就是"**再加一个像样的工具（≥600 字符
+#: ≈ 250 token）就会红**", 逼着人先想"能不能扩 action"（一个 action 只加十几 token）。
+#:
+#: ⚠ T12-6 把预算抬到 **4700**: 你点名要加第 5 个工具（日程 `set_schedule`, 930 字符）,
+#:    它没法塞进任何一个现有工具的 action（日程与壁纸/音乐/视频是四件不同的事）。
+#:    量到的: STUDY **4528 字符**（IDLE 4329 / GAME 544 / SLEEP 0）—— 4700 给它留 ~170 字符
+#:    余量, 所以**下一个工具照样会红**（守卫的牙还在）。真 token 由
+#:    `tests/board/measure_tool_tokens.py` 在板端 `/tokenize` 量（那个脚本就是为这次
+#:    决定写的; 改动本常量的人应当先跑它一遍, 把新数字写回这两行注释）。
+TOOL_BLOCK_BUDGET_CHARS = 4700
 
 #: 单个工具的字符预算（最大的 `next_music` 现在 1761 字符 ≈ 744 token）——
 #: 防的是"某条 description 突然把一整份词表/清单塞进去"（T7-4 那种注入有前科）。
@@ -502,7 +540,8 @@ def advertised_tools(state=None):
     """某个状态下的完整工具清单（T8-5c-3 的守卫量它; 不给状态 = STUDY）。
 
     @note T11-5 起要**四个状态各量一遍**: `bilibili_search` 只在 GAME 出现,
-          所以 STUDY 的清单没变（仍 3562/3600）, 而 GAME 的清单里只有它一个。
+          所以 STUDY 的清单没变（T11-5 时仍 3562/3600）, 而 GAME 的清单里只有它一个。
+    @note T12-6 起 STUDY/IDLE 多了 `set_schedule`（日程）: STUDY 4528/4700。
     """
     from agent.core.state_machine import StateMachine
     from agent.llm import provider as provider_module
@@ -545,7 +584,10 @@ class TestPromptBudget(unittest.TestCase):
                                         "、".join(seen[state])))
         self.assertEqual(seen[State.SLEEP], [])
         self.assertEqual(seen[State.STUDY],
-                         ["back_to_desktop", "next_music", "next_wallpaper"])
+                         ["back_to_desktop", "next_music", "next_wallpaper", "set_schedule"])
+        self.assertEqual(seen[State.IDLE],
+                         ["next_music", "next_wallpaper", "set_schedule"],
+                         "IDLE 与 STUDY 只差 back_to_desktop")
         self.assertEqual(seen[State.GAME], ["bilibili_search"],
                          "GAME 下模型只该看到 B 站那一个工具")
 
@@ -563,7 +605,7 @@ class TestPromptBudget(unittest.TestCase):
         # 反空转: 清单真的量出来了（不是空列表/量了个寂寞）
         tools = advertised_tools()
         self.assertEqual([t["name"] for t in tools],
-                         ["back_to_desktop", "next_music", "next_wallpaper"])
+                         ["back_to_desktop", "next_music", "next_wallpaper", "set_schedule"])
         block = _tool_block(tools)
         self.assertGreater(len(block), TOOL_BLOCK_BUDGET_CHARS // 2,
                            "量出来的清单太小了 —— 守卫可能是空转的")

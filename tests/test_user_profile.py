@@ -453,9 +453,10 @@ class TestItIsNotATool(unittest.IsolatedAsyncioTestCase):
     def test_the_tool_modules_have_no_profile_tool(self):
         from agent.tools import TOOL_MODULES
 
-        # T11-5 起是四个模块（多了只在 GAME 可见的 bilibili）—— 但**没有**画像那一个
+        # T11-5 起多了只在 GAME 可见的 bilibili、T12-6 起多了日程 set_schedule ——
+        # 但**没有**画像那一个
         self.assertEqual(TOOL_MODULES,
-                         ("back_to_desktop", "wallpaper", "music", "bilibili"))
+                         ("back_to_desktop", "wallpaper", "music", "bilibili", "schedule"))
         self.assertNotIn("user_profile", TOOL_MODULES)
         self.assertNotIn("profile", TOOL_MODULES)
 

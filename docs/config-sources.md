@@ -181,10 +181,11 @@ Agent 里唯一会碰 `config.yaml` 的地方是 `agent/core/schedule_config.py`
 | 认不出的写法 | flow 风格（`oneoff: [{...}]`）**给理由、不改文件** | 一行里塞多个条目，文本级改它风险太大 |
 | 注释 | 紧贴**下一条**的注释与空行**留着**（只删属于那条的行） | 宁可留一行悬空注释，也不误删可能描述下一条的注释 |
 
-**（二）加一条 / 删一条日程（T12-5）** —— `add_entry()` / `remove_entry()`（文本级）与
-`add_entry_in_file()` / `remove_entry_in_file()`（落盘）。它们是给"日程设置"那类调用方
-（工具 `set_schedule`）准备的：`recurring` 与 `oneoff` **都能加、都能删**（R3 那条仍旧只动 oneoff）。
-多出来的规矩：
+**（二）加一条 / 删一条日程（T12-5 的写入器 + T12-6 的工具 `set_schedule`）** ——
+`add_entry()` / `remove_entry()`（文本级）与 `add_entry_in_file()` / `remove_entry_in_file()`（落盘）。
+调用方是**对话工具 `set_schedule`**（`agent/tools/schedule.py` → `Runtime.schedule_add/remove`）：
+`recurring` 与 `oneoff` **都能加、都能删**（R3 那条仍旧只动 oneoff）。
+工具那条路上多出来的规矩（都在 `tests/test_schedule_tool.py` 里钉着）：
 
 | 项 | 做法 | 为什么 |
 | --- | --- | --- |
@@ -203,6 +204,23 @@ Agent 里唯一会碰 `config.yaml` 的地方是 `agent/core/schedule_config.py`
 | Agent（`scheduler.remove_fired_oneoff`） | 一条 oneoff **触发之后**立刻删 | 自动（开关默认关） |
 | CLI（`assistant cleanup --apply`） | 清理 `date < 今天` 的 oneoff（已经过去、不会再触发） | 人显式敲（默认 dry-run） |
 
+**谁在用（二）**（`set_schedule` 工具那条路，T12-6）：
+
+| 步骤 | 谁做 | 细节 |
+| --- | --- | --- |
+| "模型说的话算不算一条日程" | 工具层（`agent/tools/schedule.py::normalize`） | 同义动词 / 中文状态 / `9点30` / `周一,周三` / `2026/09/22` —— **只做等价改写** |
+| 语义校验 | `Runtime.schedule_add` → **真的** `ScheduleEvent.from_config` | 同一个判据既管读也管写：`state` 认不认得、时间合不合法、`date` 与 `days` 互斥 |
+| 落盘 | `schedule_config.add_entry_in_file()` | 文本级 + `.bak` + 原子写；查重命中就一个字节都不改 |
+| **热生效** | `Runtime._schedule_reload()` | 按**刚写的那个文件**重读（不走 `load_config` 的缓存/路径解析），再 `Scheduler.reload()`；调度器没起来就只写不载并如实说"重启后生效" |
+| 一次性日程写在过去 | `Runtime.schedule_add` | **拒绝**并附上今天的日期（系统提示里没有时钟，模型的日期是猜的） |
+| 删的时候同时刻有多条 | `Runtime.schedule_remove` | **不猜**：把候选摆出来，让调用方带上 `days`/`date` 再说 |
+
+> ⚠ 这条路上 **Agent 是 `config.yaml` 的写入者**（工具由模型调，不需要任何开关）——
+> 与 R3 的区别：R3 要人显式打开 `remove_fired_oneoff`，而"让助手加个日程"是**用户当场
+> 要求**的动作。写入范围仍然只有 `scheduler` 段的那几行，且仍然留 `.bak`。
+> ⚠ 别把 `config.example.yaml` 当目标：路径落到模板上时**拒绝写**（`Runtime._schedule_path`），
+> 与 CLI 的 `cleanup --apply` 同一条规矩。
+
 > ⚠ CLI 的"默认只读"立场因此有一个**显式例外** —— 见 [`cli.md`](cli.md) §4 的 `cleanup` 一节。
 > 它不另写一份删除逻辑，走的就是这里这一套。
 
@@ -217,6 +235,7 @@ Agent 里唯一会碰 `config.yaml` 的地方是 `agent/core/schedule_config.py`
 
 > ⚠ 打开它意味着 **Agent 成为 `config.yaml` 的第二个写入者**。默认关就是这个原因：
 > 这是"程序自动改真源"的行为，该由人显式决定。
+> （T12-6 起还有第三条路：对话工具 `set_schedule` 的 add/remove —— 见上面"谁在用（二）"。）
 > **守卫**：`tests/test_config_source_guard.py::TestWhoWritesTheConfig` —— `agent/` 里出现写入原语的
 > 只能是这六个，且**每个都必须是"派生数据/本地数据"，不能是真源**：
 > `agent/config.py`（唯一的原子写实现）、`agent/core/schedule_config.py`（唯一允许改真源的调用方）、
@@ -235,13 +254,14 @@ Agent 里唯一会碰 `config.yaml` 的地方是 `agent/core/schedule_config.py`
 
 GUI 的**日程区**显示的内容来自 `config.yaml` 的 `scheduler.recurring` / `scheduler.oneoff`
 —— 与 Agent 的 `Scheduler._load_events()` **同一处**，连"某个键在 scheduler 段里找不到就
-**逐键**回落到顶层"这条都一致。GUI 不写这一段（删已触发 oneoff 的是 Agent，见 §3.1），
-也不新增 IPC topic。
+**逐键**回落到顶层"这条都一致。GUI **不写**这一段（改它的是 Agent：R3 与工具 `set_schedule`，
+见 §3.1），也不新增 IPC topic。
 
 | | 谁 | 做什么 |
 |---|---|---|
 | 触发 | Agent（`agent/core/scheduler.py`） | 按 `window_min` / `late_grace_min` 真正触发日程：到点就把设备**切到那条日程写的 state**（走状态机，必要时经 IDLE 中转）；开关打开时删掉已触发的那条 oneoff |
 | 展示 | GUI（`gui/src/core/schedule_model.cpp`） | 只读同一段，展开成"今天 / 明天"两段，再按**窗口**（`[现在, 现在+24h)`）筛出"接下来 24 小时"给日程区；每行是 `HH:MM  状态` |
+| **改这一段** | Agent（工具 `set_schedule` → `schedule_config`） | 用户跟助手说一句（"每天 23 点睡觉"）就**文本级**加/删一条，写完热重载（§3.1 的（二）） |
 
 > T12-4 起**日程的内容只有「时间 + 状态」**：`state` 必填（`sleep`/`idle`/`study`/`game`），
 > `title` / `end` / `remind_before_min` / `prompt` 不再被读（出现即忽略，Agent 启动时记警告），

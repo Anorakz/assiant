@@ -209,18 +209,21 @@ agent/
 | ↑ T8-6 加了 `least`/`most` 两个 action 之后 | **3522 字符**（≈ +40 token） |
 | ↑ T10-3 又加了 `stage`（只预挑不切屏）之后 | **3562 字符**（离 3600 的守卫只剩 **38 字符** —— 加之前先把 `next_wallpaper` 的 description 与枚举措辞压了一遍才塞进去） |
 | ↑ T11-5 加了第四个工具 `bilibili_search` | **STUDY 一个字符都不涨**（仍 3562）—— 它**只在 GAME 可用**，所以走进的是 GAME 那份清单：**544 字符**（GAME 本来零工具，空间充裕） |
+| ↑ T12-6 加了第五个工具 `set_schedule`（日程, IDLE/STUDY） | **STUDY 4528 / IDLE 4329 字符**（它自己 930）—— 日历式日程没法塞进任何现有工具的 action（与壁纸/音乐/视频是四件不同的事, 你点名要加），所以预算抬到 **4700**；真 token 由 `tests/board/measure_tool_tokens.py` 在板端 `/tokenize` 量 |
 | 第一轮 prompt | 1495 token（T8-5b 测得；T8-6 之后约 1535，`ctx_size` 4096 —— **没有重量过板端**） |
 | 加一个 **action**（enum 多一个值） | ≈ 十几 token |
-| 加一个**工具**（像样的 description + schema） | ≈ 250~750 token |
+| 加一个**工具**（像样的 description + schema） | ≈ 250~750 token（`set_schedule` 930 字符 —— 已经把 description 与 schema 措辞压过一遍） |
 
 > ⚠ **"把工具放进哪个状态"是预算问题，不只是权限问题**（T11-5 的教训）：同一个工具放进
 > STUDY 会让清单从 3562 涨到 4139（**超 539**），放进 GAME 则**一点不占**别人的额度。
 > 所以 T11 的 B 站工具选了 **GAME-only**（也是你定的：视频就是游戏模式主区在放的东西）。
 
-`tests/test_merged_tools.py::TestPromptBudget` 按**字符**卡上限（`TOOL_BLOCK_BUDGET_CHARS = 3600`、
-单工具 `TOOL_BUDGET_CHARS = 2000`）—— 也就是"再加一个像样的工具就会红"，逼着人先想
-"能不能扩 action"。要抬预算就得**在注释里写清理由**，并重量一遍板端 prompt（char→token
-的换算上面那张表里有）。守卫带反空转检查：量出来的清单不能太小、真加一个工具必须过不去、
+`tests/test_merged_tools.py::TestPromptBudget` 按**字符**卡上限（`TOOL_BLOCK_BUDGET_CHARS = 4700`、
+单工具 `TOOL_BUDGET_CHARS = 2000`）—— T8-5c-3 立这条守卫时是 3600（"再加一个像样的工具就会红"），
+T12-6 因为按需求加了第五个工具抬到 4700，**只留了 ~170 字符余量**（下一个工具照样会红）。
+要抬预算就得**在注释里写清理由**，并重量一遍板端 prompt —— 量法固定下来了：
+`python3 tests/board/measure_tool_tokens.py`（起真 llama-server，POST `/tokenize`，四个状态各量一遍）。
+守卫带反空转检查：量出来的清单不能太小、真加一个工具必须过不去、
 加一个 action 涨的字符必须远小于加一个工具。
 
 ⚠ 顺带记一个坑（有测试钉着）：`Tool.to_llm_dict()` 的 `parameters` **就是模块级 `SCHEMA`
@@ -245,15 +248,23 @@ agent/
 | | `track_id="none"｜""｜"null"` | 删掉（走"按条件挑"） |
 | | `limit="3"` / `level="30"` | `3` / `30`（schema 会拒字符串） |
 | | `action="tag"` 却把标签放进 `tag` | 搬到 `set_tag` |
+| `set_schedule` | `action="create"｜"set"｜"schedule"` | `action="add"`（T12-6：同义动词） |
+| | `action="delete"｜"cancel"` / `"show"｜"query"` | `remove` / `list` |
+| | 没给 `action`，但给了 `start`/`days`/`date` | `action="add"`；只给 `state` → `list` |
+| | `state="学习"｜"STUDY"｜"Study模式"` | `study`（中文说法与大小写；认不出的**原样留着**让语义校验报错） |
+| | `start="9:30"｜"930"｜"9点30"｜"9点"｜"9点半"` | `09:30` / `09:00` / `09:30`（机械改写；`"九点"` 这种认不出的**原样留着**） |
+| | `start` 写进 `time`/`at`/`when` 等键 | 搬到 `start` |
+| | `days="mon,wed"｜"周一 周三"｜"工作日"｜[1,3]` | `["mon","wed"]` / `["mon".."fri"]` / `["mon","wed"]`（1=周一） |
+| | `date="2026/09/22"｜"2026.09.22"｜"2026年9月22日"` | `"2026-09-22"`（只换分隔符 + 补零） |
 
 **权限表（T4，唯一写下来的地方是 `tests/test_tool_permissions.py::EXPECTED`）**：
 
-| 状态 | `back_to_desktop` | `next_wallpaper` | `next_music` | `bilibili_search` |
-| --- | --- | --- | --- | --- |
-| `SLEEP` | ✗ | ✗ | ✗ | ✗ |
-| `IDLE` | ✗ | ✓ | ✓ | ✗ |
-| `STUDY` | ✓ | ✓ | ✓ | ✗ |
-| `GAME` | ✗ | ✗ | ✗ | ✓ |
+| 状态 | `back_to_desktop` | `next_wallpaper` | `next_music` | `bilibili_search` | `set_schedule` |
+| --- | --- | --- | --- | --- | --- |
+| `SLEEP` | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `IDLE` | ✗ | ✓ | ✓ | ✗ | ✓ |
+| `STUDY` | ✓ | ✓ | ✓ | ✗ | ✓ |
+| `GAME` | ✗ | ✗ | ✗ | ✓ | ✗ |
 
 > **T8-5b: 七个工具合并成三个**（每个工具用 `action` 分派具体动作）。动机是 prompt 预算 ——
 > T8-5 板端实测 7 个工具的工具清单占第一轮 prompt 的 **90%**（1699 / 1898 token），
@@ -267,14 +278,27 @@ agent/
 > **只有"把对话里的关键词交给 B 站队列"**：搜 + 排 + 填预览栏，**不播**（播不播由 GUI 操作决定，
 > 见 [bilibili.md](bilibili.md) §7）。清队列/切集/选片**都不进 LLM**（那些只走 GUI 命令与
 > Agent 自己的循环）—— 所以它没有 `action` 枚举，也就长得特别小（508 字符）。
-
-- **SLEEP 一个都不给**：SLEEP 是"别动系统里的任何东西"。
-- **GAME 只给 B 站那一个**（T11）：主区是视频区，换壁纸等于白换，而"回到桌面"是**学习收尾**的
-  动作（T1 的决定）；游戏模式下唯一有意义的新工具就是"给队列一个关键词"。
-- **给模型的候选清单也按状态过滤**（`ToolRouter.allowed_tools()`）：不可用的工具根本不该
-  出现在候选里 —— 否则 SLEEP/GAME 下模型会看到 `back_to_desktop`、试着调、吃一个拒绝，
-  白花一轮。执行期的 fail-closed 校验照旧（是**少给**，不是放宽）。
-- **加工具时先在这张表里决定它在哪些状态可用**，否则 `test_tool_permissions.py` 会红
+>
+> **T12-6: 第五个工具 `set_schedule`（IDLE/STUDY，你点名要的日程设置）** —— 三个 action
+> `add` / `list` / `remove`，写的是 `config.yaml` 的 `scheduler` 段（**文本级**手术 +
+> `.bak`，与 R3 那套同一份实现，见 [config-sources.md](config-sources.md) §3.1），
+> 写完**立刻热重载**运行中的调度器。语义校验走**真的** `ScheduleEvent.from_config`
+> （同一个判据既管读也管写），所以"写得进去但读不出来"不会发生；一次性日程写在过去会被
+> **拒绝并附上今天的日期**（系统提示里没有时钟 —— 模型的日期是猜的）。所以：
+> **要写 `date` 就先 `action="list"` 拿今天的日期**（`list` 会回 `today` / `now` / `weekday`），
+> 这条要求写进了工具的 description；`list` 也顺带把"读不出来的老条目"如实列出来。
+> ⚠ 这是**已知的边界**：不往系统提示里塞时钟，是因为那会动所有模式的行为，属于另一个改动
+> （真要让模型自己算"明天"，得先把当前时间放进 prompt）。
+>
+> - **SLEEP 一个都不给**：SLEEP 是"别动系统里的任何东西"。
+> - **GAME 只给 B 站那一个**（T11）：主区是视频区，换壁纸等于白换，而"回到桌面"是**学习收尾**的
+>   动作（T1 的决定）；游戏模式下唯一有意义的新工具就是"给队列一个关键词"。
+> - **日程只在 IDLE / STUDY**（T12-6）：与壁纸/音乐同一档 —— "什么时候切到什么模式"是日常安排。
+>   ⚠ 排出来的日程**可以**切到 `sleep`/`game`：那只是被执行的动作，与"现在能不能调工具"无关。
+> - **给模型的候选清单也按状态过滤**（`ToolRouter.allowed_tools()`）：不可用的工具根本不该
+>   出现在候选里 —— 否则 SLEEP/GAME 下模型会看到 `back_to_desktop`、试着调、吃一个拒绝，
+>   白花一轮。执行期的 fail-closed 校验照旧（是**少给**，不是放宽）。
+> - **加工具时先在这张表里决定它在哪些状态可用**，否则 `test_tool_permissions.py` 会红
   （它双向对齐：注册得到的工具必须在表里，表里的工具必须注册得到）。
 - ⚠ **T7-3 撤掉了 T6① 的一半**：以前 `next_wallpaper` 既是工具名也是 GUI 命令名，
   于是命令路径要借同一张表判一次（`ToolRouter.allowed_in_current_state()`）。按你的要求

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""T12-5 板端验收: 日程配置的**文本级增删**（对真配置的**副本**跑, 真文件只做 md5 核对）。
+"""T12-5/T12-6 板端验收: 日程的**文本级增删** + **工具链路**（真配置的副本上跑, 真文件只做 md5）。
 
 跑法（板端, 仓库根）::
 
     python3 tests/board/t12_writers_accept.py
 
-验的是这五件事（都用**真配置 + 真 Scheduler**）:
+验的是这几件事（真配置 + 真 Scheduler + 真工具路由）:
 
     A. 加: 每周那条进 `recurring`、带日期的那条进 `oneoff`; 用真的
        `ScheduleEvent.from_config` 读回来就是同一条（状态/时刻/星期都对）。
@@ -15,14 +15,19 @@
        （注释数不变、长度不变）。
     D. 真文件没被碰: `config/config.yaml` 前后 md5 一样。
     E. 换行: CRLF 的副本走一遍, 出来的还是纯 CRLF; `.bak` 逐字节等于"上一次写之前"。
+    F. **工具链路**（T12-6）: 真 `ToolRouter` + 真 `Runtime`（临时配置）跑
+       `set_schedule` 的 add / list / remove —— 归一层、schema 校验、权限表、
+       Runtime 落盘与热重载**整条链**都走一遍; SLEEP/GAME 下调它必须被拒且不写文件。
 
 ⚠ 这是**验收脚本**（要真配置 + 板端 python3.8）, 不进 `scripts/test-python.*` 的常规清单。
-⚠ T12-7 会往这个脚本里继续加"真 Agent + 日程到点 + `set_schedule` 工具热生效"那几段。
+⚠ T12-7 会往这个脚本里继续加"真 Agent + 日程到点 + 视频/SigLIP/llama 释放"那几段。
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
+import logging
 import os
 import sys
 import tempfile
@@ -33,8 +38,10 @@ import yaml                                                        # noqa: E402
 
 from agent.core import schedule_config as sc                       # noqa: E402
 from agent.core.scheduler import Scheduler, entry_matcher          # noqa: E402
-from agent.core.state_machine import StateMachine                  # noqa: E402
+from agent.core.state_machine import State, StateMachine           # noqa: E402
+from agent.core.tool_router import ToolRouter                      # noqa: E402
 from agent.io import ChatInputBus                                  # noqa: E402
+from agent.tools import build_tools as build_all_tools             # noqa: E402
 
 if hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -137,6 +144,9 @@ def main():
     check(".bak = 上一次写之前那份", read_bytes(sc_backup(tmp)) == before_last)
     check("CRLF 的 .bak 逐字节相等", read_bytes(sc_backup(crlf)) == crlf_before)
 
+    print("F. 工具链路（真 ToolRouter + 真 Runtime + 临时配置）")
+    _check_tool_chain()
+
     for path in (tmp, sc_backup(tmp), crlf, sc_backup(crlf)):
         if os.path.exists(path):
             os.unlink(path)
@@ -146,8 +156,103 @@ def main():
     if _FAILED:
         print("FAILED: %d 项 -> %s" % (len(_FAILED), ", ".join(_FAILED)))
         return 1
-    print("OK: T12-5 的文本级增删在板端全部通过")
+    print("OK: T12-5/T12-6 的日程写入与工具链路在板端全部通过")
     return 0
+
+
+def _check_tool_chain():
+    """`set_schedule` 整条链: 归一层 -> schema -> 权限表 -> Runtime -> 落盘 + 热重载。
+
+    ⚠ 用**临时目录里的配置**（真 config.yaml 只读来当模板）, 跑完删掉。
+    """
+    from agent.main import Runtime
+
+    workdir = tempfile.mkdtemp(prefix="t12-tool-")
+    path = os.path.join(workdir, "config.yaml")
+    with open(REAL_CONFIG, "rb") as src, open(path, "wb") as dst:
+        dst.write(src.read())
+    with open(path, "rb") as handle:
+        original = handle.read()
+
+    try:
+        config = {"llm": {"mode": "disabled"},
+                  "scheduler": {"interval_min": 1, "recurring": [], "oneoff": []},
+                  "gui": {"theme": "grey"}}
+        logging.disable(logging.CRITICAL)
+        runtime = Runtime(config=config, config_path_used=path,
+                          start_native=False, start_terminal=False)
+        runtime.state = StateMachine()
+        runtime.bus = ChatInputBus()
+        runtime.scheduler = Scheduler(state=runtime.state, bus=runtime.bus,
+                                      config=config, config_path=path)
+
+        router = ToolRouter(state_provider=runtime.state, services={
+            "schedule_add": runtime.schedule_add,
+            "schedule_list": runtime.schedule_list,
+            "schedule_remove": runtime.schedule_remove,
+        })
+        for tool in build_all_tools(router):
+            router.register(tool)
+        check("工具装上了", "set_schedule" in router.names(), "、".join(router.names()))
+
+        def run(coro):
+            """跑一次工具调用（`ToolRouter.execute` 是协程 —— 这里没有事件循环, 自己起一个）。"""
+            return asyncio.run(coro)
+
+        added = run(router.execute("set_schedule", {"action": "add", "state": "学习",
+                                                    "start": "9点30", "days": "周一,周三"}))
+        check("add 走完归一层 + 落盘", added.get("ok") and added["result"].get("ok"),
+              str(added.get("error") or added.get("result", {}).get("entry")))
+        check("写进去的是 canonical 形",
+              '    - state: study\n      days: [mon, wed]\n      start: "09:30"\n'
+              in read_text(path))
+        check("热重载立刻生效", len(runtime.scheduler.events) == 1,
+              str([e.label() for e in runtime.scheduler.events]))
+
+        again = run(router.execute("set_schedule", {"action": "add", "state": "study",
+                                                    "start": "09:30",
+                                                    "days": ["mon", "wed"]}))
+        check("查重不写第二遍", again["result"].get("already") is True,
+              again["result"].get("note"))
+
+        listed = run(router.execute("set_schedule", {"action": "list"}))
+        payload = listed["result"]
+        check("list 给出条目与今天的日期",
+              payload.get("count") == 1 and payload.get("today"),
+              "%s / today=%s" % (payload.get("entries"), payload.get("today")))
+
+        runtime.state.transition(State.IDLE, "验收")
+        runtime.state.transition(State.SLEEP, "验收")
+        refused = run(router.execute("set_schedule", {"action": "add", "state": "study",
+                                                      "start": "08:00"}))
+        check("SLEEP 下调它被拒（不写文件）", not refused["ok"] and "not allowed" in refused["error"],
+              refused.get("error"))
+        runtime.state.transition(State.IDLE, "验收")
+        runtime.state.transition(State.GAME, "验收")
+        refused_game = run(router.execute("set_schedule", {"action": "add",
+                                                           "state": "study",
+                                                           "start": "08:00"}))
+        check("GAME 下调它也被拒", not refused_game["ok"]
+              and "not allowed" in refused_game["error"], refused_game.get("error"))
+
+        runtime.state.transition(State.IDLE, "验收")
+        removed = run(router.execute("set_schedule", {"action": "remove", "state": "study",
+                                                      "start": "09:30"}))
+        check("remove 删得掉", removed["result"].get("ok"), str(removed["result"]))
+        check("删完逐字节回到原文", read_bytes(path) == original,
+              "%d -> %d 字节" % (len(original), len(read_bytes(path))))
+        check("热重载后调度器也空了", runtime.scheduler.events == [])
+    finally:
+        logging.disable(logging.NOTSET)
+        for name in (path, sc_backup(path)):
+            if os.path.exists(name):
+                os.unlink(name)
+        os.rmdir(workdir)
+
+
+def read_text(path):
+    with open(path, "rb") as handle:
+        return handle.read().decode("utf-8")
 
 
 def sc_backup(path):

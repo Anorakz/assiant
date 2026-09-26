@@ -1828,6 +1828,33 @@ T12-5 — **日程配置的写入器**（文本级增删；工具 `set_schedule`
       真 Scheduler 读回来 -> 查重 -> 删干净后**逐字节回到原文** -> 真 config.yaml md5 不变 ->
       CRLF 副本仍是纯 CRLF + `.bak` 逐字节；T12-7 往这个脚本里继续加端到端那几段）
 
+T12-6 — **日程设置进工具列表**（`set_schedule`；你点名要的那一条）
+☑ 新工具 `agent/tools/schedule.py`：`action=add|list|remove`，**只在 IDLE/STUDY**（与壁纸/音乐同档）；
+      登记进 `TOOL_MODULES`（第 5 个模块）与权限表 `EXPECTED`（双向对齐，禁止组合数从 10 → 12）
+☑ 归一化（只做**等价改写**）：同义动词（create/set/delete/show…）、中文状态（学习/睡眠/空闲/游戏）、
+      时间写法（`9:30`/`930`/`9点30`/`9点`/`9点半`）、星期（`mon,wed`/`周一 周三`/`工作日`/`周末`/数字 1..7=周一）、
+      日期分隔符（`2026/09/22`→`2026-09-22`）、同义键（time/at→start）; 认不出的**原样留着**让校验报错
+☑ Runtime 三条入口 `schedule_add/list/remove`：
+      · 语义校验走**真的** `ScheduleEvent.from_config`（同一个判据既管读也管写）
+      · 落盘走 T12-5 的 `schedule_config` 写入器（文本级 + `.bak` + 原子写 + 查重）
+      · **写完立刻热重载**：按**刚写的那个文件**重读（不走 `load_config` 的缓存/路径解析）再
+        `Scheduler.reload()`，并把新 scheduler 段同步回 `self.config`；调度器没起来就只写不载并如实说
+      · 一次性日程写在过去 -> **拒绝并附上今天的日期**（系统提示里没有时钟, 模型的日期是猜的）
+      · 同时刻有多条时删 -> **不猜**：把候选摆出来, 让调用方带上 days/date
+      · 目标落到 `config.example.yaml`（模板）-> 拒绝写（与 `cleanup --apply` 同规矩）
+☑ `agent/config.py` 新增 `read_config_file(path)`（按路径读, 不走缓存/白名单 —— 热重载要用）
+☑ 单测: `tests/test_schedule_tool.py` 46 项（归一化 / schema / 权限 / Runtime 落盘与热重载 /
+      模板与注入配置的拒绝）；`tests/test_scheduler.py::TestEntryMatcher` +1（**每周那条不是一次性那条**,
+      修掉了"每天 09:30"与"某天 09:30"互相匹配的 bug）
+☑ 工具清单预算: STUDY 3562 → **4528 字符**（工具自己 930）, 预算 `TOOL_BLOCK_BUDGET_CHARS` 3600 → **4700**
+      （只留 ~170 余量, 下一个工具照样会红）; 新增 `tests/board/measure_tool_tokens.py`
+      （起真 llama-server, POST `/tokenize`, 四个状态各量一遍）把"改预算前先量一遍"固定下来
+☑ 板端验收 `tests/board/t12_writers_accept.py` 加 **F 段**: 真 `ToolRouter` + 真 `Runtime`
+      （临时配置）跑 add/list/remove 整条链 + SLEEP/GAME 下必须被拒且不写文件
+☑ 文档: `Readme.md`（权限表 + 第五个工具 + 启动顺序那条"它不挑子系统"）、`docs/architecture.md`
+      （预算表 + 权限表 + 归一化规则表 + "没有时钟"这条边界）、`docs/config-sources.md` §3.1（二）
+      （写入路径与热重载）、`docs/cli.md`（CLI 只读、加删走对话）
+
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档

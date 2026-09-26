@@ -256,15 +256,18 @@ def _iter_oneoff_blocks(text: str) -> Iterator[Tuple[int, int, int, Dict[str, st
         yield key_index, start, end, fields
 
 
-def find_entry(text: str, matches: Callable[[Dict[str, str]], bool]
+def find_entry(text: str, matches: Callable[[Dict[str, str]], bool],
+               keys: Sequence[str] = ENTRY_KEYS
                ) -> Tuple[Optional[Dict[str, Any]], str]:
-    """找第一条让 `matches(fields)` 说"是它"的日程（`recurring` 与 `oneoff` 都找）。
+    """找第一条让 `matches(fields)` 说"是它"的日程（默认 `recurring` 与 `oneoff` 都找）。
 
+    @param keys 只在哪些序列里找（`add_entry` 的查重只查**目标那一个**序列——
+                别人写的另一段是 flow 风格不该拦住这次添加）
     @return (条目, 原因)。找到时条目是 `{"key", "key_index", "fields", "span"}`、
             原因是空串；没找到时条目是 None、原因说明为什么（写法不支持 / 没有匹配）。
     """
     try:
-        for key, key_index, start, end, fields in _iter_blocks(text):
+        for key, key_index, start, end, fields in _iter_blocks(text, keys):
             if matches(fields):
                 return {"key": key, "key_index": key_index, "fields": fields,
                         "span": (start, end)}, ""
@@ -487,7 +490,7 @@ def add_entry(text: str, values: Dict[str, Any],
     render_entry_lines(values, 0)                # 缩进这里无所谓，只为校验形状
 
     if matches is not None:
-        existing, why = find_entry(text, matches)
+        existing, why = find_entry(text, matches, keys=(key,))
         if existing is not None:
             return text, "已经有一条一样的了（%s 里那条 %s）" % (
                 existing["key"], existing["fields"].get("start"))

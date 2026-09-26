@@ -17,13 +17,14 @@ tests/test_tool_permissions.py — 工具的状态权限表（Phase 7 T4）
       · 给 LLM 看的清单也要按状态过滤（T4 顺手修的那一处, 见
         `agent/llm/provider.py::_advertised_tools`）
 
-这张表（你 T4 拍的板；T7-3 加过 list_wallpaper_tags；T8-5b 合并成**三个**工具）:
+这张表（你 T4 拍的板；T7-3 加过 list_wallpaper_tags；T8-5b 合并成**三个**工具；
+T11-5 加了只在 GAME 的 bilibili_search；T12-6 加了 set_schedule）:
 
-    | 状态  | back_to_desktop | next_wallpaper | next_music |
-    | SLEEP |        ✗        |       ✗        |     ✗      |
-    | IDLE  |        ✗        |       ✓        |     ✓      |
-    | STUDY |        ✓        |       ✓        |     ✓      |
-    | GAME  |        ✗        |       ✗        |     ✗      |
+    | 状态  | back_to_desktop | next_wallpaper | next_music | bilibili_search | set_schedule |
+    | SLEEP |        ✗        |       ✗        |     ✗      |        ✗        |      ✗       |
+    | IDLE  |        ✗        |       ✓        |     ✓      |        ✗        |      ✓       |
+    | STUDY |        ✓        |       ✓        |     ✓      |        ✗        |      ✓       |
+    | GAME  |        ✗        |       ✗        |     ✗      |        ✓        |      ✗       |
 
     T8-5b 把七个工具合并成三个（每个工具用 `action` 分派具体动作）:
       · next_wallpaper = 翻页 / 按内容挑 / 看标签（原来的 next_wallpaper + list_wallpaper_tags）
@@ -32,11 +33,16 @@ tests/test_tool_permissions.py — 工具的状态权限表（Phase 7 T4）
       · back_to_desktop = 回到桌面（无参数, 只 STUDY）
     合并的动机是 **prompt 预算**: T8-5 实测 7 个工具的工具清单占第一轮 prompt 的 90%
     （1699 / 1898 token）, 第二轮 2131 直接撞穿 ctx。合并后模型只认 3 个名字。
+    T12-6 的 `set_schedule`（日程 = 时间 + 状态）是**你点名要加的第 5 个工具**: 日程与
+    壁纸/音乐/视频是四件不同的事, 塞进任何一个现有工具的 action 里都会让那个工具的语义
+    变成两件事 —— 代价是工具清单变长, 由 `test_merged_tools.py` 的预算守卫量着。
 
 为什么 SLEEP / GAME 一个都不给
     · SLEEP = "睡眠": 不让模型动系统里的任何东西, 最保守的一档
     · GAME  = 主区是视频区, 换壁纸等于白换; 而"回到桌面"是**学习收尾**的动作
       （T1 的决定, 工具说明里也写着"别在 GAME/IDLE 里乱按"）
+    · 日程只在 IDLE / STUDY: 与壁纸/音乐同一档（"什么时候切到什么模式"是日常安排）;
+      ⚠ 排出来的日程**可以**切到 sleep/game —— 那只是被执行的动作, 与"现在能不能调工具"无关
 
 ⚠ T7-3 撤掉了 T6① 的一半
     T6① 曾规定"GUI 的 `next_wallpaper` **命令**也受这张表约束"（靠
@@ -80,13 +86,18 @@ EXPECTED = {
     # 放 IDLE/STUDY 会撞 STUDY 的 prompt 预算, 且语义上那是"看视频"不是"学习"）。
     # 它只有"把对话里的关键词交给队列"这一件事: 清队列/切集只走 Agent, 不进工具。
     "bilibili_search": {State.GAME},
+    # T12-6: 日程设置（增/查/删）—— IDLE / STUDY, 与壁纸/音乐同一档。
+    # ⚠ 它写的是 **config.yaml 的 scheduler 段**（文本级 + .bak）: 这是 agent/ 里
+    #   第二个"改真源"的工具（第一个是 R3 的删除, 由调度器自己触发, 不是工具）。
+    "set_schedule": {State.IDLE, State.STUDY},
 }
 
-#: 全部工具（几次断言要一起数）：T8-5b 三个 + T11-5 的 bilibili_search
-TOOL_NAMES = ("back_to_desktop", "next_wallpaper", "next_music", "bilibili_search")
+#: 全部工具（几次断言要一起数）：T8-5b 三个 + T11-5 的 bilibili_search + T12-6 的 set_schedule
+TOOL_NAMES = ("back_to_desktop", "next_wallpaper", "next_music", "bilibili_search",
+              "set_schedule")
 
 #: 对应的**模块**名（`TOOL_MODULES` 里写的是模块名, 不是工具名）
-TOOL_MODULE_NAMES = ("back_to_desktop", "wallpaper", "music", "bilibili")
+TOOL_MODULE_NAMES = ("back_to_desktop", "wallpaper", "music", "bilibili", "schedule")
 
 #: 有**必填**参数的工具, 给一份合法参数（回桌面没有参数）。
 #: ⚠ 这不是"权限表"的一部分, 只是让"放行"那条断言真的走到 handler;
@@ -95,6 +106,9 @@ _SAMPLE_ARGS = {
     "next_wallpaper": {"action": "next"},
     "next_music": {"action": "clear_queue"},
     "bilibili_search": {"keyword": "跑个测试"},
+    # 三个 action 里 `list` 是唯一**只读且不要求身份字段**的那个（add/remove 要
+    # state+start, 那会去碰真配置 —— 权限用例不该写文件）
+    "set_schedule": {"action": "list"},
 }
 
 #: 四个状态各自**应该**看到哪些工具（由 EXPECTED 推出来, 不手写第二份）
@@ -131,7 +145,7 @@ def go_to(machine, state):
 #: 计数替身里的每一格（每个工具一个入口 —— 一个工具跑一次, 恰好点亮一格）
 CALL_KEYS = ("desktop", "wallpaper", "tags", "music_list", "music_search", "music_state",
              "music_enqueue", "music_queue_clear", "music_queue_state", "music_tag",
-             "music_control", "bilibili")
+             "music_control", "bilibili", "schedule")
 
 
 def _no_calls():
@@ -199,6 +213,10 @@ def make_router(machine=None):
         calls["bilibili"] += 1
         return {"ok": True, "count": 12, "index": 0, "keyword": keyword}
 
+    def _schedule_list():
+        calls["schedule"] += 1
+        return {"ok": True, "count": 0, "entries": []}
+
     machine = machine if machine is not None else StateMachine()
     router = ToolRouter(
         state_provider=machine,
@@ -209,7 +227,10 @@ def make_router(machine=None):
                   "music_queue_clear": _music_queue_clear,
                   "music_queue_state": _music_queue_state,
                   "music_tag": _music_tag, "music_control": _music_control,
-                  "bilibili_search": _bilibili_search},
+                  "bilibili_search": _bilibili_search,
+                  "schedule_add": lambda values: {"ok": True},
+                  "schedule_list": _schedule_list,
+                  "schedule_remove": lambda values: {"ok": True}},
     )
     for tool in build_tools(router):
         router.register(tool)
@@ -310,8 +331,8 @@ class TestForbiddenCombinationsAreReallyRefused(unittest.IsolatedAsyncioTestCase
                 self.assertEqual(calls, _no_calls(),
                                  "%s/%s 被拒时 handler 不该跑" % (state.value, name))
                 checked += 1
-        # 反空转: 真的验到了组合（SLEEP 4 + GAME 3 + IDLE 3 = 10）
-        self.assertEqual(checked, 10, "遍历到的禁止组合数不对: %d" % checked)
+        # 反空转: 真的验到了组合（5 个工具 × 4 个状态 = 20 对, 其中 12 对是禁止的）
+        self.assertEqual(checked, 12, "遍历到的禁止组合数不对: %d" % checked)
 
     async def test_every_allowed_pair_really_runs(self):
         checked = 0
@@ -327,8 +348,8 @@ class TestForbiddenCombinationsAreReallyRefused(unittest.IsolatedAsyncioTestCase
                 self.assertEqual(sum(calls.values()), 1,
                                  "%s/%s 放行时 handler 应当正好跑一次" % (state.value, name))
                 checked += 1
-        # 反空转: 真的验到了允许的组合（STUDY 3 + IDLE 2 + GAME 1 = 6）
-        self.assertEqual(checked, 6, "遍历到的允许组合数不对: %d" % checked)
+        # 反空转: 真的验到了允许的组合（STUDY 4 + IDLE 3 + GAME 1 = 8）
+        self.assertEqual(checked, 8, "遍历到的允许组合数不对: %d" % checked)
 
 
 class TestModelOnlySeesAllowedTools(unittest.IsolatedAsyncioTestCase):
@@ -378,15 +399,15 @@ class TestModelOnlySeesAllowedTools(unittest.IsolatedAsyncioTestCase):
         await provider.chat_with_tools("x", {})
         request = backend.client.chat.completions.requests[0]
         self.assertEqual([t["function"]["name"] for t in request["tools"]],
-                         ["back_to_desktop", "next_music", "next_wallpaper"],
-                         "STUDY 下三个工具都给, 按名字排序")
+                         ["back_to_desktop", "next_music", "next_wallpaper", "set_schedule"],
+                         "STUDY 下四个工具都给, 按名字排序")
 
     async def test_idle_sees_no_back_to_desktop(self):
         provider, backend = self._provider(State.IDLE)
         await provider.chat_with_tools("x", {})
         request = backend.client.chat.completions.requests[0]
         self.assertEqual([t["function"]["name"] for t in request["tools"]],
-                         ["next_music", "next_wallpaper"],
+                         ["next_music", "next_wallpaper", "set_schedule"],
                          "清单按名字排序, 顺序也要稳定; IDLE 只是少了 back_to_desktop")
 
     async def test_sleep_advertises_no_tools_at_all(self):

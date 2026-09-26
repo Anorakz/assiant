@@ -979,10 +979,12 @@ class TestRuntimeStartBuildsTheDeck(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(runtime.wallpaper)
             self.assertEqual(runtime.wallpaper.directory, root)
             names = [t["name"] for t in runtime.tools.list_tools()]
-            # T8-5b: 只有三个工具（音乐没开 -> next_music 自己跳过）
-            self.assertEqual(names, ["back_to_desktop", "next_wallpaper"],
-                             "back_to_desktop + next_wallpaper（音乐没开时没有 next_music）")
-            self.assertEqual(len(runtime.tools), 2)
+            # T8-5b: 音乐没开 -> next_music 自己跳过; T12-6 起 set_schedule 总是装上
+            # （它只有"配置文件 + 调度器"这两个依赖, 没有配置开关）
+            self.assertEqual(names, ["back_to_desktop", "next_wallpaper", "set_schedule"],
+                             "back_to_desktop + next_wallpaper + set_schedule"
+                             "（音乐没开时没有 next_music）")
+            self.assertEqual(len(runtime.tools), 3)
         finally:
             await runtime.stop()
 

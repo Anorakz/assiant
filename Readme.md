@@ -42,8 +42,9 @@ agent/
 │   │   └── music.py             # 播放内核: 环形队列 / 轮询真实进度 / 30 秒计一次 / **补歌到目标长度** (T8-4/T10-4)
 │   ├── media/                   # 本地媒体库 (T8-3)
 │   │   └── music_library.py     # config/music_library.jsonl: 读写/合并/打标/挑选（纯 Python）
-│   ├── tools/                   # 具体工具 (Phase 7; T8-5b 合并成三个):
-│   │                            #   back_to_desktop / next_wallpaper / next_music
+│   ├── tools/                   # 具体工具 (Phase 7; T12-6 起五个):
+│   │                            #   back_to_desktop / next_wallpaper / next_music /
+│   │                            #   bilibili(只在 GAME) / schedule(日程, IDLE/STUDY)
 │   ├── llm/                     # LLM 三模式 + 规则兜底
 │   │   ├── provider.py          # edge / cloud / disabled 分发 (edge 连本机 llama-server)
 │   │   └── rule_engine.py       # 无 LLM 时的正则规则兜底
@@ -110,12 +111,13 @@ agent/
 │   ├── test_bilibili_queue.py   # B 站队列: 3×预览栏格数的滑动窗口 / 往哪边走往哪边补页 / 边界 (T11-2)
 │   ├── test_bilibili_buffer.py  # B 站缓冲代理: ffmpeg 合流->MPEG-TS->本机 HTTP / 15 s 门槛 / 暂停延到 60 s (T11-3)
 │   ├── test_bilibili_tool.py    # B 站工具: 只有一个 keyword / 只在 GAME 可见 / 参数归一化 (T11-5)
+│   ├── test_schedule_tool.py    # 日程工具: 归一化 / schema / 权限 / Runtime 落盘与热重载 (T12-6)
 │   ├── test_bilibili_config.py  # B 站配置守卫: 模板能被真构造器吃下 / 键不多不少 / 默认值对齐 (T11-8)
 │   ├── test_game_watch.py       # 游戏观察器: 画面锚点 vs PC 进程双路 / 自学习纠错 / 常驻策略 (T11-4)
 │   ├── test_music_library.py    # 本地音乐库: 读写 / 合并 / 打标 / 挑选 (T8-3)
 │   ├── test_music_player.py     # 播放内核: 环形队列 / 30 秒计一次 / 曲终自动下一首 / 补歌两段式 (T8-4/T10-4)
 │   ├── test_label_spec.py       # 统一标签语法: 拆键 / 拆值 / 多轴 / 壁纸那边只用这一份 (T8-5b)
-│   ├── test_merged_tools.py     # 三个工具: action 分派 / 缺依赖跳过 / 清单**预算守卫** (T8-5b/5c)
+│   ├── test_merged_tools.py     # 五个工具: action 分派 / 缺依赖跳过 / 清单**预算守卫** (T8-5b/5c/T12-6)
 │   ├── test_tool_normalize.py   # 参数归一化: 真实错法 → 规范形 / 校验前跑 / 边界 (T8-5c)
 │   ├── test_read_intents.py     # 只读问句直连: 该直连的/不该截胡的/拿不到数据 (T8-5c)
 │   ├── test_chat_memory.py      # 纯对话记忆: 只收对话源 / 有界 / **不碰盘** / 场景与时间 (T9-1)
@@ -238,12 +240,12 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
   **Phase 7 起丢给模型的候选也按状态过滤**（`allowed_tools()`）—— 不可用的工具不该出现在
   候选里。当前这张权限表（`tests/test_tool_permissions.py::EXPECTED` 是唯一真源）：
 
-  | 状态 | `back_to_desktop` | `next_wallpaper` | `next_music` | `bilibili_search` |
-  | --- | --- | --- | --- | --- |
-  | `SLEEP` | ✗ | ✗ | ✗ | ✗ |
-  | `IDLE` | ✗ | ✓ | ✓ | ✗ |
-  | `STUDY` | ✓ | ✓ | ✓ | ✗ |
-  | `GAME` | ✗ | ✗ | ✗ | ✓ |
+  | 状态 | `back_to_desktop` | `next_wallpaper` | `next_music` | `bilibili_search` | `set_schedule` |
+  | --- | --- | --- | --- | --- | --- |
+  | `SLEEP` | ✗ | ✗ | ✗ | ✗ | ✗ |
+  | `IDLE` | ✗ | ✓ | ✓ | ✗ | ✓ |
+  | `STUDY` | ✓ | ✓ | ✓ | ✗ | ✓ |
+  | `GAME` | ✗ | ✗ | ✗ | ✓ | ✗ |
 
   **T8-5b 把七个工具合并成三个**（每个工具用 `action` 分派具体动作）：
   `next_wallpaper` = 翻页/按内容挑/**按用量挑**（`action=least`/`most`，T8-6）/
@@ -259,6 +261,19 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
   放在 GAME 而不是 STUDY 有**预算**上的道理：放进 STUDY 会把清单从 3562 顶到 4139（超预算），
   放 GAME 则一个字符都不占别人的额度（GAME 那份清单 544 字符）。链路见
   [`docs/bilibili.md`](docs/bilibili.md)。
+
+  **T12-6 加了第五个工具 `set_schedule`**（**IDLE / STUDY**，你点名要的"日程设置"）：
+  三个 action —— `add` / `list` / `remove`。日程的内容只有**时间 + 状态**
+  （`sleep`/`idle`/`study`/`game`），到点严格按状态机切过去（跨模式自动经 `IDLE`
+  释放/接管资源），并推一行展示文本给界面（**不进 LLM**）。它写的是 `config.yaml`
+  的 `scheduler` 段 —— 走的是 R3 那套**文本级**手术（只动目标那几行 + `.bak`），
+  写完**立刻热重载**调度器（不用重启 Agent），见
+  [`docs/config-sources.md`](docs/config-sources.md) §3.1。
+  ⚠ 工具清单因此从 3562 涨到 **4528 字符**（STUDY），预算相应抬到 4700 —— 理由与
+  板端实测 token 数记在 `tests/test_merged_tools.py::TestPromptBudget` 的注释里，
+  量法见 `tests/board/measure_tool_tokens.py`。
+  ⚠ 系统提示里**没有当前时间**：一次性日程（`date`）要先 `action=list` 拿今天的日期，
+  这条要求写进了工具的 description（0.6B 会自己猜日期）。
 
   **T7-3 撤掉了 T6① 的一半**：以前 GUI 的 `next_wallpaper` 命令与 LLM 的工具共用这张表
   （命令路径问 `ToolRouter.allowed_in_current_state()`）。按需求**手动换壁纸已删除**
@@ -330,6 +345,9 @@ AGENT_RUN_SECONDS=5 python3 agent/main.py   # 跑 5 秒自动退出 (冒烟)
 
 > ⚠ **音乐与 B 站都排在"建工具"之前**：`agent/tools/` 里的那几个工具要**建的时候**就知道
 > 对应子系统"开没开"（没开就整个不装）—— 顺序错了会变成"工具装了但一调就报错"。
+> ⚠ 日程那个工具（`set_schedule`）反过来**不挑子系统**：它只要"配置文件路径"与
+> "调度器"两样，后者是**后面**才起的 —— 所以它绑的是方法（调用时才读 `runtime.scheduler`），
+> 那样"调度器还没起来"只会让工具如实说"配置写好了，下次启动生效"，而不是整个消失。
 
 约定：
 
@@ -341,7 +359,8 @@ AGENT_RUN_SECONDS=5 python3 agent/main.py   # 跑 5 秒自动退出 (冒烟)
   免得正常日志看起来像崩了。排查时把级别调到 DEBUG 即可。
 - 关闭：`SIGINT` / `SIGTERM` 都会触发干净退出（systemd 停服务发的是 SIGTERM）。
 - 尚未实现、启动时跳过并记一条 WARNING 的组件：`agent/tools/` 里某个工具**缺依赖**时只跳过
-  那一个（Phase 7 起 `agent/tools/` 本身有真工具了：`back_to_desktop` / `next_wallpaper`）、
+  那一个（Phase 7 起 `agent/tools/` 本身有真工具了：`back_to_desktop` / `next_wallpaper` /
+  `set_schedule` 等，见上面的权限表）、
   `agent/ipc/` 缺失或没有 `build_ipc()`（GUI 连不上）。它们**不算失败**，放到位即自动接入，
   不用改 `main.py`。
 
