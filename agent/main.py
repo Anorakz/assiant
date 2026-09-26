@@ -1176,6 +1176,8 @@ class Runtime:
                 mem_watermark_mb=float(buffer_cfg.get("mem_watermark_mb", 400) or 400),
                 log=self.log)
             self._bilibili_task = asyncio.ensure_future(self._game_watch_loop())
+            # ⚠ 起播前先问一次 cookie 有效性（失效的话第一句提示就要说实话, 见方法注释）
+            self._check_bilibili_cookie()
             self.log.info(
                 "bilibili: 就绪（预览栏兜底 %d 格 -> 目标 %d 条; 观察器 %s, 锚点 %d 个/%s）",
                 viewport, self.bilibili.target(),
@@ -1812,16 +1814,48 @@ class Runtime:
         if note:
             self._say(note)
 
+    def _check_bilibili_cookie(self) -> None:
+        """起播前把 cookie 的**有效性**问清楚（T11-9 板端验收抓到的漏项）。
+
+        ⚠ 为什么必须在**起播前**问：实测（T11-9）—— cookie 失效时 B 站的 playurl
+          **不报错**，它就把你当匿名（给 480P/720P），于是"cookie 过期"这件事
+          只能靠 `nav`（`login()`）看出来。不问的话，用户看到的是
+          "这条 B 站只给到 720P，和登不登录无关" —— 那是**甩锅给视频**。
+        只问一次（进程启动 / 状态重进时），结果记在 `api.auth_note` 上。
+        """
+        api = self._bilibili_api
+        if api is None or not api.cookie_present:
+            return
+        try:
+            info = api.login(refresh=True)
+        except Exception as exc:                          # noqa: BLE001 - 问不到不该拦住启动
+            self.log.warning("bilibili: 登录态没问出来（忽略）: %r", exc)
+            return
+        if info.get("logged_in"):
+            self.log.info("bilibili: cookie 有效（高清走 DASH）")
+            return
+        api.auth_note = str(info.get("why") or "cookie 失效了")
+        self.log.warning("bilibili: %s", api.auth_note)
+
     def _bilibili_quality_note(self) -> str:
-        """这一条清晰度的**如实提醒**（要说的才说, 1080P 及以上不念叨）。"""
+        """这一条清晰度的**如实提醒**（要说的才说, 1080P 及以上不念叨）。
+
+        ⚠ T11-9 板端验收抓到的顺序问题: **cookie 失效**那条话必须排在最前面 ——
+          失效时 `playurl` 会退回匿名单文件（视频照样能放），如果先按"清晰度 < 80"去解释，
+          用户看到的是"这条视频就这样"，而真相是"cookie 过期了、配上就能 1080P"。
+        """
         if self._buffer is None:
             return ""
+        api = self._bilibili_api
+        auth_note = str(getattr(api, "auth_note", "") or "")
+        if auth_note:
+            return "（cookie 失效了：%s）" % auth_note
         stream = getattr(self._buffer, "stream", {}) or {}
         quality = int(stream.get("quality") or 0)
         if quality >= 80:
             return ""
         label = str(stream.get("quality_label") or "未知清晰度")
-        cookie = bool(self._bilibili_api is not None and self._bilibili_api.cookie_present)
+        cookie = bool(api is not None and api.cookie_present)
         if not cookie:
             return ("（没配 config/bilibili_cookie.json，这条只给到 %s；要高清得在板端配上 "
                     "SESSDATA）" % label)

@@ -302,7 +302,16 @@ class BilibiliBuffer(object):
             try:
                 proc.wait(timeout=2)
             except Exception:                              # noqa: BLE001
-                pass
+                # ⚑ T11-9 板端验收抓到的: ffmpeg 卡在"往满管道里写"时**不一定理 SIGTERM**,
+                #   2 s 内没退就补一刀 SIGKILL —— 否则 Agent 走了还留一个孤儿 ffmpeg
+                #   （它会一直占着内存/句柄, 板子上是真看得见的）。
+                try:
+                    killer = getattr(proc, "kill", None)
+                    if callable(killer):
+                        killer()
+                        proc.wait(timeout=2)
+                except Exception as exc:                   # noqa: BLE001
+                    self.log.warning("bilibili: ffmpeg 杀不掉（放着）: %r", exc)
         with self._lock:
             self._window = bytearray()
         if self.path:

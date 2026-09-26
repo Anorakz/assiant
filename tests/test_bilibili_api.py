@@ -390,6 +390,29 @@ class TestViewAndPlayurl(unittest.TestCase):
         self.assertEqual(stream["audio"]["bps"], 101000)
         self.assertEqual(stream["bps"], 1201000 + 101000)
 
+    def test_an_expired_cookie_is_remembered_even_though_we_fall_back(self):
+        """⚑ T11-9 板端验收抓出来的真问题：cookie 失效时 DASH 被兜底吞掉。
+
+        视频照样能放（退回单文件），但**不能就这么算了** —— 否则用户看到的是
+        "这条 B 站只给到 720P，和登不登录无关"，而真相是"cookie 过期了"。
+        所以 `playurl` 要把那句话记在 `auth_note` 上（由 Runtime 的清晰度提醒说出去）。
+        """
+        client = fake_with_cookie([(api_mod.HOME_URL, (200, HOME_HTML)),
+                                   ("fnval=1", (200, PLAIN_PAYLOAD)),
+                                   ("fnval=16", (200, '{"code":-101,"message":"账号未登录"}'))])
+        self.assertEqual(client.auth_note, "")
+        stream = client.playurl("BV1xx411c7mD", cid=456)
+        self.assertEqual(stream["kind"], "plain", "退回单文件是对的（能放就先放）")
+        self.assertIn("cookie", client.auth_note.lower())
+        self.assertIn("SESSDATA", client.auth_note)
+
+    def test_a_working_cookie_leaves_no_such_note(self):
+        client = fake_with_cookie([(api_mod.HOME_URL, (200, HOME_HTML)),
+                                   ("fnval=1", (200, PLAIN_PAYLOAD)),
+                                   ("fnval=16", (200, DASH_PAYLOAD))])
+        client.playurl("BV1xx411c7mD", cid=456)
+        self.assertEqual(client.auth_note, "")
+
     def test_single_file_wins_when_it_is_already_clearer(self):
         """实测：`Barricades` 匿名单文件就给 1080P，而 DASH 匿名只给 720P → 用单文件（省合流）。"""
         plain_1080 = ('{"code":0,"message":"OK","data":{"quality":80,"accept_quality":[80,16],'

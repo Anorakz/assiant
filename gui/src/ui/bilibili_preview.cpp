@@ -336,7 +336,12 @@ void BilibiliPreview::maybeReportViewport()
     }
     // ⚠ 布局还没算出来时可见区只有几十像素 —— 那时上报 1 格会把队列目标压成 3 条。
     //   宁可先不上报：等布局给了真实宽度（`list_->viewport()` 的 resize 会再叫我们）。
-    if (list_->viewport()->width() < kCellW) {
+    const int width = list_->viewport()->width();
+    if (width < kCellW) {
+        qInfo().noquote()
+            << QStringLiteral("[bilibili] 预览栏还没量出宽度（%1 px < %2）—— 先不上报格数")
+                   .arg(width)
+                   .arg(kCellW);
         return;
     }
     const int cells = visibleCells();

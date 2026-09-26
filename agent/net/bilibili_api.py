@@ -284,6 +284,12 @@ class BilibiliApi(object):
         self.timeout_s = float(timeout_s or DEFAULT_TIMEOUT_S)
         self.cookie_file = str(cookie_file or DEFAULT_COOKIE_FILE)
         self.cookie, self.cookie_notes = load_cookie_file(self.cookie_file)
+        #: ⚑ T11-9 板端验收抓出来的真问题：cookie **失效**时 DASH 那条路被
+        #:   `playurl` 的兜底吞掉（它会退回单文件，视频照样能放），于是**没人告诉用户**
+        #:   "cookie 失效了" —— 用户看到的会是"这条 B 站只给到 720P，和登不登录无关"，
+        #:   而真相是"配上有效的 SESSDATA 就是 1080P"。所以把那条话**记在这里**，
+        #:   由 `Runtime._bilibili_quality_note()` 优先说出去。
+        self.auth_note = ""
         self._transport = transport if transport is not None else UrllibTransport(self.timeout_s)
         self._booted = False
         self._login: Optional[Dict[str, Any]] = None
@@ -501,6 +507,10 @@ class BilibiliApi(object):
             dash = self._dash_stream(bvid, cid)
         except BilibiliError as exc:
             self.log.info("bilibili: DASH 那条没拿到（用单文件）: %s", exc)
+            if isinstance(exc, BilibiliAuthError):
+                # ⚑ 失效的 cookie **不能就这么算了**：记下来，让清晰度那句话如实说
+                #   （否则用户以为"这条视频就这样"，而其实是 cookie 过期了）。
+                self.auth_note = str(exc)
             return plain
         if _int(dash.get("quality")) > _int(plain.get("quality")):
             return dash

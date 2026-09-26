@@ -83,6 +83,7 @@ struct Options {
     bool prevBilibiliDemo = false;  ///< 启动后点一下视频区"上一集"（验收用）
     int bilibiliPickDemo = -1;      ///< >=0 时点一下预览栏第 N 格（验收用）
     bool videoPlayDemo = false;     ///< 启动后切一次播放/暂停（验收用）
+    int videoPauseDemoMs = 0;       ///< >0 时过这么多毫秒点一次播放/暂停（T11-9: 验暂停预取）
     bool videoFullscreenDemo = false; ///< 启动后切一次全屏（验收用）
     bool watchdogDemo = false;      ///< 启动后点一下看门狗（验收用）
     QString modelModeDemo;         ///< 非空 = 切到该推理位置（验收用）
@@ -122,6 +123,7 @@ void printUsage()
         "  --prev-bilibili-demo 启动后点一下视频区「上一集」（验收用）\n"
         "  --bilibili-pick-demo <n>  启动后点一下预览栏第 n 格（0 起，验收用）\n"
         "  --video-play-demo    启动后切一次播放/暂停（验收用）\n"
+        "  --video-pause-demo <ms>  过这么多毫秒点一次播放/暂停（验收「暂停预取」用）\n"
         "  --video-fullscreen-demo 启动后切一次全屏（覆盖整屏，验收用）\n"
         "  --watchdog-demo     启动后点一下看门狗（验收用）\n"
         "  --model-mode-demo <local|cloud|disabled>  切到该推理位置（验收用）\n"
@@ -212,6 +214,17 @@ Options parseArgs(int argc, char** argv)
             }
         } else if (arg == QLatin1String("--video-play-demo")) {
             opt.videoPlayDemo = true;
+        } else if (arg == QLatin1String("--video-pause-demo")
+                   || arg.startsWith(QLatin1String("--video-pause-demo="))) {
+            const QString value =
+                optionValue(arg, QStringLiteral("--video-pause-demo"), i, argc, argv, opt);
+            bool ok = false;
+            const int ms = value.toInt(&ok);
+            if (!ok || ms <= 0) {
+                opt.error = QStringLiteral("--video-pause-demo 需要一个 >0 的毫秒数");
+            } else {
+                opt.videoPauseDemoMs = ms;
+            }
         } else if (arg == QLatin1String("--video-fullscreen-demo")) {
             opt.videoFullscreenDemo = true;
         } else if (arg == QLatin1String("--watchdog-demo")) {
@@ -576,6 +589,12 @@ int runGuiMode(const Options& opt, int argc, char** argv)
     }
     if (opt.videoPlayDemo) {
         QTimer::singleShot(3500, &window, [&window]() { window.demoPlayPause(); });
+    }
+    if (opt.videoPauseDemoMs > 0) {
+        // T11-9：验收"暂停 -> 缓冲继续预取到 60 s"。⚠ 必须由 **GUI 自己**暂停 ——
+        // 从 Agent 那侧塞一条 playing=false 会被 GUI 每 2 秒的进度回报覆盖回去。
+        const int ms = opt.videoPauseDemoMs;
+        QTimer::singleShot(ms, &window, [&window]() { window.demoPlayPause(); });
     }
     if (opt.videoFullscreenDemo) {
         QTimer::singleShot(2500, &window, [&window]() { window.demoFullscreen(); });
