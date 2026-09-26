@@ -7,6 +7,8 @@
 #  里面有什么（全部**有界**，见下面每条的上限）:
 #      thresholds  当前阈值（分类门槛 / 余量门槛 / 学习门槛 …）—— 标定给初值,
 #                  运行期由 `study_watch.py`（T13-3）一点点修正，改一次记一条理由
+#      ewma        阈值自适应用到的指数滑动平均（T13-3）—— **它也得落盘**,
+#                  否则 Agent 一重启就退回标定初值,"运行中不断优化"只优化到下次重启
 #      counters    数出来的事: 看了多少帧 / 判了几次 study / 提醒了几次 / 弹了几次桌面 …
 #      histogram   分数分布（每 0.05 一档）—— 自适应阈值要**看着分布**动，不看分布
 #                  就等于拍脑袋; 三类各一份: study / not_study / unknown
@@ -41,7 +43,7 @@ from collections import deque
 __all__ = [
     "StudyStats", "DEFAULT_STATS_FILE", "SCHEMA_VERSION",
     "HISTOGRAM_BUCKETS", "MAX_NOTES", "MAX_SAMPLES", "MAX_COUNTERS", "MAX_THRESHOLDS",
-    "CATEGORY_KEYS",
+    "MAX_EWMA", "CATEGORY_KEYS",
 ]
 
 _log = logging.getLogger(__name__)
@@ -64,6 +66,9 @@ MAX_COUNTERS = 64
 
 #: 阈值项上限（同上）。
 MAX_THRESHOLDS = 16
+
+#: 阈值自适应用的 EWMA 项上限（`study_watch.py` 在跑，只有几项）。
+MAX_EWMA = 16
 
 #: 直方图的三份: 真有标签的 study / not_study，以及"判不出来"的 unknown。
 #: ⚠ `unknown` **完全中性**（你定的）: 它只是被记下来，不参与任何"往哪边动"的判断。
@@ -115,6 +120,7 @@ class StudyStats(object):
     def __init__(self, path: Optional[str] = None, *, buckets: int = HISTOGRAM_BUCKETS,
                  max_notes: int = MAX_NOTES, max_samples: int = MAX_SAMPLES,
                  max_counters: int = MAX_COUNTERS, max_thresholds: int = MAX_THRESHOLDS,
+                 max_ewma: int = MAX_EWMA,
                  clock: Any = time.time, log: Optional[logging.Logger] = None) -> None:
         self.path = resolve_stats_file(path)
         self.buckets = max(1, int(buckets or HISTOGRAM_BUCKETS))
@@ -122,10 +128,12 @@ class StudyStats(object):
         self.max_samples = max(1, int(max_samples or MAX_SAMPLES))
         self.max_counters = max(1, int(max_counters or MAX_COUNTERS))
         self.max_thresholds = max(1, int(max_thresholds or MAX_THRESHOLDS))
+        self.max_ewma = max(1, int(max_ewma or MAX_EWMA))
         self.clock = clock
         self.log = log or _log
         self._counters: Dict[str, int] = {}
         self._thresholds: Dict[str, float] = {}
+        self._ewma: Dict[str, float] = {}
         self._histogram: Dict[str, List[int]] = {key: [0] * self.buckets for key in CATEGORY_KEYS}
         self._samples: Deque[Dict[str, Any]] = deque(maxlen=self.max_samples)
         self._notes: Deque[Dict[str, Any]] = deque(maxlen=self.max_notes)
@@ -171,6 +179,7 @@ class StudyStats(object):
             "version": SCHEMA_VERSION,
             "updated_at": self.updated_at,
             "thresholds": dict(self._thresholds),
+            "ewma": dict(self._ewma),
             "counters": dict(self._counters),
             "histogram": {key: list(value) for key, value in self._histogram.items()},
             "samples": [dict(item) for item in self._samples],
@@ -199,6 +208,14 @@ class StudyStats(object):
                     self._counters[str(name)] = int(value)
                 except (TypeError, ValueError):
                     self.log.warning("study_stats: 计数器 %r 不是整数（跳过）", name)
+        ewma = raw.get("ewma")
+        if isinstance(ewma, Mapping):
+            self._ewma = {}
+            for name, value in ewma.items():
+                try:
+                    self.set_ewma(str(name), value)
+                except ValueError as exc:
+                    self.log.warning("study_stats: EWMA %r 不合法（跳过）: %s", name, exc)
         histogram = raw.get("histogram")
         if isinstance(histogram, Mapping):
             for key in CATEGORY_KEYS:
@@ -251,7 +268,6 @@ class StudyStats(object):
             raise ValueError("阈值 %s 得是有限数, 收到 %r" % (key, value))
         self._thresholds[key] = number
         return number
-
     def update_thresholds(self, values: Mapping[str, Any]) -> Dict[str, float]:
         """批量设阈值（**先全验一遍再落**：半套阈值比旧值更危险）。"""
         checked: Dict[str, float] = {}
@@ -259,7 +275,10 @@ class StudyStats(object):
             key = str(name or "").strip()
             if not key:
                 raise ValueError("阈值得有个名字")
-            number = float(value)
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                raise ValueError("阈值 %s 得是数字, 收到 %r" % (key, value))
             if not math.isfinite(number):
                 raise ValueError("阈值 %s 得是有限数, 收到 %r" % (key, value))
             checked[key] = number
@@ -268,6 +287,51 @@ class StudyStats(object):
             raise ValueError("阈值项太多了（上限 %d）" % self.max_thresholds)
         self._thresholds.update(checked)
         return dict(self._thresholds)
+
+    # ------------------------------------------------------------ EWMA ---
+    def ewma_all(self) -> Dict[str, float]:
+        """阈值自适应用的指数滑动平均（`study_watch.py` 的"越用越准"就靠它）。"""
+        return dict(self._ewma)
+
+    def ewma(self, name: str, default: Optional[float] = None) -> Optional[float]:
+        value = self._ewma.get(str(name))
+        return default if value is None else float(value)
+
+    def set_ewma(self, name: str, value: Any) -> float:
+        """设一项 EWMA。@raise ValueError 名字是空的 / 值不是有限数 / 项数超上限。
+
+        @note 为什么 EWMA 要**落盘**: 它是"学到了什么"的那部分（阈值该往哪边挪）。
+              不落盘的话, Agent 一重启就退回到标定初值 —— 你定的"运行中不断优化"
+              就永远只优化到下一次重启。
+        """
+        key = str(name or "").strip()
+        if not key:
+            raise ValueError("EWMA 得有个名字")
+        if key not in self._ewma and len(self._ewma) >= self.max_ewma:
+            raise ValueError("EWMA 项太多了（上限 %d）—— 是不是名字拼错了？" % self.max_ewma)
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("EWMA %s 得是数字, 收到 %r" % (key, value))
+        if not math.isfinite(number):
+            raise ValueError("EWMA %s 得是有限数, 收到 %r" % (key, value))
+        self._ewma[key] = number
+        return number
+
+    def push_ewma(self, name: str, value: float, *, alpha: float = 0.1) -> float:
+        """把一个新观测揉进 EWMA: `new = (1-alpha)*old + alpha*value`（首样直接落）。
+
+        @return 揉完之后的值
+        """
+        try:
+            weight = min(1.0, max(0.0, float(alpha)))
+        except (TypeError, ValueError):
+            weight = 0.1
+        old = self._ewma.get(str(name))
+        number = float(value)
+        if old is None:
+            return self.set_ewma(name, number)
+        return self.set_ewma(name, (1.0 - weight) * float(old) + weight * number)
 
     # ------------------------------------------------------------ 计数 ---
     def counters(self) -> Dict[str, int]:
@@ -364,7 +428,7 @@ class StudyStats(object):
     def reset(self, *, keep_thresholds: bool = True) -> None:
         """清空统计。
 
-        @param keep_thresholds 默认**留下阈值** —— 你只是"想重新数一遍"，
+        @param keep_thresholds 默认**留下阈值和 EWMA** —— 你只是"想重新数一遍"，
                不该顺手把学到的阈值也扔了；真要全清（回到标定初值）再传 False。
         """
         self._counters = {}
@@ -373,10 +437,11 @@ class StudyStats(object):
         self._notes.clear()
         if not keep_thresholds:
             self._thresholds = {}
+            self._ewma = {}
 
     def snapshot(self) -> Dict[str, Any]:
         """给日志 / `assistant study status` 用的一眼可读状态。"""
-        return {"file": self.path, "thresholds": self.thresholds(),
+        return {"file": self.path, "thresholds": self.thresholds(), "ewma": self.ewma_all(),
                 "counters": self.counters(), "histogram": self.histogram(),
                 "samples": len(self._samples), "notes": len(self._notes),
                 "updated_at": self.updated_at}

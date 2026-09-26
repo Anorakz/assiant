@@ -26,7 +26,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agent.core import game_anchors                                     # noqa: E402
 from agent.core import study_anchors as sa                              # noqa: E402
 from agent.core import study_stats as ss                                # noqa: E402
-
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIM = 768        # 与 SigLIP 图像向量一致（锚点复用 wall_data 的 base64(float16) 编解码）
 
@@ -715,6 +714,58 @@ class TestStatsHistogram(TempDirCase):
         self.assertLess(low, high)
         self.assertAlmostEqual(high, 0.825, places=3)
         self.assertAlmostEqual(low, 0.125, places=3)
+
+
+class TestStatsEwma(TempDirCase):
+    """阈值自适应要用的 EWMA（T13-3）—— 它必须**落盘**、有界、坏值不炸。"""
+
+    def test_first_sample_lands_directly_and_later_ones_blend(self):
+        stats = self.make_stats()
+        self.assertIsNone(stats.ewma("score_study"))
+        self.assertEqual(stats.push_ewma("score_study", 0.9, alpha=0.1), 0.9)
+        self.assertAlmostEqual(stats.push_ewma("score_study", 0.8, alpha=0.1), 0.89, places=6)
+
+    def test_push_ewma_uses_the_configured_alpha(self):
+        stats = self.make_stats()
+        stats.push_ewma("x", 1.0, alpha=0.5)
+        self.assertAlmostEqual(stats.push_ewma("x", 0.0, alpha=0.5), 0.5, places=6)
+
+    def test_it_is_capped_and_validated(self):
+        stats = self.make_stats(max_ewma=1)
+        stats.set_ewma("a", 0.5)
+        with self.assertRaises(ValueError):
+            stats.set_ewma("b", 0.5)
+        for bad in (float("nan"), float("inf"), "abc", None):
+            with self.assertRaises(ValueError):
+                stats.set_ewma("a", bad)
+
+    def test_it_survives_a_round_trip(self):
+        stats = self.make_stats()
+        stats.set_ewma("score_study", 0.83)
+        stats.save()
+        other = self.make_stats()
+        other.load()
+        self.assertAlmostEqual(other.ewma("score_study"), 0.83, places=6)
+
+    def test_reset_keeps_it_with_the_thresholds_but_full_reset_drops_it(self):
+        stats = self.make_stats()
+        stats.set_threshold("confident_score", 0.8)
+        stats.set_ewma("score_study", 0.83)
+        stats.reset()
+        self.assertEqual(stats.ewma("score_study"), 0.83)
+        stats.reset(keep_thresholds=False)
+        self.assertIsNone(stats.ewma("score_study"))
+        self.assertEqual(stats.thresholds(), {})
+
+    def test_a_damaged_ewma_in_the_file_is_skipped(self):
+        with open(self.stats_file, "w", encoding="utf-8") as handle:
+            json.dump({"version": ss.SCHEMA_VERSION,
+                       "ewma": {"score_study": 0.8, "bad": "x"}}, handle)
+        stats = self.make_stats()
+        with self.assertLogs("agent.core.study_stats", level="WARNING"):
+            stats.load()
+        self.assertAlmostEqual(stats.ewma("score_study"), 0.8, places=6)
+        self.assertIsNone(stats.ewma("bad"))
 
 
 class TestStatsRingBuffers(TempDirCase):
