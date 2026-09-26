@@ -35,6 +35,7 @@ $tests = @(
     "tests\test_music_player.py",
     "tests\test_netease_cli.py",
     "tests\test_bilibili_api.py",
+    "tests\test_bilibili_queue.py",
     "tests\test_label_spec.py",
     "tests\test_merged_tools.py",
     "tests\test_tool_normalize.py",
