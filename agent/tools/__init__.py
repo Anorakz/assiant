@@ -39,10 +39,13 @@ _log = logging.getLogger(__name__)
 #:   每个工具内部用 `action` 分派具体动作（见各自模块头）。为什么合并:
 #:   工具清单占第一轮 prompt 的 90%（6 个工具 1699 token, 用户那句话只有 6 token）,
 #:   合并后模型要认的名字从 7 个降到 3 个, 上下文与"先想清楚叫哪个名字"一起省下来。
+#: ⚠ T11-5 加的第 4 个是 `bilibili`（**只在 GAME 可见**）: 它**不占 STUDY 的清单**
+#:   （STUDY 仍是那三个, 3562/3600 不变）—— 视频本来就是游戏模式主区在放的东西。
 TOOL_MODULES = (
     "back_to_desktop",
     "wallpaper",
     "music",
+    "bilibili",
 )
 
 

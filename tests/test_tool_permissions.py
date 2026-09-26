@@ -76,13 +76,17 @@ EXPECTED = {
     "next_wallpaper": {State.IDLE, State.STUDY},
     # 音乐的一切（排队列 / 清空 / 清单 / 搜 / 状态 / 标签 / 音量）
     "next_music": {State.IDLE, State.STUDY},
+    # T11-5: B 站搜视频 —— **只在 GAME**（视频就是游戏模式主区在放的东西;
+    # 放 IDLE/STUDY 会撞 STUDY 的 prompt 预算, 且语义上那是"看视频"不是"学习"）。
+    # 它只有"把对话里的关键词交给队列"这一件事: 清队列/切集只走 Agent, 不进工具。
+    "bilibili_search": {State.GAME},
 }
 
-#: T8-5b: 全部工具就是这三个（几次断言要一起数）
-TOOL_NAMES = ("back_to_desktop", "next_wallpaper", "next_music")
+#: 全部工具（几次断言要一起数）：T8-5b 三个 + T11-5 的 bilibili_search
+TOOL_NAMES = ("back_to_desktop", "next_wallpaper", "next_music", "bilibili_search")
 
 #: 对应的**模块**名（`TOOL_MODULES` 里写的是模块名, 不是工具名）
-TOOL_MODULE_NAMES = ("back_to_desktop", "wallpaper", "music")
+TOOL_MODULE_NAMES = ("back_to_desktop", "wallpaper", "music", "bilibili")
 
 #: 有**必填**参数的工具, 给一份合法参数（回桌面没有参数）。
 #: ⚠ 这不是"权限表"的一部分, 只是让"放行"那条断言真的走到 handler;
@@ -90,6 +94,7 @@ TOOL_MODULE_NAMES = ("back_to_desktop", "wallpaper", "music")
 _SAMPLE_ARGS = {
     "next_wallpaper": {"action": "next"},
     "next_music": {"action": "clear_queue"},
+    "bilibili_search": {"keyword": "跑个测试"},
 }
 
 #: 四个状态各自**应该**看到哪些工具（由 EXPECTED 推出来, 不手写第二份）
@@ -126,7 +131,7 @@ def go_to(machine, state):
 #: 计数替身里的每一格（每个工具一个入口 —— 一个工具跑一次, 恰好点亮一格）
 CALL_KEYS = ("desktop", "wallpaper", "tags", "music_list", "music_search", "music_state",
              "music_enqueue", "music_queue_clear", "music_queue_state", "music_tag",
-             "music_control")
+             "music_control", "bilibili")
 
 
 def _no_calls():
@@ -190,6 +195,10 @@ def make_router(machine=None):
         calls["music_control"] += 1
         return {"ok": True, "action": action}
 
+    def _bilibili_search(keyword=""):
+        calls["bilibili"] += 1
+        return {"ok": True, "count": 12, "index": 0, "keyword": keyword}
+
     machine = machine if machine is not None else StateMachine()
     router = ToolRouter(
         state_provider=machine,
@@ -199,7 +208,8 @@ def make_router(machine=None):
                   "music_state": _music_state, "music_enqueue": _music_enqueue,
                   "music_queue_clear": _music_queue_clear,
                   "music_queue_state": _music_queue_state,
-                  "music_tag": _music_tag, "music_control": _music_control},
+                  "music_tag": _music_tag, "music_control": _music_control,
+                  "bilibili_search": _bilibili_search},
     )
     for tool in build_tools(router):
         router.register(tool)
@@ -233,11 +243,11 @@ class TestTheTable(unittest.TestCase):
         self.assertEqual(len(TOOL_MODULES), len(table_names),
                          "TOOL_MODULES 与权限表的条数不一样: %s" % (TOOL_MODULES,))
         self.assertEqual(tuple(TOOL_MODULES), TOOL_MODULE_NAMES,
-                         "T8-5b: 只有三个工具模块, 且顺序稳定")
+                         "T11-5: 四个工具模块, 且顺序稳定")
         _machine, router, _calls = make_router()
         # `router.names()` 是**按名字排序**的（权限表也是按名字查）, 所以这里比集合
         self.assertEqual(set(router.names()), set(TOOL_NAMES),
-                         "模块名 -> 工具名: 三个模块正好造出三个工具")
+                         "模块名 -> 工具名: 四个模块正好造出四个工具")
 
     def test_each_tool_allows_exactly_the_states_in_the_table(self):
         _, router, _ = make_router()
@@ -272,13 +282,15 @@ class TestRouterFollowsTheTable(unittest.TestCase):
         self.assertEqual({t["name"] for t in router.list_tools()}, everything,
                          "list_tools() 不该随状态变 —— 按状态过滤是 allowed_tools() 的事")
 
-    def test_sleep_and_game_allow_nothing(self):
-        # 你 T4 拍的那两条: 睡眠与游戏模式一个工具都不给
+    def test_sleep_allows_nothing_and_game_only_allows_bilibili(self):
+        # T4 拍的那条: 睡眠模式一个工具都不给（最保守的一档）
         machine, router, _ = make_router()
-        for state in (State.SLEEP, State.GAME):
-            go_to(machine, state)
-            self.assertEqual(router.allowed_tools(), [],
-                             "%s 下不该有任何工具" % state.value)
+        go_to(machine, State.SLEEP)
+        self.assertEqual(router.allowed_tools(), [], "SLEEP 下不该有任何工具")
+        # T11-5 改的那条: GAME **只给 B 站那一个**（视频就是游戏模式主区在放的东西）
+        go_to(machine, State.GAME)
+        self.assertEqual({tool["name"] for tool in router.allowed_tools()},
+                         {"bilibili_search"}, "GAME 下只该有 bilibili_search")
 
 
 class TestForbiddenCombinationsAreReallyRefused(unittest.IsolatedAsyncioTestCase):
@@ -298,8 +310,8 @@ class TestForbiddenCombinationsAreReallyRefused(unittest.IsolatedAsyncioTestCase
                 self.assertEqual(calls, _no_calls(),
                                  "%s/%s 被拒时 handler 不该跑" % (state.value, name))
                 checked += 1
-        # 反空转: 真的验到了组合（SLEEP 3 + GAME 3 + IDLE 1 = 7）
-        self.assertEqual(checked, 7, "遍历到的禁止组合数不对: %d" % checked)
+        # 反空转: 真的验到了组合（SLEEP 4 + GAME 3 + IDLE 3 = 10）
+        self.assertEqual(checked, 10, "遍历到的禁止组合数不对: %d" % checked)
 
     async def test_every_allowed_pair_really_runs(self):
         checked = 0
@@ -315,8 +327,8 @@ class TestForbiddenCombinationsAreReallyRefused(unittest.IsolatedAsyncioTestCase
                 self.assertEqual(sum(calls.values()), 1,
                                  "%s/%s 放行时 handler 应当正好跑一次" % (state.value, name))
                 checked += 1
-        # 反空转: 真的验到了允许的组合（STUDY 3 + IDLE 2 = 5）
-        self.assertEqual(checked, 5, "遍历到的允许组合数不对: %d" % checked)
+        # 反空转: 真的验到了允许的组合（STUDY 3 + IDLE 2 + GAME 1 = 6）
+        self.assertEqual(checked, 6, "遍历到的允许组合数不对: %d" % checked)
 
 
 class TestModelOnlySeesAllowedTools(unittest.IsolatedAsyncioTestCase):
@@ -377,14 +389,21 @@ class TestModelOnlySeesAllowedTools(unittest.IsolatedAsyncioTestCase):
                          ["next_music", "next_wallpaper"],
                          "清单按名字排序, 顺序也要稳定; IDLE 只是少了 back_to_desktop")
 
-    async def test_sleep_and_game_advertise_no_tools_at_all(self):
-        for state in (State.SLEEP, State.GAME):
-            provider, backend = self._provider(state)
-            await provider.chat_with_tools("x", {})
-            request = backend.client.chat.completions.requests[0]
-            self.assertNotIn("tools", request,
-                             "%s 下不该给模型任何工具候选" % state.value)
-            self.assertNotIn("tool_choice", request)
+    async def test_sleep_advertises_no_tools_at_all(self):
+        provider, backend = self._provider(State.SLEEP)
+        await provider.chat_with_tools("x", {})
+        request = backend.client.chat.completions.requests[0]
+        self.assertNotIn("tools", request, "SLEEP 下不该给模型任何工具候选")
+        self.assertNotIn("tool_choice", request)
+
+    async def test_game_advertises_only_the_bilibili_tool(self):
+        # T11-5: GAME 以前一个工具都没有, 现在只给 B 站那一个（你定的 D6）
+        provider, backend = self._provider(State.GAME)
+        await provider.chat_with_tools("x", {})
+        request = backend.client.chat.completions.requests[0]
+        self.assertEqual([t["function"]["name"] for t in request["tools"]],
+                         ["bilibili_search"],
+                         "GAME 下模型只该看到 bilibili_search")
 
 
 class TestTheRevertedT6Rule(unittest.IsolatedAsyncioTestCase):

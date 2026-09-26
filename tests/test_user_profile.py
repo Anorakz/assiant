@@ -450,10 +450,12 @@ class TestItIsNotATool(unittest.IsolatedAsyncioTestCase):
       `RuntimeError: There is no current event loop`（这个坑板端当场抓到了）。
     """
 
-    def test_the_tool_modules_still_only_have_three(self):
+    def test_the_tool_modules_have_no_profile_tool(self):
         from agent.tools import TOOL_MODULES
 
-        self.assertEqual(TOOL_MODULES, ("back_to_desktop", "wallpaper", "music"))
+        # T11-5 起是四个模块（多了只在 GAME 可见的 bilibili）—— 但**没有**画像那一个
+        self.assertEqual(TOOL_MODULES,
+                         ("back_to_desktop", "wallpaper", "music", "bilibili"))
         self.assertNotIn("user_profile", TOOL_MODULES)
         self.assertNotIn("profile", TOOL_MODULES)
 

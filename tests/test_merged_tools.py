@@ -42,15 +42,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from agent.core.state_machine import State  # noqa: E402
 from agent.core.tool_router import ToolRouter  # noqa: E402
-from agent.tools import back_to_desktop, build_tools, music, wallpaper  # noqa: E402
+from agent.tools import back_to_desktop, bilibili, build_tools, music, wallpaper  # noqa: E402
 
 logging.disable(logging.CRITICAL)
 
-ALL_MODULES = (back_to_desktop, wallpaper, music)
+#: T11-5 起是四个模块（bilibili 只在 GAME 可见）
+ALL_MODULES = (back_to_desktop, wallpaper, music, bilibili)
 
 
 def fake_services(**overrides):
-    """三个工具要的全部入口的替身: 记下调用, 返回一个像 Runtime 那样的结果。"""
+    """四个工具要的全部入口的替身: 记下调用, 返回一个像 Runtime 那样的结果。"""
     calls = []
 
     def advance(step=1, match=None, sort=None):
@@ -95,6 +96,10 @@ def fake_services(**overrides):
         calls.append(("control", action, kwargs))
         return {"ok": True, "action": action}
 
+    def bilibili_search(keyword=""):
+        calls.append(("bilibili", keyword))
+        return {"ok": True, "count": 12, "index": 0, "keyword": keyword}
+
     services = {
         "input_sender": type("S", (), {"show_desktop": lambda self: None})(),
         "next_wallpaper": advance, "wallpaper_tags": tags,
@@ -102,6 +107,7 @@ def fake_services(**overrides):
         "music_state": music_state, "music_enqueue": music_enqueue,
         "music_queue_clear": music_queue_clear, "music_queue_state": music_queue_state,
         "music_tag": music_tag, "music_control": music_control,
+        "bilibili_search": bilibili_search,
     }
     services.update(overrides)
     return services, calls
@@ -137,21 +143,26 @@ class TestSkippedWithoutDependencies(unittest.TestCase):
         self.assertIsNone(back_to_desktop.build({}))
         self.assertIsNone(back_to_desktop.build({"input_sender": object()}))
 
-    def test_build_tools_installs_three_when_everything_is_wired(self):
+    def test_build_tools_installs_four_when_everything_is_wired(self):
         services, _calls = fake_services()
         router = ToolRouter(services=services)
         names = [t.name for t in build_tools(router)]
-        self.assertEqual(names, ["back_to_desktop", "next_wallpaper", "next_music"],
-                         "T8-5b: 模型只该看到三个工具, 顺序按模块清单稳定")
+        self.assertEqual(names, ["back_to_desktop", "next_wallpaper", "next_music",
+                                 "bilibili_search"],
+                         "T11-5: 多了一个只在 GAME 可见的 bilibili_search, 顺序按模块清单稳定")
 
-    def test_build_tools_without_music_still_installs_two(self):
+    def test_build_tools_without_music_still_installs_three(self):
         services, _calls = fake_services()
         for name in ("music_list", "music_search", "music_state", "music_enqueue",
                      "music_queue_clear", "music_queue_state", "music_tag", "music_control"):
             services[name] = None
         router = ToolRouter(services=services)
         names = [t.name for t in build_tools(router)]
-        self.assertEqual(names, ["back_to_desktop", "next_wallpaper"])
+        self.assertEqual(names, ["back_to_desktop", "next_wallpaper", "bilibili_search"])
+
+    def test_bilibili_needs_its_entry(self):
+        self.assertIsNone(bilibili.build({}))
+        self.assertIsNone(bilibili.build({"bilibili_search": "x"}))
 
 
 # ===========================================================================
@@ -163,6 +174,10 @@ class TestSchemaAndStates(unittest.TestCase):
             with self.subTest(tool=module.NAME):
                 tool = module.build(fake_services()[0])
                 self.assertTrue(tool.allowed_states)
+                if module is bilibili:
+                    self.assertEqual(tool.allowed_states, {State.GAME},
+                                     "T11-5 你定的: B 站工具**只在 GAME 可见**")
+                    continue
                 self.assertFalse(tool.allowed_states - {State.IDLE, State.STUDY},
                                  "只有壁纸/音乐是 IDLE+STUDY, 回桌面是 STUDY")
 
@@ -173,6 +188,9 @@ class TestSchemaAndStates(unittest.TestCase):
                 self.assertFalse(tool.schema["additionalProperties"])
                 if module is back_to_desktop:
                     self.assertEqual(tool.schema["properties"], {}, "回桌面没有参数")
+                elif module is bilibili:
+                    self.assertEqual(tool.schema["required"], ["keyword"],
+                                     "只干'把关键词交出去'这一件事 -> 只有 keyword")
                 else:
                     self.assertEqual(tool.schema["required"], ["action"],
                                      "action 必填 —— 干什么必须说出来")
@@ -480,14 +498,20 @@ def _tool_block(tools):
                       ensure_ascii=False)
 
 
-def advertised_tools():
-    """STUDY 下的完整工具清单（T8-5c-3 的守卫量它）。"""
+def advertised_tools(state=None):
+    """某个状态下的完整工具清单（T8-5c-3 的守卫量它; 不给状态 = STUDY）。
+
+    @note T11-5 起要**四个状态各量一遍**: `bilibili_search` 只在 GAME 出现,
+          所以 STUDY 的清单没变（仍 3562/3600）, 而 GAME 的清单里只有它一个。
+    """
     from agent.core.state_machine import StateMachine
     from agent.llm import provider as provider_module
     from agent.tools import build_tools as build
 
     machine = StateMachine()
-    machine.transition(State.STUDY, "budget")
+    target = State.STUDY if state is None else state
+    if target is not State.IDLE:                      # 初始就是 IDLE, 不用切
+        machine.transition(target, "budget")
     router = ToolRouter(state_provider=machine, services=fake_services()[0])
     for tool in build(router):
         router.register(tool)
@@ -505,8 +529,30 @@ class TestPromptBudget(unittest.TestCase):
             "确实要加工具就先量一遍板端 prompt 再改这个预算（记得写理由）"
             % (len(block), TOOL_BLOCK_BUDGET_CHARS))
 
+    def test_every_state_is_within_budget(self):
+        """T11-5: **四个状态各量一遍** —— 只在 GAME 出现的工具也不能把 GAME 的清单撑爆。"""
+        from agent.core.state_machine import State
+
+        seen = {}
+        for state in (State.SLEEP, State.IDLE, State.STUDY, State.GAME):
+            tools = advertised_tools(state)
+            seen[state] = [t["name"] for t in tools]
+            block = _tool_block(tools)
+            with self.subTest(state=state.value):
+                self.assertLessEqual(len(block), TOOL_BLOCK_BUDGET_CHARS,
+                                     "%s 下的清单 %d 字符超预算 %d（工具: %s）"
+                                     % (state.value, len(block), TOOL_BLOCK_BUDGET_CHARS,
+                                        "、".join(seen[state])))
+        self.assertEqual(seen[State.SLEEP], [])
+        self.assertEqual(seen[State.STUDY],
+                         ["back_to_desktop", "next_music", "next_wallpaper"])
+        self.assertEqual(seen[State.GAME], ["bilibili_search"],
+                         "GAME 下模型只该看到 B 站那一个工具")
+
     def test_every_tool_is_within_its_own_budget(self):
-        for tool in advertised_tools():
+        from agent.core.state_machine import State
+
+        for tool in advertised_tools() + advertised_tools(State.GAME):
             with self.subTest(tool=tool["name"]):
                 size = len(json.dumps(tool, ensure_ascii=False))
                 self.assertLessEqual(size, TOOL_BUDGET_CHARS,
