@@ -58,6 +58,7 @@ agent/
 │   ├── vision/                  # 视觉层
 │   │   ├── roi.py               # ROI 字符串解析 ("x,y,w,h")
 │   │   ├── siglip/              # 真 RKNN 双塔: 实时帧/离线打标签/图像检索 (T7-1；T13-1 删空接口)
+│   │   ├── frame_pipeline.py    # "整屏截图 → 板子看到的那一帧"（native 点采样原样复现，T13-4）
 │   │   ├── tag_vocab.py         # 三轴标签词表 (T7-2)
 │   │   ├── wall_data.py         # config/wall_data.jsonl 的唯一写者 (T7-2)
 │   │   ├── tagger.py            # 打标签 (板端 NPU, T7-2)
@@ -126,9 +127,10 @@ agent/
 │   ├── test_read_intents.py     # 只读问句直连: 该直连的/不该截胡的/拿不到数据 (T8-5c)
 │   ├── test_chat_memory.py      # 纯对话记忆: 只收对话源 / 有界 / **不碰盘** / 场景与时间 (T9-1)
 │   ├── test_user_profile.py     # 用户画像: 权重配方 / 负反馈清零(两层) / 心情解析 / 落盘 / 消费方 (T9-2/T10)
+│   ├── test_frame_pipeline.py   # "截图 → 板子看到的那一帧": native 点采样公式与 C++ 一致 (T13-4)
 │   ├── mocks/                   # mock_agent_native: native 替身
 │   ├── host/                    # 需要 numpy 的绑定层测试 (按需手动跑)
-│   └── board/                   # 板端真机验收脚本
+│   └── board/                   # 板端真机验收脚本（t13_study_calib.py = 学习判定标定, T13-4）
 ├── docs/                        # 文档 (入口: docs/architecture.md)
 │   ├── architecture.md           # 架构与拓扑、板端布局
 │   ├── deploy.md                # 部署与双机同步规则

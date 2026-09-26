@@ -36,6 +36,7 @@ tests/test_llm.py
 tests/test_llm_service.py
 tests/test_vision.py
 tests/test_siglip.py
+tests/test_frame_pipeline.py
 tests/test_read_intents.py
 tests/test_chat_memory.py
 tests/test_user_profile.py
