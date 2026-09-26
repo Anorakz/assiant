@@ -430,17 +430,17 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         handler = _make_command_handler(None)
         await handler(COMMAND_CHAT_INPUT, {"text": "喂"})   # 不该抛
 
-    async def test_unwired_commands_are_ignored_not_crashed(self):
+    async def test_unknown_commands_are_ignored_not_crashed(self):
         from agent.ipc import _make_command_handler
         from agent.io.chat_bus import ChatInputBus
 
         bus = ChatInputBus()
         handler = _make_command_handler(bus)
 
-        await handler(COMMAND_SWITCH_MODE, {"value": "STUDY"})     # 还没接线
+        await handler(COMMAND_SWITCH_MODE, {"value": "STUDY"})     # 没给 runtime, 切不动
         await handler(COMMAND_SWITCH_MODE, {"value": "banana"})    # 非法模式
         await handler(COMMAND_SWITCH_MODE, {})
-        await handler(COMMAND_NEXT_BILIBILI, {})                  # 未接线的命令
+        await handler(COMMAND_NEXT_BILIBILI, {})                  # 给了也没有 bilibili_control
         await handler("next_wallpaper", {})                       # T7-3 已删除的命令
         await handler("something_new", {})
 
@@ -620,23 +620,25 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
 
     # ---- Phase 6 D7: 未接线的命令要回一句说明 (GUI 上别点了没反应) ----
 
-    async def test_unwired_commands_reply_with_a_note(self):
-        from agent.ipc import _make_command_handler
+    async def test_unwired_table_is_empty_and_no_command_falls_into_it(self):
+        """⚠ T11-6 起 `UNWIRED_COMMAND_NOTES` **空了** —— 最后一个 `next_bilibili` 也接上了。
 
+        这条盯的是"表空了"这件事本身: 表里还有东西就说明有命令没接下游（那就该有测试覆盖它）;
+        表空着时, 任何命令都不该再收到"还没接入"这种说明。
+        """
+        from agent.ipc import UNWIRED_COMMAND_NOTES, _make_command_handler
+
+        self.assertEqual(UNWIRED_COMMAND_NOTES, {}, "还有命令没接下游 —— 补上或写清楚")
         pushed = []
         handler = _make_command_handler(
             None, runtime=None, push=lambda topic, data: pushed.append((topic, data))
         )
-
-        # ⚠ T7-3 起这张表里只剩 next_bilibili: next_wallpaper 命令连同 GUI 的
-        #   「下一张」按钮一起删掉了（换壁纸只走对话）。
+        # `next_bilibili` 现在有处理分支（runtime 没有入口时回的是"B 站还没开"那句, 不是"没接入"）
         await handler(COMMAND_NEXT_BILIBILI, {})
-
-        self.assertEqual(len(pushed), 1, "未接线的命令要回一句")
-        topic, data = pushed[0]
-        self.assertEqual(topic, TOPIC_LLM, "走 llm 通道 (GUI 显示成助手气泡)")
-        self.assertIn("接入", data["text"], "说明要讲清没接入")
-        self.assertIn("Phase 7", data["text"])
+        self.assertEqual(len(pushed), 1)
+        self.assertEqual(pushed[0][0], TOPIC_LLM)
+        self.assertIn("bilibili", pushed[0][1]["text"])
+        self.assertNotIn("还没接入", pushed[0][1]["text"])
 
     async def test_the_deleted_wallpaper_command_gets_no_reply_at_all(self):
         # T7-3: 这条命令**不存在**了 —— 老客户端发过来只记一条 warning,
@@ -743,14 +745,14 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
             reader, writer = await asyncio.open_unix_connection(server.path)
             await _wait_until(lambda: server.client_count == 1, what="GUI 连上")
 
-            # ⚠ T3 起换成了 next_bilibili: next_wallpaper 已经接上下游,
-            #   走的是"真的换一张"那条路（见 tests/test_wallpaper.py）。
+            # ⚠ T11-6 起 next_bilibili 也接上下游了（走"队列里下一集并开始放"那条路）。
+            #   这里没有 runtime, 所以回的是"B 站还没开"那句 —— 反正**不是**"还没接入"。
             writer.write(encode_command(COMMAND_NEXT_BILIBILI, {}))
             await writer.drain()
 
             topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
             self.assertEqual(topic, TOPIC_LLM)
-            self.assertIn("接入", data["text"])
+            self.assertIn("bilibili", data["text"])
         finally:
             if writer is not None:
                 writer.close()
@@ -1045,12 +1047,13 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         try:
             reader, writer = await asyncio.open_unix_connection(server.path)
             await _wait_until(lambda: server.client_count == 1, what="GUI 连上")
-            # 连接仍然活着: 发一条未接线命令, 该收到那句"还没接入"的说明
+            # 连接仍然活着: 发一条 B 站命令 —— 这个假 runtime 没有 bilibili_control,
+            # 所以该收到那句"B 站视频还没开"的说明（**说明本身就是连接还活着的证据**）。
             writer.write(encode_command(COMMAND_NEXT_BILIBILI, {}))
             await writer.drain()
             topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
             self.assertEqual(topic, TOPIC_LLM, "后续命令照常处理")
-            self.assertIn("接入", data["text"])
+            self.assertIn("B 站视频还没开", data["text"])
         finally:
             if writer is not None:
                 writer.close()

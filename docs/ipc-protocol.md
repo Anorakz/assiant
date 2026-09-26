@@ -138,6 +138,21 @@ GUI 收到后按 `topic` 分发。**不认识的 topic 忽略**。
 > 从来没换过任何一张时，补推会**顺手选第一张**当初始画面。
 | `music` | `title` | string | 当前曲目标题 |
 | | `playing` | bool | 是否正在播放 |
+| `bilibili` | `queue` | array | **B 站预览队列**（T11-6）：每条 `{bvid,title,author,duration_s,play,cover,url}`。窗口 = **3×预览栏格数**（见 `bilibili_viewport`）；**只存地址, 不下载视频** |
+| | `index` | number | 当前第几条（在 `queue` 里的下标） |
+| | `current` | object｜null | 当前那条（字段同上）；队列空时 `null` |
+| | `keyword` / `source` | string | 队列是谁驱动的：`keyword` 是那个词, `source` 是 `dialogue`（对话指定）或 `screen`（画面认出的游戏） |
+| | `viewport` / `target` | number | 预览栏格数 / 目标条数（= 3×格数, 上限 `queue.max`） |
+| | `stream` | string | **要播的本地流路径**（板端 FIFO, 例如 `/tmp/bilibili-BV1xx.ts`）。⚠ **不是 URL** —— 板端 `souphttpsrc` 是坏的（T11-0 实测），走的是"ffmpeg 合流 → MPEG-TS → FIFO → 播放器读本地路径" |
+| | `ready` | bool | 缓冲够不够（够了才有 `stream`）；`buffer` 里还有 `buffered_s/written_s/cap_s/state/restarts` 等实情 |
+| | `quality` | string | 这一条的实际清晰度（`"360P"`/`"720P"`/…）。⚠ 清晰度的**提醒只走聊天气泡**（`llm`），GUI 不显示它 |
+| | `why` / `note` | string | 队列/缓冲如实说的话（认不出、没搜到、只凑到 N 条…），可直接显示 |
+
+> ⚠ `bilibili` 也是**变化时推**：搜到一批、走了一格、缓冲就绪、清空时各推一次；
+> **新客户端连上时补推当前队列**（`push_current_bilibili`）。
+> ⚠ **队列内容只有两个来源**：**对话关键词**（工具 `bilibili_search`）与**画面认出的游戏**
+> （Agent 在 GAME 模式里的循环）。**播放只由 GUI 操作触发** —— 不点预览图/不按下一集就不播、
+> 也不提前缓冲（你定的"等 GUI 操作才开始播放"）。
 | `schedule` | `kind` | string | `"state"`（应答 `query_schedule` 的快照）或 `"fired"`（刚刚真的触发了一条） |
 | | `now` | string | **仅 `kind:"state"`**：生成快照的本地时刻 `YYYY-MM-DDTHH:MM:SS` |
 | | `limit` | number | **仅 `kind:"state"`**：这份快照最多带多少条事实（当前实现 50） |
@@ -197,18 +212,34 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
 | --- | --- | --- | --- |
 | `switch_mode` | `value` | string | 目标状态，取值同 `MODES`（`SLEEP`/`IDLE`/`STUDY`/`GAME`）。⚠ **键是 `value`，不是 `mode`**：`mode` 是 §3 里 `status` **推送**的字段，方向不同，别混 |
 | `chat_input` | `text` | string | 用户在 GUI 里敲的一行输入，等价于终端输入 |
-| `next_bilibili` | — | — | 播放下一集 B 站视频；`payload` 必须是 `{}` |
+| `next_bilibili` | — | — | **下一集**（T11-6 起真的接上了）：队列里往后一格并**开始放那一集**。`payload` 必须是 `{}` |
+| `prev_bilibili` | — | — | **上一集**：队列里往前一格并开始放（走到头就回一条 `llm` 说明"前面没有了"） |
+| `bilibili_pick` | `index` | number | **挑了预览栏的第几条**（用户点了缩略图）→ 开始放那一条。⚠ **只有它（和上面两条）会让视频开始播**（你定的"等 GUI 操作才开始播放, 不提前缓存"） |
+| `bilibili_viewport` | `visible` | number | GUI 的预览栏**能放下几个缩略图** → 队列目标 = 3×它（夹在 1..20）。**不播** |
+| `video_state` | `position_s` | number | 当前播放位置（秒）—— GUI 回报的**真实进度** |
+| | `duration_s` | number | 时长（秒；流式播放时播放器可能给 0, 以 Agent 从 B 站拿到的为准） |
+| | `playing` | bool | 在放 / 暂停 → Agent 据此调整预取（**暂停时窗口从 15 s 放到 60 s**） |
+| | `eof` | bool | **这一集放完了**（唯一的"该下一集了"真值）→ Agent 自动下一集；到队尾就安静停下 |
 | `query_schedule` | — | — | 问一句"你最近触发过哪些日程"；`payload` 必须是 `{}`。应答是随后那条 §3 的 `schedule`（`kind:"state"`） |
 | `music_play_pause` | — | — | 暂停/继续**当前这首**（T8-4）；PC 上没在放时**从环形队列当前位置起播**（T8-5b）。应答是随后那条 `music` 推送（§3） |
 | `music_next` / `music_prev` | — | — | 在**环形队列**里前后走一格 —— 到尾回第一首、到首回最后一首（T8-5b）；队列空时回一条 `llm` 说明 |
 | `music_stop` | — | — | 停止播放（**不改**本地库） |
 
-> ⚠ **分工（T8-5b）**：**队列内容**由**对话**决定（工具 `next_music` 的 `enqueue` / `clear_queue`），
+> ⚠ **音乐那条线的分工（T8-5b）**：**队列内容**由**对话**决定（工具 `next_music` 的
+> `enqueue` / `clear_queue`），
 > **播放控制**由**四个按钮**决定（`agent/core/music.py::MusicPlayer.toggle()/step()`）。
 > 队列是**环形**的，曲终**自动下一首**；队列只在 Agent 内部用，**不推给 GUI**。
 > 工具侧因此**没有** play/pause/next/prev（只有 `volume`）。见 [`music.md`](music.md) §4.2。
 > 这三个按钮失败时（音乐没开 / PC 上没在放 / 队列是空的）都会回一条 `llm` 说明 ——
 > 不假装换了一首。
+
+> ⚠ **B 站那条线的分工（T11-6）**：**队列内容**只有两个来源 —— **对话关键词**
+> （工具 `bilibili_search`）与**画面认出的游戏**（Agent 在 GAME 模式里的循环, 与 LLM 无关）；
+> **播放/换集**由 GUI 的三个动作决定（`next_bilibili` / `prev_bilibili` / `bilibili_pick`）。
+> 也就是说"清队列/切集"这类动作**只走 Agent, 不进 LLM 工具**（你定的）。
+> ⚠ 队列**只在 GAME 模式里有意义**（视频就是游戏模式主区在放的东西）; 那个工具也只在 GAME 可见。
+> ⚠ 队列是**窗口**不是全集：目标 = 3×预览栏格数, 往哪边走就往哪边补页
+> （见 [`../agent/core/bilibili.py`](../agent/core/bilibili.py) 模块头）。
 
 注意：
 
@@ -221,9 +252,11 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
   "按文件名翻下一张"，而标签化之后"换成什么样"只有自然语言说得清。GUI 侧同步删掉了
   主区那个「下一张」按钮与 `--next-wallpaper-demo`。老客户端真发这条命令过来时，
   Agent 按"不认识的 action"处理：**记 warning、不回话**（不会假装换好了）。
-- **`next_bilibili` 还没接下游**（属 Phase 7）：Agent 收到后会回推一条
-  `llm{"text": "…还没接入（Phase 7）…"}` —— 让"点了"有反馈，而不是毫无动静
-  （文案见 `agent/ipc/__init__.py` 的 `UNWIRED_COMMAND_NOTES`）。
+- ⚠ **`next_bilibili` 自 T11-6 起接上下游了**：它会真的换到下一集并开始放。
+  Phase 6 那张"还没接线的命令"表（`UNWIRED_COMMAND_NOTES`）**现在是空的** ——
+  也就是说没有任何命令会再回"还没接入"。表留着是给"以后再出现没接下游的命令"用的。
+  未知命令（老客户端发来的）仍按"不认识的 action"处理：**记 warning、不回话**。
+  失败（队列是空的 / B 站没开 / 这条放不了）会回一条 `llm` 说明 —— 点了没反应最难查。
 - `switch_mode` 的合法性由 Agent 侧状态机判定：非法转换（例如 `STUDY → GAME`）
   **不会**报协议错，而是被拒绝并回一条 `status` 说明当前真实状态。
   GUI 应当以随后收到的 `status` 为准，不要乐观地自行切换显示。

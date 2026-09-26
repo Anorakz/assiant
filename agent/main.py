@@ -347,6 +347,24 @@ class Runtime:
         #: 上次推过的 (title, playing)，用来决定"这次要不要推"（进度每次都推）
         self._last_music_push: Tuple[str, bool] = ("", False)
 
+        #: B 站视频（T11-6）: 队列 + 游戏观察器 + 缓冲代理。
+        #: **None = 没开**（`bilibili.enabled=false`）—— 与音乐同一条口径。
+        #: ⚠ 队列内容只有两个来源: **对话关键词**（工具 `bilibili_search`）与
+        #:   **画面认出的游戏**（`_game_watch` 在 GAME 模式里的循环）; 播放只由 **GUI 操作**触发
+        #:   （你定的"等 GUI 操作才开始播放, 不提前缓存"）。
+        self.bilibili: Optional[Any] = None
+        self._bilibili_api: Optional[Any] = None
+        self._bilibili_anchors: Optional[Any] = None
+        self._game_watch: Optional[Any] = None
+        self._buffer: Optional[Any] = None            # 当前那条的缓冲代理（换条就换一个）
+        self._bilibili_cfg: Dict[str, Any] = {}
+        self._bilibili_task: Optional[asyncio.Task] = None
+        self._last_bilibili_game: str = ""             # 上次认出并搜过的游戏（只在**变了**时重搜）
+        self._bilibili_stream: str = ""                # 现在这一条的本地 FIFO 路径
+        self._bilibili_quality: str = ""               # 这一条的清晰度（给人看的名字）
+        #: bilibili 推送钩子（与 on_music 同款"有就接"）—— IPC 层把它接到 topic `bilibili`
+        self.on_bilibili: Optional[Callable[[Dict[str, Any]], Any]] = None
+
         self._components: List[_Component] = []
         self._terminal_task: Optional[asyncio.Task] = None
         self.failures: List[Tuple[str, str]] = []
@@ -376,6 +394,9 @@ class Runtime:
         # ⚠ 音乐在工具之前: `agent/tools/` 里的音乐四件套要**建的时候**就知道
         #   "音乐开没开"（没开就整个不装）—— 所以 `self.music` 必须先就位。
         "_start_music",
+        # ⚠ B 站也在工具**之前**: `bilibili_search` 那条入口要建工具时就位
+        #   （没开就整个不装 —— 与音乐同一条口径）。
+        "_start_bilibili",
         "_start_state_and_tools",
         "_start_llm_service",
         "_start_llm",
@@ -618,6 +639,9 @@ class Runtime:
                     "music_queue_state": self.music_queue_state if self.music else None,
                     "music_tag": self.music_tag if self.music else None,
                     "music_control": self.music_control if self.music else None,
+                    # B 站（T11-5/T11-6）: 工具只会"把关键词交给队列"这一件事。
+                    # ⚠ **没开就是 None** —— 那个工具会自己跳过（与音乐同款）。
+                    "bilibili_search": self.bilibili_search if self.bilibili else None,
                 },
             )
             registered = self._register_tools(self.tools)
@@ -1105,7 +1129,71 @@ class Runtime:
 
         await self._guarded(_Component("music", _start, _stop), fatal=False)
 
-    # ---- 3.7) 用户画像 (T9-3) ----
+    # ---- 3.7) B 站视频 (T11-6) ----
+    async def _start_bilibili(self) -> None:
+        """按配置接上 B 站视频: 网络层 + 队列 + 锚点库 + 游戏观察器 + GAME 里的观察循环。
+
+        ⚠ **工具只有一条入口**（`bilibili_search`: 把对话关键词交给队列）——
+          队列的另一个来源是**画面认出的游戏**（本方法起的循环）, 播放**只由 GUI 操作**触发。
+        @note 关掉时什么都不做（`bilibili.enabled=false`）—— 那个工具也会自己跳过。
+        """
+        from agent.core.bilibili import BilibiliQueue
+        from agent.core.game_anchors import GameAnchors
+        from agent.core.game_watch import GameWatcher
+        from agent.net.bilibili_api import BilibiliApi
+
+        async def _start() -> None:
+            section = self._cfg("bilibili", default={}) or {}
+            api = BilibiliApi.from_config(section, log=self.log)
+            if api is None:
+                self.log.info("bilibili: 没开（config 的 bilibili.enabled）—— 工具不装")
+                return
+            self._bilibili_cfg = dict(section)
+            queue_cfg = section.get("queue") or {}
+            viewport = int(queue_cfg.get("viewport_fallback", 6) or 6)
+            self.bilibili = BilibiliQueue(
+                api, viewport=viewport, queue_max=int(queue_cfg.get("max", 60) or 60),
+                log=self.log)
+            self._bilibili_api = api
+            watch = section.get("game_watch") or {}
+            self._bilibili_anchors = GameAnchors(watch.get("anchor_file"), log=self.log)
+            try:
+                self._bilibili_anchors.load()
+            except Exception as exc:                      # noqa: BLE001 - 锚点坏了不该拦住看视频
+                self.log.warning("bilibili: 锚点库读不了（当成空的）: %s", exc)
+            probe = None
+            if bool(watch.get("enabled", True)):
+                from agent.net.pc_probe import PcProbe
+
+                probe = PcProbe.from_config(watch, music=self._cfg("music", default={}),
+                                            log=self.log)
+            buffer_cfg = section.get("buffer") or {}
+            self._game_watch = GameWatcher(
+                self._bilibili_anchors, probe=probe,
+                interval_s=float(watch.get("interval_s", 60) or 60),
+                confident_score=float(watch.get("confident_score", 0.82) or 0.82),
+                confident_margin=float(watch.get("confident_margin", 0.05) or 0.05),
+                mem_watermark_mb=float(buffer_cfg.get("mem_watermark_mb", 400) or 400),
+                log=self.log)
+            self._bilibili_task = asyncio.ensure_future(self._game_watch_loop())
+            self.log.info(
+                "bilibili: 就绪（预览栏兜底 %d 格 -> 目标 %d 条; 观察器 %s, 锚点 %d 个/%s）",
+                viewport, self.bilibili.target(),
+                "开" if probe is not None else "关（只看画面）",
+                len(self._bilibili_anchors),
+                "、".join(self._bilibili_anchors.games()[:4]) or "还没有")
+
+        async def _stop() -> None:
+            task, self._bilibili_task = self._bilibili_task, None
+            if task is not None:
+                task.cancel()
+            self._stop_buffer()
+            if self._game_watch is not None:
+                self._game_watch.unload()
+
+        await self._guarded(_Component("bilibili", _start, _stop), fatal=False)
+
+    # ---- 3.8) 用户画像 (T9-3) ----
     async def _start_profile(self) -> None:
         """按配置接上"用户画像"（T9-2 的内核 + T9-3 的触发）。
 
@@ -1570,6 +1658,280 @@ class Runtime:
         except MusicError as exc:
             return {"ok": False, "error": str(exc), "tell_user": str(exc)}
         return {"ok": True, "track_id": record.get("id"), "tags": record.get("tags")}
+
+    # ---- B 站视频（T11-6: 队列 / 观察器 / 缓冲; GUI 命令与工具都走这里）----
+    def bilibili_state(self) -> Dict[str, Any]:
+        """队列 + 当前那条 + 缓冲现状（**只读**, 给工具/日志/GUI 用）。"""
+        if self.bilibili is None:
+            return {"ok": False, "error": "B 站视频没开（config.yaml 的 bilibili.enabled）"}
+        out = dict(self.bilibili.state())
+        out["ok"] = True
+        out["stream"] = self._bilibili_stream
+        out["quality"] = self._bilibili_quality
+        buffer = self._buffer.snapshot() if self._buffer is not None else None
+        out["buffer"] = buffer
+        out["ready"] = bool(buffer and buffer.get("ready"))
+        return out
+
+    def bilibili_search(self, keyword: str) -> Dict[str, Any]:
+        """**对话那条路**（工具 `bilibili_search` 的入口）: 关键词 -> 重建队列并推给 GUI。
+
+        @return 给模型看的形状: {"ok","count","index","current","keyword","why"}
+        @note 这里**只搜不播** —— 播不播由用户在预览栏里点（你定的）。
+        """
+        if self.bilibili is None:
+            return {"ok": False, "tell_user": "B 站视频还没开：在 config.yaml 的 bilibili 段"
+                                             "里把 enabled 打开。",
+                    "error": "bilibili 没开"}
+        result = self.bilibili.search(keyword, source="dialogue")
+        self._push_bilibili()
+        current = result.get("current") or {}
+        self.log.info("bilibili: 搜「%s」-> %s（%d 条, 目标 %d）",
+                      keyword, "成功" if result["ok"] else "失败", result["count"],
+                      self.bilibili.target())
+        out = {"ok": bool(result["ok"]), "count": result["count"],
+               "index": result["index"], "keyword": result["keyword"],
+               "why": result.get("why") or "",
+               "current": {"bvid": current.get("bvid"), "title": current.get("title"),
+                           "author": current.get("author")} if current else None}
+        if not result["ok"]:
+            out["error"] = result.get("why") or "搜索失败"
+            out["tell_user"] = ("没搜到能用的视频：%s" % (result.get("why") or "")
+                                ) if result.get("why") else "搜索失败了，过一会再试"
+        return out
+
+    def bilibili_control(self, action: str, payload: Optional[Dict[str, Any]] = None
+                         ) -> Dict[str, Any]:
+        """**GUI 那条路**（IPC 命令的入口）—— 只有它会让视频**真的开始放**。
+
+        @param action next / prev / pick / viewport / video_state
+        @return {"ok", "tell_user"?} —— ok=False 时 tell_user 是给用户的一句话
+        @note `viewport` / `video_state` **不播**（前者是格数上报, 后者是进度回报）。
+        """
+        if self.bilibili is None:
+            return {"ok": False, "error": "bilibili 没开",
+                    "tell_user": "B 站视频还没开：在 config.yaml 的 bilibili 段里把 enabled 打开。"}
+        data = dict(payload or {})
+        if action == "viewport":
+            visible = self.bilibili.set_viewport(data.get("visible"))
+            self._push_bilibili()
+            return {"ok": True, "viewport": visible, "target": self.bilibili.target()}
+        if action == "video_state":
+            return self._bilibili_video_state(data)
+        if action in ("next", "prev"):
+            moved = self.bilibili.move(1 if action == "next" else -1)
+            if not moved["ok"]:
+                return {"ok": False, "error": moved["why"], "tell_user": moved["why"]}
+            return self._bilibili_play()
+        if action == "pick":
+            picked = self.bilibili.pick(data.get("index"))
+            if not picked["ok"]:
+                return {"ok": False, "error": picked["why"], "tell_user": picked["why"]}
+            return self._bilibili_play()
+        if action == "clear":
+            cleared = self.bilibili.clear()
+            self._stop_buffer()
+            self._push_bilibili()
+            return {"ok": True, "why": cleared["why"]}
+        return {"ok": False, "error": "不认识的 B 站动作 %r" % action}
+
+    def _bilibili_play(self) -> Dict[str, Any]:
+        """给当前那条**取流 + 起缓冲**（只有 GUI 操作才会调到它）。
+
+        @note **不阻塞事件循环**: `start()` 只是起 ffmpeg 与两个线程, "攒够 15 s"
+          在后台线程里等（`on_ready` 回调把 FIFO 路径推给 GUI）。
+        """
+        if self.bilibili is None or self._bilibili_api is None:
+            return {"ok": False, "error": "bilibili 没开"}
+        item = self.bilibili.current()
+        if not item:
+            return {"ok": False, "tell_user": "队列是空的 —— 在 GAME 模式里跟我说一个视频名，"
+                                             "或者点一下预览图"}
+        from agent.core.bilibili_buffer import BilibiliBuffer, BufferError
+
+        self._stop_buffer()
+        buffer_cfg = self._bilibili_cfg.get("buffer") or {}
+        buffer = BilibiliBuffer(self._bilibili_api,
+                                fifo_dir=buffer_cfg.get("dir"),
+                                initial_s=buffer_cfg.get("initial_s", 15),
+                                max_s=buffer_cfg.get("max_s", 60),
+                                mem_watermark_mb=buffer_cfg.get("mem_watermark_mb", 400),
+                                log=self.log)
+        buffer.on_ready = self._on_bilibili_ready
+        try:
+            started = buffer.start(item)
+        except BufferError as exc:
+            self.log.warning("bilibili: 起不了缓冲: %s", exc)
+            return {"ok": False, "error": str(exc), "tell_user": "这条放不了：%s" % exc}
+        self._buffer = buffer
+        self._bilibili_stream = ""
+        self._bilibili_quality = str((started or {}).get("quality") or "")
+        # 后台等门槛（**不堵事件循环**）: 到点了 on_ready 会推路径; 等不到就按现有缓冲起播
+        threading.Thread(target=self._wait_bilibili_ready, args=(buffer,),
+                         name="bilibili-gate", daemon=True).start()
+        self._push_bilibili()
+        self.log.info("bilibili: 开始缓冲 %s（%s, 门槛 %.0f s）", item.get("bvid"),
+                      started.get("state"), buffer.initial_s)
+        return {"ok": True, "bvid": item.get("bvid"), "title": item.get("title"),
+                "state": started.get("state")}
+
+    def _wait_bilibili_ready(self, buffer: Any) -> None:
+        """等"攒够 15 s"（后台线程）; 等不到就**按现有缓冲起播**并如实说一句。"""
+        try:
+            if buffer.wait_ready(buffer.initial_s * 2 + 5.0):
+                return
+            if self._buffer is not buffer:
+                return                                    # 已经换条/停了
+            buffer.open_gate()
+            self._say("B 站这条网络有点慢：没攒够 %.0f 秒就先起播了（缓冲 %.1f 秒）"
+                      % (buffer.initial_s, buffer.buffered_s()))
+        except Exception as exc:                          # noqa: BLE001 - 后台线程不能炸
+            self.log.warning("bilibili: 等门槛时出错（忽略）: %r", exc)
+
+    def _on_bilibili_ready(self, path: str) -> None:
+        """缓冲就绪（**从缓冲线程调进来**）-> 把 FIFO 路径推给 GUI, 并提醒清晰度。
+
+        @note 这条路只在**用户操作之后**才会发生（你定的"等 GUI 操作才开始播放"）。
+        @note 清晰度提示**只走聊天气泡**（你定的"清晰度只使用 LLM 对话框, 不更新 GUI"）。
+        """
+        if self._buffer is None or self._buffer.path != path:
+            return
+        self._bilibili_stream = path
+        snapshot = self._buffer.snapshot()
+        self._bilibili_quality = str(snapshot.get("quality") or self._bilibili_quality)
+        self._push_bilibili()
+        self.log.info("bilibili: 可以播了 %s（%s, 缓冲 %.1f s）", path,
+                      self._bilibili_quality or "清晰度未知", snapshot.get("buffered_s") or 0)
+        note = self._bilibili_quality_note()
+        if note:
+            self._say(note)
+
+    def _bilibili_quality_note(self) -> str:
+        """这一条清晰度的**如实提醒**（要说的才说, 1080P 及以上不念叨）。"""
+        if self._buffer is None:
+            return ""
+        stream = getattr(self._buffer, "stream", {}) or {}
+        quality = int(stream.get("quality") or 0)
+        if quality >= 80:
+            return ""
+        label = str(stream.get("quality_label") or "未知清晰度")
+        cookie = bool(self._bilibili_api is not None and self._bilibili_api.cookie_present)
+        if not cookie:
+            return ("（没配 config/bilibili_cookie.json，这条只给到 %s；要高清得在板端配上 "
+                    "SESSDATA）" % label)
+        return "（这条 B 站只给到 %s，和登不登录无关）" % label
+
+    def _bilibili_video_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """GUI 回报的真实进度（**不播**）: 暂停时就多预取, `eof` 时自动下一集。"""
+        if self._buffer is not None:
+            self._buffer.set_playing(bool(payload.get("playing", True)))
+        if not payload.get("eof"):
+            return {"ok": True, "position_s": payload.get("position_s")}
+        moved = self.bilibili.move(1) if self.bilibili is not None else {"ok": False,
+                                                                       "why": "队列是空的"}
+        if not moved.get("ok"):
+            self._stop_buffer()
+            self._bilibili_stream = ""
+            self._push_bilibili()
+            self.log.info("bilibili: 放完了，后面没有了（%s）", moved.get("why"))
+            return {"ok": True, "eof": True, "note": moved.get("why") or ""}
+        self.log.info("bilibili: 放完了 -> 自动下一集 %s",
+                      (self.bilibili.current() or {}).get("bvid"))
+        played = self._bilibili_play()
+        played["eof"] = True
+        return played
+
+    def _stop_buffer(self) -> None:
+        """停掉当前缓冲（换条/清空/退出时都走它; 幂等）。"""
+        buffer, self._buffer = self._buffer, None
+        self._bilibili_stream = ""
+        if buffer is None:
+            return
+        try:
+            buffer.stop()
+        except Exception as exc:                          # noqa: BLE001
+            self.log.warning("bilibili: 停缓冲时出错（忽略）: %r", exc)
+
+    def push_current_bilibili(self) -> bool:
+        """GUI 刚连上时补推一次队列（与 `push_current_music` 同款）。"""
+        if self.bilibili is None:
+            return False
+        return self._push_bilibili()
+
+    def _push_bilibili(self, **extra: Any) -> bool:
+        """把队列现状推给 GUI（topic `bilibili` 的负载只在这一处构造）。"""
+        if self.on_bilibili is None:
+            return False
+        payload = self.bilibili_state()
+        payload.update(extra)
+        try:
+            self.on_bilibili(payload)
+            return True
+        except Exception as exc:                          # noqa: BLE001 - 推送失败不该影响队列
+            self.log.warning("bilibili: 推送失败 (已忽略): %r", exc)
+            return False
+
+    def _say(self, text: str) -> None:
+        """往对话区说一句（走 `on_reply`; 没有 IPC 时就只记日志）。"""
+        if not text:
+            return
+        if self.on_reply is None:
+            self.log.info("bilibili: %s", text)
+            return
+        try:
+            self.on_reply(text)
+        except Exception as exc:                          # noqa: BLE001
+            self.log.warning("bilibili: 气泡推不出去 (已忽略): %r", exc)
+
+    async def _game_watch_loop(self) -> None:
+        """**GAME 模式里的循环**（你定的: 画面捕获不走 LLM 工具, 是 Agent 自己的循环）。
+
+        · 只在 **GAME** 里抓帧认游戏（别的模式画面里没有游戏）;
+        · **有对话关键词时完全不抓帧**（你定的: 有对话就不看画面）;
+        · 认出的游戏**变了**才重搜队列（否则会把你正在看的列表刷掉）;
+        · 模型按状态常驻/卸载（STUDY/GAME 常驻 —— 你定的）。
+        """
+        while True:
+            try:
+                await asyncio.sleep(self._GAME_WATCH_TICK_S)
+                state = self.state.current().value if self.state is not None else ""
+                if self._game_watch is not None:
+                    self._game_watch.ensure_model(state)          # 常驻/卸载
+                if state != "game" or self._game_watch is None or self.bilibili is None:
+                    continue
+                has_keyword = bool(self.bilibili.keyword) and self.bilibili.source == "dialogue"
+                if has_keyword:
+                    continue                                     # 有对话关键词 -> 一帧都不抓
+                frame = None
+                if self.image_reader is not None:
+                    frame = await self.image_reader.read_latest()
+                decision = self._game_watch.tick(frame, state=state, has_keyword=False)
+                for note in self._game_watch.notes():
+                    self.log.info("bilibili: %s", note)
+                if decision.get("skipped"):
+                    self.log.debug("bilibili: 观察器跳过（%s）", decision["skipped"])
+                    continue
+                game = str(decision.get("game") or "")
+                self.log.info("bilibili: 画面认游戏 -> %s（%s, %.3f/余量 %.3f）%s",
+                              game or "认不出", decision.get("source") or "-",
+                              decision.get("score") or 0.0, decision.get("margin") or 0.0,
+                              ("；" + decision["note"]) if decision.get("note") else "")
+                if game and game != self._last_bilibili_game:
+                    self._last_bilibili_game = game
+                    result = self.bilibili.search(game, source="screen")
+                    self._push_bilibili()
+                    self.log.info("bilibili: 按画面搜「%s」-> %s（%d 条）", game,
+                                  "成功" if result["ok"] else "失败", result["count"])
+                    if not result["ok"] and result.get("why"):
+                        self._say("想给你找「%s」的视频，但没搜到：%s" % (game, result["why"]))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:                          # noqa: BLE001 - 轮询不能死
+                self.log.warning("bilibili: 观察循环出错（已忽略）: %r", exc)
+                await asyncio.sleep(5.0)
+
+    #: 观察循环的轮询间隔（真正"该不该看"由 GameWatcher 按 60 s 判; 这里只是心跳）
+    _GAME_WATCH_TICK_S = 2.0
 
     def push_current_wallpaper(self) -> bool:
         """把一个 GUI 刚连上来该看到的壁纸补推一次（T6）。

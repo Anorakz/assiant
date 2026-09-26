@@ -655,8 +655,12 @@ class TestTheManualEntryPointsAreGone(unittest.IsolatedAsyncioTestCase):
     def test_it_is_not_in_the_unwired_table_either(self):
         # 它既不是"已接线"也不是"未接线": 这条命令**不存在**了
         self.assertNotIn("next_wallpaper", UNWIRED_COMMAND_NOTES)
-        self.assertIn(p.COMMAND_NEXT_BILIBILI, UNWIRED_COMMAND_NOTES,
-                      "B 站那条还没接, 别一起删了")
+        self.assertNotIn("next_wallpaper", p.COMMANDS)
+
+    def test_bilibili_did_not_get_deleted_along_with_it(self):
+        # T7-3 删的是壁纸那条; T11-6 把 B 站那条**接上了**, 所以它既存在又不是未接线
+        self.assertIn(p.COMMAND_NEXT_BILIBILI, p.COMMANDS)
+        self.assertNotIn(p.COMMAND_NEXT_BILIBILI, UNWIRED_COMMAND_NOTES)
 
     async def test_the_command_handler_ignores_it(self):
         from agent.ipc import _make_command_handler

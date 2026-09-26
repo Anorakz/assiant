@@ -39,14 +39,18 @@ from .local_server import (
 )
 from .protocol import (
     ACTION_FIELD,
+    COMMAND_BILIBILI_PICK,
+    COMMAND_BILIBILI_VIEWPORT,
     COMMAND_CHAT_INPUT,
     COMMAND_MUSIC_NEXT,
     COMMAND_MUSIC_PLAY_PAUSE,
     COMMAND_MUSIC_PREV,
     COMMAND_MUSIC_STOP,
     COMMAND_NEXT_BILIBILI,
+    COMMAND_PREV_BILIBILI,
     COMMAND_QUERY_SCHEDULE,
     COMMAND_SWITCH_MODE,
+    COMMAND_VIDEO_STATE,
     COMMANDS,
     ENCODING,
     MAX_LINE_BYTES,
@@ -58,6 +62,7 @@ from .protocol import (
     MODES,
     PAYLOAD_FIELD,
     SOCKET_PATH,
+    TOPIC_BILIBILI,
     TOPIC_LLM,
     TOPIC_MUSIC,
     TOPIC_SCHEDULE,
@@ -86,11 +91,16 @@ __all__ = [
     "TOPIC_WALLPAPER",
     "TOPIC_MUSIC",
     "TOPIC_SCHEDULE",
+    "TOPIC_BILIBILI",
     "TOPICS",
     # command (GUI -> Agent)
     "COMMAND_SWITCH_MODE",
     "COMMAND_CHAT_INPUT",
     "COMMAND_NEXT_BILIBILI",
+    "COMMAND_PREV_BILIBILI",
+    "COMMAND_BILIBILI_PICK",
+    "COMMAND_BILIBILI_VIEWPORT",
+    "COMMAND_VIDEO_STATE",
     "COMMAND_QUERY_SCHEDULE",
     "COMMANDS",
     "UNWIRED_COMMAND_NOTES",
@@ -301,6 +311,10 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
             current = getattr(runtime, "push_current_music", None)
             if callable(current):
                 _log.debug("ipc: 新客户端连上 -> 补推当前音乐状态: %s", current())
+            # T11-6: 预览图栏同理 —— 连上就该看到队列里有什么（空的话就是空的）
+            bilibili = getattr(runtime, "push_current_bilibili", None)
+            if callable(bilibili):
+                _log.debug("ipc: 新客户端连上 -> 补推 B 站队列: %s", bilibili())
 
         server.on_client_connect = _on_client_connect
         _log.debug("ipc: 已接上'连上补推壁纸/音乐' (server.on_client_connect)")
@@ -313,6 +327,16 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
 
         runtime.on_music = _on_music
         _log.debug("ipc: 已接上音乐推送 (runtime.on_music -> music)")
+
+    # · B 站队列/当前那条/要播的本地流 -> bilibili{queue, index, current, stream, …}（T11-6）
+    # 与 on_music 同款"有就接"。⚠ 那个 `stream` 是**板端本地 FIFO 路径**（不是 URL）——
+    # GUI 只是 `setSource(它)`; "怎么把流喂出来"是缓冲代理的事。
+    if hasattr(runtime, "on_bilibili"):
+        def _on_bilibili(snapshot: Dict[str, Any]) -> None:
+            dispatch(TOPIC_BILIBILI, dict(snapshot))
+
+        runtime.on_bilibili = _on_bilibili
+        _log.debug("ipc: 已接上 B 站推送 (runtime.on_bilibili -> bilibili)")
 
     # · 日程触发 -> schedule{kind:"fired", event}
     # 与上面 on_reply 同款"有就接": runtime 没带调度器 (或它还没起来) 就跳过 ——
@@ -327,17 +351,19 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
 
 
 #: 还没接下游的命令 -> 回给用户的那句话 (Phase 6 D7 / 决策 7)。
-#: 下游属 Phase 7; 现在必须**回一句说明**, 否则 GUI 上点了完全没反应, 用起来像坏了。
 #: 文案是给**用户**看的 (GUI 会把 llm 的 text 显示成助手气泡), 所以不要写成日志腔。
-#: ⚠ T7-3 起这张表里只剩 `next_bilibili`: `next_wallpaper` 命令连同 GUI 的「下一张」
-#:   按钮一起**删掉了**（换壁纸只走对话）。所以表里不再有它 —— 老客户端真发过来时
-#:   落到下面的"没有处理分支"分支, 只记一条 warning, 不会崩。
-UNWIRED_COMMAND_NOTES: Dict[str, str] = {
-    COMMAND_NEXT_BILIBILI: "B 站「下一集」还没接入（Phase 7），这次点击先没有生效。",
-}
+#: ⚠ **T11-6 起这张表空了**: 最后一条 `next_bilibili` 也接上了（Runtime.bilibili_next）。
+#:   表留着是因为"以后再有没接下游的命令"时还得有个地方写那句话, 而且
+#:   `tests/test_ipc_local_server.py` 盯着"表空了就没有命令会落到那句说明"。
+#:   老客户端发来的**未知**命令仍走下面"没有处理分支"那条: 只记 warning, 不会崩。
+UNWIRED_COMMAND_NOTES: Dict[str, str] = {}
 
 #: 收到音乐按钮但 Agent 侧没有音乐入口（`music.enabled=false`）时回的那句话 (给用户看)。
 NO_MUSIC_NOTE = "音乐还没开：在 config.yaml 的 music 段里把 enabled 打开、填上 PC 地址。"
+
+#: 收到 B 站按钮但 Agent 侧没有 B 站入口（`bilibili.enabled=false` / 没配好）时回的话。
+NO_BILIBILI_NOTE = ("B 站视频还没开：在 config.yaml 的 bilibili 段里把 enabled 打开"
+                    "（队列是空的，先在 GAME 模式里用对话点一个视频）。")
 
 
 #: schedule.data.kind 的两个取值 (线格式见 docs/ipc-protocol.md §3)。
@@ -393,6 +419,10 @@ def _make_command_handler(bus: Any, runtime: Any = None, push: Any = None):
             _handle_music(runtime, push, _MUSIC_ACTIONS[action])
             return
 
+        if action in _BILIBILI_ACTIONS:
+            _handle_bilibili(runtime, push, _BILIBILI_ACTIONS[action], payload)
+            return
+
         if action in UNWIRED_COMMAND_NOTES:
             # Phase 6 D7 (决策 7): 下游在 Phase 7, 但**必须回一句** —— 否则 GUI 上
             # 点了完全没反应, 用起来像坏了。回的是 llm (用户看得见的那条通道)。
@@ -437,6 +467,50 @@ def _handle_music(runtime: Any, push: Any, action: str) -> None:
         return
     reason = result.get("tell_user") or result.get("error") or "原因不明"
     _log.warning("ipc: music %s 失败: %s", action, reason)
+    if push is not None:
+        push(TOPIC_LLM, {"text": str(reason)})
+
+
+#: B 站命令 -> `Runtime` 上的入口名（T11-6）。
+#: ⚠ 与音乐同一条口径: 按钮**不决定放什么** —— 队列内容由**对话**（或画面认出的游戏）决定,
+#:   按钮只在队列里走位/挑一条/回报进度。`video_state` 是**回报**, 不是请求。
+_BILIBILI_ACTIONS: Dict[str, str] = {
+    COMMAND_NEXT_BILIBILI: "next",
+    COMMAND_PREV_BILIBILI: "prev",
+    COMMAND_BILIBILI_PICK: "pick",
+    COMMAND_BILIBILI_VIEWPORT: "viewport",
+    COMMAND_VIDEO_STATE: "video_state",
+}
+
+
+def _handle_bilibili(runtime: Any, push: Any, action: str, payload: dict) -> None:
+    """B 站那几个 GUI 动作 —— **只走 Agent, 不经过 LLM**（你定的）。
+
+    · `next` / `prev`: 在队列里走一格, 然后**开始放那一集**（用户按了就是"要看");
+    · `pick`: 放队列里的第 index 条（用户点了预览图）—— **只有用户点才播**;
+    · `viewport`: GUI 上报预览栏格数 -> 队列目标 = 3×它（**不播**）;
+    · `video_state`: GUI 回报真实进度（**不播**）; `eof=true` -> 自动下一集。
+
+    失败一律推一条 `llm` 说明（点了没反应最难查）; 成功不写气泡（界面上已经变了）。
+    """
+    entry = getattr(runtime, "bilibili_control", None) if runtime is not None else None
+    if not callable(entry):
+        _log.warning("ipc: 收到 B 站命令 %s 但 runtime 没有入口, 回一句说明", action)
+        if push is not None:
+            push(TOPIC_LLM, {"text": NO_BILIBILI_NOTE})
+        return
+    try:
+        result = entry(action, dict(payload or {})) or {}
+    except Exception as exc:                              # noqa: BLE001 - 如实回一句
+        _log.warning("ipc: B 站命令 %s 抛异常: %r", action, exc)
+        if push is not None:
+            push(TOPIC_LLM, {"text": "B 站那边出错了：%s" % exc})
+        return
+    if result.get("ok"):
+        _log.debug("ipc: bilibili %s -> ok", action)
+        return
+    reason = result.get("tell_user") or result.get("error") or "原因不明"
+    _log.warning("ipc: bilibili %s 失败: %s", action, reason)
     if push is not None:
         push(TOPIC_LLM, {"text": str(reason)})
 

@@ -18,6 +18,7 @@ tests/test_main.py — agent/main.py 的装配与生命周期单测
 
 import asyncio
 import atexit
+import contextlib
 import importlib
 import logging
 import os
@@ -65,6 +66,10 @@ EXPECTED_ORDER = [
     # ⚠ 它在 state_machine/tool_router **之前** —— 音乐四个工具建的时候就要知道
     #   "音乐开没开"（没开整个不装）, 所以 self.music 必须先就位（T8-5）。
     "music",
+    # T11-6: B 站视频（同样: 没开时这一步什么都不做, 组件照旧注册）。
+    # ⚠ 也在 tool_router **之前** —— `bilibili_search` 那条工具入口建的时候就要就位
+    #   （没开就整个不装, 与音乐同一套）。
+    "bilibili",
     "state_machine",
     "tool_router",
     # T7-4: 本机 llama-server 的启停（mode 不是 edge 或开关没开时这一步**什么都不做**,
@@ -913,6 +918,219 @@ class TestNativeSunshineHandshake(unittest.IsolatedAsyncioTestCase):
         )
         args = fake_native.moonlight.start_with_session.call_args[0]
         self.assertEqual(args[-1], "rtsp://127.0.0.1:48010")
+
+
+class TestBilibiliWiring(unittest.IsolatedAsyncioTestCase):
+    """T11-6: B 站接进 Runtime 的那几条线（**全程离线**: 队列/缓冲都用替身）。
+
+    钉的是三条你定的规矩:
+      ① 队列内容只有两个来源（对话关键词 / 画面认出的游戏）;
+      ② **播放只由 GUI 操作触发**（`bilibili_control`）, 工具那条路只搜不播;
+      ③ 只有**心情**…（不对）—— 只有 **GAME** 模式才抓画面认游戏, 且**有对话关键词就不抓**。
+    """
+
+    class _Queue:
+        """假队列: 记下每次调用, 回一个像真队列那样的结果。"""
+
+        def __init__(self):
+            self.calls = []
+            self.keyword = ""
+            self.source = ""
+            self.current_item = {"bvid": "BV1", "title": "标题"}
+            self.index = 0
+
+        def target(self):
+            return 18
+
+        def state(self):
+            return {"keyword": self.keyword, "source": self.source, "count": 18,
+                    "index": self.index, "target": 18, "viewport": 6, "num_pages": 50,
+                    "first_page": 1, "last_page": 1, "cached": 20, "at_head": False,
+                    "at_tail": False, "why": "", "current": self.current_item}
+
+        def search(self, keyword, source="dialogue", order="totalrank"):
+            self.calls.append(("search", keyword, source))
+            self.keyword, self.source = keyword, source
+            return {"ok": True, "why": "", "count": 18, "index": 0, "keyword": keyword,
+                    "source": source, "current": self.current_item}
+
+        def move(self, delta):
+            self.calls.append(("move", delta))
+            return {"ok": True, "why": "", "index": 0, "count": 18, "current": self.current_item}
+
+        def pick(self, index):
+            self.calls.append(("pick", index))
+            return {"ok": True, "why": "", "index": 0, "count": 18, "current": self.current_item}
+
+        def set_viewport(self, visible):
+            self.calls.append(("viewport", visible))
+            return 8
+
+        def clear(self):
+            self.calls.append(("clear",))
+            self.keyword = ""
+            return {"ok": True, "why": "清空了", "count": 0, "index": 0, "current": None}
+
+        def current(self):
+            return dict(self.current_item)
+
+    def _runtime(self):
+        rt = make_runtime()
+        rt.bilibili = self._Queue()
+        rt._bilibili_api = type("Api", (), {"cookie_present": False})()
+        rt._push_bilibili = lambda **extra: True          # 推送单独测, 这里不掺和
+        return rt
+
+    async def test_search_fills_the_queue_from_dialogue(self):
+        rt = self._runtime()
+        out = rt.bilibili_search("Luna say maybe")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["count"], 18)
+        self.assertEqual(rt.bilibili.calls, [("search", "Luna say maybe", "dialogue")])
+        self.assertEqual(rt.bilibili.source, "dialogue")
+
+    async def test_search_without_the_client_is_honest(self):
+        rt = make_runtime()
+        out = rt.bilibili_search("x")
+        self.assertFalse(out["ok"])
+        self.assertIn("bilibili", out["tell_user"])
+
+    async def test_next_prev_and_pick_start_playback(self):
+        rt = self._runtime()
+        played = []
+        rt._bilibili_play = lambda: played.append("play") or {"ok": True}
+        self.assertTrue(rt.bilibili_control("next")["ok"])
+        self.assertTrue(rt.bilibili_control("prev")["ok"])
+        self.assertTrue(rt.bilibili_control("pick", {"index": 3})["ok"])
+        self.assertEqual(played, ["play", "play", "play"], "按钮按下就该开始放那一集")
+        self.assertEqual(rt.bilibili.calls, [("move", 1), ("move", -1), ("pick", 3)])
+
+    async def test_viewport_and_video_state_do_not_play(self):
+        rt = self._runtime()
+        played = []
+        rt._bilibili_play = lambda: played.append("play") or {"ok": True}
+        self.assertTrue(rt.bilibili_control("viewport", {"visible": 8})["ok"])
+        self.assertEqual(rt.bilibili_control("viewport", {"visible": 8})["target"], 18)
+        self.assertTrue(rt.bilibili_control("video_state",
+                                            {"position_s": 3.0, "playing": True})["ok"])
+        self.assertEqual(played, [], "上报格数/回报进度**不该**开始播放（你定的）")
+
+    async def test_eof_starts_the_next_one(self):
+        rt = self._runtime()
+        played = []
+        rt._bilibili_play = lambda: played.append("play") or {"ok": True}
+        out = rt.bilibili_control("video_state", {"eof": True, "playing": False})
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["eof"])
+        self.assertEqual(played, ["play"], "放完了就自动下一集")
+        self.assertEqual(rt.bilibili.calls, [("move", 1)])
+
+    async def test_eof_at_the_end_is_quiet(self):
+        rt = self._runtime()
+        rt.bilibili.move = lambda delta: {"ok": False, "why": "后面没有了"}
+        rt._bilibili_play = lambda: (_ for _ in ()).throw(AssertionError("不该播"))
+        out = rt.bilibili_control("video_state", {"eof": True})
+        self.assertTrue(out["ok"], "放完最后一集不是错误")
+        self.assertIn("后面没有了", out["note"])
+
+    async def test_unknown_action_is_rejected(self):
+        rt = self._runtime()
+        self.assertFalse(rt.bilibili_control("dance")["ok"])
+
+    async def test_without_bilibili_the_commands_say_why(self):
+        rt = make_runtime()
+        out = rt.bilibili_control("next")
+        self.assertFalse(out["ok"])
+        self.assertIn("bilibili", out["tell_user"])
+
+    async def test_play_without_a_queue_is_honest(self):
+        rt = self._runtime()
+        rt.bilibili.current = lambda: None
+        out = rt._bilibili_play()
+        self.assertFalse(out["ok"])
+        self.assertIn("队列是空的", out["tell_user"])
+
+    async def test_quality_note_mentions_the_missing_cookie(self):
+        rt = self._runtime()
+        rt._buffer = type("Buf", (), {"stream": {"quality": 16, "quality_label": "360P"}})()
+        note = rt._bilibili_quality_note()
+        self.assertIn("360P", note)
+        self.assertIn("bilibili_cookie.json", note)
+
+    async def test_quality_note_is_quiet_for_1080p(self):
+        rt = self._runtime()
+        rt._buffer = type("Buf", (), {"stream": {"quality": 80, "quality_label": "1080P"}})()
+        self.assertEqual(rt._bilibili_quality_note(), "")
+
+    async def test_watch_loop_skips_when_not_in_game(self):
+        """观察循环只在 GAME 里抓帧 —— 别的状态连帧都不读（你定的）。"""
+        rt = self._runtime()
+        rt.state = type("S", (), {"current": lambda self: type("C", (), {"value": "study"})()})()
+        reads = []
+
+        class _Reader:
+            async def read_latest(self):
+                reads.append(1)
+                return "frame"
+
+        rt.image_reader = _Reader()
+
+        class _Watch:
+            def __init__(self):
+                self.ticks = []
+
+            def ensure_model(self, state):
+                self.ticks.append(("ensure", state))
+                return True
+
+            def tick(self, frame, **kwargs):
+                self.ticks.append(("tick", frame))
+                return {"game": "hoi4", "skipped": ""}
+
+            def notes(self):
+                return []
+
+        rt._game_watch = _Watch()
+        task = asyncio.ensure_future(rt._game_watch_loop())
+        await asyncio.sleep(rt._GAME_WATCH_TICK_S + 0.6)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        self.assertEqual(reads, [], "STUDY 里不该读画面")
+        self.assertTrue(any(item[0] == "ensure" for item in rt._game_watch.ticks),
+                        "模型常驻/卸载那条策略每轮都要走")
+
+    async def test_watch_loop_does_not_capture_with_a_dialogue_keyword(self):
+        rt = self._runtime()
+        rt.bilibili.keyword = "luna"
+        rt.bilibili.source = "dialogue"
+        rt.state = type("S", (), {"current": lambda self: type("C", (), {"value": "game"})()})()
+        reads = []
+
+        class _Reader:
+            async def read_latest(self):
+                reads.append(1)
+                return "frame"
+
+        rt.image_reader = _Reader()
+
+        class _Watch:
+            def ensure_model(self, state):
+                return True
+
+            def tick(self, frame, **kwargs):
+                raise AssertionError("有对话关键词时一帧都不该抓")
+
+            def notes(self):
+                return []
+
+        rt._game_watch = _Watch()
+        task = asyncio.ensure_future(rt._game_watch_loop())
+        await asyncio.sleep(rt._GAME_WATCH_TICK_S + 0.6)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        self.assertEqual(reads, [], "有对话关键词 -> 不抓帧（你定的）")
 
 
 if __name__ == "__main__":

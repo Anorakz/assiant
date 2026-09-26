@@ -42,11 +42,16 @@ __all__ = [
     "TOPIC_WALLPAPER",
     "TOPIC_MUSIC",
     "TOPIC_SCHEDULE",
+    "TOPIC_BILIBILI",
     "TOPICS",
     # command (GUI -> Agent)
     "COMMAND_SWITCH_MODE",
     "COMMAND_CHAT_INPUT",
     "COMMAND_NEXT_BILIBILI",
+    "COMMAND_PREV_BILIBILI",
+    "COMMAND_BILIBILI_PICK",
+    "COMMAND_BILIBILI_VIEWPORT",
+    "COMMAND_VIDEO_STATE",
     "COMMAND_QUERY_SCHEDULE",
     "COMMAND_MUSIC_PLAY_PAUSE",
     "COMMAND_MUSIC_NEXT",
@@ -107,8 +112,19 @@ TOPIC_MUSIC = "music"
 #:   进程重启即清零。详见 docs/ipc-protocol.md §3。
 TOPIC_SCHEDULE = "schedule"
 
+#: B 站视频（T11-6）。data 里是**队列 + 当前那条 + 要播的本地流路径**:
+#:     {"queue": [{bvid,title,author,duration_s,play,cover,url}…], "index": n,
+#:      "current": {…}|null, "keyword": "…", "source": "dialogue|screen",
+#:      "viewport": n, "target": n, "ready": bool, "stream": "/tmp/bilibili-XXX.ts",
+#:      "quality": "720P", "note": "…"}
+#: ⚠ `stream` 是**板端本地 FIFO 路径**（不是 URL, 也不是 http）—— T11-0 实测板端
+#:   `souphttpsrc` 是坏的, 所以走"ffmpeg 合流 -> MPEG-TS -> FIFO -> 播放器读本地路径"。
+#: ⚠ 队列**只在 GAME 模式有意义**（视频就是游戏模式主区在放的东西）。
+TOPIC_BILIBILI = "bilibili"
+
 #: 全部 topic (Agent -> GUI)
-TOPICS = (TOPIC_STATUS, TOPIC_LLM, TOPIC_WALLPAPER, TOPIC_MUSIC, TOPIC_SCHEDULE)
+TOPICS = (TOPIC_STATUS, TOPIC_LLM, TOPIC_WALLPAPER, TOPIC_MUSIC, TOPIC_SCHEDULE,
+          TOPIC_BILIBILI)
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +132,24 @@ TOPICS = (TOPIC_STATUS, TOPIC_LLM, TOPIC_WALLPAPER, TOPIC_MUSIC, TOPIC_SCHEDULE)
 # ---------------------------------------------------------------------------
 COMMAND_SWITCH_MODE = "switch_mode"
 COMMAND_CHAT_INPUT = "chat_input"
+
+# ---- B 站视频（T11-6）----
+#: `next_bilibili` 自 Phase 6 就存在（GUI 视频区那个「下一集」按钮一直在发它）, 但下游
+#: 一直"没接入"（回一句说明）。T11-6 起**真的接上了**: 队列里往前走一格并**开始放下一集**。
+#: ⚠ 与音乐同一条口径: 这几个按钮**不决定放什么** —— 队列内容由**对话**（或画面认出的游戏）
+#:   决定; 按钮只在这条队列里走位/挑一条。
 COMMAND_NEXT_BILIBILI = "next_bilibili"
+#: 往回走一格（GUI 的「上一集」按钮; T11-6 起转正）
+COMMAND_PREV_BILIBILI = "prev_bilibili"
+#: 挑队列里的第几条（payload `{"index": n}`）—— 用户点了预览图。
+#: ⚠ **只有用户点它才播**（你定的"等 GUI 操作才开始播放, 不提前缓存"）。
+COMMAND_BILIBILI_PICK = "bilibili_pick"
+#: GUI 上报"预览栏能放下几个缩略图"（payload `{"visible": n}`）—— 队列目标 = 3×它。
+COMMAND_BILIBILI_VIEWPORT = "bilibili_viewport"
+#: GUI 回报**真实播放进度**（payload `{"position_s":…, "duration_s":…, "playing":…, "eof":…}`）。
+#: 为什么要有这条: 缓冲代理只知道自己喂了多少, **播放器放到哪只有 GUI 知道** ——
+#: `eof=true` 就是"这一集放完了, 该下一集了"的唯一真值（不靠估算）。
+COMMAND_VIDEO_STATE = "video_state"
 
 #: ⚠ T7-3 删掉了 `next_wallpaper` 命令（T3 加的）: 换壁纸**只走对话**
 #: （LLM 工具 `next_wallpaper`, 见 agent/tools/wallpaper.py）。手动按钮"只能按文件名
@@ -140,11 +173,16 @@ COMMAND_MUSIC_NEXT = "music_next"
 COMMAND_MUSIC_PREV = "music_prev"
 COMMAND_MUSIC_STOP = "music_stop"
 
+
 #: 全部 command (GUI -> Agent)
 COMMANDS = (
     COMMAND_SWITCH_MODE,
     COMMAND_CHAT_INPUT,
     COMMAND_NEXT_BILIBILI,
+    COMMAND_PREV_BILIBILI,
+    COMMAND_BILIBILI_PICK,
+    COMMAND_BILIBILI_VIEWPORT,
+    COMMAND_VIDEO_STATE,
     COMMAND_QUERY_SCHEDULE,
     COMMAND_MUSIC_PLAY_PAUSE,
     COMMAND_MUSIC_NEXT,

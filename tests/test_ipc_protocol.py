@@ -46,18 +46,32 @@ class TestConstants(unittest.TestCase):
         self.assertEqual(p.TOPIC_WALLPAPER, "wallpaper")
         self.assertEqual(p.TOPIC_MUSIC, "music")
         self.assertEqual(p.TOPIC_SCHEDULE, "schedule")
+        self.assertEqual(p.TOPIC_BILIBILI, "bilibili")
         self.assertEqual(p.TOPICS,
-                         ("status", "llm", "wallpaper", "music", "schedule"))
+                         ("status", "llm", "wallpaper", "music", "schedule", "bilibili"))
 
     def test_commands(self):
         self.assertEqual(p.COMMAND_SWITCH_MODE, "switch_mode")
         self.assertEqual(p.COMMAND_CHAT_INPUT, "chat_input")
-        self.assertEqual(p.COMMAND_NEXT_BILIBILI, "next_bilibili")
         self.assertEqual(p.COMMAND_QUERY_SCHEDULE, "query_schedule")
         self.assertEqual(p.COMMANDS,
                          ("switch_mode", "chat_input",
-                          "next_bilibili", "query_schedule",
+                          "next_bilibili", "prev_bilibili", "bilibili_pick",
+                          "bilibili_viewport", "video_state", "query_schedule",
                           "music_play_pause", "music_next", "music_prev", "music_stop"))
+
+    def test_bilibili_commands(self):
+        # T11-6: B 站那几个按钮/回报。⚠ 与音乐同一条口径: 它们**不决定放什么**
+        # （队列内容由对话或画面认出的游戏决定）; `video_state` 是 GUI 的**回报**。
+        self.assertEqual(p.COMMAND_NEXT_BILIBILI, "next_bilibili")
+        self.assertEqual(p.COMMAND_PREV_BILIBILI, "prev_bilibili")
+        self.assertEqual(p.COMMAND_BILIBILI_PICK, "bilibili_pick")
+        self.assertEqual(p.COMMAND_BILIBILI_VIEWPORT, "bilibili_viewport")
+        self.assertEqual(p.COMMAND_VIDEO_STATE, "video_state")
+        for name in (p.COMMAND_NEXT_BILIBILI, p.COMMAND_PREV_BILIBILI,
+                     p.COMMAND_BILIBILI_PICK, p.COMMAND_BILIBILI_VIEWPORT,
+                     p.COMMAND_VIDEO_STATE):
+            self.assertIn(name, p.COMMANDS)
 
     def test_music_commands(self):
         # T8-4: 音乐按钮。⚠ 它们**不决定放什么**（那是对话的事）—— 只做"暂停/继续"和
@@ -385,9 +399,9 @@ class TestWireContract(unittest.TestCase):
                                  (topic, data))
 
     def test_every_documented_topic_and_command_is_covered(self):
-        # 防止"文档加了条目但测试漏了"（5 个 topic + 8 条命令 = 13）
+        # 防止"文档加了条目但测试漏了"（6 个 topic + 12 条命令 = 18）
         documented = set(p.TOPICS) | set(p.COMMANDS)
-        self.assertEqual(len(documented), 13)
+        self.assertEqual(len(documented), 18)
 
     def test_one_message_is_exactly_one_line(self):
         # NDJSON 的前提: 消息里不能出现裸换行
