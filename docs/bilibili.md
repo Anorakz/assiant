@@ -14,10 +14,11 @@
 
 | 实测约束 | 后果 |
 | --- | --- |
-| 板端 **`souphttpsrc` 是坏的**（`souphttpsrc ! fakesink` 都 SIGABRT；`libgstreamer 1.18.5` 配 `gst-plugins-good 1.16.3` 版本错配，`dmesg` 无 OOM） | **不用 HTTP 供流**：改成 **ffmpeg → MPEG-TS → FIFO → 播放器读本地路径** |
+| 板端 **`souphttpsrc` 是坏的**（`souphttpsrc ! fakesink` 都 SIGABRT；`libgstreamer 1.18.5` 配 `gst-plugins-good 1.16.3` 版本错配，`dmesg` 无 OOM） | **不用 soup**：GUI 启动时设 `GST_PLUGIN_FEATURE_RANK=souphttpsrc:0` 把它降权，`playbin` 就自动选板上的 **`curlhttpsrc`**（实测正常）→ 供流走本机 HTTP |
+| **FIFO 供流播放器一个字节都读不到**（T11-9 板端实测：`playbin uri=file://<FIFO>` 12 秒读走 **0 字节** —— FIFO `stat` size 恒为 0、不可 seek，preroll 过不去；同一时刻 `dd` 读到 291 s、`filesrc ! decodebin` 读到 210 s，说明管道通、是**播放器不认**） | 供流改 **本机 HTTP**（`http://127.0.0.1:<port>/stream/<bvid>?v=<token>`，`chunked` 边下边喂）；实测 static 与 chunked 两种都 preroll 通过并放到 EOS |
 | `mp4` 写管道会 `Could not write header … Broken pipe`（管道不可 seek） | 中间格式固定 **MPEG-TS**（`-f mpegts`） |
 | 直链/封面**必须带 `User-Agent` + `Referer`**，否则 CDN 回 **403** | 取流与取封面都带这两个头（`bilibili_api.ffmpeg_input_args` / GUI 的 `CoverLoader`） |
-| `ffmpeg -c copy` 比实时快 **68×** | 必须有**背压**：窗口够了就不读，管道自然堵住 ffmpeg（否则几秒灌满内存） |
+| `ffmpeg -c copy` 比实时快 **68×** | 必须有**背压**：窗口够了就不读，管道自然堵住 ffmpeg（否则几秒灌满内存）；走 http 之后还要**自己限速**（见 §4） |
 | 板端**已装 MPP 硬解**（`mppvideodec`，rank 257，HEVC/AVC/VP8/VP9） | 解码交给播放器（GStreamer），**ffmpeg 只做 `-c copy` 合流/重封装，不转码**（你定的方案 ①） |
 | 匿名会话要先访问一次首页拿 `buvid3`/`b_nut`，否则接口直接 **412** | `BilibiliApi.session()` 懒引导一次，cookie 只在内存 |
 | 搜索分页**同一页连取 3 次完全一致**、页间零重叠，但 **`page > numPages` 不报错、会回重复内容** | 窗口靠**翻页 + 按 `bvid` 去重**，边界**按 `numPages` 判**，不看"结果是否为空" |
@@ -35,14 +36,14 @@ GUI：预览栏（缩略图，点击 = bilibili_pick）+ 地址栏（只读）+ 
         │  只有 GUI 操作才继续（你定的"等 GUI 操作才开始播放，不提前缓存"）
         ▼
 agent/core/bilibili_buffer.py ── ffmpeg -c copy → MPEG-TS → 内存窗口（15 s 起播门槛）
-        │  topic bilibili{stream: "/tmp/bilibili-<bvid>.ts", ready: true}
+        │  topic bilibili{stream: "http://127.0.0.1:8765/stream/<bvid>?v=<8位token>", ready: true}
         ▼
-GUI：QMediaPlayer 读那个 FIFO（GStreamer 选中 mppvideodec 硬解）
+GUI：QMediaPlayer 读**那个本机地址**（GStreamer 经 curlhttpsrc 拉，硬解仍选 mppvideodec）
         └─ video_state{position_s,duration_s,playing,eof} 回报 → 放完自动下一集
 ```
 
 **不内嵌播放器、不折腾 DASH**：视频就是"板端主区那个 VideoPanel"，与本地文件播放**同一条路**
-（`VideoPanel::setSource(本地路径)`）；DASH 只用来**取一条**合并后的流，播放端不必知道。
+（`VideoPanel::setSource(路径或 URL)`）；DASH 只用来**取一条**合并后的流，播放端不必知道。
 
 ---
 
@@ -109,14 +110,14 @@ GUI：QMediaPlayer 读那个 FIFO（GStreamer 选中 mppvideodec 硬解）
 | 环节 | 做法 |
 | --- | --- |
 | **不提前缓存** | 搜索、识别、填预览栏**都不取直链、不起缓冲**；队列条目只占"元数据 + 封面" |
-| 起播 | 你点预览图/上一集/下一集 → 取流（有 cookie 时单文件与 DASH **都问一遍，取清晰度高的**）→ `ffmpeg -c copy` → 内存窗口 |
-| 门槛 | 窗口攒够 **15 s**（按码率折算字节）才把 FIFO 路径推给 GUI（`stream` 字段）；凑不够就"按现有缓冲起播"并如实说一句 |
-| 播放中 | 领先 **15 s**（`buffer.initial_s`） |
-| **暂停**（GUI 回报 `playing=false`） | **继续预取**到 **60 s**（`buffer.max_s`）或 `MemAvailable < 400 MB` 为止 |
-| 释放 | 写进管道的字节立刻从内存里丢（"播过即释放"）；换条/清空/放完 → **整块释放**；**全程不落盘** |
+| 起播 | 你点预览图/上一集/下一集 → 取流（有 cookie 时单文件与 DASH **都问一遍，取清晰度高的**）→ `ffmpeg -c copy` → 内存窗口 → 一个**只绑 127.0.0.1** 的小 HTTP 服务按播放器的消费速度喂（`chunked`） |
+| 门槛 | 窗口攒够 **15 s**（按码率折算字节）才把 **本机 URL** 推给 GUI（`stream` 字段）；**没开闸一个字节都不喂**（谁先连上也不能把门槛作废）；凑不够就"按现有缓冲起播"并如实说一句 |
+| 播放中 | 领先 **15 s**（`buffer.initial_s`）—— ⚠ 走 http 之后播放器能一口气把整段吞进它自己的缓冲（板端实测几十秒就把 4 分半拉完），所以这条领先是**缓冲代理自己限速**（`_lead_ok()`：喂出去的秒数 ≤ 开闸至今的秒数 + 封顶），**不是**靠管道背压；⚠ **限速 = 让连接等着**（背压），**不是**把连接收掉 |
+| **暂停**（GUI 回报 `playing=false`） | **继续预取**到 **60 s**（`buffer.max_s`）或 `MemAvailable < 400 MB` 为止。⚠ 只认**真播过之后**的 `playing=false`：GUI 在 `setMedia()` 之后头几秒还在 Loading，那几条报的也是 `false`，以前照单全收 -> 封顶当场跳到 60 s，播放器一口气吞掉 60 s 正好撞上限速（T11-10e 板端实测 `buffered=26.6s`） |
+| 释放 | 客户端读到哪就放到哪（`_release_below`）——"播过即释放"；换条/清空 → **服务收掉 + 窗口整个放掉**；**全程不落盘** |
 | 直链过期 | 上游 ffmpeg 非 0 退出（403 等）→ **重取直链 + 带 `-ss` 重连**，重试有限次；对 GUI 透明，日志如实记 |
-| seek | **没有**（FIFO 不可 seek，GUI 也没有进度条）—— 想跳就换一条 |
-| 片尾 | ffmpeg 退出码 `0/None` = **正常放完**（不重连）；GUI 报 `eof=true` → Agent **自动下一集** |
+| seek | **没有**（chunked 的流没有总长度，播放器也没法跳；GUI 也没有进度条）—— 想跳就换一条 |
+| 片尾 | ffmpeg 退出码 `0/None` = **正常放完**（不重连）→ 缓冲 `finished()` 为真；GUI 报 `eof=true` → Agent **自动下一集**。⚠ `eof` 只是**信号**：换条/清空时我们主动收流，播放器照样收到一次干净的 EOS（板端实测曾因此**一路连跳 6 条**）—— 所以自动下一集要问**我们自己的真值**（缓冲到了 `ended` 才跳） |
 
 内存量级（实测）：720P 码率 ≈ 258 KB/s → 15 s ≈ **3.9 MB**、60 s ≈ **15.5 MB**；360P 更低。
 板端带宽 ≈ 658 KB/s，够 1× 实时（约 2.5× 余量）。
@@ -200,7 +201,9 @@ GUI：QMediaPlayer 读那个 FIFO（GStreamer 选中 mppvideodec 硬解）
 | `timeout_s` | 15 | 同上（单次 HTTP 超时） |
 | `queue.viewport_fallback` | 6 | `Runtime._start_bilibili`（GUI 还没上报格数时的兜底） |
 | `queue.max` | 60 | 同上（窗口硬上限） |
-| `buffer.dir` | `/tmp` | `BilibiliBuffer`（FIFO 放哪） |
+| `buffer.transport` | `http` | `Runtime._bilibili_play`（`http` 供流给播放器 / `fifo` 只给 dd/cat 排障） |
+| `buffer.port` | `8765` | `BilibiliBuffer`（本机 HTTP 端口；被占了自动换一个并把真端口推给 GUI） |
+| `buffer.dir` | `/tmp` | `BilibiliBuffer`（**只有 `transport: fifo` 用**：管道建在哪） |
 | `buffer.initial_s` / `max_s` | 15 / 60 | 同上（起播门槛 / 暂停时的封顶） |
 | `buffer.mem_watermark_mb` | 400 | 同上（`MemAvailable` 低于它就停读，让管道堵 ffmpeg） |
 | `game_watch.enabled` | `true` | `Runtime._start_bilibili`（关掉就只看画面锚点、不问 PC 进程） |
@@ -233,7 +236,7 @@ bilibili:
 - **DASH 1080P 需要 cookie**：没配 cookie 就是单文件的 360P~720P（视视频而定）。
   ⚠ 部分视频匿名连 720P 都拿不到（实测阶梯有 `[80,16]` / `[64,16]` / `[16]` 三种）。
 - **没有倍速**（你定的：搁置）。控制条那颗 `1.0x` 仍是占位，点了只给一句说明。
-- **没有 seek**（FIFO 不可 seek）。想跳就换一条。
+- **没有 seek**（chunked 流没有总长度、播放器没法跳）。想跳就换一条。
 - **不做反馈切换**（D5）：没有"不想看这个"的整批拉黑。
 - **不做**：弹幕、点赞/投币/收藏、直播、番剧、字幕、后台预下载下一集、把视频落到磁盘。
 - **多分P 只放 P1**（分P 数如实显示，不做选集）。
@@ -253,7 +256,7 @@ bilibili:
 | --- | --- |
 | `tests/test_bilibili_api.py` | 假 transport：清洗/分页/阶梯/cookie 三态/错误话术 |
 | `tests/test_bilibili_queue.py` | 窗口不变量、边界、去重、极端 N |
-| `tests/test_bilibili_buffer.py` | 假 ffmpeg + 假 FIFO：门槛、封顶、水位、背压、过期重取、释放 |
+| `tests/test_bilibili_buffer.py` | 假 ffmpeg + 假 FIFO/假 HTTP 客户端：门槛、封顶、限速、水位、背压、过期重取、释放 |
 | `tests/test_game_watch.py` | 假编码器 + 假进程读数：阈值、自纠错写锚点、防抖、关键词优先 |
 | `tests/test_bilibili_tool.py` | GAME-only、单参数、诚实失败 |
 | `tests/test_bilibili_config.py` | **模板守卫**：`config.example.yaml` 的 `bilibili:` 段能被真构造器吃下、键不多不少、默认值与代码一致 |

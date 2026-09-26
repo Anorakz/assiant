@@ -184,8 +184,10 @@ music:
 # 视频在**板端**放, 内容只在缓冲里、**不落盘**; 完整说明见 docs/bilibili.md。
 #
 # ⚠ 三条板端实测定下来的硬约束 (改链路前先看 docs/bilibili.md §1):
-#    · 板端 souphttpsrc **是坏的** -> 不走 HTTP 供流, 改成
-#      **ffmpeg -c copy -> MPEG-TS -> FIFO**, GUI 读本地路径;
+#    · 板端 souphttpsrc **是坏的** -> GUI 启动时把它的 rank 压到 0
+#      (GST_PLUGIN_FEATURE_RANK=souphttpsrc:0), 播放器就自动改用板上的 **curlhttpsrc**;
+#    · 而 **FIFO 那条路播放器读不动** (playbin 对 FIFO 读到 0 字节: size 恒为 0、不可 seek,
+#      preroll 过不去) -> 供流走 **本机 HTTP** (只绑 127.0.0.1, chunked 边下边喂);
 #    · 直链与封面**都要带 UA + Referer**, 否则 CDN 回 403;
 #    · 解码靠板端已装的 **MPP 硬解** (mppvideodec), ffmpeg **只做重封装、不转码**。
 bilibili:
@@ -215,11 +217,18 @@ bilibili:
 
   # ---- 缓冲 (内存滑动窗口, 全程不落盘) ----
   buffer:
-    # FIFO 放哪个目录 (每换一条都会新建一个 bilibili-<bvid>.ts)
+    # 供流方式: http = **本机 HTTP**(默认, 播放器唯一能走通的那条, 只绑 127.0.0.1);
+    #          fifo = 老路子, 留给 dd/cat 这类哑读端排障用 (**播放器读不动**, 别在板端改回去)
+    transport: http
+    # 本机 HTTP 端口(端口被占会自动换一个, 换到的那个会如实推给 GUI)
+    port: 8765
+    # transport: fifo 时管道路径放哪个目录 (每换一条都会新建一个 bilibili-<bvid>.ts)
     dir: /tmp
     # 起播门槛: 攒够这么多秒才把流交给播放器 (没攒够会说一句"网络慢")
     initial_s: 15
     # 封顶: **播放中**领先 initial_s; **暂停时**放宽到这么多秒 (你定的)
+    # ⚠ 走 http 之后播放器能一口气把整段吞进去, 所以这条封顶是**缓冲代理自己限速**
+    #   实现的 (喂出去的不超过"已过时间 + 封顶"), 不是靠管道背压。
     max_s: 60
     # 内存水位: MemAvailable 低于它就停止预取, 让管道堵住 ffmpeg (天然背压)
     mem_watermark_mb: 400

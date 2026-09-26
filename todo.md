@@ -1691,6 +1691,36 @@ Phase 7 T11 收尾 — **FIFO 播放 + CLI 控制**（你点名的两件事, 202
       topic `bilibili` 加 `control/seq`（Agent→GUI 让它切播放器）+ `assistant video play|pause|toggle|next|prev`
       —— 排在 FIFO 修好之后（要有能播的画面才验得出暂停）
 
+Phase 7 T11-10 — **缓冲换本机 HTTP**（2026-09-26, 你批准的 a→b→复验→d 顺序）
+☑ **T11-10a 缓冲换 HTTP**（`agent/core/bilibili_buffer.py`）: `transport` 默认 `http`
+      （`fifo` 只留给 `dd`/`cat` 排障）, `http://127.0.0.1:<port>/stream/<bvid>?v=<token>`
+      （只绑本机、`chunked` 边下边喂、端口被占自动换一个并把真端口推给 GUI）;
+      `docs/config-sources.md` / `config.example.yaml` 加了 `buffer.transport` / `buffer.port`
+☑ **T11-10b GUI 认 URL + 压 soup**: `VideoPanel::setSource` 区分 URL 与本地文件;
+      GUI 启动时把 `GST_PLUGIN_FEATURE_RANK=souphttpsrc:0` 追加到环境（让 GStreamer 走 `curlhttpsrc`）
+☑ **T11-10c CLI 音乐**（见上）
+☑ **板端复验 A/C 段全绿**: 真搜索/真封面/15 s 门槛/推的是 `http://127.0.0.1:8765/…`、
+      端口真在听、`position_s` 在涨、换条后旧服务收掉+新地址能连、RSS 在预算内、真数据没动
+⚑ **T11-10d 复验 D 段抓到两个真问题**（红, 不是脚本写错）:
+      ① `feed()` 把"限速了/暂时没料"当成"这条放完了" → 写 chunked 结束块 → 播放器收到**干净的 EOS**
+         → GUI 报 `eof` → Agent 自动下一集 → 换条又收流 → **一路连跳 6 条**（板端 GUI 日志实证:
+         BV15E421j7Bu→BV1f4421Q7ob→BV1T8hZ6oEyK→BV1qbYNzyE6j→BV16hGR69EP8→BV1SM4m1k73V→BV16GZmYpEz7,
+         每条 1~9 秒就"放完了"）。PC 上 3 秒复现: 客户端拿到 1.3 s 就收到 `0\r\n\r\n`,
+         而那一刻 `state=serving`、`ffmpeg_alive=True`、窗口里还剩 1.3 s。
+      ② GUI 在 `setMedia()` 之后头几秒报 `playing=false`（还在 Loading）, 被当成"用户暂停"
+         → 封顶当场 15 s→60 s, 播放器一口气吞 60 s（实测 `buffered=26.6s`）, 正好撞上限速。
+☑ **T11-10e 修完**（4 处 + 单测, 都已提交）:
+      · `feed()`: 只有"真该收工"才返回空（stop / 真放完 / 要的块已放掉）; 限速、没料、水位卡住一律**等着**
+        （等就是背压）, 加 `FEED_STALL_S=30` 兜底（死连接别吊着线程, 日志如实记）;
+      · `_lead_ok()`: **没开闸一律不喂**（以前"没开闸=放行", 谁先连上就能把 15 s 门槛作废）;
+      · `set_playing(False)`: 只认**真播过之后**的 false（`_saw_playing`）, `snapshot()` 多带
+        `saw_playing`/`paused` 两个字段;
+      · `BilibiliBuffer.finished()`（= `state=="ended"`, 我们自己的真值）+ `Runtime._bilibili_video_state`:
+        播放器报 `eof` 但缓冲没到 ended → **不自动下一集**（换条/收流引出的 EOS 再也不会连跳）。
+      单测: `tests/test_bilibili_buffer.py` 加 4 条、`tests/test_main.py::TestBilibiliWiring` 加 3 条;
+      **老代码下这 4 条 buffer 用例 4/4 红**（用 `git show HEAD:…` 换回老模块跑的, 不是嘴上说）
+□ **CLI 视频接入**（见上）
+
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档

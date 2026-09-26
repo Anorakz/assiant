@@ -107,7 +107,7 @@ agent/
 │   ├── test_netease_cli.py      # ssh 调 PC 的第三方 neteasecli: 命令行 / 信封 / 四类错误 (T8-2)
 │   ├── test_bilibili_api.py     # B 站唯一网络层: 搜索/详情/直链(单文件 vs DASH)/cookie/错误话术 (T11-1)
 │   ├── test_bilibili_queue.py   # B 站队列: 3×预览栏格数的滑动窗口 / 往哪边走往哪边补页 / 边界 (T11-2)
-│   ├── test_bilibili_buffer.py  # B 站缓冲代理: ffmpeg 合流->MPEG-TS->FIFO / 15 s 门槛 / 暂停延到 60 s (T11-3)
+│   ├── test_bilibili_buffer.py  # B 站缓冲代理: ffmpeg 合流->MPEG-TS->本机 HTTP / 15 s 门槛 / 暂停延到 60 s (T11-3)
 │   ├── test_bilibili_tool.py    # B 站工具: 只有一个 keyword / 只在 GAME 可见 / 参数归一化 (T11-5)
 │   ├── test_bilibili_config.py  # B 站配置守卫: 模板能被真构造器吃下 / 键不多不少 / 默认值对齐 (T11-8)
 │   ├── test_game_watch.py       # 游戏观察器: 画面锚点 vs PC 进程双路 / 自学习纠错 / 常驻策略 (T11-4)
@@ -130,7 +130,7 @@ agent/
 │   ├── tagging.md               # 壁纸标签化: 词表 / wall_data.jsonl / IP 检索 / 三格窗口与画像挑图 (T7/T10-3)
 │   ├── music.md                 # 音乐: 板端 ssh 调 PC neteasecli / 本地库 / 工具四件套 / 自动补歌 (T8/T10-4)
 │   ├── profile.md               # 用户画像: 纯对话记忆 / IP·歌手权重 / 负反馈两层清零 / 心情 / **谁在消费它** (T9/T10)
-│   ├── bilibili.md              # B 站视频: 队列滑动窗口 / 缓冲 FIFO / 清晰度与 cookie 真相 / 双路认游戏 / 实测数字 (T11)
+│   ├── bilibili.md              # B 站视频: 队列滑动窗口 / 缓冲走本机 HTTP 的来龙去脉 / 清晰度与 cookie 真相 / 双路认游戏 / 实测数字 (T11)
 │   ├── llm.md                   # LLM 三模式 / edge 接 llama-server / 工具循环 / 降级
 │   ├── ipc-protocol.md          # Agent ⇄ GUI 协议 (线上格式唯一真源)
 │   ├── gui.md                   # GUI 构建与使用
@@ -574,7 +574,7 @@ config.save_config("config", {...})    # 写 config.yaml 并同步刷新缓存
 - **壁纸是"三格窗口"**（`prev`/`current`/`next`，进程内、不落盘）：换图 = `next` 变当前并**立刻**按画像补一个新的 `next`；`action=stage` 只预挑不切屏（T10-3）。
 - **用户画像只被 Agent 自己读**（挑下一个壁纸 / 补歌 / 判负反馈 / 心情变了重置队列），模型既看不到也调不到它（T9 定、T10 消费，见 [`docs/profile.md`](docs/profile.md) §8）。
 - **音乐队列维持 30 首**：缺了先吃本地库、不够**只按画像里的歌手**去 PC 搜（`music.autofill`，T10-4）；负反馈把类似的歌整批移出队列。
-- **B 站视频只在板端放、内容不落盘**：队列只存地址（3× 预览栏格数的滑动窗口），**只有 GUI 操作才开始播**（点预览图/上一集/下一集），流走 **ffmpeg `-c copy` → MPEG-TS → FIFO**（板端 `souphttpsrc` 是坏的，不走 HTTP），解码用板端 MPP 硬解；清晰度只走聊天气泡、界面不显示 —— 见 [`docs/bilibili.md`](docs/bilibili.md)。
+- **B 站视频只在板端放、内容不落盘**：队列只存地址（3× 预览栏格数的滑动窗口），**只有 GUI 操作才开始播**（点预览图/上一集/下一集），流走 **ffmpeg `-c copy` → MPEG-TS → 内存窗口 → 只绑 127.0.0.1 的本机 HTTP**（板端 `souphttpsrc` 是坏的，GUI 里把它的 rank 压到 0 让 GStreamer 走 `curlhttpsrc`；播放器读不了 FIFO），解码用板端 MPP 硬解；清晰度只走聊天气泡、界面不显示 —— 见 [`docs/bilibili.md`](docs/bilibili.md)。
 - **认游戏是"画面筛一遍 + PC 进程裁决"**：两路不一致时**以进程为准**并把那一帧写回锚点库（自纠错）；**有对话关键词就一帧都不抓**（T11）。
 - `send_key` / `send_mouse` / `send_hotkey` 必须释放 GIL，不阻塞 asyncio。
 - Agent ⇄ GUI 走**同机 Unix domain socket**（`/tmp/agent.sock`），两个方向的信封不同 —— 见 [`docs/ipc-protocol.md`](docs/ipc-protocol.md)。

@@ -1764,7 +1764,7 @@ class Runtime:
                                 initial_s=buffer_cfg.get("initial_s", 15),
                                 max_s=buffer_cfg.get("max_s", 60),
                                 mem_watermark_mb=buffer_cfg.get("mem_watermark_mb", 400),
-                                transport=buffer_cfg.get("transport", "http"),
+                                transport=buffer_cfg.get("transport"),   # 缺省 = http（见 buffer）
                                 port=buffer_cfg.get("port"),
                                 log=self.log)
         buffer.on_ready = self._on_bilibili_ready
@@ -1866,11 +1866,25 @@ class Runtime:
         return "（这条 B 站只给到 %s，和登不登录无关）" % label
 
     def _bilibili_video_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """GUI 回报的真实进度（**不播**）: 暂停时就多预取, `eof` 时自动下一集。"""
+        """GUI 回报的真实进度（**不播**）: 暂停时就多预取, **真放完**时自动下一集。
+
+        @note ⚠ T11-10e 板端验收抓到的大问题: 播放器报 `eof` **不等于**这条真放完了 ——
+              换条/清空时我们主动把流收掉, 播放器照样收到一次（干净的）EOS, 于是
+              "自动下一集"把刚换的那条又顶掉, 换条又收流…… **一路连跳了 6 条**
+              （板端 GUI 日志实证）。所以自动下一集必须问**我们自己的真值**:
+              `buffer.finished()`（= ffmpeg 正常收尾, 整条片的字节都拉完了）。
+        """
         if self._buffer is not None:
             self._buffer.set_playing(bool(payload.get("playing", True)))
         if not payload.get("eof"):
             return {"ok": True, "position_s": payload.get("position_s")}
+        buffer = self._buffer
+        if buffer is None or not buffer.finished():
+            state = buffer.snapshot().get("state") if buffer is not None else "没有缓冲"
+            self.log.info("bilibili: 播放器说放完了, 但缓冲那边还没到「放完」（%s）"
+                          "—— 不自动下一集（换条/收流也会让播放器报一次 EOS）", state)
+            return {"ok": True, "eof": True, "ignored": True,
+                    "note": "播放器报放完，但缓冲还没放完（换条/收流）—— 不跳集"}
         moved = self.bilibili.move(1) if self.bilibili is not None else {"ok": False,
                                                                        "why": "队列是空的"}
         if not moved.get("ok"):

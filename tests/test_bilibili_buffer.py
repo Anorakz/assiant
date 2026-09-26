@@ -202,6 +202,61 @@ def wait_until(predicate, timeout=3.0):
     return False
 
 
+def read_raw(url, seconds, timeout=0.3):
+    """把一条 http 响应**原样**读一会儿（chunked 的框也留着, 好判断有没有被收尾）。
+
+    @param seconds 读多久（限速期间连接会一直开着 —— 所以必须给个上限）
+    """
+    import socket as socketlib
+
+    rest = url.split("//", 1)[1]
+    hostport, _, path = rest.partition("/")
+    host, _, port = hostport.partition(":")
+    sock = socketlib.create_connection((host or "127.0.0.1", int(port or 80)), timeout=3.0)
+    raw = b""
+    try:
+        sock.sendall(("GET /%s HTTP/1.1\r\nHost: %s\r\n\r\n" % (path, hostport)).encode())
+        sock.settimeout(timeout)
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            try:
+                block = sock.recv(65536)
+            except (socketlib.timeout, OSError):
+                continue
+            if not block:
+                break
+            raw += block
+    finally:
+        sock.close()
+    return raw
+
+
+def parse_chunked_body(raw):
+    """把 chunked 响应解成 `(payload, ended)`。
+
+    @param ended 收到 `0\\r\\n\\r\\n`（= 服务端把这条流**收尾**了 —— 播放器会当 EOS）吗
+    """
+    _, sep, body = raw.partition(b"\r\n\r\n")
+    if not sep:
+        return b"", False
+    payload = b""
+    while True:
+        line, sep, tail = body.partition(b"\r\n")
+        if not sep:
+            break
+        try:
+            size = int(line.split(b";")[0].strip() or b"0", 16)
+        except ValueError:
+            break
+        if size == 0:
+            return payload, True
+        if len(tail) < size:
+            break
+        payload += tail[:size]
+        body = tail[size + 2:] if len(tail) >= size + 2 else b""
+    return payload, False
+
+
 class TestHelpers(unittest.TestCase):
 
     def test_seconds_to_bytes(self):
@@ -298,6 +353,11 @@ class TestBuffering(unittest.TestCase):
         h = Harness(seconds_of_data=120)
         self.assertEqual(h.buf.cap_s(), 15.0)
         h.buf.set_playing(False)
+        # ⚠ T11-10e: **起播前**的 playing=false 不是暂停（GUI 在 setMedia 之后会这么报），
+        #   所以先按真顺序播一次, 再暂停。
+        self.assertEqual(h.buf.cap_s(), DEFAULT_INITIAL_S)
+        h.buf.set_playing(True)                          # 真播起来了
+        h.buf.set_playing(False)                         # 这才是暂停
         self.assertEqual(h.buf.cap_s(), DEFAULT_MAX_S)
         h.buf.set_playing(True)
         self.assertEqual(h.buf.cap_s(), DEFAULT_INITIAL_S)
@@ -321,6 +381,7 @@ class TestBuffering(unittest.TestCase):
             self.assertTrue(wait_until(lambda: h.writer is not None, 2.0),
                             "写线程还没开管道")
             h.writer.set_paused(True)                # 播放器暂停 = 管道那头不读了
+            h.buf.set_playing(True)                  # ⚠ T11-10e: 先"真播过"才算暂停（见上一条用例）
             h.buf.set_playing(False)
             self.assertTrue(wait_until(lambda: h.buf.buffered_s() > 20.0, 3.0),
                             "暂停后窗口没长起来: %.1f s" % h.buf.buffered_s())
@@ -371,8 +432,8 @@ class TestHttpTransport(unittest.TestCase):
     之后 static/live 两种供法播放器都能持续读。这个类把那条链路的**服务端**钉住。
     """
 
-    def harness(self, **kwargs):
-        h = Harness(seconds_of_data=60, **kwargs)
+    def harness(self, seconds_of_data=60, **kwargs):
+        h = Harness(seconds_of_data=seconds_of_data, **kwargs)
         h.buf.transport = "http"
         h.buf.port = 0                        # 随机端口, 免得撞上板端/开发机上别的东西
         return h
@@ -490,6 +551,84 @@ class TestHttpTransport(unittest.TestCase):
             self.assertTrue(got[0].startswith("http://"))
         finally:
             h.buf.stop()
+
+    # ------------------------------------------------------------------
+    #  T11-10e: 板端验收抓到的两个真问题（"限速"被当成"放完了" / 起播前的
+    #  playing=false 被当成"暂停"）—— 都在这里钉死。
+    # ------------------------------------------------------------------
+
+    def test_lead_cap_makes_the_client_wait_instead_of_eos(self):
+        """**限速期间连接必须还开着、还在慢慢喂** —— 不能写成 EOS。
+
+        板端实测（T11-9/T11-10 验收）: 播放器一口气吞到封顶 -> 服务端"0.2 秒没等到料"
+        就收工写 chunked 结束块 -> 播放器报 `EndOfMedia` -> GUI 报 `eof` -> Agent 自动
+        下一集 -> 换条又把流收掉 -> **一路连跳 6 条**（每条 1~9 秒就"放完了"）。
+        """
+        h = self.harness(seconds_of_data=600, initial_s=1.0)     # 封顶 1 s: 几下就撞上
+        try:
+            url = self.start(h)
+            raw = read_raw(url, 5.0)
+            payload, ended = parse_chunked_body(raw)
+            got_s = len(payload) / (BPS / 8.0)
+            self.assertFalse(ended, "被限速挡住时**不该**收到 chunked 结束块（= 播放器会当放完）")
+            self.assertGreater(got_s, 2.0,
+                               "限速期间还得继续慢慢喂（实测只喂了 %.1f s）" % got_s)
+            self.assertFalse(h.buf.finished(), "还在喂的时候不能说'放完了'")
+            self.assertNotIn(h.buf.state, ("ended", "stopped", "error"))
+        finally:
+            h.buf.stop()
+
+    def test_nothing_is_served_before_the_gate_opens(self):
+        """没攒够 15 s（没开闸）-> **一个字节都不喂**（以前"没开闸=放行"，门槛被作废）。"""
+        # 卡住不吐（`then_stall`）: 只有 10 s 料, 门槛 90 s -> 永远不会开闸
+        h = self.harness(seconds_of_data=10, initial_s=90.0, then_stall=True)
+        try:
+            h.buf.start(dict(ITEM))
+            self.assertTrue(wait_until(lambda: h.buf.buffered_s() > 1.0, 3.0), "假 ffmpeg 没吐料")
+            self.assertFalse(h.buf.ready, "没攒够门槛就不该 ready")
+            self.assertFalse(h.buf._lead_ok(), "没开闸 -> 不喂")
+            payload, ended = parse_chunked_body(read_raw(h.buf.stream_target(), 1.5))
+            self.assertEqual(payload, b"", "没开闸却喂了 %d 字节" % len(payload))
+            self.assertFalse(ended, "没开闸也不该把连接收掉（它只是在等）")
+        finally:
+            h.buf.stop()
+
+    def test_false_playing_before_start_is_not_a_pause(self):
+        """GUI 在 `setMedia()` 之后头几秒报的 `playing=false` **不是暂停**（那会儿还没起播）。"""
+        h = self.harness(seconds_of_data=600)
+        buf = h.buf
+        try:
+            self.assertTrue(buf.snapshot()["playing"], "默认按播放中算")
+            buf.set_playing(False)                     # 起播前那几条
+            self.assertEqual(buf.cap_s(), 15.0, "起播前的 playing=false 不能把封顶放到 60 s")
+            self.assertFalse(buf.snapshot()["paused"])
+            self.assertFalse(buf.snapshot()["saw_playing"])
+            buf.set_playing(True)                      # 真播起来了
+            self.assertTrue(buf.snapshot()["saw_playing"])
+            buf.set_playing(False)                     # 这下才是暂停
+            self.assertEqual(buf.cap_s(), 60.0)
+            self.assertTrue(buf.snapshot()["paused"])
+        finally:
+            buf.stop()
+
+    def test_finished_is_our_own_truth(self):
+        """`finished()` = **我们自己**说放完了（ffmpeg 正常收尾）, 不看播放器怎么说。"""
+        h = self.harness(seconds_of_data=600, initial_s=1.0)
+        try:
+            self.start(h)
+            self.assertFalse(h.buf.finished(), "还在喂的时候不算放完")
+        finally:
+            h.buf.stop()
+        self.assertFalse(h.buf.finished(), "被我们收工（换条/清空）更不算放完")
+
+        done = Harness(seconds_of_data=3, initial_s=1.0)     # 比门槛还短 -> 很快放完
+        done.start()
+        try:
+            self.assertTrue(done.buf.wait_ready(3.0), "门槛没开")
+            self.assertTrue(wait_until(lambda: done.buf.finished(), 5.0),
+                            "短片放完该报 ended（现在 state=%s）" % done.buf.state)
+        finally:
+            done.buf.stop()
 
     @staticmethod
     def wait(predicate, timeout):

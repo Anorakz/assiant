@@ -26,6 +26,8 @@ from agent.core.bilibili_buffer import (                                        
     DEFAULT_INITIAL_S,
     DEFAULT_MAX_S,
     DEFAULT_MEM_WATERMARK_MB,
+    DEFAULT_PORT,
+    DEFAULT_TRANSPORT,
     BilibiliBuffer,
 )
 from agent.core.game_anchors import DEFAULT_ANCHOR_FILE, GameAnchors               # noqa: E402
@@ -49,7 +51,7 @@ EXAMPLE = os.path.join(PROJECT_ROOT, "config", "config.example.yaml")
 KNOWN_KEYS = {
     "top": {"enabled", "cookie_file", "timeout_s", "queue", "buffer", "game_watch"},
     "queue": {"viewport_fallback", "max"},
-    "buffer": {"dir", "initial_s", "max_s", "mem_watermark_mb"},
+    "buffer": {"transport", "port", "dir", "initial_s", "max_s", "mem_watermark_mb"},
     "game_watch": {"enabled", "interval_s", "confident_score", "confident_margin",
                    "anchor_file", "process_names", "mem_watermark_mb"},
 }
@@ -101,9 +103,13 @@ class TestBilibiliExampleSection(unittest.TestCase):
         buffer = BilibiliBuffer(api, fifo_dir=section["buffer"]["dir"],
                                 initial_s=section["buffer"]["initial_s"],
                                 max_s=section["buffer"]["max_s"],
-                                mem_watermark_mb=section["buffer"]["mem_watermark_mb"])
+                                mem_watermark_mb=section["buffer"]["mem_watermark_mb"],
+                                transport=section["buffer"]["transport"],
+                                port=section["buffer"]["port"])
         self.assertEqual(buffer.initial_s, float(section["buffer"]["initial_s"]))
         self.assertEqual(buffer.max_s, float(section["buffer"]["max_s"]))
+        self.assertEqual(buffer.transport, "http")
+        self.assertEqual(buffer.port, int(section["buffer"]["port"]))
 
     # ------------------------------------------------------- 2) 键不写错 ---
     def test_every_key_in_the_example_is_one_the_code_reads(self):
@@ -130,6 +136,8 @@ class TestBilibiliExampleSection(unittest.TestCase):
         self.assertEqual(float(section["buffer"]["initial_s"]), DEFAULT_INITIAL_S)
         self.assertEqual(float(section["buffer"]["max_s"]), DEFAULT_MAX_S)
         self.assertEqual(float(section["buffer"]["mem_watermark_mb"]), DEFAULT_MEM_WATERMARK_MB)
+        self.assertEqual(str(section["buffer"]["transport"]), DEFAULT_TRANSPORT)
+        self.assertEqual(int(section["buffer"]["port"]), DEFAULT_PORT)
         self.assertEqual(float(section["game_watch"]["interval_s"]), DEFAULT_INTERVAL_S)
         self.assertEqual(float(section["game_watch"]["confident_score"]), DEFAULT_CONFIDENT_SCORE)
         self.assertEqual(float(section["game_watch"]["confident_margin"]), DEFAULT_CONFIDENT_MARGIN)

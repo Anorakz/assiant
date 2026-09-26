@@ -977,6 +977,27 @@ class TestBilibiliWiring(unittest.IsolatedAsyncioTestCase):
         def current(self):
             return dict(self.current_item)
 
+    class _Buffer:
+        """假缓冲: 只给 Runtime 真正问到的那几个口子。
+
+        ⚠ T11-10e: `finished()` 是**我们自己的真值**（ffmpeg 正常收尾 = 整条片拉完了），
+          自动下一集必须问它 —— 播放器报的 `eof` 在"我们主动收流（换条/清空）"时也会来一次。
+        """
+
+        def __init__(self, finished=True):
+            self._finished = bool(finished)
+            self.state = "ended" if finished else "serving"
+            self.playing_calls = []
+
+        def set_playing(self, playing):
+            self.playing_calls.append(bool(playing))
+
+        def finished(self):
+            return self._finished
+
+        def snapshot(self):
+            return {"state": self.state}
+
     def _runtime(self):
         rt = make_runtime()
         rt.bilibili = self._Queue()
@@ -1020,16 +1041,44 @@ class TestBilibiliWiring(unittest.IsolatedAsyncioTestCase):
 
     async def test_eof_starts_the_next_one(self):
         rt = self._runtime()
+        rt._buffer = self._Buffer(finished=True)        # 缓冲说"真放完了"
         played = []
         rt._bilibili_play = lambda: played.append("play") or {"ok": True}
         out = rt.bilibili_control("video_state", {"eof": True, "playing": False})
         self.assertTrue(out["ok"])
         self.assertTrue(out["eof"])
-        self.assertEqual(played, ["play"], "放完了就自动下一集")
+        self.assertEqual(played, ["play"], "真放完了就自动下一集")
         self.assertEqual(rt.bilibili.calls, [("move", 1)])
+        self.assertEqual(rt._buffer.playing_calls, [False])
+
+    async def test_eof_without_a_finished_buffer_does_not_advance(self):
+        """⚠ T11-10e 板端验收抓到的连跳: 播放器报 eof, 但我们自己的真值没到"放完" -> **不跳集**。
+
+        换条/清空时我们主动把流收掉, 播放器照样收到一次干净的 EOS —— 照单全收就会
+        "换条 -> 报 eof -> 自动下一集 -> 又收流 -> 又报 eof" 一路连跳（板端实测 6 条）。
+        """
+        rt = self._runtime()
+        rt._buffer = self._Buffer(finished=False)       # 还在喂 / 被我们收工了
+        played = []
+        rt._bilibili_play = lambda: played.append("play") or {"ok": True}
+        out = rt.bilibili_control("video_state", {"eof": True, "playing": False})
+        self.assertTrue(out["ok"], "这不是错误, 只是不当成放完")
+        self.assertTrue(out.get("ignored"))
+        self.assertEqual(played, [], "缓冲没到 ended 就不该自动下一集")
+        self.assertEqual(rt.bilibili.calls, [], "队列也不该动")
+        self.assertEqual(rt._buffer.playing_calls, [False], "暂停/播放还是要如实记到缓冲上")
+
+    async def test_eof_without_a_buffer_at_all_is_ignored(self):
+        rt = self._runtime()
+        rt._buffer = None
+        rt._bilibili_play = lambda: (_ for _ in ()).throw(AssertionError("不该播"))
+        out = rt.bilibili_control("video_state", {"eof": True})
+        self.assertTrue(out.get("ignored"))
+        self.assertEqual(rt.bilibili.calls, [])
 
     async def test_eof_at_the_end_is_quiet(self):
         rt = self._runtime()
+        rt._buffer = self._Buffer(finished=True)
         rt.bilibili.move = lambda delta: {"ok": False, "why": "后面没有了"}
         rt._bilibili_play = lambda: (_ for _ in ()).throw(AssertionError("不该播"))
         out = rt.bilibili_control("video_state", {"eof": True})

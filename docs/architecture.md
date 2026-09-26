@@ -450,8 +450,8 @@ gui/src/
 | 画面 → 游戏名 → 队列 | **进程内**（无通道） | GAME 模式里 Agent 自己的循环（**不走 LLM 工具**）：`ImageReader` 抓一帧 → SigLIP 编码 → 与 `config/game_anchors.jsonl` 的锚点算余弦；不够有把握就问 **PC 进程名**（ssh，复用 `music:` 那套），**两路不一致以进程为准并把这一帧写回锚点库**（自纠错）。**有对话关键词就整个跳过**（一帧都不抓）。认出的游戏**变了**才重搜队列。见 [`bilibili.md`](bilibili.md) §3 |
 | 对话/GUI → 视频队列 | **进程内**（无通道） | 关键词只从**对话**（工具 `bilibili_search`，只在 GAME 可见）或**画面**来 → `agent/core/bilibili.py` 维护"3×预览栏格数"的滑动窗口（只存地址，不下载视频） |
 | 队列 → GUI | Unix socket | topic `bilibili{queue[],index,current,stream,…}`（变化时推、客户端连上时补推）→ 预览栏 + 地址栏 + 下区域封面。**播放只由 GUI 操作触发** |
-| GUI → 播放的流 | **本机 FIFO**（不是网络） | 你点预览图/上一集/下一集 → Agent 取直链（带 UA+Referer）→ `ffmpeg -c copy` → **MPEG-TS** → 内存窗口（15 s 起播门槛）→ `/tmp/bilibili-<bvid>.ts` → GUI 用 `QMediaPlayer` 读它（GStreamer 选 **`mppvideodec`** 硬解）。⚠ 板端 `souphttpsrc` 是坏的，所以**不走 HTTP**；**内容不落盘**。见 [`bilibili.md`](bilibili.md) §1/§4 |
-| GUI → Agent（进度） | Unix socket | 命令 `video_state{position_s,duration_s,playing,eof}` 每 2 秒一次（**真进度，不是估算**）：Agent 靠它知道"暂停了"（于是把预取放宽到 60 s）与"放完了"（自动下一集） |
+| GUI → 播放的流 | **本机 HTTP**（只绑 127.0.0.1，不是外网） | 你点预览图/上一集/下一集 → Agent 取直链（带 UA+Referer）→ `ffmpeg -c copy` → **MPEG-TS** → 内存窗口（15 s 起播门槛）→ `http://127.0.0.1:<port>/stream/<bvid>?v=<token>`（`chunked` 边下边喂）→ GUI 用 `QMediaPlayer` 播它（GStreamer 经 **`curlhttpsrc`** 拉、**`mppvideodec`** 硬解）。⚠ 板端 `souphttpsrc` 是坏的（GUI 里把它的 rank 压到 0），而**播放器读不了 FIFO**（T11-9 实测读 0 字节）—— 所以是**本机 HTTP 而不是管道**；**内容不落盘**。见 [`bilibili.md`](bilibili.md) §1/§4 |
+| GUI → Agent（进度） | Unix socket | 命令 `video_state{position_s,duration_s,playing,eof}` 每 2 秒一次（**真进度，不是估算**）：Agent 靠它知道"暂停了"（于是把预取放宽到 60 s）与"放完了"（自动下一集）。⚠ 两条都得**核实**（T11-10e）：起播前那几条 `playing=false` 不是暂停；`eof` 在"我们主动收流（换条/清空）"时也会来一次，所以自动下一集还要看缓冲自己的真值（`finished()`） |
 
 ---
 

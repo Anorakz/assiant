@@ -14,9 +14,9 @@
 
     A. 真搜索 -> 队列 = 3 × 预览栏格数 + 真封面地址（预览图由**真 GUI** 去下, 见 C 的日志）
     B. cookie 三态（有 / 空 / 失效）各给一句**不一样**的话
-    C. **真 GUI** 端到端: 点预览图 -> 15 s 起播门槛 -> `video_state.position_s` 递增
-       -> 上一集/下一集换条 -> 旧缓冲释放（FIFO 没了 + RSS 回落）
-    D. 暂停 -> 预取从 15 s 放宽到 60 s（到水位就停）
+    C. **真 GUI** 端到端: 点预览图 -> 15 s 起播门槛 -> 推的是**本机 http 地址** ->
+       `video_state.position_s` 递增 -> 上一集/下一集换条 -> 旧缓冲释放（服务收掉 + 窗口放掉）
+    D. 暂停 -> 预取窗口从 15 s 放宽到 60 s（**单起一个 GUI**, 让它起播 30 秒后自己点暂停）
     E. 断网（iptables REJECT 掉 api.bilibili.com）-> **诚实报错** -> 规则撤掉后能继续
     F. 双路识别**真跑**（真 SigLIP + 真锚点副本 + 假进程读数）-> 不一致时**锚点副本多一行**;
        有对话关键词 -> **一帧都不抓**（模型都没加载）
@@ -48,7 +48,10 @@ import time
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 if hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    # ⚠ `line_buffering=True` 是给"板端跑的时候 `| tee` 看进度"用的: 换个 TextIOWrapper
+    #   会把 `python3 -u` 的无缓冲**丢掉**（新包装默认块缓冲）, 于是整段日志要等进程结束才出现。
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace",
+                                  line_buffering=True)
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 GUI_BIN = os.path.join(REPO, "gui", "build", "agent_gui")
@@ -311,7 +314,7 @@ def part_b_cookie(runtime, tmp, keyword):
 
 
 # ---------------------------------------------------------------------------
-#  C/D. 真 GUI：起播 / 进度 / 换条 / 暂停预取
+#  C. 真 GUI：起播 / 进度 / 换条（D 段的"真暂停"单起一个 GUI，见 part_d_pause）
 # ---------------------------------------------------------------------------
 async def part_c_playback(runtime, sock, seen, tmp):
     print("\n== C. 真 GUI 端到端（点预览图 -> 15 s 门槛 -> 真播 -> 换条）")
@@ -319,10 +322,9 @@ async def part_c_playback(runtime, sock, seen, tmp):
         skip("真 GUI 播放", "没找到 %s（先跑 scripts/sync-gui.ps1）" % GUI_BIN)
         return
     shot = os.path.join(tmp, "t11-9-playing.png")
-    # ⚠ `--video-pause-demo` 让 **GUI 自己**在 25 秒时点一次播放/暂停（D 段要用它）：
-    #   从 Agent 那侧塞一条 playing=false 会被 GUI 每 2 秒的进度回报覆盖回去。
-    gui = GuiRun(sock, os.path.join(tmp, "gui1.log"),
-                 "--bilibili-pick-demo", "0", "--video-pause-demo", "25000")
+    # ⚠ 这一段**不**让 GUI 自己点暂停：暂停要在"真的在播"之后才算数（换源那一刻播放器还在
+    #   Loading, 也会报 playing=false, 那不是暂停 —— T11-10e）。所以 D 段单起一个 GUI。
+    gui = GuiRun(sock, os.path.join(tmp, "gui1.log"), "--bilibili-pick-demo", "0")
     gui.start()
     try:
         # ⚠ **必须把 GUI 切进 GAME 模式**（而且要在它连上之后切）：视频区（预览栏 + 地址栏）
@@ -381,11 +383,23 @@ async def part_c_playback(runtime, sock, seen, tmp):
             check("缓冲对象报的门槛就是配置里的 15 s",
                   abs(float(buffer.initial_s) - 15.0) < 0.01, str(buffer.initial_s))
         state = runtime.bilibili_state()
-        print("  stream=%s（FIFO 存在=%s）; quality=%s"
-              % (state.get("stream"), os.path.exists(str(state.get("stream"))), state.get("quality")))
-        check("推给 GUI 的是**本地 FIFO 路径**（不是 HTTP URL）",
-              str(state.get("stream") or "").startswith("/"), str(state.get("stream")))
-        check("FIFO 真的建出来了", os.path.exists(str(state.get("stream") or "")))
+        print("  stream=%s; quality=%s" % (state.get("stream"), state.get("quality")))
+        check("推给 GUI 的是**本机 http URL**（127.0.0.1，不是外网、不是文件路径）",
+              str(state.get("stream") or "").startswith("http://127.0.0.1:"),
+              str(state.get("stream")))
+        # 真去连一下那条路（能连上就说明本机 http 服务真的在听）
+        port = int(str(state.get("stream")).split("//")[1].split("/")[0].split(":")[1])
+        probe = socketlib.socket(socketlib.AF_INET, socketlib.SOCK_STREAM)
+        probe.settimeout(3.0)
+        try:
+            probe.connect(("127.0.0.1", port))
+            listening = True
+        except OSError as exc:
+            listening = False
+            note("连不上 127.0.0.1:%d（%r）" % (port, exc))
+        finally:
+            probe.close()
+        check("本机 http 服务真的在听（127.0.0.1:%d）" % port, listening)
 
         # ---- position_s 递增 ----
         def states():
@@ -421,52 +435,34 @@ async def part_c_playback(runtime, sock, seen, tmp):
 
         # ---- 旧缓冲释放 + 换条（下一集 / 上一集 走真 IPC） ----
         old = runtime._buffer
-        old_path = str(getattr(old, "path", "") or "")
+        old_url = str(getattr(old, "url", "") or "")
         before_rss = rss_mb()
         send_command(sock, "next_bilibili", {})
         moved = await wait_for(lambda: runtime._buffer is not old, 25, "换条")
         check("下一集：换了新的一条（新缓冲对象）", moved)
-        released = await wait_for(lambda: not os.path.exists(old_path), 15, "旧 FIFO 释放")
-        print("  旧 FIFO %s 还在吗: %s; 旧缓冲 state=%s"
-              % (old_path, os.path.exists(old_path), old.snapshot().get("state") if old else "-"))
-        check("旧缓冲立刻释放（FIFO 被删掉）", released,
+        released = await wait_for(lambda: bool(old) and not old.url and not old.ready, 15, "释放")
+        print("  旧缓冲 state=%s url=%r ready=%s server=%s（旧地址 %s —— 端口会被新的一条复用,"
+              " 所以看对象状态）"
+              % (old.snapshot().get("state") if old else "-", old.url if old else "-",
+                 old.ready if old else "-", getattr(old, "_server", "-"), old_url))
+        check("旧缓冲立刻释放（服务收掉、地址清空、窗口放掉）",
+              released and getattr(old, "_server", None) is None,
               str(old.snapshot().get("state") if old else ""))
+        # 新的一条得**顶上**（旧的服务关了, 新的这条地址要能用）
+        new_url = str(runtime._buffer.url or "") if runtime._buffer is not None else ""
+        print("  新的一条: %s" % (new_url or "-"))
+        check("新的一条顶上来了（新地址能连上）", _port_alive(new_url), new_url or "-")
         after_rss = rss_mb()
-        print("  Agent RSS: %.0f MB -> %.0f MB" % (before_rss, after_rss))
-        check("换条后没有一堆 ffmpeg 堆着（RSS 没暴涨）", after_rss - before_rss < 120,
-              "%+.0f MB" % (after_rss - before_rss))
+        watcher_loaded = bool(runtime._game_watch is not None
+                              and runtime._game_watch.model_loaded)
+        print("  Agent RSS: %.0f MB -> %.0f MB（SigLIP 常驻中=%s —— GAME 模式下它就是常驻的,"
+              " 那 ~900 MB 不算漏）" % (before_rss, after_rss, watcher_loaded))
+        budget = 120.0 + (950.0 if watcher_loaded else 0.0)
+        check("换条后没有一堆 ffmpeg 堆着（RSS 在预算内）", after_rss - before_rss < budget,
+              "%+.0f MB（预算 %.0f）" % (after_rss - before_rss, budget))
         send_command(sock, "prev_bilibili", {})
         check("上一集：Agent 收到 prev", await wait_for(
             lambda: any(a == "prev" for a, _, _ in seen), 8, "prev"))
-
-        # ---- D. 暂停 -> 预取放宽到 60 s（**GUI 自己暂停**, FIFO 读端还活着） ----
-        print("\n== D. 暂停 -> 预取从 15 s 放宽到 60 s（由 GUI 自己点暂停）")
-        buffer = runtime._buffer
-        if buffer is None:
-            skip("暂停预取", "没有缓冲对象")
-        else:
-            # ⚠ 只看**这一段之后**新到的回报：前面"放完"那几条也是 playing=false，
-            #   不按下标看的话会立刻匹配上（第一次跑就踩了 —— 于是根本没等到暂停）。
-            mark = len(seen)
-            paused = await wait_for(
-                lambda: any(a == "video_state" and p.get("playing") is False
-                            and not p.get("eof") for a, p, _ in seen[mark:]),
-                45, "GUI 报 playing=false")
-            await asyncio.sleep(1.0)                    # 让 set_playing 落到缓冲上
-            print("  GUI 自己报了 playing=false: %s（cap_s=%.0f s）" % (paused, buffer.cap_s()))
-            check("GUI 点暂停后如实回报 playing=false", paused)
-            check("暂停后封顶从 15 s 放到 60 s", buffer.cap_s() >= 60.0, "%.0f" % buffer.cap_s())
-            grew = await wait_for(
-                lambda: float(buffer.snapshot().get("buffered_s") or 0) > 20.0, 45, "暂停预取")
-            snap = buffer.snapshot()
-            print("  暂停后: %s" % snap)
-            check("暂停时确实继续预取（> 20 s）", grew,
-                  "%.1fs" % float(snap.get("buffered_s") or 0))
-            # 恢复：GUI 的暂停按钮只能按一次（demo 就一次），这里从 Agent 侧把它放回去 ——
-            # 此时 GUI 的进度回报也是 playing=true，两边一致，不会被覆盖。
-            send_command(sock, "video_state", {"playing": True, "position_s": 3.0})
-            await wait_for(lambda: buffer.cap_s() <= 15.5, 5, "恢复后封顶变小")
-            check("恢复播放后封顶回到 15 s", buffer.cap_s() <= 15.5, "%.0f" % buffer.cap_s())
     finally:
         gui.stop()
         await asyncio.sleep(0.5)
@@ -477,14 +473,122 @@ async def part_c_playback(runtime, sock, seen, tmp):
         print("\n".join(gui.log_text().splitlines()[-12:]))
 
 
-async def part_d_pause(runtime, sock, seen):
-    """D 段已在 `part_c_playback` 里跑（**必须趁 GUI 还活着**：FIFO 的读端就是它）。
+async def part_d_pause(runtime, sock, seen, tmp):
+    """D. 真暂停 -> 预取窗口从 15 s 放宽到 60 s（**GUI 自己点暂停**, 走真 IPC 回报）。
 
-    这里只在"没跑 GUI"（--no-gui）时给一句说明，免得日志里少一段让人以为漏了。
+    ⚠ 为什么单起一个 GUI（T11-10e 板端验收的教训）: 暂停必须发生在**真的在播之后** ——
+      换源那一刻播放器还在 Loading, 它也会报 `playing=false`, 但那不是"用户暂停"
+      （所以 `BilibiliBuffer.set_playing` 只认"真播过之后"的 false）。上一版验收就是在
+      换条之后等到了那条"还没起播"的 false, 于是**量错了对象**, 两条红都不是真结论。
+      这里的时序: GUI 连上 -> 点预览图 -> 攒够 15 s 开闸 -> 真播（位置在涨）-> 起播 30 秒后
+      GUI 自己点一次暂停。
     """
-    if runtime._buffer is None or runtime._buffer.ready:
+    print("\n== D. 真暂停 -> 预取窗口从 15 s 放宽到 60 s（GUI 自己点暂停）")
+    if not os.path.exists(GUI_BIN):
+        skip("暂停预取", "没找到 %s（先跑 scripts/sync-gui.ps1）" % GUI_BIN)
         return
-    skip("暂停预取", "没有缓冲对象（--no-gui 时不会起播）")
+    # ⚠ `--bilibili-pick-demo` 是**进程启动 3 秒后**点第一格, `--video-pause-demo` 是从启动算的
+    #   毫秒数 —— 所以"点暂停"必须留够"新那条攒够 15 s 开闸 + 起播"的时间, 否则会点在
+    #   "还没起播"那一刻（那不是暂停）。45 s 是板端实测留够的（开闸最慢见过 ~16 s）。
+    gui = GuiRun(sock, os.path.join(tmp, "gui3.log"),
+                 "--bilibili-pick-demo", "0", "--video-pause-demo", "45000")
+    # ⚠ 游标要**在起 GUI 之前**取: pick 在 3 秒时就发了, 起完 GUI 再取会把它漏掉（上一版就漏了）。
+    picks_before = sum(1 for a, _, _ in seen if a == "pick")
+    buffer_before = runtime._buffer
+    gui.start()
+    try:
+        await wait_for(lambda: int(getattr(runtime.ipc, "clients", 0) or 0) >= 1, 20, "GUI 连上")
+        got_pick = await wait_for(
+            lambda: sum(1 for a, _, _ in seen if a == "pick") > picks_before, 40,
+            "D: GUI 点预览图")
+        check("D: GUI 点了预览图（起播）", got_pick)
+
+        def this_snapshot():
+            buffer = runtime._buffer
+            if buffer is None or buffer is buffer_before:
+                return {}
+            return buffer.snapshot()
+
+        # 等 **pick 出来这条**（新缓冲）真的在播 —— 用**缓冲自己的真值**, 不看别的流那几条回报
+        played = await wait_for(lambda: bool(this_snapshot().get("playing"))
+                                and bool(this_snapshot().get("saw_playing")), 60, "D: 真的在播")
+        check("D: pick 出来那条真的在播（缓冲自己认：saw_playing 且 playing）", played,
+              str({k: this_snapshot().get(k) for k in ("bvid", "playing", "saw_playing", "cap_s")}))
+        # ---- 播放中封顶就该是 15 s（T11-10e: 以前起播前的 false 把封顶顶到 60） ----
+        #   只在"还在播"的时候采样: 一旦缓冲认下暂停, 后面的窗口是"暂停预取", 不算播放中。
+        peak, samples = 0.0, 0
+        for _ in range(60):
+            snap = this_snapshot()
+            if not snap or snap.get("paused") or not snap.get("playing"):
+                break
+            peak = max(peak, float(snap.get("buffered_s") or 0))
+            samples += 1
+            await asyncio.sleep(0.5)
+        print("  播放中采样 %d 次, 窗口峰值 %.1f s（播放中封顶该是 15 s）" % (samples, peak))
+        check("D: 播放中窗口没被撑过 15 s（起播前的 playing=false 不算暂停）",
+              samples >= 3 and peak <= 18.0, "峰值 %.1fs / 采样 %d 次" % (peak, samples))
+        # ---- 等"真暂停"（缓冲自己认下的那次: saw_playing 之后的 false） ----
+        paused = await wait_for(lambda: bool(this_snapshot().get("paused")), 90, "D: 缓冲认下暂停")
+        await asyncio.sleep(0.5)
+        snap = this_snapshot()
+        print("  缓冲认下暂停: %s" % snap)
+        check("D: GUI 点暂停后缓冲认下这次暂停（saw_playing=True 且 paused=True）", paused,
+              str({k: snap.get(k) for k in ("playing", "saw_playing", "paused", "cap_s")}))
+        check("D: 暂停后封顶从 15 s 放到 60 s", float(snap.get("cap_s") or 0) >= 60.0,
+              "%.0f" % float(snap.get("cap_s") or 0))
+        # ⚠ 走 http 之后播放器能**一口气**往前吞（受 `_lead_ok` 限速, 暂停时封顶 60 s）,
+        #   所以"暂停还在预取"要看**窗口本身攒到多少**: 播放中窗口封顶 15 s,
+        #   只有"暂停 -> 封顶放到 60 s"这条路能让它涨过 20 s。
+        grew = await wait_for(lambda: float(this_snapshot().get("buffered_s") or 0) > 20.0,
+                              60, "D: 暂停预取")
+        snap = this_snapshot()
+        print("  暂停后: %s" % snap)
+        check("D: 暂停时窗口确实攒过 20 s（播放中上限 15 s）", grew,
+              "%.1fs" % float(snap.get("buffered_s") or 0))
+        # 恢复: 从 Agent 侧把封顶放回去（GUI 的暂停按钮只按一次）。
+        # ⚠ GUI 还在暂停: 它下一句回报（2 秒内）会把封顶再放回 60 s —— 那是**对的**,
+        #   播放器才是真值。所以这里只看"Agent 说继续播的那一刻封顶确实回到了 15 s"。
+        caps = []
+
+        async def watch_cap():
+            deadline = time.time() + 6
+            while time.time() < deadline:
+                if runtime._buffer is not None:
+                    caps.append(runtime._buffer.cap_s())
+                await asyncio.sleep(0.2)
+
+        watcher = asyncio.ensure_future(watch_cap())
+        send_command(sock, "video_state", {"playing": True, "position_s": 3.0})
+        await watcher
+        print("  恢复播放那几秒的封顶: %s" % sorted({round(c, 1) for c in caps})[:6])
+        check("D: 说继续播之后封顶回到 15 s（GUI 还暂停的话它下一句回报会放回 60 s, 那是对的）",
+              bool(caps) and min(caps) <= 15.5, "最小 %.0f" % (min(caps) if caps else -1))
+    finally:
+        gui.stop()
+        await asyncio.sleep(0.5)
+    print("  这一段的命令全表: %s" % [(a, r.get("ok"), r.get("tell_user") or r.get("error") or "")
+                                      for a, _, r in seen])
+    print("  --- GUI 日志（末 10 行）---")
+    print("\n".join(gui.log_text().splitlines()[-10:]))
+
+
+def _port_alive(url: str) -> bool:
+    """`http://127.0.0.1:<port>/…` 还在听吗（换条时旧缓冲的端口该关掉）。"""
+    if not url.startswith("http://127.0.0.1:"):
+        return False
+    try:
+        port = int(url.split("//")[1].split("/")[0].split(":")[1])
+    except (IndexError, ValueError):
+        return False
+    probe = socketlib.socket(socketlib.AF_INET, socketlib.SOCK_STREAM)
+    probe.settimeout(1.0)
+    try:
+        probe.connect(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
 
 
 def send_command(sock, action, payload=None):
@@ -752,7 +856,8 @@ async def main():
     section = dict(config.get("bilibili") or {})
     section["enabled"] = True
     section["queue"] = {"viewport_fallback": _FIXED, "max": 60}
-    section["buffer"] = {"dir": "/tmp", "initial_s": 15, "max_s": 60, "mem_watermark_mb": 400}
+    section["buffer"] = {"transport": "http", "port": 8765, "dir": "/tmp",
+                         "initial_s": 15, "max_s": 60, "mem_watermark_mb": 400}
     section["game_watch"] = {"enabled": True, "interval_s": 60, "confident_score": 0.82,
                              "confident_margin": 0.05,
                              "anchor_file": os.path.join(tmp, "anchors.jsonl"),
@@ -804,7 +909,7 @@ async def main():
             elif "c" in want:
                 skip("真 GUI 那两段", "--no-gui")
             if "d" in want:
-                await part_d_pause(runtime, sock, seen)
+                await part_d_pause(runtime, sock, seen, tmp)
             if "e" in want:
                 part_e_netcut(runtime, args.keyword, not args.no_netcut)
         if "f" in want:

@@ -138,7 +138,8 @@ L2 归一化、只能按余弦 —— 全部写死在 `agent/vision/siglip/confi
 | `cookie_file` | 同上 | **凭据**（`config/bilibili_cookie.json`，相对路径按仓库根）；空/缺 = 匿名 360P |
 | `timeout_s` | 同上 | 单次 HTTP 超时 |
 | `queue.viewport_fallback` / `queue.max` | `agent/main.py::_start_bilibili` → `BilibiliQueue` | 预览栏还没上报格数时的兜底 / 窗口硬上限（目标 = 3×格数） |
-| `buffer.dir` / `initial_s` / `max_s` / `mem_watermark_mb` | `agent/core/bilibili_buffer.py` | FIFO 目录 / 起播门槛 / 暂停时的封顶 / 内存水位 |
+| `buffer.transport` / `port` | `agent/core/bilibili_buffer.py` | 供流方式（`http` 默认 / `fifo` 只给 dd 排障）/ 本机 HTTP 端口 |
+| `buffer.dir` / `initial_s` / `max_s` / `mem_watermark_mb` | 同上 | （仅 fifo 用的）管道目录 / 起播门槛 / 暂停时的封顶 / 内存水位 |
 | `game_watch.enabled` / `interval_s` / `confident_score` / `confident_margin` | `agent/core/game_watch.py` | 双路识别：多久认一次、"有把握"的门槛 |
 | `game_watch.anchor_file` | `agent/core/game_anchors.py` | 锚点索引（**派生数据**，见 §2 表） |
 | `game_watch.process_names` | `agent/net/pc_probe.py` | **进程名 → 游戏名**的映射；ssh 参数复用 `music:` 段（同一台 PC） |

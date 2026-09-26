@@ -51,16 +51,18 @@ from typing import Any, Callable, Dict, List, Optional
 
 __all__ = ["BilibiliBuffer", "BufferError", "seconds_to_bytes", "ffmpeg_argv",
            "DEFAULT_INITIAL_S", "DEFAULT_MAX_S", "DEFAULT_MEM_WATERMARK_MB",
-           "DEFAULT_PORT"]
+           "DEFAULT_TRANSPORT", "DEFAULT_PORT"]
 
 _log = logging.getLogger(__name__)
 
 DEFAULT_INITIAL_S = 15.0        #: 起播门槛（你定的 15 s）
 DEFAULT_MAX_S = 60.0            #: 暂停时能延到多长（你定的 60 s）
 DEFAULT_MEM_WATERMARK_MB = 400.0  #: 内存水位（低于它就不再预取）
+DEFAULT_TRANSPORT = "http"      #: 默认走本机 HTTP（fifo 只留给 dd/cat 排障）
 DEFAULT_PORT = 8765             #: 本机 HTTP 端口（只绑 127.0.0.1）; 被占了会自动换一个
 CHUNK = 65536
 LOOP_SLEEP = 0.02
+FEED_STALL_S = 30.0             #: 一条连接**一点料都等不到**多久才放弃（兜底, 不是限速）
 
 
 class BufferError(RuntimeError):
@@ -183,7 +185,7 @@ class BilibiliBuffer(object):
                  open_writer: Optional[Callable[[str], Any]] = None,
                  create_fifo: Optional[Callable[[str], None]] = None,
                  meminfo: Optional[Callable[[], Dict[str, float]]] = None,
-                 transport: str = "http", port: Optional[int] = None,
+                 transport: str = DEFAULT_TRANSPORT, port: Optional[int] = None,
                  log: Optional[logging.Logger] = None, retries: int = 2) -> None:
         """
         @param spawn       起 ffmpeg 的方式（默认 `subprocess.Popen`; 单测注入假的）
@@ -193,11 +195,12 @@ class BilibiliBuffer(object):
         @param transport   `http`（默认, **播放器能走通的那条**）/ `fifo`（只给 dd/cat 排障）
         @param port        本机 HTTP 端口（默认 8765; 被占了会自动换一个, 见 `start()`）
         """
-        if str(transport or "http").lower() not in ("http", "fifo"):
+        mode = str(transport or DEFAULT_TRANSPORT).lower()
+        if mode not in ("http", "fifo"):
             raise BufferError("不认识的传输方式 %r（只有 http / fifo）" % (transport,))
         self.api = api
         self.log = log or _log
-        self.transport = str(transport or "http").lower()
+        self.transport = mode
         self.fifo_dir = str(fifo_dir or "/tmp")
         self.port = int(port if port is not None else DEFAULT_PORT)
         self.initial_s = max(1.0, float(initial_s or DEFAULT_INITIAL_S))
@@ -232,6 +235,7 @@ class BilibiliBuffer(object):
         self._stop = threading.Event()
         self._gate = threading.Event()
         self._playing = True
+        self._saw_playing = False     #: 播放器真报过 playing=true 吗（起播前的 false 不算暂停）
         self._proc: Any = None
         self._writer: Any = None
         self._reader: Optional[threading.Thread] = None
@@ -240,7 +244,8 @@ class BilibiliBuffer(object):
         self._notes: List[str] = []
         self._server: Any = None                     #: http 模式的 ThreadingHTTPServer
         self._server_thread: Optional[threading.Thread] = None
-        self._cursors: List[int] = []                #: 正在读的客户端各自读到哪了（绝对偏移）
+        self._cursors: List[Dict[str, Any]] = []     #: 正在读的客户端（各自读到哪了 = 绝对偏移）
+        self._gate_at = 0.0                          #: 开闸时刻（限速用，见 `_lead_ok`）
 
     # ------------------------------------------------------------ 只读 ---
     def buffered_s(self) -> float:
@@ -262,6 +267,16 @@ class BilibiliBuffer(object):
     def cap_s(self) -> float:
         """当前窗口封顶: **播放中 15 s / 暂停 60 s**（你定的"暂停可以延长"）。"""
         return self.max_s if not self._playing else self.initial_s
+
+    def finished(self) -> bool:
+        """这一条**真的放完了**吗（我们自己的真值, 不看播放器怎么说）。
+
+        @note ⚠ T11-10e: 播放器报 `eof` **不等于**这条真的放完了 —— 换条/清空时我们主动
+              把流收掉, 播放器也会收到一次（干净的）EOS。所以自动下一集必须问这里:
+              只有 `state == "ended"`（`_handle_eof` 判定 ffmpeg **正常收尾**, 也就是整条片
+              的字节都拉完了）才算放完。开着闸还在喂的时候它一定是 False。
+        """
+        return self.state == "ended"
 
     def stream_target(self) -> str:
         """交给播放器的**地址**: http 模式是 `http://127.0.0.1:<port>/stream/…`，
@@ -289,6 +304,8 @@ class BilibiliBuffer(object):
                     "written_s": progress["written_s"],
                     "inflight_s": progress["inflight_s"],
                     "cap_s": self.cap_s(), "playing": bool(self._playing),
+                    "saw_playing": bool(self._saw_playing),
+                    "paused": bool(self._saw_playing and not self._playing),
                     "bytes": progress["bytes"], "ffmpeg_alive": bool(
                         self._proc is not None and getattr(self._proc, "poll", lambda: 0)() is None),
                     "restarts": self.restarts, "why": self.why}
@@ -329,6 +346,7 @@ class BilibiliBuffer(object):
             raise BufferError("没有 bvid，不知道放哪个视频")
         self.item = dict(item or {})
         self._playing = bool(playing)
+        self._saw_playing = False
         if stream is None:
             stream = self._fetch_stream(self.bvid)
         self.stream = dict(stream or {})
@@ -387,8 +405,20 @@ class BilibiliBuffer(object):
             self._open_gate()
 
     def set_playing(self, playing: bool) -> None:
-        """GUI 回报的播放状态 —— **暂停时窗口封顶从 15 s 放到 60 s**。"""
-        self._playing = bool(playing)
+        """GUI 回报的播放状态 —— **暂停时窗口封顶从 15 s 放到 60 s**。
+
+        @note ⚠ T11-10e 板端验收抓到的: GUI 在 `setMedia()` 之后**头几秒**是 Loading/Stopped,
+              于是那几条 `video_state` 报的是 `playing=false` —— 那不是"用户暂停", 只是
+              "还没起播"。以前照单全收, 封顶当场从 15 s 跳到 60 s（板端实测 `buffered=26.6s`）,
+              播放器一口气吞掉 60 s, 正好撞上限速被写成 EOS（见 `feed` 的注释）。
+              所以: **真播过一次之后的"暂停"**才算暂停; 起播前的 `playing=false` 一律按播放中算。
+        """
+        playing = bool(playing)
+        if playing:
+            self._saw_playing = True
+        elif not self._saw_playing:
+            return                                          #: 还没起播, 不是暂停
+        self._playing = playing
         if self._playing and self.state == "paused":
             self.state = "serving"
         elif not self._playing and self.state == "serving":
@@ -493,6 +523,7 @@ class BilibiliBuffer(object):
     def _open_gate(self) -> None:
         self.ready = True
         self.state = "serving" if self._playing else "paused"
+        self._gate_at = time.time()                        #: 限速的起算点（见 `_lead_ok`）
         self._gate.set()
         callback, target = self.on_ready, self.stream_target()
         if callable(callback) and target:
@@ -537,30 +568,62 @@ class BilibiliBuffer(object):
             if drop > 0 and self._window:
                 del self._window[:drop]
 
-    def feed(self, cursor: int, wait_s: float = 0.2) -> bytes:
-        """给某条 HTTP 连接取"下一个字节块"（**可能等一会儿**）。
+    def _lead_ok(self) -> bool:
+        """喂出去的进度 vs 真实时间: 领先**不超过 `cap_s()`**（播放中 15 s / 暂停 60 s）。
+
+        @note FIFO 那会儿这条背压是**内核管道**给的（64 KB 满了就写不动）; 走 http 之后
+              播放器能一口气把整段吞进它自己的缓冲（板端实测: 几十秒就把 4 分半的视频
+              全拉走了）—— 那就等于"窗口只领先 15 s、暂停才延到 60 s"形同虚设。
+              所以这里**自己限速**: 超前不超过 cap, 超了就等一会儿再喂。
+        @note ⚠ T11-10e: **没开闸一律不喂** —— 开闸（`_open_gate`）才是"15 s 攒够了"的
+              唯一标志; 以前这里"没开闸就放行", 等于谁先连上谁就能把门槛提前作废。
+        """
+        if not self._gate.is_set():
+            return False
+        if self.bps <= 0:
+            return True                                    # 码率未知: 限不了, 放行
+        elapsed = max(0.0, time.time() - self._gate_at)
+        served_s = self._written / max(1.0, self.bps / 8.0)
+        return served_s <= elapsed + self.cap_s()
+
+    def feed(self, cursor: int) -> bytes:
+        """给某条 HTTP 连接取"下一个字节块"（**会等** —— 等就是背压, 不是结束）。
 
         @param cursor 这条连接已经读到哪了（绝对偏移）
-        @return 一块字节; **空字节 = 现在真没有了**（放完了 / 收工了 / 那块已经放掉了）
-        @note 这是整条 http 链路的核心: 客户端读到哪, 我们才从窗口里放到哪;
-              追上了写头就在这里等（`wait_s`）, 等不到新料就返回空 —— 不忙等、不占 CPU。
+        @return 一块字节; **空字节 = 这条连接该收工了**（收工 = 给播放器 EOS）
+        @note 这条链路的两个关键: ① 客户端读到哪, 我们才从窗口里放到哪;
+              ② **领先不超过 `cap_s()`**（`_lead_ok`）—— 播放器想一口气吞掉整段也不行。
+        @note ⚠ T11-10e 板端验收抓到的**真问题**: 以前这里"0.2 秒没等到料"就返回空,
+              而调用方把空当"放完了" -> 写 chunked 结束块 -> 播放器收到**干净的 EOS** ->
+              GUI 报 `eof` -> Agent 自动下一集 -> 换条又收掉流 -> **一路连跳 6 条**
+              （板端日志实证, 见 docs/bilibili.md §4）。所以现在**只有真该收工才返回空**:
+                 · `stop()`（换条/清空/收工）;
+                 · 真放完（`_reader_done` 且窗口已喂空 —— 这才是 EOS）;
+                 · 要的那块已经被"播过即释放"放掉了（客户端太慢, 补不回来）。
+              限速、暂时没料、内存水位卡住 —— 一律**在这儿等着**, 等多久都行（最多
+              `FEED_STALL_S` 秒一点料都没有才放弃, 那时日志会如实记一笔）。
         """
-        deadline = time.time() + max(0.0, float(wait_s))
+        stall_deadline = time.time() + FEED_STALL_S
         while True:
             with self._idle:
                 base = self._total_in - len(self._window)
                 if cursor < base:                             #: 太慢: 它要的那块已经放掉了
+                    self.log.info("bilibili: 这条连接落后太多（要第 %d 字节, 窗口从 %d 开始）"
+                                  "—— 只能收工", cursor, base)
                     return b""
                 start = cursor - base
-                if start < len(self._window):
+                if start < len(self._window) and self._lead_ok():
                     end = min(len(self._window), start + CHUNK)
                     return bytes(self._window[start:end])
                 if self._stop.is_set():
                     return b""                                #: 收工 -> 让它收尾
                 if self._reader_done.is_set() and not self._window:
-                    return b""                                #: 放完了 -> 收尾 = 播放器收到 EOS
+                    return b""                                #: **真放完了** -> 收尾 = EOS
                 self._idle.wait(0.05)
-            if time.time() > deadline:
+            if time.time() > stall_deadline:                  #: 兜底: 别让死连接吊着线程
+                self.log.warning("bilibili: 这条连接 %.0f 秒没等到料（cap=%.0f s, 已喂 %.1f s, "
+                                 "窗口 %.1f s）—— 收工",
+                                 FEED_STALL_S, self.cap_s(), self.written_s(), self.buffered_s())
                 return b""
 
     def _serve_client(self, handler: Any, cursor: int) -> None:
