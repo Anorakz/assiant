@@ -520,9 +520,12 @@ class TestExecution(unittest.IsolatedAsyncioTestCase):
 #: ⚠ T12-6 把预算抬到 **4700**: 你点名要加第 5 个工具（日程 `set_schedule`, 930 字符）,
 #:    它没法塞进任何一个现有工具的 action（日程与壁纸/音乐/视频是四件不同的事）。
 #:    量到的: STUDY **4528 字符**（IDLE 4329 / GAME 544 / SLEEP 0）—— 4700 给它留 ~170 字符
-#:    余量, 所以**下一个工具照样会红**（守卫的牙还在）。真 token 由
-#:    `tests/board/measure_tool_tokens.py` 在板端 `/tokenize` 量（那个脚本就是为这次
-#:    决定写的; 改动本常量的人应当先跑它一遍, 把新数字写回这两行注释）。
+#:    余量, 所以**下一个工具照样会红**（守卫的牙还在）。
+#:    **板端 `/tokenize` 实测**（`python3 tests/board/measure_tool_tokens.py`）:
+#:      STUDY 4528 字符 = **1867 token**（= ctx 4096 的 45.6%; 其中 set_schedule 自己 930 字符
+#:      = 390 token）; IDLE 1799 token; GAME 258 token; SLEEP 0。
+#:      ⇒ 换算比仍约 **0.41 token/字符**, 与 T8-5c-3 那次测的一致。
+#:    改动本常量的人应当先跑一遍那个脚本, 把新数字写回这几行注释。
 TOOL_BLOCK_BUDGET_CHARS = 4700
 
 #: 单个工具的字符预算（最大的 `next_music` 现在 1761 字符 ≈ 744 token）——

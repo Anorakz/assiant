@@ -209,10 +209,10 @@ agent/
 | ↑ T8-6 加了 `least`/`most` 两个 action 之后 | **3522 字符**（≈ +40 token） |
 | ↑ T10-3 又加了 `stage`（只预挑不切屏）之后 | **3562 字符**（离 3600 的守卫只剩 **38 字符** —— 加之前先把 `next_wallpaper` 的 description 与枚举措辞压了一遍才塞进去） |
 | ↑ T11-5 加了第四个工具 `bilibili_search` | **STUDY 一个字符都不涨**（仍 3562）—— 它**只在 GAME 可用**，所以走进的是 GAME 那份清单：**544 字符**（GAME 本来零工具，空间充裕） |
-| ↑ T12-6 加了第五个工具 `set_schedule`（日程, IDLE/STUDY） | **STUDY 4528 / IDLE 4329 字符**（它自己 930）—— 日历式日程没法塞进任何现有工具的 action（与壁纸/音乐/视频是四件不同的事, 你点名要加），所以预算抬到 **4700**；真 token 由 `tests/board/measure_tool_tokens.py` 在板端 `/tokenize` 量 |
-| 第一轮 prompt | 1495 token（T8-5b 测得；T8-6 之后约 1535，`ctx_size` 4096 —— **没有重量过板端**） |
+| ↑ T12-6 加了第五个工具 `set_schedule`（日程, IDLE/STUDY） | **STUDY 4528 字符 = 1867 token**（= ctx 4096 的 **45.6%**；它自己 930 字符 / **390 token**；IDLE 1799 token）—— 日程没法塞进任何现有工具的 action（与壁纸/音乐/视频是四件不同的事, 你点名要加），所以预算抬到 **4700**（只留 ~170 余量） |
+| 第一轮 prompt | 1495 token（T8-5b 测得；T8-6 之后约 1535 —— **没有重量过板端**）; T12-6 量的是**工具清单那一块**, 不是整轮 prompt |
 | 加一个 **action**（enum 多一个值） | ≈ 十几 token |
-| 加一个**工具**（像样的 description + schema） | ≈ 250~750 token（`set_schedule` 930 字符 —— 已经把 description 与 schema 措辞压过一遍） |
+| 加一个**工具**（像样的 description + schema） | ≈ 250~750 token（`set_schedule` 930 字符 = **390 token** —— 已经把 description 与 schema 措辞压过一遍） |
 
 > ⚠ **"把工具放进哪个状态"是预算问题，不只是权限问题**（T11-5 的教训）：同一个工具放进
 > STUDY 会让清单从 3562 涨到 4139（**超 539**），放进 GAME 则**一点不占**别人的额度。

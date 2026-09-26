@@ -269,9 +269,9 @@ await router.execute("screenshot", {})    # {"ok": True, "result": ...}
   的 `scheduler` 段 —— 走的是 R3 那套**文本级**手术（只动目标那几行 + `.bak`），
   写完**立刻热重载**调度器（不用重启 Agent），见
   [`docs/config-sources.md`](docs/config-sources.md) §3.1。
-  ⚠ 工具清单因此从 3562 涨到 **4528 字符**（STUDY），预算相应抬到 4700 —— 理由与
-  板端实测 token 数记在 `tests/test_merged_tools.py::TestPromptBudget` 的注释里，
-  量法见 `tests/board/measure_tool_tokens.py`。
+  ⚠ 工具清单因此从 3562 涨到 **4528 字符（= 1867 token, ctx 4096 的 45.6%）**，预算相应抬到 4700 ——
+  理由与量法记在 `tests/test_merged_tools.py::TestPromptBudget` 的注释里，
+  量法本身固定成了 `tests/board/measure_tool_tokens.py`（起真 llama-server, POST `/tokenize`）。
   ⚠ 系统提示里**没有当前时间**：一次性日程（`date`）要先 `action=list` 拿今天的日期，
   这条要求写进了工具的 description（0.6B 会自己猜日期）。
 
