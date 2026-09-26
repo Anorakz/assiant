@@ -439,6 +439,94 @@ class TestIsConnected(unittest.TestCase):
             native_mod.reset_native()
 
 
+class TestTransitionTo(unittest.TestCase):
+    """T12-1: **按状态图的规矩走到目标**（跨模式时经 IDLE 中转, 逐跳执行）。
+
+    为什么单列一类: 这条不是"多走一步"这么简单 —— 每一跳都会触发 `on_change`,
+    而"离开某个模式要释放的东西"（视频/常驻模型/llama-server）就挂在那个回调上。
+    一口跳过去 = 那些东西没人放（板端上真发生过: 到点了没切过去, 视频还开着）。
+    """
+
+    def test_a_direct_edge_is_one_step(self):
+        sm = StateMachine()
+        seen = []
+        sm.on_change(lambda old, new: seen.append((old.value, new.value)))
+        out = sm.transition_to(State.STUDY, "直接进学习")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["steps"], [{"from": "idle", "to": "study"}])
+        self.assertIs(sm.current(), State.STUDY)
+        self.assertEqual(seen, [("idle", "study")])
+
+    def test_game_to_sleep_goes_through_idle(self):
+        sm = StateMachine()
+        seen = []
+        sm.on_change(lambda old, new: seen.append((old.value, new.value)))
+        self.assertTrue(sm.transition(State.GAME, "先玩"))       # IDLE -> GAME
+
+        out = sm.transition_to(State.SLEEP, "该睡了")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["steps"], [{"from": "game", "to": "idle"},
+                                        {"from": "idle", "to": "sleep"}])
+        self.assertIs(sm.current(), State.SLEEP)
+        # ⚠ **两跳都通知了** —— 释放清单就是靠这个按步跑的
+        self.assertEqual(seen, [("idle", "game"), ("game", "idle"), ("idle", "sleep")])
+
+    def test_study_to_game_also_goes_through_idle(self):
+        sm = StateMachine()
+        self.assertTrue(sm.transition(State.STUDY, "学习"))
+        out = sm.transition_to(State.GAME, "换游戏")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual([s["to"] for s in out["steps"]], ["idle", "game"])
+        self.assertIs(sm.current(), State.GAME)
+
+    def test_sleep_to_study_goes_through_idle(self):
+        sm = StateMachine()
+        self.assertTrue(sm.transition(State.SLEEP, "睡"))
+        out = sm.transition_to("study", "醒了要学习")            # 字符串也认（IPC 那条路）
+        self.assertTrue(out["ok"], out)
+        self.assertEqual([s["to"] for s in out["steps"]], ["idle", "study"])
+
+    def test_already_there_and_unknown_are_refused_honestly(self):
+        sm = StateMachine()
+        out = sm.transition_to(State.IDLE, "原地")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["steps"], [])
+        self.assertIn("已经在", out["why"])
+        bad = sm.transition_to("banana", "乱写")
+        self.assertFalse(bad["ok"])
+        self.assertIn("不认识的模式", bad["why"])
+        self.assertIs(sm.current(), State.IDLE)                  # 拒绝不动状态
+
+    def test_plan_path_is_pure(self):
+        sm = StateMachine()
+        self.assertEqual(sm.plan_path(State.STUDY), [State.STUDY])       # 有直边: 一跳
+        self.assertTrue(sm.transition(State.GAME, "玩"))
+        self.assertEqual(sm.plan_path(State.SLEEP), [State.IDLE, State.SLEEP])
+        self.assertEqual(sm.plan_path(State.GAME), [])                   # 原地 = 走不到
+        self.assertIs(sm.current(), State.GAME, "plan_path 不该动状态")
+
+    def test_the_old_single_hop_still_refuses_cross_mode(self):
+        # `transition()` 是单跳原语, 语义**一点没变**（跨模式照样 False）
+        sm = StateMachine()
+        self.assertTrue(sm.transition(State.GAME, "玩"))
+        self.assertFalse(sm.transition(State.SLEEP, "越级"))
+        self.assertIs(sm.current(), State.GAME)
+
+    def test_a_broken_callback_does_not_break_the_path(self):
+        sm = StateMachine()
+        calls = []
+
+        def boom(old, new):
+            calls.append((old.value, new.value))
+            raise RuntimeError("回调炸了")
+
+        sm.on_change(boom)
+        out = sm.transition_to(State.SLEEP, "睡")               # IDLE -> SLEEP 一跳
+        self.assertTrue(out["ok"], out)
+        self.assertIs(sm.current(), State.SLEEP)
+        self.assertEqual(calls, [("idle", "sleep")])
+
+
 class TestRepr(unittest.TestCase):
     def test_repr_contains_state(self):
         sm = StateMachine(connected_check=lambda: False)

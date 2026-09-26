@@ -835,20 +835,27 @@ class Scheduler:
         """把 action dict 落到状态机/消息上。
 
         认得的键:
-            state   目标状态 (str 或 State) —— 非法转换会被记进结果, 不抛异常
+            state   目标状态 (str 或 State) —— **按状态图的规矩走**（必要时经 IDLE 中转,
+                    见 `StateMachine.transition_to`）; 走不到就如实记进结果, 不抛异常
             reason  转换理由 (不给就用默认)
-            prompt  要发给 Agent 的文本 (不给就没消息)
+            prompt  要发给 Agent 的文本 (⚠ T12-4 起日程不再带它; 这条留给终端命令那套)
+
+        @note T12-1: 以前这里只调**一次** `transition()` —— 从 GAME/STUDY 到 SLEEP
+              **非法**, 于是"到点了什么都没发生"。现在走 `transition_to()`:
+              `GAME -> IDLE -> SLEEP` 两跳, 每跳都会触发释放（视频/SigLIP/llama-server）。
         """
         done: List[Dict[str, Any]] = []
 
         target = action.get("state")
         if target is not None:
-            ok = self._state.transition(target, action.get("reason") or reason)
+            result = self._state.transition_to(target, action.get("reason") or reason)
             done.append(
                 {
                     "type": "state",
                     "state": getattr(target, "value", str(target)),
-                    "ok": bool(ok),
+                    "ok": bool(result.get("ok")),
+                    "steps": list(result.get("steps") or []),
+                    "why": result.get("why") or "",
                     "current": self._state.current().value,
                 }
             )

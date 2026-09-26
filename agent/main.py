@@ -2189,22 +2189,74 @@ class Runtime:
                              "—— edge 模式下这会儿会降级到规则兜底", waited)
 
     def _on_state_change(self, old: State, new: State) -> None:
-        """进入 SLEEP 停服务、离开 SLEEP 起回来（T7-4 的要求）。
+        """状态变化：**先"离开 old"要释放的，再"进入 new"要做的**（T12-1 你定的）。
 
-        @note 只在 `llm_service` 存在时动（= mode=edge 且 manage_service 打开）
-        @note 状态机要求**任何切换都经过 IDLE**, 所以"离开 SLEEP"就是 SLEEP→IDLE
-        @note 这个回调在状态机调用栈里跑（同步）: 起停都是 subprocess, 所以丢到
-              **后台线程**去做, 不卡状态切换与 GUI 的状态推送
+        @note 次序是刻意的：`GAME -> SLEEP` 走的是 `transition_to()` 的两跳，
+              所以这个回调会被调两次 —— 第一次 `GAME->IDLE`（**释 GAME**：停视频 +
+              清队列/封面 + 卸 SigLIP），第二次 `IDLE->SLEEP`（**释 IDLE**：现在没有
+              专属资源，只记一行；**进 SLEEP**：停 llama-server）。
+              一口跳到 SLEEP 是**非法**的（状态机不允许），所以"视频还开着就睡了"这种
+              情况不可能发生。
+        @note 这个回调在状态机调用栈里跑（同步）：起停 subprocess 丢后台线程，卸载模型
+              很轻（一次 `close()`），所以都不会卡住状态推送。
         """
-        service = self.llm_service
-        if service is None:
+        self._release_state(old)
+        self._enter_state(new)
+
+    def _release_state(self, state: State) -> None:
+        """**离开**某个状态要放开的东西（T12 的"释放清单"，按状态列在这儿）。"""
+        if state is State.GAME:
+            self._release_game()
+        elif state is State.STUDY:
+            # STUDY 也常驻 SigLIP（见 GameWatcher.RESIDENT_STATES）
+            self._release_vision("离开 STUDY")
+        elif state is State.SLEEP:
+            # 离开睡眠 = 把模型服务起回来（T7-4 的要求）
+            if self.llm_service is not None:
+                self.log.info("llm_service: 离开 SLEEP -> 起 llama-server")
+                self._run_service_op(self.llm_service.start, "起")
+        else:
+            # IDLE: 现在**没有**专属资源 —— 照样走一遍（钩子在这儿，日志如实说）
+            self.log.info("state: 离开 IDLE —— IDLE 现在没有专属资源要释放"
+                          "（照规矩走一遍，好让 GAME/STUDY 的东西先被放掉）")
+
+    def _enter_state(self, state: State) -> None:
+        """**进入**某个状态要做的事（现在只有 SLEEP 要停服务）。"""
+        if state is State.SLEEP:
+            if self.llm_service is not None:
+                self.log.info("llm_service: 进入 SLEEP -> 停 llama-server")
+                self._run_service_op(self.llm_service.stop, "停")
+        else:
+            self.log.debug("state: 进入 %s（没有更多「进入」动作）", state.value)
+
+    def _release_game(self) -> None:
+        """离开 GAME：停视频 + **清队列/封面** + 卸载 SigLIP（你定的"连队列一起清"）。
+
+        @note 顺序: 先停缓冲/播放（播放器那边立刻断），再清队列，最后卸载模型 ——
+              推给 GUI 的那一条带着"空队列 + 空 stream"，界面就回占位态。
+        """
+        self._stop_buffer()
+        if self.bilibili is not None:
+            try:
+                self.bilibili.clear()
+            except Exception as exc:                       # noqa: BLE001 - 清队列失败不该拦住退出
+                self.log.warning("bilibili: 离开 GAME 时清队列出错（忽略）: %r", exc)
+            self._bilibili_stream = ""
+            self._push_bilibili()                          # 空队列 + 空 stream = 界面回占位
+        self._release_vision("离开 GAME")
+        self.log.info("bilibili: 离开 GAME —— 视频停了、队列清了、SigLIP 放掉了")
+
+    def _release_vision(self, why: str) -> None:
+        """卸载常驻的 SigLIP（923 MB）—— 退出 GAME/STUDY 时**当场**放，不等观察循环那一跳。"""
+        watcher = self._game_watch
+        if watcher is None:
             return
-        if new is State.SLEEP and old is not State.SLEEP:
-            self.log.info("llm_service: 进入 SLEEP -> 停 llama-server")
-            self._run_service_op(service.stop, "停")
-        elif old is State.SLEEP and new is not State.SLEEP:
-            self.log.info("llm_service: 离开 SLEEP -> 起 llama-server")
-            self._run_service_op(service.start, "起")
+        try:
+            if watcher.model_loaded:
+                watcher.unload()
+                self.log.info("game_watch: %s -> SigLIP 已卸载（释放约 900 MB）", why)
+        except Exception as exc:                           # noqa: BLE001
+            self.log.warning("game_watch: %s 卸载模型出错（忽略）: %r", why, exc)
 
     def _run_service_op(self, operation: Callable[[], Tuple[bool, str]], what: str) -> None:
         """在后台线程里跑一次起/停（失败只记日志, 不抛给状态机）。"""

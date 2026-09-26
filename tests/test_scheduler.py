@@ -420,8 +420,12 @@ class TestCheckSchedule(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(state_action["ok"])
         self.assertEqual(state_action["current"], "study")
 
-    async def test_action_reports_illegal_transition(self):
-        # STUDY -> GAME 不合法; 不该抛异常, 只在结果里记 ok=False
+    async def test_action_walks_through_idle_for_cross_mode(self):
+        """T12-1: 同一时刻两条日程（study 再 game）—— 第二条**经 IDLE** 走两步。
+
+        以前这里断言 `ok == [False, True]`（跨模式被拒、于是"到点了什么都没发生"）。
+        现在按状态图的规矩走过去: `study -> idle -> game`, 两条都成功, 第二条两步。
+        """
         config = {"recurring": [
             {"title": "先学习", "start": "09:30", "action": {"state": "study"}},
             {"title": "再游戏", "start": "09:30", "action": {"state": "game"}},
@@ -430,7 +434,22 @@ class TestCheckSchedule(unittest.IsolatedAsyncioTestCase):
         fired = await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
         self.assertEqual(len(fired), 2)
         results = [a for f in fired for a in f["actions"] if a["type"] == "state"]
-        self.assertEqual(sorted(r["ok"] for r in results), [False, True])
+        self.assertEqual([r["ok"] for r in results], [True, True])
+        self.assertEqual([s["to"] for s in results[0]["steps"]], ["study"])
+        self.assertEqual([s["to"] for s in results[1]["steps"]], ["idle", "game"])
+        self.assertIs(state.current(), State.GAME)
+
+    async def test_action_with_an_unknown_state_is_refused_not_crashed(self):
+        """认不出来的目标（配置写错）: 如实记 ok=False + why, 不抛异常、不动状态。"""
+        config = {"recurring": [{
+            "title": "乱写", "start": "09:30", "action": {"state": "banana"}}]}
+        scheduler, state, _, _ = make_scheduler(config)
+        fired = await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
+        state_action = [a for f in fired for a in f["actions"] if a["type"] == "state"][0]
+        self.assertFalse(state_action["ok"])
+        self.assertIn("不认识的模式", state_action["why"])
+        self.assertEqual(state_action["steps"], [])
+        self.assertIs(state.current(), State.IDLE)
 
     async def test_action_with_reason(self):
         config = {"recurring": [{

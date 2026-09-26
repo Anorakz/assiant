@@ -143,7 +143,7 @@ agent/
 
 | 模块 | 职责 |
 | --- | --- |
-| `core/state_machine.py` | 状态机 `SLEEP ⇄ IDLE ⇄ STUDY ⇄ GAME`（内部**小写**；IPC 上用大写，转换只在 ipc 层做） |
+| `core/state_machine.py` | 状态机 `SLEEP ⇄ IDLE ⇄ STUDY ⇄ GAME`（内部**小写**；IPC 上用大写，转换只在 ipc 层做）。⚠ **任何切换都必须经过 IDLE**：`transition_to()` 会按这张表算路径（有直边一跳，否则 `当前→IDLE→目标` 两跳）并**逐跳执行** —— 每一跳都触发 `on_change`，所以"离开那个模式要释放的东西"按步发生（T12-1；`transition()` 是单跳原语，语义没变） |
 | `core/tool_router.py` | 工具注册、权限控制、执行调度（JSON Schema 子集校验） |
 | `core/scheduler.py` | 日程检查、定时触发、触发监听、触发事实（R 系列）与"删掉已触发的一次性日程"（R3，默认关） |
 | `io/chat_bus.py` | Chat Input Bus：把多个输入源汇成一条 `asyncio.Queue`（单消费者 + `subscribe()` 旁观） |

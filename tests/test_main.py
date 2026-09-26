@@ -33,6 +33,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from agent.core.state_machine import State, StateMachine  # noqa: E402
 from agent.io import _native as native_mod  # noqa: E402
 from agent.ipc import (  # noqa: E402
     COMMAND_CHAT_INPUT,
@@ -918,6 +919,109 @@ class TestNativeSunshineHandshake(unittest.IsolatedAsyncioTestCase):
         )
         args = fake_native.moonlight.start_with_session.call_args[0]
         self.assertEqual(args[-1], "rtsp://127.0.0.1:48010")
+
+
+class TestStateRelease(unittest.IsolatedAsyncioTestCase):
+    """T12-1: **离开一个模式要先把那个模式的东西放掉**, 再去下一个状态。
+
+    你定的规矩: 从 GAME/STUDY 去 SLEEP 不是一跳, 而是 `GAME -> IDLE -> SLEEP`;
+    所以"释 GAME（视频 + 队列 + SigLIP）→ 释 IDLE（现在没有专属资源）→ 进 SLEEP
+    （停 llama-server）"这个次序必须**按步**发生。这里的假件只记"谁在什么时候被叫到"。
+    """
+
+    def _runtime(self):
+        rt = make_runtime()
+        self.events = []
+
+        class _Service:
+            def start(self_inner):
+                self.events.append("llama:start")
+                return (True, "起")
+
+            def stop(self_inner):
+                self.events.append("llama:stop")
+                return (True, "停")
+
+        class _Watcher:
+            def __init__(self_inner):
+                self_inner.model_loaded = True
+
+            def unload(self_inner):
+                self_inner.model_loaded = False
+                self.events.append("siglip:unload")
+
+        class _Queue:
+            def clear(self_inner):
+                self.events.append("queue:clear")
+                return {"ok": True, "why": "清空了", "count": 0, "index": 0, "current": None}
+
+        rt.llm_service = _Service()
+        rt._game_watch = _Watcher()
+        rt.bilibili = _Queue()
+
+        def stop_buffer():
+            self.events.append("video:stop")
+            rt._bilibili_stream = ""
+
+        rt._stop_buffer = stop_buffer
+        rt._push_bilibili = lambda **extra: self.events.append("push:bilibili") or True
+        # 起停服务本来走后台线程: 这里同步跑, 好断言次序
+        rt._run_service_op = lambda op, what: op()
+        # 状态机单独造一个（`make_runtime()` 不启动组件, 状态机是 start 时才建的）,
+        # 但挂的是 **Runtime 真那个** 回调 —— 要验的就是它的次序。
+        machine = StateMachine()
+        machine.on_change(rt._on_state_change)
+        return rt, machine
+
+    async def test_game_to_sleep_releases_in_order(self):
+        rt, machine = self._runtime()
+        self.assertTrue(machine.transition(State.GAME, "先玩"))
+
+        out = machine.transition_to(State.SLEEP, "日程: 该睡了")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(self.events, [
+            "video:stop",        # ① 离开 GAME: 先停视频
+            "queue:clear",       # ② 再把队列/封面清掉
+            "push:bilibili",     # ③ 推给 GUI（空队列 + 空 stream = 回占位）
+            "siglip:unload",     # ④ 卸载常驻模型
+            "llama:stop",        # ⑤ 最后才进 SLEEP 停服务（IDLE 那一跳没有专属资源）
+        ])
+        self.assertIs(machine.current(), State.SLEEP)
+
+    async def test_study_to_sleep_only_unloads_the_model(self):
+        rt, machine = self._runtime()
+        self.assertTrue(machine.transition(State.STUDY, "学习"))
+        self.events.clear()
+        self.assertTrue(machine.transition_to(State.SLEEP, "睡")["ok"])
+        self.assertEqual(self.events, ["siglip:unload", "llama:stop"])
+
+    async def test_leaving_sleep_starts_the_service_again(self):
+        rt, machine = self._runtime()
+        self.assertTrue(machine.transition(State.SLEEP, "睡"))
+        self.assertEqual(self.events, ["llama:stop"])
+        self.events.clear()
+        self.assertTrue(machine.transition_to(State.STUDY, "醒了")["ok"])
+        self.assertEqual(self.events, ["llama:start"], "离开 SLEEP = 把服务起回来（T7-4）")
+
+    async def test_idle_release_is_a_noop_but_does_not_crash(self):
+        rt, machine = self._runtime()
+        self.assertTrue(machine.transition_to(State.GAME, "玩")["ok"])
+        self.events.clear()
+        self.assertTrue(machine.transition_to(State.STUDY, "换学习")["ok"])   # 经 IDLE
+        # GAME 的释放照跑; IDLE 那一跳现在没有专属资源（什么都不加）
+        self.assertEqual(self.events, ["video:stop", "queue:clear", "push:bilibili",
+                                       "siglip:unload"])
+
+    async def test_without_a_watcher_or_queue_nothing_breaks(self):
+        rt, machine = self._runtime()
+        rt._game_watch = None
+        rt.bilibili = None
+        self.assertTrue(machine.transition(State.GAME, "玩"))
+        self.events.clear()
+        out = machine.transition_to(State.SLEEP, "睡")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(self.events, ["video:stop", "llama:stop"],
+                         "没开 B 站时不推空载荷（队列本来就不存在）")
 
 
 class TestBilibiliWiring(unittest.IsolatedAsyncioTestCase):

@@ -553,15 +553,19 @@ def _handle_switch_mode(runtime: Any, push: Any, payload: dict) -> None:
         )
         return
 
-    # transition() 接受 "study" 这样的小写字符串, 并且非法/原地转换都只返回 False
-    if state.transition(mode, "ipc: switch_mode"):
-        _log.info("ipc: switch_mode -> %s", mode)
+    # ⚠ T12-1: 走 `transition_to()` —— **按状态图的规矩**（跨模式时经 IDLE 两跳）。
+    #   以前只调单跳 `transition()`, 于是一按"睡眠"（当前 GAME/STUDY）就被拒, 而且
+    #   GAME 那边开着的视频/常驻模型没人放。现在每一跳都会触发释放。
+    result = state.transition_to(mode, "ipc: switch_mode")
+    if result.get("ok"):
+        _log.info("ipc: switch_mode -> %s（%s）", mode,
+                  " -> ".join(step["to"] for step in result.get("steps") or []) or mode)
         return
 
     current = getattr(state.current(), "value", "?")
     _log.warning(
-        "ipc: switch_mode(%s) 被状态机拒绝 (当前 %s), 把真实状态推回给 GUI",
-        mode, current,
+        "ipc: switch_mode(%s) 被拒（当前 %s, %s）, 把真实状态推回给 GUI",
+        mode, current, result.get("why") or "原因不明",
     )
     if push is not None:
         push(TOPIC_STATUS, _status_data(state))

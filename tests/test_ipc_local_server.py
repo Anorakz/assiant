@@ -587,10 +587,13 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         await handler(COMMAND_SWITCH_MODE, {"value": "IDLE"})
         self.assertEqual(runtime.state.current(), State.IDLE)
 
-    async def test_illegal_switch_mode_pushes_the_real_state_back(self):
-        """非法转换: 拒绝 + 把**真实**状态推回 GUI (docs §4 承诺过这件事)。
+    async def test_cross_mode_switch_is_walked_through_idle(self):
+        """T12-1: `STUDY -> GAME` 现在**能切**（按状态图经 IDLE 两跳），不再被拒。
 
-        IDLE -> STUDY 合法; STUDY -> GAME 非法 (状态机的表里 STUDY 只能回 IDLE)。
+        以前 GUI 从 STUDY 点 GAME 会被拒（状态机只允许 STUDY->IDLE），于是"点了没反应"。
+        现在走 `transition_to()`: `study -> idle -> game`, 而且每一跳都会触发 on_change
+        （释放清单就挂在那个回调上）。真正切不动的情况（已经在那个模式 / 认不出的值）
+        仍然把**真实**状态推回 GUI（docs §4 承诺过）。
         """
         from agent.ipc import _make_command_handler
         from agent.io.chat_bus import ChatInputBus
@@ -605,12 +608,16 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.state.current(), State.STUDY)
         self.assertEqual(pushed, [], "成功时由 on_change 推送, 这里不该再推一条")
 
-        await handler(COMMAND_SWITCH_MODE, {"value": "GAME"})      # STUDY -> GAME 非法
-        self.assertEqual(runtime.state.current(), State.STUDY, "非法转换不能改状态")
-        self.assertEqual(len(pushed), 1, "要把真实状态推回去")
+        await handler(COMMAND_SWITCH_MODE, {"value": "GAME"})   # STUDY -> IDLE -> GAME
+        self.assertEqual(runtime.state.current(), State.GAME)
+        self.assertEqual(pushed, [], "两跳都成功, 也不该额外推")
+
+        await handler(COMMAND_SWITCH_MODE, {"value": "GAME"})   # 已经在 GAME: 切不动
+        self.assertEqual(runtime.state.current(), State.GAME)
+        self.assertEqual(len(pushed), 1, "切不动时要把真实状态推回去")
         topic, data = pushed[0]
         self.assertEqual(topic, TOPIC_STATUS)
-        self.assertEqual(data["mode"], "STUDY", "推的是**当前真实**状态, 不是请求的 GAME")
+        self.assertEqual(data["mode"], "GAME", "推的是**当前真实**状态")
 
     async def test_switch_mode_without_runtime_is_ignored(self):
         from agent.ipc import _make_command_handler
@@ -830,12 +837,22 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
             self.assertIs(data["connected"], False)
             self.assertEqual(runtime.state.current(), State.STUDY)
 
-            # 再来一条非法的: 应当收到一条**真实状态**的 status (仍是 STUDY)
+            # T12-1: 跨模式**能切**了 —— 而且线上能看到**两跳**（先 IDLE, 再 GAME）,
+            # 因为状态机的每一跳都会触发 on_change（释放清单就挂在那个回调上）。
             writer.write(encode_command(COMMAND_SWITCH_MODE, {"value": "GAME"}))
             await writer.drain()
             topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
-            self.assertEqual((topic, data["mode"]), (TOPIC_STATUS, "STUDY"))
-            self.assertEqual(runtime.state.current(), State.STUDY)
+            self.assertEqual((topic, data["mode"]), (TOPIC_STATUS, "IDLE"), "第一跳")
+            topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+            self.assertEqual((topic, data["mode"]), (TOPIC_STATUS, "GAME"), "第二跳")
+            self.assertEqual(runtime.state.current(), State.GAME)
+
+            # 切不动的情况（已经在 GAME）: 仍旧把**真实**状态推回 GUI
+            writer.write(encode_command(COMMAND_SWITCH_MODE, {"value": "GAME"}))
+            await writer.drain()
+            topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
+            self.assertEqual((topic, data["mode"]), (TOPIC_STATUS, "GAME"))
+            self.assertEqual(runtime.state.current(), State.GAME)
         finally:
             if writer is not None:
                 writer.close()

@@ -19,6 +19,12 @@
 #  STUDY 也不能直接进 GAME。这不是限制, 是刻意的: IDLE 是唯一的"公共锚点",
 #  两个活跃状态之间直接跳会让"休眠前保存了什么/游戏前加载了什么"失去唯一入口。
 #
+#  ⚠ T12-1: 规矩早就写在这张表里, 但**没人走多步** —— 调用方（日程/按钮）看到
+#    GAME->SLEEP 非法就放弃了, 结果是"到点了没切过去"。现在多了 `transition_to()`:
+#    它按这张表算路径（有直边一跳, 否则 经 IDLE 两跳）并**逐跳执行**, 每一跳都会
+#    触发 `on_change` —— 于是"离开 GAME 要释放的东西"先放, 再轮到 IDLE 的。
+#    `transition()`（单跳）原样保留。
+#
 #  设计边界 (按约定不做的事)
 #  ---------------------------------------------------------------------------
 #  · **不做** 状态持久化 —— 重启即回到初始状态
@@ -37,7 +43,7 @@ from __future__ import annotations
 
 import sys
 from enum import Enum
-from typing import Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 __all__ = [
     "State",
@@ -154,7 +160,7 @@ class StateMachine:
 
     # ------------------------------------------------------------ 转换 ---
     def transition(self, to: State, reason: str) -> bool:
-        """尝试转换到 to。
+        """尝试转换到 to（**单跳**）。
 
         @param to     目标状态; 接受 State 成员, 也接受 "study" 这样的小写字符串
                       (IPC / 配置里拿到的是字符串)
@@ -163,6 +169,8 @@ class StateMachine:
 
         @note 回调在**状态已经改好之后**触发, 所以回调里 current() 拿到的
               一定是新状态。
+        @note 想说"我要去 SLEEP"（不管现在在哪儿）请用 `transition_to()` —— 它会按
+              **状态图的规矩**自己经 IDLE 中转, 而不是把非法的那一跳丢掉。
         """
         target = self._coerce(to)
 
@@ -176,6 +184,60 @@ class StateMachine:
         self._state = target
         self._notify(previous, target, reason)
         return True
+
+    def plan_path(self, to: State) -> List[State]:
+        """算"从当前状态走到 to"的**跳法**（纯计算, 无副作用）。
+
+        @return 途经的目标状态列表（不含当前状态）; **空列表 = 走不到**
+        @note 有直边就一跳; 没有就 `当前 -> IDLE -> 目标` 两跳 —— 这正是状态图那条
+              "任何切换都必须经过 IDLE" 的规矩落到代码里的样子。
+        """
+        target = self._coerce(to)
+        if target is None or target is self._state:
+            return []
+        if target in LEGAL_TRANSITIONS.get(self._state, set()):
+            return [target]
+        via_idle = LEGAL_TRANSITIONS.get(self._state, set())
+        if State.IDLE in via_idle and target in LEGAL_TRANSITIONS.get(State.IDLE, set()):
+            return [State.IDLE, target]
+        return []
+
+    def transition_to(self, to: State, reason: str) -> Dict[str, Any]:
+        """**按状态图的规矩走到 to**（必要时经 IDLE 中转）—— **一跳到一跳动**（T12-1）。
+
+        @return {"ok": bool, "steps": [{"from","to"}, …], "why": str}
+
+        ⚠ 为什么要有它（你定的规矩）: 从 GAME/STUDY 去 SLEEP **不是**一次转换, 而是
+          `GAME -> IDLE -> SLEEP` 两次。逐跳执行意味着**每一跳都会触发 `on_change`**,
+          于是"离开那个模式要释放的东西"按步发生 —— 释 GAME 的（视频/队列/SigLIP）先走,
+          然后才轮到 IDLE 的, 最后进 SLEEP（停 llama-server）。如果一口跳到 SLEEP,
+          GAME 那边开着的视频与常驻模型就没人放了。
+
+        @note 每一跳仍然走 `transition()`（单跳校验 + 通知都在那儿）, 所以路径是算出来的
+              也照样会被再校验一次 —— 表改了这里不会"偷偷跳过去", 而是返回 ok=False。
+        @note 触发源: 日程到点(`Scheduler._apply_action`)、GUI/CLI 的 `switch_mode`、
+              以后的工具。只想做"合法的单跳"就还用 `transition()`。
+        """
+        target = self._coerce(to)
+        if target is None:
+            return {"ok": False, "steps": [], "why": "不认识的模式 %r" % (to,)}
+        if target is self._state:
+            return {"ok": False, "steps": [], "why": "已经在这个模式（%s）" % target.value}
+
+        hops = self.plan_path(target)
+        if not hops:
+            return {"ok": False, "steps": [],
+                    "why": "状态图里从 %s 走不到 %s" % (self._state.value, target.value)}
+
+        steps: List[Dict[str, str]] = []
+        for hop in hops:
+            previous = self._state
+            if not self.transition(hop, reason):
+                return {"ok": False, "steps": steps,
+                        "why": "%s -> %s 被状态机拒了（路径是算出来的, 不该发生）"
+                               % (previous.value, hop.value)}
+            steps.append({"from": previous.value, "to": hop.value})
+        return {"ok": True, "steps": steps}
 
     # ------------------------------------------------------------ 回调 ---
     def on_change(self, callback: Callable[[State, State], None]) -> None:
