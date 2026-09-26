@@ -1524,6 +1524,49 @@ Phase 7 T10 — **画像驱动的切换**（你定的六条 + A1~A5; "暂不应�
       （不切屏、不计数, 但不是你要的那个条件）。要修就是把规则放宽到"除 `tags` 以外", 属于改
       工具行为, 得单独做（T10-6 只记不改; 见 `docs/tagging.md` §7）
 
+Phase 7 T11 — **B 站视频**（图像锚点认游戏 -> 搜 B 站 -> 板端播；工具只在 GAME 可见）
+☑ T11-0 **门禁实测（先量后写码）** —— 4 项全跑完, 结论与证据:
+      · **传输必须换掉**: 板端 **`souphttpsrc` 是坏的**（连 `souphttpsrc ! fakesink` 都 SIGABRT）。
+        根因是**后端/版本错配**, 不是内存: 崩在 0.08 s、RSS 极小、`dmesg` 无 OOM、3/3 稳定复现;
+        触发点是 `Got context from element 'souphttpsrc0': gst.soup.session=context,
+        session=(SoupSession)NULL` 紧跟 `std::runtime_error`; 而
+        `libgstreamer1.0-0 = 1.18.5-1` 配 `gstreamer1.0-plugins-good = 1.16.3`（`libgstsoup.so`
+        自报 1.16.3, 链 `libsoup-2.4 2.70.0`）→ 核心与插件版本错配。
+        → **定案: FIFO（命名管道）+ MPEG-TS**, 不用 HTTP:
+          `filesrc ! decodebin` 从 FIFO 播 -> **选中 `mppvideodec`**、EOS 正常（退出码 0）;
+          ⚠ **mp4 写管道不行**（`Could not write header … Broken pipe`, 管道不可 seek）,
+          `-f mpegts` 就通。备选（真要 HTTP 时）: 板上还有 `curlhttpsrc`。
+      · **ffmpeg 拉 B 站直链必须带 `-user_agent` + `-headers "Referer: …\r\n"`**,
+        不带两个 CDN 都回 **403**; `-c copy` 合流 DASH 两路成功（ffprobe 确认 HEVC 1080P + AAC）。
+      · **ffmpeg 比实时快 68×** → 必须**背压**（窗口够了就不读、让管道阻塞）, 否则几秒灌满内存。
+      · **真 GUI 播通（0-2）**: `gui/build/agent_gui --video /tmp/bilibili-<bvid>.ts`
+        + `assistant mode game` -> `[video] state=1 pos=21283ms` 位置在涨、**声音在响**
+        （`pactl`: Sink Input "ALSA plug-in [agent_gui]" Corked: no, sink State: RUNNING）、
+        画面截图 `temp/t11_gui.png`、GUI RSS **127 MB**、sink = `xvimage`、`rockchipmpp` 已加载。
+        ⚠ 播放时 GUI CPU **66% 单核**（空载壁纸 0.5%）——大头在**显示/缩放路径**（1080P→1280×800）,
+        纯解码实测只有 7%（T11-7 可以试 glimagesink/kmssink 降下来）; 流式无时长（`dur=0ms`）。
+      · **游戏识别标定**（素材: 5 个游戏 / 13 张, `/home/kickpi/game_samples`）:
+        画面锚点 leave-one-out top-1 **9/13 = 69%**（平均原型 62%）; 正确分 0.616~0.915、
+        误判时错误分最高 0.835 → **阈值区间重叠, 单一阈值分不开**; 混淆集中在 galgame;
+        **文本锚点去掉**（实测 77% 但样本太小, 不足为据）;
+        **进程只做修正**: `top1 ≥ 0.82 且 margin ≥ 0.05` -> 画面直接采信（13 张里 **6 张、零误判**）,
+        否则问进程; 进程裁决后**把这一帧写成该游戏的锚点**（自学习）。
+        ⚠ **窗口标题拿不到**: sshd 在 **session 0**, `MainWindowTitle` 恒为 0 —— 进程路只能用
+        **进程名**（`tasklist` / `Get-Process` 可用, 0.5~1.5 s）→ 需要 `exe 名 -> 游戏名` 映射
+        （已给: `WHITE ALBUM Memories like Falling Snow.exe` -> white album、
+        `hatsuyuki.exe` -> 初雪樱、`Amakano3.exe` -> 甜蜜女友3; hoi4/stellaris 顺名字）。
+      · **单帧 1.6~3.3 s / 模型加载 2.2~4.1 s / SigLIP 常驻 923 MB**（`close()` 回落 111 MB）。
+        **策略: STUDY 与 GAME 都常驻**（离开这两个状态卸载）。
+      · **内存水位实测**: MemTotal **3901 MB 无 swap**; 空载 499; **llama-server 1219 MB**
+        （长跑实测到过 2030）; **Agent 121 MB**; **GUI 127 MB**; SigLIP 923 MB; ffmpeg 46 MB;
+        播放器 ~15 MB; 缓冲 **3.8~15 MB**（720P 15/60 s）。
+        常驻 + llama 冷启 ≈ **2965 MB（剩 ~900 MB）**; 最坏（llama 2030）≈ 3776 MB（剩 ~120 MB）
+        → 定 `buffer.mem_watermark_mb = 400`, **加载/保持 SigLIP 前先看 `MemAvailable`**,
+        不够就不加载（或先卸载）并如实记日志; **不和 `assistant tag`（离线打标签）同时跑**。
+      · 教训: 我留了个 `--serve-only` 后台进程（跑了 29 分钟）——板子随后**网络掉了**
+        （板子**没重启**、`dmesg` 只有 SKWIFI 调试行、没有掉线报错, 大概率是 Windows 热点侧
+        踢客户端）。**规矩改了: 不留后台进程、一切套 `timeout`、`souphttpsrc` 一律不碰**。
+
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档
