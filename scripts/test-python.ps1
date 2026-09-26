@@ -37,6 +37,7 @@ $tests = @(
     "tests\test_bilibili_api.py",
     "tests\test_bilibili_queue.py",
     "tests\test_bilibili_buffer.py",
+    "tests\test_game_watch.py",
     "tests\test_label_spec.py",
     "tests\test_merged_tools.py",
     "tests\test_tool_normalize.py",
