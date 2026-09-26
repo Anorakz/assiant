@@ -216,7 +216,7 @@ class TestNoGuiConfigLeftovers(unittest.TestCase):
 WRITE_PRIMITIVES = (r"(os\.replace|mkstemp|\.write_text\(|write_text_atomic\("
                     r"|open\([^)]*,\s*[\"']a)")
 
-#: 允许出现写入原语的文件（**只有**这六个）。
+#: 允许出现写入原语的文件（**只有**这八个）。
 ALLOWED_WRITERS = {
     "agent/config.py",               # write_text_atomic: 全仓唯一的"原子写文本"实现
     "agent/core/schedule_config.py", # 唯一被允许的调用方: 删掉已触发的一次性日程 (R3) +
@@ -240,6 +240,18 @@ ALLOWED_WRITERS = {
     #   运行期只有一条写入路径 —— 画面与 PC 进程**不一致**时把那一帧登记成锚点（自纠错）。
     #   截图文件（config/game_anchors/<游戏>/*.jpg）也由它写。
     "agent/core/game_anchors.py",
+    # T13-2 新增的第七个写入者: **学习内容锚点库**（config/study_anchors.jsonl）。
+    # ⚠ 与游戏锚点库同款、但是**另一个文件**（你定的"两个库分开"）: 一行一锚点 =
+    #   子标签（code/doc/real/anime/game）+ 768 维 float16 向量 + 截图路径 + 来源 + 时间。
+    #   两条写入路径都在这一个模块里: 自学习时**追加**，以及"超每类上限丢最旧 / 清空"
+    #   时**整篇原子重写**（`write_text_atomic`）。它不是配置真源，是识别用的派生数据；
+    #   截图目录 config/study_anchors/<子标签>/ 也由它写。
+    "agent/core/study_anchors.py",
+    # T13-2 新增的第八个写入者: **学习监督的运行统计**（config/study_stats.json）。
+    # ⚠ 全篇原子重写（不是追加）: 阈值 + 计数 + 分数分布 + 最近明细，**全程有界**
+    #   （直方图固定 20 档、明细/备注都是定长环形、计数器与阈值项也封了上限）——
+    #   它是"阈值能在运行期自己修正"（你定的）的**唯一依据**，也是诊断材料，不是配置真源。
+    "agent/core/study_stats.py",
 }
 
 
@@ -266,10 +278,12 @@ class TestWhoWritesTheConfig(unittest.TestCase):
                       % (", ".join(sorted(ALLOWED_WRITERS)), "\n  ".join(offenders)))
 
     def test_the_writer_scan_is_not_vacuous(self):
-        """反空转：白名单里那六个文件**真的**命中了写入原语，否则这条守卫什么都没查。
+        """反空转：白名单里那八个文件**真的**命中了写入原语，否则这条守卫什么都没查。
 
         ⚠ T11-8：这条断言正是"补上追加写"的理由 —— 只把 `game_anchors.py` 加进白名单
         而正则不认 `open(path, "a")`，这里就会红（那份白名单是假的）。
+        ⚠ T13-2：`study_stats.py` 只做**整篇重写**（`write_text_atomic`），
+        `study_anchors.py` 两条都有（追加 + 重写）—— 两个都必须在正则里有命中。
         """
         hits = {}
         for path in _agent_python_files():

@@ -39,6 +39,8 @@ agent/
 │   │   ├── scheduler.py         # 日程检查 + 定时触发 + 终端命令监听
 │   │   ├── schedule_config.py   # 日程的**文本级**增删（只动目标那几行 + `.bak`，R3/T12-5）
 │   │   ├── wallpaper.py         # 壁纸目录 + 游标 + **三格窗口 prev/current/next**（可在候选里翻，T7-3/T10-3）
+│   │   ├── study_anchors.py     # **学习内容锚点库**（五类子标签→study/not_study；每类上限丢最旧，T13-2）
+│   │   ├── study_stats.py       # 学习监督的**有界**运行统计：阈值/计数/分数分布/明细（T13-2）
 │   │   └── music.py             # 播放内核: 环形队列 / 轮询真实进度 / 30 秒计一次 / **补歌到目标长度** (T8-4/T10-4)
 │   ├── media/                   # 本地媒体库 (T8-3)
 │   │   └── music_library.py     # config/music_library.jsonl: 读写/合并/打标/挑选（纯 Python）
@@ -113,6 +115,7 @@ agent/
 │   ├── test_schedule_tool.py    # 日程工具: 归一化 / schema / 权限 / Runtime 落盘与热重载 (T12-6)
 │   ├── test_bilibili_config.py  # B 站配置守卫: 模板能被真构造器吃下 / 键不多不少 / 默认值对齐 (T11-8)
 │   ├── test_game_watch.py       # 游戏观察器: 画面锚点 vs PC 进程双路 / 自学习纠错 / 常驻策略 (T11-4)
+│   ├── test_study_anchors.py    # 学习锚点库(五类/大类映射/每类上限丢最旧) + 运行统计(有界/坏文件容错) (T13-2)
 │   ├── test_music_library.py    # 本地音乐库: 读写 / 合并 / 打标 / 挑选 (T8-3)
 │   ├── test_music_player.py     # 播放内核: 环形队列 / 30 秒计一次 / 曲终自动下一首 / 补歌两段式 (T8-4/T10-4)
 │   ├── test_label_spec.py       # 统一标签语法: 拆键 / 拆值 / 多轴 / 壁纸那边只用这一份 (T8-5b)

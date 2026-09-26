@@ -132,6 +132,18 @@ config/game_anchors.jsonl
 config/game_anchors.jsonl.bak
 # 锚点截图目录（自学习时存的"它当时看到了什么"，供人复核；同样不入库）
 config/game_anchors/
+# 学习内容锚点（T13-2）: 一行一个锚点（子标签 + 向量 + 截图路径），与游戏锚点**分开**一份
+# —— 游戏库要认作品（小类）、这里只要认"像不像学习"（大类），生命周期也不同。
+# 同样是运行期自学出来的派生数据，不入库。
+config/study_anchors.jsonl
+config/study_anchors.jsonl.bak
+# 学习锚点的截图目录（"它当时看到了什么"，供人复核；不入库）
+config/study_anchors/
+# 学习监督的运行统计（T13-2）: 当前阈值 + 计数 + 分数分布 + 明细。**运行期派生数据**,
+# 一台板子跑出来的东西换台机器没有意义（阈值会在运行期自己修正, 见 study_watch）。
+# ⚠ 后缀是 .json，`config/*.yaml` 那条盖不住它，必须单独写一行。
+config/study_stats.json
+config/study_stats.json.bak
 # 本地音乐库（T8-3）: 一行一首歌（id + tags + 播放次数），**板端本地数据** ——
 # 从云歌单**导入一次** id 之后就不再看云歌单了，属于"这台机器听过什么"，不入库。
 config/music_library.jsonl
