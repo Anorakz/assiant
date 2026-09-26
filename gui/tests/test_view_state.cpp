@@ -72,11 +72,14 @@ void TestViewState::modeSwitchChoicesFollowCurrentMode()
     QCOMPARE(ViewState::modeSwitchChoices(QStringLiteral("IDLE")),
              QStringList({QStringLiteral("SLEEP"), QStringLiteral("STUDY"),
                           QStringLiteral("GAME")}));
-    // 其它模式 → 只有"退出"（不许出现"学习 → 游戏"这种要过状态机的直跳）
+    // 其它模式 → 退出 + 睡眠 + 另一个活跃模式（T12-3：都能点, 跨模式由 Agent 走路径）
     QCOMPARE(ViewState::modeSwitchChoices(QStringLiteral("STUDY")),
-             QStringList({QStringLiteral("IDLE")}));
+             QStringList({QStringLiteral("IDLE"), QStringLiteral("SLEEP"),
+                          QStringLiteral("GAME")}));
     QCOMPARE(ViewState::modeSwitchChoices(QStringLiteral("GAME")),
-             QStringList({QStringLiteral("IDLE")}));
+             QStringList({QStringLiteral("IDLE"), QStringLiteral("SLEEP"),
+                          QStringLiteral("STUDY")}));
+    // 睡眠屏例外: 只给"退出当前模式"（不提供直接跳进游戏/学习）
     QCOMPARE(ViewState::modeSwitchChoices(QStringLiteral("SLEEP")),
              QStringList({QStringLiteral("IDLE")}));
     // 非法值按"未知"处理，仍给三个入口

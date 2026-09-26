@@ -31,7 +31,10 @@ public:
 
     /// 「模式切换按钮」的可选项（方案 §3 首页可变按钮）：
     ///   IDLE 或未知 → SLEEP / STUDY / GAME（三个入口）
-    ///   其它模式     → 只有 IDLE（退出当前模式）
+    ///   STUDY / GAME → IDLE（退出）+ SLEEP + 另一个活跃模式
+    ///                  ⚠ 跨模式那一跳由 **Agent 按状态图的规矩走**（`GAME -> IDLE -> SLEEP`），
+    ///                  界面不再自己拦（T12-3：以前把跨模式全灰掉，"从游戏点睡眠"根本发不出去）
+    ///   SLEEP       → 只有 IDLE（退出当前模式）
     static QStringList modeSwitchChoices(const QString& currentMode);
 
     /// 应用一条消息。返回是否有任一字段被更新。

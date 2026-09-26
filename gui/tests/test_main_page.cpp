@@ -51,7 +51,7 @@ class TestMainPage : public QObject {
 
 private slots:
     void modePanelOffersThreeWhenIdleOrUnknown();
-    void modePanelOffersOnlyExitWhenBusy();
+    void modePanelOffersExitSleepAndTheOtherActiveMode();
     void chatSendEmitsTextAndClearsInput();
     void chatSendBlockedWhenLinkDown();
     void chatCapsMessageCount();
@@ -80,11 +80,15 @@ void TestMainPage::modePanelOffersThreeWhenIdleOrUnknown()
     QCOMPARE(spy.first().at(0).toString(), QStringLiteral("STUDY"));
 }
 
-void TestMainPage::modePanelOffersOnlyExitWhenBusy()
+void TestMainPage::modePanelOffersExitSleepAndTheOtherActiveMode()
 {
+    // T12-3: 在 GAME/STUDY 里不再是"只有退出" —— 退出 + 睡眠 + 另一个活跃模式都点得到
+    //        （跨模式那一跳由 **Agent** 按状态机的规矩走 `GAME -> IDLE -> SLEEP`）。
     ModePanel panel;
     panel.setMode(QStringLiteral("GAME"));
-    QCOMPARE(modeButtons(&panel).size(), 1);
+    QCOMPARE(modeButtons(&panel).size(), 3);
+    QVERIFY(modeButtonFor(&panel, QStringLiteral("SLEEP")) != nullptr);
+    QVERIFY(modeButtonFor(&panel, QStringLiteral("STUDY")) != nullptr);
 
     QPushButton* exit = modeButtonFor(&panel, QStringLiteral("IDLE"));
     QVERIFY(exit != nullptr);
@@ -94,6 +98,11 @@ void TestMainPage::modePanelOffersOnlyExitWhenBusy()
     exit->click();
     QCOMPARE(spy.count(), 1);
     QCOMPARE(spy.first().at(0).toString(), QStringLiteral("IDLE"));
+
+    // 睡眠屏**例外**: 仍旧只给"退出当前模式"（不提供直接跳进游戏/学习）
+    panel.setMode(QStringLiteral("SLEEP"));
+    QCOMPARE(modeButtons(&panel).size(), 1);
+    QVERIFY(modeButtonFor(&panel, QStringLiteral("IDLE")) != nullptr);
 
     // 切回 IDLE 后按钮组应该恢复成三个
     panel.setMode(QStringLiteral("IDLE"));

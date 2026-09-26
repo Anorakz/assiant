@@ -16,13 +16,27 @@ const QStringList& ViewState::modes()
 
 QStringList ViewState::modeSwitchChoices(const QString& currentMode)
 {
-    // 只有 IDLE（或还没收到 / 收到非法值）时才给"进入某个模式"的三个入口；
-    // 处在其它模式时只给一个"退出"，避免出现"学习 → 游戏"这种要经状态机判断的直跳。
+    // T12-3: **都能点** —— 不只是"退出当前模式"。
+    //
+    // 为什么改: 状态机本来就要求"任何切换都经过 IDLE"（`GAME -> IDLE -> SLEEP`），
+    // Agent 那边现在会**逐跳走**（每一跳都释放那个模式里的东西: 视频/队列/SigLIP…）。
+    // 界面以前把跨模式的目标全灰掉，于是"从游戏点睡眠"根本发不出去 —— 用户只能绕
+    // "先退出、再睡眠"两步，而 Agent 明明能一步做完。
+    //
+    //   IDLE（或还没收到/非法） -> 进入某个模式的三个入口（不变）
+    //   STUDY / GAME            -> 退出 + 睡眠 + 另一个活跃模式（由 Agent 走路径）
+    //   SLEEP                   -> 只给"退出当前模式"（睡眠屏不提供直接跳进游戏/学习）
     if (currentMode.isEmpty() || !isValidMode(currentMode)
         || currentMode == QLatin1String("IDLE")) {
         return {QStringLiteral("SLEEP"), QStringLiteral("STUDY"), QStringLiteral("GAME")};
     }
-    return {QStringLiteral("IDLE")};
+    if (currentMode == QLatin1String("SLEEP")) {
+        return {QStringLiteral("IDLE")};
+    }
+    if (currentMode == QLatin1String("STUDY")) {
+        return {QStringLiteral("IDLE"), QStringLiteral("SLEEP"), QStringLiteral("GAME")};
+    }
+    return {QStringLiteral("IDLE"), QStringLiteral("SLEEP"), QStringLiteral("STUDY")};
 }
 
 bool ViewState::isValidMode(const QString& mode)
