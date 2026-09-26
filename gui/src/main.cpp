@@ -84,6 +84,8 @@ struct Options {
     int bilibiliPickDemo = -1;      ///< >=0 时点一下预览栏第 N 格（验收用）
     bool videoPlayDemo = false;     ///< 启动后切一次播放/暂停（验收用）
     int videoPauseDemoMs = 0;       ///< >0 时过这么多毫秒点一次播放/暂停（T11-9: 验暂停预取）
+QString modeDemo;               ///< 非空 = 点一下指向该模式的按钮（T12-3: SLEEP/IDLE/STUDY/GAME）
+int modeDemoMs = 3000;          ///< 上面那一下在启动后多久点（默认 3 秒, 留够连上 Agent 的时间）
     bool videoFullscreenDemo = false; ///< 启动后切一次全屏（验收用）
     bool watchdogDemo = false;      ///< 启动后点一下看门狗（验收用）
     QString modelModeDemo;         ///< 非空 = 切到该推理位置（验收用）
@@ -124,6 +126,8 @@ void printUsage()
         "  --bilibili-pick-demo <n>  启动后点一下预览栏第 n 格（0 起，验收用）\n"
         "  --video-play-demo    启动后切一次播放/暂停（验收用）\n"
         "  --video-pause-demo <ms>  过这么多毫秒点一次播放/暂停（验收「暂停预取」用）\n"
+        "  --mode-demo <模式>       启动后点一下模式区里指向该模式的按钮（SLEEP/IDLE/STUDY/GAME，验收用）\n"
+        "  --mode-demo-ms <ms>      上面那一下在启动后多久点（默认 3000）\n"
         "  --video-fullscreen-demo 启动后切一次全屏（覆盖整屏，验收用）\n"
         "  --watchdog-demo     启动后点一下看门狗（验收用）\n"
         "  --model-mode-demo <local|cloud|disabled>  切到该推理位置（验收用）\n"
@@ -227,6 +231,29 @@ Options parseArgs(int argc, char** argv)
             }
         } else if (arg == QLatin1String("--video-fullscreen-demo")) {
             opt.videoFullscreenDemo = true;
+        } else if (arg == QLatin1String("--mode-demo")
+                   || arg.startsWith(QLatin1String("--mode-demo="))) {
+            const QString value =
+                optionValue(arg, QStringLiteral("--mode-demo"), i, argc, argv, opt);
+            const QString target = value.trimmed().toUpper();
+            // 四个模式是协议 §3 的全集（与 core::ViewState::modes() 同一份口径）
+            if (target != QLatin1String("SLEEP") && target != QLatin1String("IDLE")
+                && target != QLatin1String("STUDY") && target != QLatin1String("GAME")) {
+                opt.error = QStringLiteral("--mode-demo 只认 SLEEP/IDLE/STUDY/GAME");
+            } else {
+                opt.modeDemo = target;
+            }
+        } else if (arg == QLatin1String("--mode-demo-ms")
+                   || arg.startsWith(QLatin1String("--mode-demo-ms="))) {
+            const QString value =
+                optionValue(arg, QStringLiteral("--mode-demo-ms"), i, argc, argv, opt);
+            bool ok = false;
+            const int ms = value.toInt(&ok);
+            if (!ok || ms <= 0) {
+                opt.error = QStringLiteral("--mode-demo-ms 需要一个 >0 的毫秒数");
+            } else {
+                opt.modeDemoMs = ms;
+            }
         } else if (arg == QLatin1String("--watchdog-demo")) {
             opt.watchdogDemo = true;
         } else if (arg == QLatin1String("--model-mode-demo")
@@ -598,6 +625,13 @@ int runGuiMode(const Options& opt, int argc, char** argv)
     }
     if (opt.videoFullscreenDemo) {
         QTimer::singleShot(2500, &window, [&window]() { window.demoFullscreen(); });
+    }
+    if (!opt.modeDemo.isEmpty()) {
+        // T12-3 验收：起播/连上之后点**真实控件**里指向该模式的那颗按钮
+        //   （`--mode-demo SLEEP` 在 GAME 里点"睡眠" -> Agent 应当走 GAME->IDLE->SLEEP）
+        const QString target = opt.modeDemo;
+        const int ms = opt.modeDemoMs;
+        QTimer::singleShot(ms, &window, [&window, target]() { window.demoSwitchMode(target); });
     }
     if (!opt.modelModeDemo.isEmpty()) {
         const QString mode = opt.modelModeDemo;

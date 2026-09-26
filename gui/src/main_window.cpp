@@ -600,6 +600,25 @@ void MainWindow::demoPrevBilibili()
     }
 }
 
+void MainWindow::demoSwitchMode(const QString& target)
+{
+    // 走**真实控件**: 点那颗按钮 -> ModePanel::modeRequested -> 真发 switch_mode
+    //   （T12-3 的验收就靠这个: 从 GAME 点"睡眠"应当看到 Agent 走 GAME->IDLE->SLEEP）
+    ModePanel* panel = modePanel();
+    if (panel == nullptr) {
+        return;
+    }
+    QPushButton* button = panel->buttonFor(target);
+    if (button == nullptr) {
+        qInfo().noquote() << QStringLiteral("[mode] --mode-demo %1：当前没有这颗按钮（现有：%2）")
+                                 .arg(target).arg(panel->mode());
+        return;
+    }
+    qInfo().noquote() << QStringLiteral("[mode] 点了一下「%1」-> switch_mode")
+                             .arg(button->text());
+    button->click();
+}
+
 void MainWindow::demoPickBilibili(int index)
 {
     // 走**真实控件**那条路（`activateItem` 就是真点击调用的同一个入口）

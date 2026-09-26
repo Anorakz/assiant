@@ -87,6 +87,9 @@ public:
     void demoNextBilibili();
     /// 验收辅助：点一下视频区的「上一集」
     void demoPrevBilibili();
+    /// 验收辅助：点一下模式区里指向 target 的那颗按钮（走真实控件 = 真的会发 switch_mode）
+    /// @param target "SLEEP" / "IDLE" / "STUDY" / "GAME"（大小写不敏感；没有那颗按钮就记日志）
+    void demoSwitchMode(const QString& target);
     /// 验收辅助：点一下预览栏第 index 格（0 起）—— 走真实控件，不是直接发协议
     void demoPickBilibili(int index);
     /// 验收辅助：触发视频区某个占位项的说明（上一集/全屏/倍速）

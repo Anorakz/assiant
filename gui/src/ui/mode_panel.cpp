@@ -53,6 +53,18 @@ void ModePanel::setMode(const QString& mode)
     rebuild();
 }
 
+QPushButton* ModePanel::buttonFor(const QString& target) const
+{
+    const QString want = target.trimmed().toUpper();
+    for (QPushButton* button : buttons_) {
+        if (button != nullptr && button->isVisible()
+            && button->property("modeTarget").toString().toUpper() == want) {
+            return button;
+        }
+    }
+    return nullptr;
+}
+
 void ModePanel::rebuild()
 {
     const QStringList choices = core::ViewState::modeSwitchChoices(mode_);
