@@ -1,57 +1,136 @@
 # ============================================================================
-#  agent/core/bilibili_buffer.py — B 站**缓冲代理**（Phase 7 T11-3）
+#  agent/core/bilibili_buffer.py — B 站**缓冲代理**（Phase 7 T11-3；T11-10 换成 HTTP）
 #
 #  它是什么: 一个"**边下边喂**"的管子。ffmpeg 把 B 站的流 `-c copy` 合成 **MPEG-TS**
-#            写到 stdout; 我们把它收进一个**内存窗口**, 再按播放器的消费速度喂进
-#            **FIFO（命名管道）** —— GUI 那边就是"播一个本地路径"。
+#            写到 stdout; 我们把它收进一个**内存窗口**, 再由一个**只绑 127.0.0.1 的
+#            小 HTTP 服务**按播放器的消费速度喂出去（`Transfer-Encoding: chunked`,
+#            追上写头就等着新数据）—— GUI 那边就是"播一个本机 URL"。
 #
-#  为什么不是 HTTP 代理（T11-0 实测改的）:
-#      · 板端 **`souphttpsrc` 是坏的**（连 `souphttpsrc ! fakesink` 都 SIGABRT;
-#        根因是 libgstreamer 1.18 与 gstreamer1.0-plugins-good 1.16 版本错配,
-#        不是内存问题 —— 详见 todo.md 的 T11-0 记录）。播放器**拉不了 http**。
-#      · **FIFO + filesrc** 实测可用（`filesrc ! decodebin` 选中 `mppvideodec`）。
-#      · 封装必须用 **mpegts**: mp4 写管道会 `Could not write header … Broken pipe`
-#        （管道不可 seek）; mpegts 天生流式、没有索引。
+#  ⚑ 为什么从 FIFO 改成 HTTP（T11-9 板端实测, 见 todo.md）:
+#      · FIFO 那条路**播放器根本读不动**: `playbin uri=file://<FIFO>`（QMediaPlayer 的后端）
+#        12 秒里读走 **0 字节**（`filesrc` 单独读没问题、`decodebin` 也能解, 但 playbin 要
+#        preroll/探测, 而 FIFO 的 `stat` size 恒为 0、不可 seek）→ 画面上就是"位置爬到
+#        ~2.4 s 就不动了"。
+#      · 板端到 `api.bilibili.com` 那条老结论要**补一句**: `souphttpsrc` 确实是坏的
+#        （libgstreamer 1.18 配 plugins-good 1.16）, 但**换个 http 源就行** ——
+#        板上还有 **`curlhttpsrc`** 与 `neonhttpsrc`; 把 `souphttpsrc` 的 rank 压到 0
+#        （GUI 进程里 `GST_PLUGIN_FEATURE_RANK=souphttpsrc:0`）之后:
+#          - `playbin uri=http://…` **static**（带 Content-Length）: preroll 通过、正常 EOS ✓
+#          - `playbin uri=http://…` **chunked 边下边喂**: 12 秒读走 20 秒的量、进程一直活着 ✓
+#      · FIFO 那条路留着（`transport="fifo"`）**只给 `dd`/`cat` 这类哑读端排障用**,
+#        默认是 **http**（播放器唯一能走通的那条）。
 #
-#  缓冲规矩（老板 T11-0/D3 定的）:
-#      · **15 s 门槛**: 窗口里攒够 15 s 才开闸（开闸 = 把 FIFO 给 GUI 去播）。
+#  缓冲规矩（老板 T11-0/D3 定的, 换传输后**一条没变**）:
+#      · **15 s 门槛**: 窗口里攒够 15 s 才开闸（开闸 = 把 URL/FIFO 交给 GUI 去播）。
 #      · 播放中窗口封顶 = 15 s（领先一档就够, 别白占内存）;
 #        **暂停时封顶放到 60 s**（"用户停止时可以延长"）;
 #      · 两条硬上限: `max_s` 与 **内存水位**（`MemAvailable < watermark` 就不读了,
 #        ffmpeg 写满管道自然阻塞 —— 天然背压）。
-#      · **播过即释放**: 写进 FIFO 的字节从窗口里删掉; `stop()` 把窗口整个放掉。
+#      · **播过即释放**: 播放器已经收走的字节从窗口里删掉; `stop()` 把窗口整个放掉。
 #      · **全程不落盘**: 视频内容只在内存窗口里（最多 60 s ≈ 15 MB @720P）。
 #      · 直链过期（T11-0 实测 CDN 会 403）-> **重取直链 + 重启 ffmpeg**, 对 GUI 透明;
 #        重试次数用完了如实说。
 #
-#  ⚠ 不支持 seek（FIFO 不可寻址; GUI 本来也没有进度条拖动）。
-#  ⚠ 本模块**不碰 IPC**: 它只交出 `path()` 与 `snapshot()`, 谁推给 GUI 是 Runtime 的事。
+#  ⚠ 不支持 seek: chunked 的流**没有总长度**, 播放器也没法跳（一路顺序读）。
+#    GUI 本来也没有进度条拖动 —— 这条边界没变。
+#  ⚠ 本模块**不碰 IPC**: 它只交出 `stream_target()` 与 `snapshot()`, 谁推给 GUI 是 Runtime 的事。
 # ============================================================================
 
 from __future__ import annotations
 
 import errno
+import http.server
 import logging
 import os
+import secrets
+import socketserver
 import subprocess
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
 __all__ = ["BilibiliBuffer", "BufferError", "seconds_to_bytes", "ffmpeg_argv",
-           "DEFAULT_INITIAL_S", "DEFAULT_MAX_S", "DEFAULT_MEM_WATERMARK_MB"]
+           "DEFAULT_INITIAL_S", "DEFAULT_MAX_S", "DEFAULT_MEM_WATERMARK_MB",
+           "DEFAULT_PORT"]
 
 _log = logging.getLogger(__name__)
 
 DEFAULT_INITIAL_S = 15.0        #: 起播门槛（你定的 15 s）
 DEFAULT_MAX_S = 60.0            #: 暂停时能延到多长（你定的 60 s）
 DEFAULT_MEM_WATERMARK_MB = 400.0  #: 内存水位（低于它就不再预取）
+DEFAULT_PORT = 8765             #: 本机 HTTP 端口（只绑 127.0.0.1）; 被占了会自动换一个
 CHUNK = 65536
 LOOP_SLEEP = 0.02
 
 
 class BufferError(RuntimeError):
     """缓冲代理起不来/中途坏了（消息给人看、能照做）。"""
+
+
+def _make_handler(buffer: "BilibiliBuffer") -> type:
+    """造一个 HTTP 处理器类（**只认一条路**: `GET /stream/<bvid>?v=<token>`）。
+
+    线格式: `200` + `Content-Type: video/mp2t` + **`Transfer-Encoding: chunked`**
+    —— 没有 `Content-Length`（长度我们也不知道, 边下边喂）, 所以播放器把它当**直播流**:
+    顺序读、不 seek、读到收尾才 EOS。这正好对上"没有 seek"的边界。
+
+    ⚠ `Range` 请求**故意不当回事**（照 200 全量喂）: 我们的流没有总长度, 给不了 206;
+      播放器问 Range 只说明它想 seek —— 日志里记一笔, 免得以后"为什么跳不了"没人说得清。
+    """
+    import urllib.parse
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt: str, *args: Any) -> None:      # 别把日志刷屏
+            buffer.log.debug("bilibili: http %s" % (fmt % args))
+
+        # ---- 收尾: chunked 的结束块（播放器据此收到 EOS）----
+        def _end_chunks(self) -> None:
+            try:
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+
+        def write_chunk(self, data: bytes) -> None:
+            self.wfile.write(b"%x\r\n" % len(data) + data + b"\r\n")
+            self.wfile.flush()
+
+        def do_HEAD(self) -> None:                                # noqa: N802 - 基类命名
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp2t")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+
+        def do_GET(self) -> None:                                 # noqa: N802 - 基类命名
+            parsed = urllib.parse.urlparse(self.path)
+            parts = [p for p in parsed.path.split("/") if p]
+            query = urllib.parse.parse_qs(parsed.query)
+            token = (query.get("v") or [""])[0]
+            if len(parts) != 2 or parts[0] != "stream":
+                self.send_error(404, "only /stream/<bvid>")
+                return
+            if token != buffer.token or parts[1] != buffer.bvid:
+                buffer.log.warning("bilibili: 有人拿错的 token 来读（%s）—— 拒掉", token or "空")
+                self.send_error(403, "bad token")
+                return
+            if parsed.query and self.headers.get("Range"):
+                buffer.log.info("bilibili: 播放器问了 Range=%s（没有总长度, 按顺序喂全量）",
+                                self.headers.get("Range"))
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp2t")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            # ⚠ 从**现有窗口的开头**开始喂（不是从 0）: 之前的字节按"播过即释放"已经放掉了,
+            #   这条边界如实写在文档里（新连上来的播放器从当前缓冲起点开始放）。
+            start = buffer.window_base()
+            buffer._serve_client(self, start)
+            self._end_chunks()
+
+    return Handler
 
 
 def seconds_to_bytes(bps: Any, seconds: float) -> int:
@@ -104,16 +183,23 @@ class BilibiliBuffer(object):
                  open_writer: Optional[Callable[[str], Any]] = None,
                  create_fifo: Optional[Callable[[str], None]] = None,
                  meminfo: Optional[Callable[[], Dict[str, float]]] = None,
+                 transport: str = "http", port: Optional[int] = None,
                  log: Optional[logging.Logger] = None, retries: int = 2) -> None:
         """
         @param spawn       起 ffmpeg 的方式（默认 `subprocess.Popen`; 单测注入假的）
         @param open_writer 打开 FIFO 写端（默认 `open(path, "wb")` + 等读端; 单测注入假的）
         @param create_fifo 建 FIFO（默认 `os.mkfifo`; 单测注入 no-op, 免得依赖 POSIX）
         @param meminfo     读 /proc/meminfo（单测注入, 免得真去看内存）
+        @param transport   `http`（默认, **播放器能走通的那条**）/ `fifo`（只给 dd/cat 排障）
+        @param port        本机 HTTP 端口（默认 8765; 被占了会自动换一个, 见 `start()`）
         """
+        if str(transport or "http").lower() not in ("http", "fifo"):
+            raise BufferError("不认识的传输方式 %r（只有 http / fifo）" % (transport,))
         self.api = api
         self.log = log or _log
+        self.transport = str(transport or "http").lower()
         self.fifo_dir = str(fifo_dir or "/tmp")
+        self.port = int(port if port is not None else DEFAULT_PORT)
         self.initial_s = max(1.0, float(initial_s or DEFAULT_INITIAL_S))
         self.max_s = max(self.initial_s, float(max_s or DEFAULT_MAX_S))
         self.mem_watermark_mb = float(mem_watermark_mb or DEFAULT_MEM_WATERMARK_MB)
@@ -128,7 +214,9 @@ class BilibiliBuffer(object):
         self.bvid = ""
         self.stream: Dict[str, Any] = {}
         self.bps = 0.0
-        self.path = ""
+        self.path = ""               #: fifo 模式: 管道路径
+        self.url = ""                #: http 模式: 给播放器的本机 URL（含 token）
+        self.token = ""              #: 一条一个, 防止"上一集的播放器"读到这一集
         self.state = "idle"          #: idle|buffering|serving|paused|ended|error|stopped
         self.why = ""
         self.ready = False
@@ -136,9 +224,11 @@ class BilibiliBuffer(object):
         self.on_ready: Optional[Callable[[str], None]] = None
 
         self._window = bytearray()
-        self._written = 0            #: 已经喂给播放器的字节
-        self._inflight = 0           #: 从窗口摘下来、还没写进管道的字节
+        self._written = 0            #: 已经喂给播放器的字节（http 模式 = 客户端读走的最大偏移）
+        self._total_in = 0           #: 从 ffmpeg 读进来的字节（单调递增; 窗口起点靠它算）
+        self._inflight = 0           #: 从窗口摘下来、还没写进管道的字节（只 fifo 模式用）
         self._lock = threading.Lock()
+        self._idle = threading.Condition(self._lock)   #: 有新料/要收工 -> 唤醒正在喂的 HTTP 连接
         self._stop = threading.Event()
         self._gate = threading.Event()
         self._playing = True
@@ -148,6 +238,9 @@ class BilibiliBuffer(object):
         self._writer_thread: Optional[threading.Thread] = None
         self._reader_done = threading.Event()
         self._notes: List[str] = []
+        self._server: Any = None                     #: http 模式的 ThreadingHTTPServer
+        self._server_thread: Optional[threading.Thread] = None
+        self._cursors: List[int] = []                #: 正在读的客户端各自读到哪了（绝对偏移）
 
     # ------------------------------------------------------------ 只读 ---
     def buffered_s(self) -> float:
@@ -170,10 +263,27 @@ class BilibiliBuffer(object):
         """当前窗口封顶: **播放中 15 s / 暂停 60 s**（你定的"暂停可以延长"）。"""
         return self.max_s if not self._playing else self.initial_s
 
+    def stream_target(self) -> str:
+        """交给播放器的**地址**: http 模式是 `http://127.0.0.1:<port>/stream/…`，
+        fifo 模式是管道路径（空 = 还没开闸）。"""
+        return self.url if self.transport == "http" else self.path
+
+    def window_base(self) -> int:
+        """窗口里第一个字节的**绝对偏移**（= 已经被放掉的字节数）。
+
+        @note 新连上来的播放器从这里开始喂（之前的地已经放掉了）—— 见 `_make_handler` 的注释。
+        """
+        with self._lock:
+            return self._total_in - len(self._window)
+
     def snapshot(self) -> Dict[str, Any]:
         progress = self.progress()
         with self._lock:
             return {"state": self.state, "ready": bool(self.ready), "path": self.path,
+                    "url": self.url, "stream": self.stream_target(),
+                    "transport": self.transport,
+                    "port": self.port if self.transport == "http" else 0,
+                    "clients": len(self._cursors),
                     "bvid": self.bvid, "title": str(self.item.get("title") or ""),
                     "buffered_s": progress["buffered_s"],
                     "written_s": progress["written_s"],
@@ -223,8 +333,12 @@ class BilibiliBuffer(object):
             stream = self._fetch_stream(self.bvid)
         self.stream = dict(stream or {})
         self.bps = float(self.stream.get("bps") or 0.0)
-        self.path = os.path.join(self.fifo_dir, "bilibili-%s.ts" % self.bvid)
-        self._prepare_fifo()
+        if self.transport == "http":
+            self._start_server()                       # 先起服务（端口被占就自动换一个）
+            self.url = "http://127.0.0.1:%d/stream/%s?v=%s" % (self.port, self.bvid, self.token)
+        else:
+            self.path = os.path.join(self.fifo_dir, "bilibili-%s.ts" % self.bvid)
+            self._prepare_fifo()
         self._stop.clear()
         self._gate = threading.Event()
         self._reader_done = threading.Event()
@@ -233,16 +347,20 @@ class BilibiliBuffer(object):
         self.why = ""
         self._window = bytearray()
         self._written = 0
+        self._total_in = 0
         self._inflight = 0
+        self._cursors = []
         self._spawn_ffmpeg(seek_s=0.0)
         self._reader = threading.Thread(target=self._read_loop, name="bilibili-read",
                                         daemon=True)
-        self._writer_thread = threading.Thread(target=self._write_loop, name="bilibili-write",
-                                               daemon=True)
         self._reader.start()
-        self._writer_thread.start()
-        self.log.info("bilibili: 缓冲开攒 %s（%s, %.0f kbps, 门槛 %.0f s）",
-                      self.bvid, self.stream.get("kind"), self.bps / 1000.0, self.initial_s)
+        if self.transport == "fifo":
+            self._writer_thread = threading.Thread(target=self._write_loop,
+                                                   name="bilibili-write", daemon=True)
+            self._writer_thread.start()
+        self.log.info("bilibili: 缓冲开攒 %s（%s, %.0f kbps, 门槛 %.0f s, %s）",
+                      self.bvid, self.stream.get("kind"), self.bps / 1000.0, self.initial_s,
+                      self.url or self.path)
         return self.snapshot()
 
     def wait_ready(self, timeout_s: float = 10.0) -> bool:
@@ -277,7 +395,7 @@ class BilibiliBuffer(object):
             self.state = "paused"
 
     def stop(self) -> None:
-        """停 ffmpeg + 关 FIFO + 放掉窗口 + 删管道文件（**幂等**）。"""
+        """停 ffmpeg + 关供流端（http 服务/FIFO）+ 放掉窗口（**幂等**）。"""
         self._stop.set()
         self._gate.clear()
         proc, writer = self._proc, self._writer
@@ -295,6 +413,9 @@ class BilibiliBuffer(object):
             except Exception as exc:                       # noqa: BLE001
                 self.log.debug("bilibili: 关 %s 时出错（忽略）: %r", name, exc)
         self._reader_done.set()                            # 让写线程别再等料
+        with self._idle:
+            self._idle.notify_all()                        # 正在喂的 HTTP 连接该收尾了
+        self._shutdown_server()
         for thread in threads:
             if thread.is_alive():
                 thread.join(timeout=2)
@@ -314,15 +435,33 @@ class BilibiliBuffer(object):
                     self.log.warning("bilibili: ffmpeg 杀不掉（放着）: %r", exc)
         with self._lock:
             self._window = bytearray()
+            self._cursors = []
         if self.path:
             try:
                 os.unlink(self.path)
             except OSError:
                 pass
         self.path = ""
+        self.url = ""
         self.ready = False
         if self.state not in ("ended", "error"):
             self.state = "stopped"
+
+    def _shutdown_server(self) -> None:
+        """收掉本机 http 服务（幂等; 不 waiting 太久, 免得拖住 stop）。"""
+        server, self._server = self._server, None
+        thread, self._server_thread = self._server_thread, None
+        if server is not None:
+            try:
+                server.shutdown()
+            except Exception as exc:                       # noqa: BLE001
+                self.log.debug("bilibili: 关 http 服务出错（忽略）: %r", exc)
+            try:
+                server.server_close()
+            except Exception as exc:                       # noqa: BLE001
+                self.log.debug("bilibili: 关 http socket 出错（忽略）: %r", exc)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2)
 
     # ------------------------------------------------------------ 内部 ---
     def _fetch_stream(self, bvid: str) -> Dict[str, Any]:
@@ -355,12 +494,102 @@ class BilibiliBuffer(object):
         self.ready = True
         self.state = "serving" if self._playing else "paused"
         self._gate.set()
-        callback, path = self.on_ready, self.path
-        if callable(callback) and path:
+        callback, target = self.on_ready, self.stream_target()
+        if callable(callback) and target:
             try:
-                callback(path)
+                callback(target)
             except Exception as exc:                       # noqa: BLE001 - 回调坏了不该影响缓冲
                 self.log.warning("bilibili: on_ready 回调出错（忽略）: %r", exc)
+
+    # ------------------------------------------------- http 供流（默认） ---
+    def _start_server(self) -> None:
+        """起一个**只绑 127.0.0.1** 的小 HTTP 服务（chunked 边下边喂）。
+
+        @note 端口被占（上一集还没收干净/别的程序占了）就退到**随机端口**并记一条 ——
+              宁可用别的端口, 也不要"开不了闸"。
+        """
+        self.token = secrets.token_hex(4)
+        handler = _make_handler(self)
+        try:
+            self._server = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), handler)
+        except OSError as exc:
+            self.log.warning("bilibili: 端口 %d 用不了（%s），换一个随机端口", self.port, exc)
+            self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        # ⚠ 两种情况下都要把**实际端口**记下来: 传 0（随机）或换端口时, `server_address` 才是真的。
+        self.port = int(self._server.server_address[1])
+        self._server.daemon_threads = True
+        self._server_thread = threading.Thread(target=self._server.serve_forever,
+                                               name="bilibili-http", daemon=True)
+        self._server_thread.start()
+        self.log.info("bilibili: 本机 http 供流就绪 127.0.0.1:%d（token=%s）",
+                      self.port, self.token)
+
+    def _min_cursor(self) -> int:
+        """正在读的客户端里**最慢**的那个读到哪了（没人读 = 已经喂出去的量）。"""
+        with self._lock:
+            return min([slot["at"] for slot in self._cursors]) if self._cursors else self._written
+
+    def _release_below(self, offset: int) -> None:
+        """把窗口里 `< offset` 的字节放掉（"播过即释放"）。"""
+        with self._lock:
+            base = self._total_in - len(self._window)      #: 窗口第 0 个字节的绝对偏移
+            drop = max(0, int(offset) - base)
+            if drop > 0 and self._window:
+                del self._window[:drop]
+
+    def feed(self, cursor: int, wait_s: float = 0.2) -> bytes:
+        """给某条 HTTP 连接取"下一个字节块"（**可能等一会儿**）。
+
+        @param cursor 这条连接已经读到哪了（绝对偏移）
+        @return 一块字节; **空字节 = 现在真没有了**（放完了 / 收工了 / 那块已经放掉了）
+        @note 这是整条 http 链路的核心: 客户端读到哪, 我们才从窗口里放到哪;
+              追上了写头就在这里等（`wait_s`）, 等不到新料就返回空 —— 不忙等、不占 CPU。
+        """
+        deadline = time.time() + max(0.0, float(wait_s))
+        while True:
+            with self._idle:
+                base = self._total_in - len(self._window)
+                if cursor < base:                             #: 太慢: 它要的那块已经放掉了
+                    return b""
+                start = cursor - base
+                if start < len(self._window):
+                    end = min(len(self._window), start + CHUNK)
+                    return bytes(self._window[start:end])
+                if self._stop.is_set():
+                    return b""                                #: 收工 -> 让它收尾
+                if self._reader_done.is_set() and not self._window:
+                    return b""                                #: 放完了 -> 收尾 = 播放器收到 EOS
+                self._idle.wait(0.05)
+            if time.time() > deadline:
+                return b""
+
+    def _serve_client(self, handler: Any, cursor: int) -> None:
+        """一条连接的喂法: chunked 一块块写；写不动就是播放器不读了（天然背压）。"""
+        slot = {"at": int(cursor)}
+        with self._lock:
+            self._cursors.append(slot)
+        self.log.info("bilibili: 播放器连上了（从第 %d 字节开始喂; 共 %d 条连接）",
+                      slot["at"], len(self._cursors))
+        try:
+            while True:
+                block = self.feed(slot["at"])
+                if not block:
+                    break
+                handler.write_chunk(block)
+                slot["at"] += len(block)
+                with self._lock:
+                    self._written = max(self._written, slot["at"])
+                self._release_below(self._min_cursor())
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            self.log.info("bilibili: 播放器断开（%r）", exc)
+        finally:
+            with self._lock:
+                if slot in self._cursors:
+                    self._cursors.remove(slot)
+            self.log.info("bilibili: 播放器走了（还剩 %d 条连接; 已经喂出去 %.1f s）",
+                          len(self._cursors), self.written_s())
+            # 没人读了: 窗口按当前封顶继续攒（暂停时 60 s），但**不再往下放**
+            self._release_below(self._min_cursor())
 
     def _mem_low(self) -> bool:
         """内存水位到了吗（到了就先别预取, 让 ffmpeg 堵在管道里）。"""
@@ -399,10 +628,14 @@ class BilibiliBuffer(object):
                 if not chunk:
                     if self._handle_eof() == "ended":
                         self._reader_done.set()        # 放完了 -> 读线程收工（写线程把尾巴喂完）
+                        with self._idle:
+                            self._idle.notify_all()    #: 喂到尾巴的连接该收尾了（= 播放器 EOS）
                         return
                     continue
                 with self._lock:
                     self._window.extend(chunk)
+                    self._total_in += len(chunk)
+                    self._idle.notify_all()          #: 有新料 -> 叫醒正在喂的 HTTP 连接
             except Exception as exc:                   # noqa: BLE001 - 读线程不能死
                 self.log.warning("bilibili: 读流出错（忽略这轮）: %r", exc)
                 time.sleep(LOOP_SLEEP * 5)

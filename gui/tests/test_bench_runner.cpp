@@ -5,6 +5,7 @@
 //  停止测试真的把子进程收掉、最新报告能被读到。
 //  真脚本（--precheck）由验收脚本在板端跑一次取证。
 // ============================================================================
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QLabel>
@@ -143,6 +144,17 @@ void TestBenchRunner::latestReportIsShown()
               QStringLiteral("# Q4_K_M 报告\n首token 123ms\n维持 4.5 tok/s\n"));
     writeFile(root + QStringLiteral("/llm/multimodal_bench/compare.md"),
               QStringLiteral("# 多模态对比\n更快\n"));
+    // ⚠ 两份报告是**同一秒**写的, 而"最新报告"是按 mtime 挑的 —— 板端实测会随机挑到多模态那份
+    //   （`Q4_K_M 报告` 于是找不到 = flaky）。这里把多模态那份调旧一分钟, 断言就确定了。
+    //   （Qt 5.12 没有静态的 `QFile::setFileTime(fileName, dt)`, 只能开一个 QFile 调。）
+    {
+        QFile older(root + QStringLiteral("/llm/multimodal_bench/compare.md"));
+        if (older.open(QIODevice::ReadWrite)) {
+            older.setFileTime(QDateTime::currentDateTime().addSecs(-60),
+                              QFileDevice::FileModificationTime);
+            older.close();
+        }
+    }
 
     ModelPage page;
     page.setPaths(root + QStringLiteral("/config/config.yaml"), root);

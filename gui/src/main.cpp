@@ -686,6 +686,19 @@ int runGuiMode(const Options& opt, int argc, char** argv)
 
 int main(int argc, char** argv)
 {
+    // ⚑ T11-10：**板端 `souphttpsrc` 是坏的**（libgstreamer 1.18 配 plugins-good 1.16，
+    //   连 `souphttpsrc ! fakesink` 都 SIGABRT），而 B 站视频那条路走的是**本机 http**
+    //   （Agent 的内存窗口，边下边喂）。把坏的那个按到 rank 0，让板上的 `curlhttpsrc`
+    //   顶上来 —— 实测：压下去之后 `playbin uri=http://…` static/live 两种供法都正常。
+    //   ⚠ 必须在**本进程里**设：用 HTTP 的是 GUI 自己（QMediaPlayer 的 GStreamer 后端）。
+    {
+        const QByteArray rank = qgetenv("GST_PLUGIN_FEATURE_RANK");
+        if (!rank.contains("souphttpsrc")) {
+            qputenv("GST_PLUGIN_FEATURE_RANK",
+                    rank.isEmpty() ? QByteArray("souphttpsrc:0")
+                                   : rank + ",souphttpsrc:0");
+        }
+    }
     const Options opt = parseArgs(argc, argv);
     if (!opt.error.isEmpty()) {
         qWarning().noquote() << "[gui] 参数错误:" << opt.error;

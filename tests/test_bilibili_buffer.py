@@ -5,6 +5,11 @@
 假掉三样东西（都是外部世界）: ffmpeg 进程（假数据流）、FIFO 写端（记字节）、/proc/meminfo。
 于是"15 s 门槛 / 播放中 15 s 封顶 / 暂停延到 60 s / 内存水位停读 / 播过即释放 /
 上游断了重取直链重连"这些规矩都能在开发机上断言。
+
+⚠ 两套传输各测各的（T11-10 起产品默认是 **http**）:
+  · `TestHttpTransport` —— 起**真的**本机 http 服务, 用 `urllib` 真去读（推荐的那条路）;
+  · 其余类用 `transport="fifo"`（夹具就是为 FIFO 语义写的: 假写端/假管道/EPIPE），
+    它现在只留给 `dd`/`cat` 这类哑读端排障。
 """
 import io
 import os
@@ -12,6 +17,8 @@ import sys
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -144,7 +151,7 @@ class Harness(object):
 
     def __init__(self, *, seconds_of_data=60, fail_after=None, code=1, writer_delay=0.0,
                  free_mb=3000.0, initial_s=15.0, max_s=60.0, retries=2, api=None,
-                 then_stall=False):
+                 then_stall=False, transport="fifo"):
         self.api = api or FakeApi()
         self.procs = []
         self.argvs = []
@@ -155,10 +162,12 @@ class Harness(object):
         self.code = code
         self.writer_delay = writer_delay
         self.then_stall = then_stall
+        # ⚠ 默认走 **fifo**（这个夹具就是为 FIFO 语义写的: 假写端、假管道、EPIPE…）;
+        #   T11-10 起产品的默认传输是 http, 那条路在 TestHttpTransport 里单测。
         self.buf = BilibiliBuffer(
             self.api, fifo_dir="/tmp", initial_s=initial_s, max_s=max_s, retries=retries,
             spawn=self.spawn, open_writer=self.open_writer,
-            create_fifo=lambda path: None,
+            create_fifo=lambda path: None, transport=transport,
             meminfo=lambda: {"MemAvailable": self.free_mb})
 
     def spawn(self, argv):
@@ -352,6 +361,144 @@ class TestBuffering(unittest.TestCase):
         self.assertTrue(h.procs[0].terminated)
         h.buf.stop()                                    # 再来一次不炸
         self.assertFalse(h.buf.ready)
+
+
+class TestHttpTransport(unittest.TestCase):
+    """T11-10: **http 传输**（产品默认）—— 起真服务, 真去读。
+
+    为什么必须换: 板端实测 `playbin uri=file://<FIFO>`（QMediaPlayer 的后端）**一个字节都不读**
+    （FIFO `stat` size=0、不可 seek, preroll 过不去）; 换成 `http://127.0.0.1:…` + chunked
+    之后 static/live 两种供法播放器都能持续读。这个类把那条链路的**服务端**钉住。
+    """
+
+    def harness(self, **kwargs):
+        h = Harness(seconds_of_data=60, **kwargs)
+        h.buf.transport = "http"
+        h.buf.port = 0                        # 随机端口, 免得撞上板端/开发机上别的东西
+        return h
+
+    def start(self, h, timeout=6.0):
+        h.buf.start(dict(ITEM))
+        self.assertTrue(h.buf.wait_ready(timeout), "没攒够门槛")
+        self.assertTrue(h.buf.stream_target(), "开闸了却没有地址")
+        return h.buf.stream_target()
+
+    def test_the_url_shape_and_token(self):
+        h = self.harness()
+        try:
+            url = self.start(h)
+            buf = h.buf
+            self.assertTrue(url.startswith("http://127.0.0.1:%d/stream/%s?v=" % (buf.port,
+                                                                                ITEM["bvid"])),
+                            url)
+            self.assertTrue(buf.token and buf.token in url)
+            self.assertEqual(buf.snapshot()["url"], url)
+            self.assertEqual(buf.snapshot()["transport"], "http")
+            # 旧字段仍然在（老客户端/验收脚本读它）：path 为空, stream = URL
+            self.assertEqual(buf.path, "")
+            self.assertEqual(buf.snapshot()["stream"], url)
+        finally:
+            h.buf.stop()
+
+    def test_it_really_serves_the_stream(self):
+        h = self.harness()
+        try:
+            url = self.start(h)
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.headers.get("Content-Type"), "video/mp2t")
+                # 没有总长度 = 播放器当它直播流（顺序读、不 seek）
+                self.assertIsNone(resp.headers.get("Content-Length"))
+                block = resp.read(200000)
+            self.assertEqual(block, h.data[:200000], "喂出来的字节必须就是 ffmpeg 那几个字节")
+            # 播过即释放: 窗口里那一段没了, 已喂出去的秒数上去了
+            self.assertGreater(h.buf.written_s(), 1.5)
+            self.assertLess(len(h.buf._window), len(h.data))
+        finally:
+            h.buf.stop()
+
+    def test_the_client_counter_goes_up_and_down(self):
+        h = self.harness()
+        try:
+            url = self.start(h)
+            resp = urllib.request.urlopen(url, timeout=5)
+            self.assertTrue(self.wait(lambda: h.buf.snapshot()["clients"] == 1, 3.0),
+                            "连上了但没登记客户端")
+            resp.read(1000)
+            resp.close()
+            self.assertTrue(self.wait(lambda: h.buf.snapshot()["clients"] == 0, 3.0),
+                            "走了但没销号")
+        finally:
+            h.buf.stop()
+
+    def test_a_wrong_token_or_path_is_refused(self):
+        h = self.harness()
+        try:
+            url = self.start(h)
+            base = url.split("?")[0]
+            for bad in (base + "?v=deadbeef", base.replace(ITEM["bvid"], "BV0"), url.replace(
+                    "/stream/", "/etc/")):
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    urllib.request.urlopen(bad, timeout=5)
+                self.assertIn(caught.exception.code, (403, 404))
+        finally:
+            h.buf.stop()
+
+    def test_only_bound_to_localhost(self):
+        h = self.harness()
+        try:
+            self.start(h)
+            self.assertEqual(h.buf._server.server_address[0], "127.0.0.1",
+                             "只许绑本机（不对外）")
+        finally:
+            h.buf.stop()
+
+    def test_stop_closes_the_server(self):
+        h = self.harness()
+        url = self.start(h)
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            resp.read(1000)
+        h.buf.stop()
+        self.assertEqual(h.buf.url, "")
+        with self.assertRaises(Exception):
+            urllib.request.urlopen(url, timeout=2)
+
+    def test_a_busy_port_falls_back_to_another_one(self):
+        import socket as socketlib
+
+        holder = socketlib.socket(socketlib.AF_INET, socketlib.SOCK_STREAM)
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        busy = holder.getsockname()[1]
+        h = self.harness()
+        h.buf.port = busy
+        try:
+            url = self.start(h)
+            self.assertTrue(url.startswith("http://127.0.0.1:%d/" % h.buf.port), url)
+            self.assertNotEqual(h.buf.port, busy, "端口被占时该换一个, 而不是开不了闸")
+        finally:
+            h.buf.stop()
+            holder.close()
+
+    def test_the_gate_hands_over_an_http_url_not_a_path(self):
+        h = self.harness()
+        got = []
+        h.buf.on_ready = got.append
+        try:
+            url = self.start(h)
+            self.assertEqual(got, [url], "开闸交给播放器的必须是那个 http 地址")
+            self.assertTrue(got[0].startswith("http://"))
+        finally:
+            h.buf.stop()
+
+    @staticmethod
+    def wait(predicate, timeout):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.05)
+        return False
 
 
 class TestUpstreamRecovery(unittest.TestCase):

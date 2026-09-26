@@ -1764,6 +1764,8 @@ class Runtime:
                                 initial_s=buffer_cfg.get("initial_s", 15),
                                 max_s=buffer_cfg.get("max_s", 60),
                                 mem_watermark_mb=buffer_cfg.get("mem_watermark_mb", 400),
+                                transport=buffer_cfg.get("transport", "http"),
+                                port=buffer_cfg.get("port"),
                                 log=self.log)
         buffer.on_ready = self._on_bilibili_ready
         try:
@@ -1796,19 +1798,21 @@ class Runtime:
         except Exception as exc:                          # noqa: BLE001 - 后台线程不能炸
             self.log.warning("bilibili: 等门槛时出错（忽略）: %r", exc)
 
-    def _on_bilibili_ready(self, path: str) -> None:
-        """缓冲就绪（**从缓冲线程调进来**）-> 把 FIFO 路径推给 GUI, 并提醒清晰度。
+    def _on_bilibili_ready(self, target: str) -> None:
+        """缓冲就绪（**从缓冲线程调进来**）-> 把要播的地址推给 GUI, 并提醒清晰度。
 
+        @param target **本机 http URL**（T11-10 起）或 FIFO 路径（老选项）——
+                      由 `BilibiliBuffer.stream_target()` 决定, 这里只管转发。
         @note 这条路只在**用户操作之后**才会发生（你定的"等 GUI 操作才开始播放"）。
         @note 清晰度提示**只走聊天气泡**（你定的"清晰度只使用 LLM 对话框, 不更新 GUI"）。
         """
-        if self._buffer is None or self._buffer.path != path:
+        if self._buffer is None or self._buffer.stream_target() != target:
             return
-        self._bilibili_stream = path
+        self._bilibili_stream = target
         snapshot = self._buffer.snapshot()
         self._bilibili_quality = str(snapshot.get("quality") or self._bilibili_quality)
         self._push_bilibili()
-        self.log.info("bilibili: 可以播了 %s（%s, 缓冲 %.1f s）", path,
+        self.log.info("bilibili: 可以播了 %s（%s, 缓冲 %.1f s）", target,
                       self._bilibili_quality or "清晰度未知", snapshot.get("buffered_s") or 0)
         note = self._bilibili_quality_note()
         if note:

@@ -306,7 +306,18 @@ void VideoPanel::setSource(const QString& fileOrUrl)
         setStageVideo(false);
         return;
     }
-    player_->setMedia(QUrl::fromLocalFile(source_));
+    // T11-10：Agent 现在给的是**本机 http URL**（内存窗口 + chunked 边下边喂；板端实测
+    //   `playbin` 对"不可 seek 的文件/FIFO"起不来，http 才行）。本地文件（`--video` 验收）
+    //   照旧走 `fromLocalFile` —— 两种都得认，别把 `http://…` 当成路径拼成 `file:///…/http:/…`。
+    const bool isUrl = source_.startsWith(QLatin1String("http://"))
+                       || source_.startsWith(QLatin1String("https://"))
+                       || source_.startsWith(QLatin1String("rtsp://"))
+                       || source_.startsWith(QLatin1String("file://"));
+    const QUrl media = isUrl ? QUrl(source_) : QUrl::fromLocalFile(source_);
+    qInfo().noquote() << QStringLiteral("[video] 换源(%1): %2")
+                             .arg(isUrl ? QStringLiteral("URL") : QStringLiteral("本地文件"),
+                                  media.toString());
+    player_->setMedia(media);
     setStageVideo(true);
     play();
 }
