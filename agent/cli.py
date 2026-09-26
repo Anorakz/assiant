@@ -387,9 +387,18 @@ async def cmd_mode(args: argparse.Namespace) -> int:
     modes_seen: List[str] = []
 
     def on_message(topic: str, data: dict) -> None:
-        if topic == TOPIC_STATUS:
-            seen.clear()
-            seen.update(data)
+        if topic != TOPIC_STATUS:
+            return
+        seen.clear()
+        seen.update(data)
+        # ⚠ T12-7: **每条 status 都要记下来**, 不是"只留最后一条"。
+        #   `GAME -> IDLE -> SLEEP` 那两跳是**连着推**的: 只读"当前那条"会把它丢成
+        #   `["SLEEP"]`, 于是明明走了两跳却打印不出「路上经过 IDLE」
+        #   （板端验收 t12_accept.py 抓到的: 真 Agent 上就是连着推的）。
+        mode = str(data.get("mode") or "")
+        if mode and (not modes_seen or modes_seen[-1] != mode):
+            modes_seen.append(mode)
+        if mode == want:
             arrived.set()
 
     client.on_message(on_message)
@@ -400,6 +409,7 @@ async def cmd_mode(args: argparse.Namespace) -> int:
         return EXIT_ERROR
 
     try:
+        modes_seen[:] = []
         arrived.clear()
         await client.send_command(COMMAND_SWITCH_MODE, {"value": want})
         if args.no_wait:
@@ -411,16 +421,11 @@ async def cmd_mode(args: argparse.Namespace) -> int:
             left = deadline - time.monotonic()
             if left <= 0:
                 break
-            arrived.clear()
             try:
                 await asyncio.wait_for(arrived.wait(), left)
             except asyncio.TimeoutError:
                 break
-            mode = str(seen.get("mode") or "")
-            if mode and (not modes_seen or modes_seen[-1] != mode):
-                modes_seen.append(mode)
-            if mode == want:
-                break
+            break                       # on_message 只在**目标模式**到达时才 set
 
         if modes_seen and modes_seen[-1] == want:
             print("已切到 %s%s" % (want, mode_path_note(modes_seen)))

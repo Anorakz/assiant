@@ -1855,6 +1855,32 @@ T12-6 — **日程设置进工具列表**（`set_schedule`；你点名要的那�
       （预算表 + 权限表 + 归一化规则表 + "没有时钟"这条边界）、`docs/config-sources.md` §3.1（二）
       （写入路径与热重载）、`docs/cli.md`（CLI 只读、加删走对话）
 
+T12-7 — **收口**: 板端端到端验收（真 Agent / 真时钟 / 真 CLI）+ 抓到的三个真问题
+☑ 新验收脚本 `tests/board/t12_accept.py`（真 Runtime + 真 Scheduler + 真 CLI 子进程 + 真 Unix
+      socket + 真时钟）, 五段:
+      A. **注入时刻**触发: `GAME -> IDLE -> SLEEP` 逐跳释放/进入次序、第一跳**真的**停视频 +
+         清队列 + 卸 SigLIP（GAME 里它是常驻的, NPU 真加载）、第二跳进 SLEEP；
+         线上收到 `status/status/schedule/llm` 四条, 展示行一字不差, 且**没有进对话总线**;
+         事实带两跳 steps; R3 把那条一次性日程从配置里删掉
+      A2. llama-server: 启动时起得来（`/v1/models` 带 key 真探活）; 进 SLEEP 停、离开 SLEEP 起
+      B. **真时钟**触发: `interval_min=1` 的循环自己跑到点, 真 CLI `watch --count 4` 从线上收齐
+      C. 工具写入 + 热重载: `schedule_add/list/remove` + 逐字节回原文 + `.bak`
+      D. CLI: `assistant schedule` 的 `HH:MM  STATE  ← 已触发` 行格式; `mode sleep` 的两跳文案
+      E. 真 `config/config.yaml` md5 不变; 不留 ffmpeg / agent_gui / llama-server 进程
+☑ ⚠ **抓到并修掉的第 1 个真问题（最严重）**: 释放钩子原来挂在 `_start_llm_service()` 里 ——
+      于是 `llm.mode=disabled` / `manage_service=false` 时状态照样跳两跳, 但
+      "离开 GAME 停视频/清队列/卸 SigLIP"**一次都不会发生**（`_release_state` 全程没被调用）。
+      现在挂在**建状态机那一刻**（`_start_state_and_tools`）, 并加了两条单测盯"装配":
+      钩子恰好挂一次 + `_start_llm_service` 不许再挂一遍（挂两遍 = 释放清单跑两遍）
+☑ ⚠ **第 2 个**: CLI `mode` 只记"当前那条 status" —— 两跳连着推时中间那一跳会被丢掉,
+      真机上打印成 `已切到 SLEEP` 而少了「（路上经过 IDLE）」。现在记**每一条** status,
+      并补了一条"两条推送背靠背"的单测（老的用例中间 sleep 0.05 s, 所以一直没露）
+☑ ⚠ **第 3 个**: `schedule_config._sequence_items()` 只认"比键更深的减号行" ——
+      `yaml.safe_dump` 的默认风格是**减号与键同缩进**, PyYAML 读得出来、文本级却一条都找不到
+      （R3 删不掉、查重查不出）。现在两种缩进都认, 并加了 safe_dump 风格的三条单测
+☑ 文档: `docs/architecture.md`（钩子挂哪儿 + 为什么 + 验收入口）、`docs/config-sources.md`
+      §3.1（两种缩进）、`docs/cli.md`（两跳文案为什么可靠）
+
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档

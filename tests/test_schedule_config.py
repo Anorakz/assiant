@@ -271,6 +271,17 @@ class TestSequenceSpan(unittest.TestCase):
             "gui:\n"
             "  theme: grey\n")
 
+    #: `yaml.safe_dump` 的默认风格: **减号与键同缩进**（T12-7 板端验收抓到的漏项）
+    SAFE_DUMP_BODY = ("scheduler:\n"
+                      "  interval_min: 1\n"
+                      "  oneoff:\n"
+                      "  - state: sleep\n"
+                      "    date: '2026-09-26'\n"
+                      "    start: '23:01'\n"
+                      "  recurring: []\n"
+                      "gui:\n"
+                      "  theme: grey\n")
+
     def test_span_stops_at_the_next_section(self):
         lines = schedule_config._split_lines(self.BODY)
         self.assertEqual(schedule_config._sequence_items(lines, 1, 2), [(2, 5)])
@@ -310,6 +321,36 @@ class TestSequenceSpan(unittest.TestCase):
                          "      start: \"14:00\"\n"
                          "gui:\n"
                          "  theme: grey\n")
+
+    # ---- T12-7: `yaml.safe_dump` 那种"减号与键同缩进"的写法 ----
+    def test_safe_dump_style_items_are_found(self):
+        lines = schedule_config._split_lines(self.SAFE_DUMP_BODY)
+        self.assertEqual(schedule_config._sequence_items(lines, 2, 2), [(3, 6)])
+
+    def test_safe_dump_style_oneoff_can_be_removed(self):
+        new_text, why = schedule_config.remove_oneoff_entry(
+            self.SAFE_DUMP_BODY, matches_exactly("sleep", "2026-09-26", "23:01"))
+        self.assertEqual(why, "")
+        self.assertNotIn("23:01", new_text)
+        self.assertIn("  recurring: []\n", new_text, "后面的键原样留着")
+        self.assertIn("gui:\n  theme: grey\n", new_text)
+
+    def test_safe_dump_style_empty_key_gets_the_repo_style_block(self):
+        # `recurring: []` 是空的 -> 没有"已有条目的缩进"可抄, 用本仓库那套（键 + 2）
+        new_text, why = schedule_config.add_entry(
+            self.SAFE_DUMP_BODY, {"state": "study", "start": "09:30"})
+        self.assertEqual(why, "")
+        self.assertIn("  recurring:\n    - state: study\n      start: \"09:30\"\n", new_text)
+        self.assertIn("  - state: sleep\n", new_text, "同缩进那条 oneoff 不许被动")
+
+    def test_safe_dump_style_non_empty_sequence_keeps_its_own_indent(self):
+        new_text, why = schedule_config.add_entry(
+            self.SAFE_DUMP_BODY, {"state": "study", "start": "09:30",
+                                  "date": "2026-09-27"})
+        self.assertEqual(why, "")
+        self.assertIn("  - state: study\n    date: \"2026-09-27\"\n    start: \"09:30\"\n",
+                      new_text)
+        self.assertIn("  recurring: []\n", new_text, "别的键仍不许动")
 
 
 # ===========================================================================

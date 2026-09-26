@@ -994,7 +994,6 @@ class TestStateRelease(unittest.IsolatedAsyncioTestCase):
         self.events.clear()
         self.assertTrue(machine.transition_to(State.SLEEP, "睡")["ok"])
         self.assertEqual(self.events, ["siglip:unload", "llama:stop"])
-
     async def test_leaving_sleep_starts_the_service_again(self):
         rt, machine = self._runtime()
         self.assertTrue(machine.transition(State.SLEEP, "睡"))
@@ -1022,6 +1021,39 @@ class TestStateRelease(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(out["ok"], out)
         self.assertEqual(self.events, ["video:stop", "llama:stop"],
                          "没开 B 站时不推空载荷（队列本来就不存在）")
+
+    async def test_the_hook_is_wired_by_the_runtime_itself(self):
+        """T12-7: 释放钩子必须**由 Runtime 自己**挂上（不能靠测试手挂）。
+
+        板端验收（`tests/board/t12_accept.py`）第一次跑就抓到: 这个钩子原来挂在
+        `_start_llm_service()` 里 —— 于是 `llm.mode=disabled` / `manage_service=false`
+        时状态照样跳两跳, 但"离开 GAME 停视频/清队列/卸 SigLIP"**一次都没发生**。
+        上面那几条用例都是自己 `machine.on_change(rt._on_state_change)` 挂的, 所以全都
+        是绿的 —— 这条专门盯"装配"这一步。
+        """
+        rt = make_runtime()
+        await rt._start_state_and_tools()
+        self.assertEqual(rt.state.callback_count, 1,
+                         "建状态机时就该把释放钩子挂上（恰好一次）")
+
+        calls = []
+        rt._release_state = lambda state: calls.append(("release", state.value))
+        rt._enter_state = lambda state: calls.append(("enter", state.value))
+        self.assertTrue(rt.state.transition(State.GAME, "玩"))
+        rt.state.transition_to(State.SLEEP, "睡")
+        self.assertEqual(calls, [("release", "idle"), ("enter", "game"),
+                                 ("release", "game"), ("enter", "idle"),
+                                 ("release", "idle"), ("enter", "sleep")],
+                         "每一次状态变化都要走「先释放、再进入」")
+
+    async def test_llm_service_does_not_wire_the_hook_again(self):
+        """T12-7: `_start_llm_service()` 不许再挂一遍（那会**每次状态变化跑两遍释放**）。"""
+        rt = make_runtime()
+        await rt._start_state_and_tools()
+        before = rt.state.callback_count
+        await rt._start_llm_service()
+        self.assertEqual(rt.state.callback_count, before,
+                         "挂第二遍 = 释放清单跑两次（卸载/清队列都会重复）")
 
 
 class TestBilibiliWiring(unittest.IsolatedAsyncioTestCase):

@@ -143,7 +143,7 @@ agent/
 
 | 模块 | 职责 |
 | --- | --- |
-| `core/state_machine.py` | 状态机 `SLEEP ⇄ IDLE ⇄ STUDY ⇄ GAME`（内部**小写**；IPC 上用大写，转换只在 ipc 层做）。⚠ **任何切换都必须经过 IDLE**：`transition_to()` 会按这张表算路径（有直边一跳，否则 `当前→IDLE→目标` 两跳）并**逐跳执行** —— 每一跳都触发 `on_change`，所以"离开那个模式要释放的东西"按步发生（T12-1；`transition()` 是单跳原语，语义没变） |
+| `core/state_machine.py` | 状态机 `SLEEP ⇄ IDLE ⇄ STUDY ⇄ GAME`（内部**小写**；IPC 上用大写，转换只在 ipc 层做）。⚠ **任何切换都必须经过 IDLE**：`transition_to()` 会按这张表算路径（有直边一跳，否则 `当前→IDLE→目标` 两跳）并**逐跳执行** —— 每一跳都触发 `on_change`，所以"离开那个模式要释放的东西"按步发生（T12-1；`transition()` 是单跳原语，语义没变）。⚠ 释放钩子（`Runtime._on_state_change` → `_release_state` / `_enter_state`）在**建状态机那一刻**就挂上（`_start_state_and_tools`）—— 早先是挂在"管 llama-server"那一步里的，于是 `llm.mode=disabled` / `manage_service=false` 时"离开 GAME 停视频/清队列/卸 SigLIP"整条不会发生（T12-7 板端验收 `tests/board/t12_accept.py` 抓到的） |
 | `core/tool_router.py` | 工具注册、权限控制、执行调度（JSON Schema 子集校验） |
 | `core/scheduler.py` | 日程检查、定时触发、触发监听、触发事实（R 系列）与"删掉已触发的一次性日程"（R3，默认关） |
 | `io/chat_bus.py` | Chat Input Bus：把多个输入源汇成一条 `asyncio.Queue`（单消费者 + `subscribe()` 旁观） |
@@ -446,6 +446,12 @@ gui/src/
 > 同时 Agent 往 `llm` topic 推**一行**给界面看的文本（`日程到点：切到 STUDY（13:00）`）。
 > 这一行**只走推送通道、不进对话总线**，所以**不会变成 LLM 的输入** ——
 > 日程是"到点照做"，不是给模型的一句话（`Scheduler._fire()` 也不再往 `bus` 里推任何东西）。
+>
+> **板端验收**：`tests/board/t12_accept.py` —— 真 Runtime + 真 Scheduler + 真 CLI + 真时钟，
+> 验的正是上面这条链：`GAME --日程到点--> IDLE --第二跳--> SLEEP`（逐跳释放：第一跳停视频 +
+> 清队列 + **真的卸掉 SigLIP**，第二跳进 SLEEP 停 llama-server；展示行上线且**不在 bus 里**；
+> 事实带两跳 `steps`；R3 把那条一次性日程从配置里删掉）。另有一段"真等一分钟"，让
+> `interval_min=1` 的检查循环自己跑到点 —— 真 CLI `watch` 从线上收那 4 条推送。
 
 ### 6.2 显示窗口：只显示"接下来 N 小时"（R 系列）
 

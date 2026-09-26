@@ -647,7 +647,16 @@ class Runtime:
     async def _start_state_and_tools(self) -> None:
         async def _start_state() -> None:
             self.state = StateMachine()
-            self.log.info("StateMachine 就绪 (初始状态 %s)", self.state.current().value)
+            # ⚠ T12-7: **释放/进入的钩子挂在这里**（状态机一建好就挂）——
+            #   `_on_state_change` 负责"先离开 old（放掉那个模式的东西）、再进入 new"，
+            #   它**不能**等到"管 llama-server"那一步才挂上: `llm.mode=disabled` 或
+            #   `manage_service=false` 时那一步根本不会走到, 于是"离开 GAME 停视频/清队列/
+            #   卸 SigLIP"整条释放都不会发生（板端验收 t12_accept.py 抓到的）。
+            #   `_release_state`/`_enter_state` 自己会看 `self.llm_service` 在不在,
+            #   所以早挂是安全的。
+            self.state.on_change(self._on_state_change)
+            self.log.info("StateMachine 就绪 (初始状态 %s, 释放钩子已挂)",
+                          self.state.current().value)
 
         await self._guarded(_Component("state_machine", _start_state))
 
@@ -2482,10 +2491,11 @@ class Runtime:
                 self.log.info("llm_service: 已启动 llama-server (%s)", message)
             else:
                 self.log.warning("llm_service: 启动 llama-server 没成功: %s", message)
-            # 状态回调：进 SLEEP 停、离开 SLEEP 起
-            if self.state is not None:
-                self.state.on_change(self._on_state_change)
-                self.log.info("llm_service: 已挂上 SLEEP 的启停回调")
+            # ⚠ T12-7: 状态回调**不在这儿挂**（见 `_start_state_and_tools`）——
+            #   以前挂在这里, 于是 `llm.mode=disabled` / `manage_service=false` 时
+            #   "离开 GAME 停视频/清队列/卸 SigLIP" 这套释放**整条不会发生**。
+            #   板端验收（tests/board/t12_accept.py）第一次跑就抓到了: 注入时刻触发后
+            #   状态确实跳了两跳, 但 `_release_state` 一次都没被调。
             # 后台探活（只写日志: "什么时候真的能用了"对排障最有用）
             asyncio.get_running_loop().run_in_executor(None, self._log_when_ready)
 

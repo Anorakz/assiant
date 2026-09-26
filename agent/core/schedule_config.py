@@ -171,6 +171,11 @@ def _sequence_items(lines: List[str], key_index: int, key_indent: int) -> List[T
           于是"序列后面还有别的段"时（板端真配置的 `oneoff:` 后面就是 `gui:`）区间会一路
           吃到文件尾 —— 删一条 oneoff 会把后面的段一起删掉。R3 默认关着，所以一直没露头；
           T12-5 的"加一条"直接踩在上面（新条目被加到了文件末尾），才把它翻出来。
+    @note ⚠ T12-7 又补了一条：YAML 的块状序列允许**减号与键同缩进**
+          （`yaml.safe_dump` 默认就写成 `oneoff:\n- state: sleep`）—— 读的一侧（PyYAML）
+          两种都认, 所以这里也必须认: 同缩进的 `- ` 行仍属于本序列, 而**同缩进的非减号行**
+          （下一个键）才是序列结束。板端验收（t12_accept.py）用 `safe_dump` 写临时配置时
+          抓到的: 读得出来、但文本级删除一条都找不到。
     """
     items: List[Tuple[int, int]] = []
     current: Optional[int] = None
@@ -180,10 +185,16 @@ def _sequence_items(lines: List[str], key_index: int, key_indent: int) -> List[T
         line = lines[index]
         if _is_blank(line):
             continue                    # 空行不切条目（收尾按下一条目/缩进回退算）
-        if _indent_of(line) <= key_indent:
-            stop = index                 # 缩进回退 = 序列结束（注释也算：那是别的段的）
+        indent = _indent_of(line)
+        is_item = bool(_ITEM_RE.match(line)) and not _is_comment(line)
+        if indent > key_indent:
+            pass                        # 序列项通常比键深（本仓库手写的风格）
+        elif indent == key_indent and is_item:
+            pass                        # 与键同缩进的减号行 —— safe_dump 的风格, 仍属本序列
+        else:
+            stop = index                # 缩进回退 / 同缩进的非减号行 = 序列结束
             break
-        if _ITEM_RE.match(line) and not _is_comment(line):
+        if is_item:
             if current is not None:
                 items.append((current, index))
             current = index

@@ -319,12 +319,17 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(setattr, main_module, "LlamaService", self._original)
         _FakeService.last = None
 
-    def _runtime(self, mode="edge", manage=True):
+    async def _runtime(self, mode="edge", manage=True):
         runtime = self.main.Runtime(
             config={"llm": {"mode": mode, "manage_service": manage}},
             start_native=False, start_terminal=False,
             log=logging.getLogger("test.llm_service"))
-        runtime.state = StateMachine()
+        # ⚠ T12-7: 走**真装配**那一步（状态机 + 释放钩子 + 工具）。
+        #   以前这里手写 `runtime.state = StateMachine()`, 于是"进 SLEEP 停服务"靠的是
+        #   `_start_llm_service()` 自己顺手挂的钩子 —— 而那个钩子后来挪到
+        #   `_start_state_and_tools()` 了（`llm.mode=disabled` 时也必须挂上释放清单）。
+        #   测试里手搭状态机就会把"装配漏挂"这件事永远藏起来。
+        await runtime._start_state_and_tools()
         return runtime
 
     async def _settle(self, seconds=2.0):
@@ -344,7 +349,7 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
         return True
 
     async def test_agent_start_starts_the_service(self):
-        runtime = self._runtime()
+        runtime = await self._runtime()
         await runtime._start_llm_service()
         service = runtime.llm_service
         self.assertIsNotNone(service)
@@ -352,7 +357,7 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.stopped, 0)
 
     async def test_sleep_stops_and_leaving_sleep_starts_again(self):
-        runtime = self._runtime()
+        runtime = await self._runtime()
         await runtime._start_llm_service()
         service = runtime.llm_service
 
@@ -366,7 +371,7 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.started, 2, "离开 SLEEP 要起回来")
 
     async def test_transitions_inside_awake_states_do_not_touch_the_service(self):
-        runtime = self._runtime()
+        runtime = await self._runtime()
         await runtime._start_llm_service()
         service = runtime.llm_service
         runtime.state.transition(State.STUDY, "test")
@@ -376,7 +381,7 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
                          "IDLE ⇄ STUDY 不该动服务")
 
     async def test_switch_off_means_no_service_object_at_all(self):
-        runtime = self._runtime(manage=False)
+        runtime = await self._runtime(manage=False)
         await runtime._start_llm_service()
         self.assertIsNone(runtime.llm_service)
         runtime.state.transition(State.SLEEP, "test")
@@ -384,7 +389,7 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.1)
 
     async def test_cloud_mode_never_touches_a_local_service(self):
-        runtime = self._runtime(mode="cloud")
+        runtime = await self._runtime(mode="cloud")
         await runtime._start_llm_service()
         self.assertIsNone(runtime.llm_service)
 
@@ -395,14 +400,14 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
 
         self.main.LlamaService = type("_B", (_Boom,), {
             "from_config": classmethod(lambda cls, config, scripts_dir=None, log=None: cls())})
-        runtime = self._runtime()
+        runtime = await self._runtime()
         await runtime._start_llm_service()          # 不该抛
         runtime.state.transition(State.SLEEP, "test")
         await self._settle()
 
     async def test_ready_probe_only_logs(self):
         # 就绪探活在后台线程里跑; 真的就绪/不就绪都只写日志, 不影响任何返回值
-        runtime = self._runtime()
+        runtime = await self._runtime()
         await runtime._start_llm_service()
         await self._settle()
         self.assertIsNotNone(runtime.llm_service)

@@ -1571,6 +1571,31 @@ class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已切到 SLEEP", out.getvalue())
         self.assertIn("路上经过 IDLE", out.getvalue())
 
+    async def test_mode_two_pushes_back_to_back_still_show_the_path(self):
+        """T12-7: 两跳是**连着推**的（真 Agent 上就是这样）—— 中间那一跳不许丢。
+
+        以前是"只记当前那条 status", 两条挤在一起时只会看到最后一条（SLEEP）,
+        于是明明走了两跳却打印不出「路上经过 IDLE」。
+        """
+        async def on_command(action, payload):
+            self.agent.commands.append((action, payload))
+            if action != COMMAND_SWITCH_MODE:
+                return
+            await self.agent.push(TOPIC_STATUS, {"mode": "IDLE", "connected": False})
+            await self.agent.push(TOPIC_STATUS,
+                                  {"mode": payload.get("value"), "connected": False})
+
+        self.agent.on_command(on_command)
+        args = cli.build_parser().parse_args(
+            ["mode", "sleep", "--socket", self.path, "--timeout", "2"])
+
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = await cli.cmd_mode(args)
+
+        self.assertEqual(code, cli.EXIT_OK, err.getvalue())
+        self.assertIn("路上经过 IDLE", out.getvalue())
+
     async def test_mode_that_never_arrives_is_reported_honestly(self):
         """只走到 IDLE 就没了（真切不过去）: 退出码 1, 并列出路上看到的。"""
         self.agent.reply_with(COMMAND_SWITCH_MODE, TOPIC_STATUS,
