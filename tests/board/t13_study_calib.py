@@ -649,11 +649,17 @@ def _apply(args, groups, cv2, model, report):
     suggested = report["suggested"] or {}
     relative = (report["hypotheses"].get(hypothesis, {}).get("m5_relative") or {})
     bands = relative.get("bands") or []
-    # 选"没把握带"的口径: **先保证一次都不误打扰**（把学习判成非学习会弹气泡/弹桌面）,
-    # 再在满足它的那些 band 里挑**监督失效最少**的; 并列时取最小的 band（判得多一点）。
+    # 选"没把握带"的口径 —— 这是**人的取舍**, 写死在这里免得每次跑出不同答案:
+    #   ① 先保证**一次都不误打扰**（把学习判成非学习会弹气泡/弹桌面, 这是最不能忍的）;
+    #   ② 在满足①的 band 里要求 监督失效 ≤ 1 且 判不出 ≤ 10%（这两个都算"监督没起作用"）;
+    #   ③ 取满足②的**最小** band（判得多一点、少一点"判不出来"）。
+    #   一个都没有 -> 回退到"误打扰=0 里失效最少"的那个。
     band = None
     safe = [row for row in bands if row["nag"] == 0]
-    if safe:
+    pick = [row for row in safe if row["miss"] <= 1 and row["unknown_rate"] <= 0.10]
+    if pick:
+        band = min(row["band"] for row in pick)
+    elif safe:
         fewest = min(row["miss"] for row in safe)
         band = min(row["band"] for row in safe if row["miss"] == fewest)
 
