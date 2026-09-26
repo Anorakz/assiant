@@ -193,7 +193,7 @@ Agent 会把真实状态推回来（协议 §4）。      # stderr, 退出码 1
 ```bash
 $ assistant watch --topics schedule
 在听 /tmp/agent.sock 的推送（只看 schedule，Ctrl-C 退出）
-13:28:09  schedule  kind=fired title=触发事实验收 date=2026-09-22 scheduled_at=2026-09-22T13:28 fired_at=2026-09-22T13:28:09
+13:28:09  schedule  kind=fired state=study date=2026-09-22 scheduled_at=2026-09-22T13:28 fired_at=2026-09-22T13:28:09
 收到 1 条推送，用时 81.7 秒
 ```
 
@@ -208,12 +208,12 @@ Ctrl-C 会打印"收到 N 条推送，用时 X 秒"再干净退出。
 
 ```bash
 $ assistant schedule
-日程（配置共 4 条；/home/kickpi/myproject/assitant/config/config.yaml）
+日程（配置共 3 条；/home/kickpi/myproject/assitant/config/config.yaml）
 窗口：18:00 → 明天 18:30（24 小时；另有最近 30 分钟里刚过去的）
 明天（2026-09-23 周三）
-  08:30  晨间计划
-  10:00  周会
-  13:00-13:30  午休
+  08:30  STUDY
+  10:00  GAME
+  13:00  SLEEP
 ✓ 触发记录来自运行中的 Agent 本人（本次 0 条）——「未触发」是**这个 Agent 进程**没触发过，
   不是配置里没有；记录只在内存里，Agent 重启即清零。
 ```
@@ -226,8 +226,8 @@ $ assistant schedule
 
 #### 窗口：只看"接下来"，所以已经过去的不在里面
 
-窗口 = `[现在 - 30 分钟, 现在 + N 小时)`，判据是**行的 `start`**（不是提前量算出来的提醒时刻 ——
-否则 `14:00` + `remind_before_min=10` 的条目在 13:55 看会因为"提醒时刻已过"而消失）。
+窗口 = `[现在 - 30 分钟, 现在 + N 小时)`，判据是**行的 `start`**（日程到点就是那一行的 `start`，
+没有"提前量算出来的提醒时刻"这种东西了 —— T12-4 起 `remind_before_min` 不再被读）。
 
 所以下午 18:00 跑上面那条命令时，**今天 08:30 / 13:00 那两条是不出现的**；
 每天 08:30 的条目在 24 小时窗口里只出现**明天**那一次。这不是丢数据，是"接下来"的定义。
@@ -236,11 +236,11 @@ $ assistant schedule
 **那 30 分钟是为了什么**：窗口只往前看，但"刚刚过去"的那一小段要留着 —— 否则
 `← 已触发 HH:MM:SS` / `← 已过（未触发）` 这两层信息在列表里**完全看不见**。
 尾巴里还会出现**配置里已经没有**的一次性日程（见下面 §"一次性日程会被删掉"），
-它是靠 Agent 的**触发事实**画出来的（事实里有 title / date / scheduled_at / fired_at）。
+它是靠 Agent 的**触发事实**画出来的（事实里有 state / date / scheduled_at / fired_at）。
 
-**行格式与 GUI 日程区逐行一致**（`HH:MM[-HH:MM]  标题`），所以"CLI 列出来的"和"界面上显示的"
+**行格式与 GUI 日程区逐行一致**（`HH:MM  状态`，状态大写），所以"CLI 列出来的"和"界面上显示的"
 可以直接 diff。日程本身用**真的** `agent.core.scheduler` 语义展开（`occurs_on()` / `trigger_at()`），
-所以 recurring 看星期、oneoff 看日期、提前量跨天都对。
+所以 recurring 看星期、oneoff 看日期都对。
 
 #### 三种标记，别把它们读成同一件事
 

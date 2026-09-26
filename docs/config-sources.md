@@ -220,8 +220,13 @@ GUI 的**日程区**显示的内容来自 `config.yaml` 的 `scheduler.recurring
 
 | | 谁 | 做什么 |
 |---|---|---|
-| 触发 | Agent（`agent/core/scheduler.py`） | 按 `window_min` / `late_grace_min` / `remind_before_min` 真正触发日程动作；开关打开时删掉已触发的那条 oneoff |
-| 展示 | GUI（`gui/src/core/schedule_model.cpp`） | 只读同一段，展开成"今天 / 明天"两段，再按**窗口**（`[现在, 现在+24h)`）筛出"接下来 24 小时"给日程区 |
+| 触发 | Agent（`agent/core/scheduler.py`） | 按 `window_min` / `late_grace_min` 真正触发日程：到点就把设备**切到那条日程写的 state**（走状态机，必要时经 IDLE 中转）；开关打开时删掉已触发的那条 oneoff |
+| 展示 | GUI（`gui/src/core/schedule_model.cpp`） | 只读同一段，展开成"今天 / 明天"两段，再按**窗口**（`[现在, 现在+24h)`）筛出"接下来 24 小时"给日程区；每行是 `HH:MM  状态` |
+
+> T12-4 起**日程的内容只有「时间 + 状态」**：`state` 必填（`sleep`/`idle`/`study`/`game`），
+> `title` / `end` / `remind_before_min` / `prompt` 不再被读（出现即忽略，Agent 启动时记警告），
+> 没有 `state` 的条目**跳过 + 警告**（不整份拒绝 —— 板端老配置里那几条纯提醒正是如此）。
+> `action: {state: …}` 这个老写法仍然收。
 
 **代价（写清楚，别当它是免费的）**：这等于在 C++ 里镜像了一份 Python 的日程语义
 （`parse_clock` / `_weekday_index` / `date.fromisoformat` / `occurs_on`）。
@@ -245,7 +250,7 @@ ssh rk3568 'cd /home/kickpi/myproject/assitant && python3 tests/test_schedule_pa
 > ✅ **已删除（L1）**：仓库里那份 `config/schedule.example.yaml` 已经不在了 —— 它是历史遗留，
 > **全仓没有任何代码读它**（`Scheduler._load_events()` 只从 `config.yaml` 的 scheduler 段/顶层找日程）。
 > 里面唯一有价值的东西是**事件语法**，已并入 `config/config.example.yaml` 的 `scheduler:` 段注释，
-> 且**只写真的会被读的键**（`title` / `days` / `start` / `end` / `date` / `remind_before_min` / `action`）。
+> 且**只写真的会被读的键**（`state` / `days` / `start` / `date`；`action: {state: …}` 也认）。
 > 它原有的 `timezone` / `defaults.remind_before_min` / `location` **从来没有读取者**，
 > 所以没有替代物 —— 也不要再往那儿加。日程的**家**只有 `config.yaml` 的 `scheduler` 段。
 

@@ -417,11 +417,17 @@ gui/src/
 `agent/ipc/__init__.py` 里"有就接"：runtime 没有 `scheduler` 时只少推这一类，其余照常。
 命令与 topic 的字段定义**只在** [`docs/ipc-protocol.md` §3/§4](ipc-protocol.md)。
 
+> **T12-4：日程到点 = 切状态 + 一行展示。** 事实里的内容是 `state`（没有 `title` 了）：
+> 触发时按 `StateMachine.transition_to()` 走到那个状态（跨模式自动经 IDLE，逐跳释放资源），
+> 同时 Agent 往 `llm` topic 推**一行**给界面看的文本（`日程到点：切到 STUDY（13:00）`）。
+> 这一行**只走推送通道、不进对话总线**，所以**不会变成 LLM 的输入** ——
+> 日程是"到点照做"，不是给模型的一句话（`Scheduler._fire()` 也不再往 `bus` 里推任何东西）。
+
 ### 6.2 显示窗口：只显示"接下来 N 小时"（R 系列）
 
 两侧（CLI `assistant schedule` 与 GUI 日程区）都只看 **`[现在, 现在 + N 小时)`**，
 默认 `N = 24`（CLI 的 `--hours`；GUI 是 `core::kWindowHours`）。判据是**行的 `start`** ——
-不是提前量算出的提醒时刻，否则 `14:00` + `remind_before_min=10` 的条目在 13:55 看会消失。
+日程到点就是那一行的 `start`（T12-4 起 `remind_before_min` 不再被读，没有"提前量时刻"这回事）。
 
 - **两侧都留 30 分钟尾巴**（窗口起点 = `现在 - 30min`）：窗口只往前看的话，"到点了、触发没触发"
   在列表里完全看不见。CLI 靠触发事实写出「已触发 / 已过（未触发）」；GUI 拿不到事实，只把那些行

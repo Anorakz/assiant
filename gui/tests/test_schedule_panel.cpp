@@ -2,7 +2,7 @@
 //  gui/tests/test_schedule_panel.cpp — 日程区控件单测（控件级，跑在 offscreen 上）
 //
 //  控件本身不解析配置：这里大部分用例是**手搓 ScheduleResult** 直接喂进去，
-//  只针对显示规则（两段、区间、变暗、截断、提示行）；最后一条用真的
+//  只针对显示规则（两段、变暗、截断、提示行）；最后一条用真的
 //  ScheduleModel 跑一份临时配置，证明"模型 → 控件"这条链是通的。
 // ============================================================================
 #include <QDate>
@@ -27,13 +27,11 @@ namespace {
 const QDate kToday(2026, 9, 21);
 const QDateTime kNow(kToday, QTime(15, 0));
 
-ScheduleRow makeRow(const QString& time, const QString& title,
-                    const QString& end = QString(), bool past = false)
+ScheduleRow makeRow(const QString& time, const QString& state, bool past = false)
 {
     ScheduleRow row;
     row.time = time;
-    row.end = end;
-    row.title = title;
+    row.state = state;
     row.past = past;
     return row;
 }
@@ -76,36 +74,39 @@ private slots:
         QVERIFY(!panel.noteIsWarning());
     }
 
-    void rowsShowTimeAndRange()
+    void rowsShowTimeAndState()
     {
         SchedulePanel panel;
-        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:30"), QStringLiteral("学习"),
-                                              QString(), true),
-                                      makeRow(QStringLiteral("14:00"), QStringLiteral("评审"),
-                                              QStringLiteral("15:30"), true)},
-                                     {makeRow(QStringLiteral("08:00"), QStringLiteral("体检"))}),
+        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:30"), QStringLiteral("study"), true),
+                                      makeRow(QStringLiteral("14:00"), QStringLiteral("game"), true)},
+                                     {makeRow(QStringLiteral("08:00"), QStringLiteral("idle"))}),
                          6);
 
         const QStringList texts = panel.rowTexts();
         QCOMPARE(texts.size(), 3);
-        QCOMPARE(texts.at(0), QStringLiteral("09:30  学习"));
-        QCOMPARE(texts.at(1), QStringLiteral("14:00-15:30  评审"));   // 有 end 就是区间
-        QCOMPARE(texts.at(2), QStringLiteral("08:00  体检"));
+        // T12-4: 一行就是 "时刻  状态"（大写），没有标题、也没有时段
+        QCOMPARE(texts.at(0), QStringLiteral("09:30  STUDY"));
+        QCOMPARE(texts.at(1), QStringLiteral("14:00  GAME"));
+        QCOMPARE(texts.at(2), QStringLiteral("08:00  IDLE"));
         // 今天两条都已过 -> "下一条"落到明天第一条（手工喂的结果没有窗口终点，
         // 所以副标题里没有"到 …"那一段）
         QCOMPARE(panel.subtitleText(),
                  QStringLiteral("接下来 24 小时 · 3 项 · 下一条 明天 08:00"));
 
-        QLabel* title = panel.findChild<QLabel*>(QStringLiteral("ScheduleTime"));
-        QVERIFY(title != nullptr);                    // 控件的对象名给 QSS 用
+        QLabel* time = panel.findChild<QLabel*>(QStringLiteral("ScheduleTime"));
+        QVERIFY(time != nullptr);                     // 控件的对象名给 QSS 用
+        QCOMPARE(time->text(), QStringLiteral("09:30"));   // 时刻那格只有时刻
+        QLabel* state = panel.findChild<QLabel*>(QStringLiteral("ScheduleTitle"));
+        QVERIFY(state != nullptr);
+        QCOMPARE(state->text(), QStringLiteral("STUDY"));  // 名字没改，内容是状态
     }
 
     void pastRowsAreMarked()
     {
         SchedulePanel panel;
-        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:30"), QStringLiteral("过了"), QString(), true),
-                                      makeRow(QStringLiteral("18:00"), QStringLiteral("没到"), QString(), false)},
-                                     {makeRow(QStringLiteral("09:30"), QStringLiteral("明天"), QString(), false)}),
+        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:30"), QStringLiteral("sleep"), true),
+                                      makeRow(QStringLiteral("18:00"), QStringLiteral("study"), false)},
+                                     {makeRow(QStringLiteral("09:30"), QStringLiteral("game"), false)}),
                          6);
         QCOMPARE(panel.isRowPast(0), true);
         QCOMPARE(panel.isRowPast(1), false);
@@ -116,9 +117,9 @@ private slots:
     void subtitleShowsNextUpcomingRow()
     {
         SchedulePanel panel;
-        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("过了"), QString(), true),
-                                      makeRow(QStringLiteral("14:00"), QStringLiteral("也过了"), QString(), true),
-                                      makeRow(QStringLiteral("18:00"), QStringLiteral("下一条"), QString(), false)},
+        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("sleep"), true),
+                                      makeRow(QStringLiteral("14:00"), QStringLiteral("idle"), true),
+                                      makeRow(QStringLiteral("18:00"), QStringLiteral("study"), false)},
                                      {}),
                          6);
         QCOMPARE(panel.subtitleText(),
@@ -128,17 +129,17 @@ private slots:
     void maxRowsTruncatesAcrossBothSections()
     {
         SchedulePanel panel;
-        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("A")),
-                                      makeRow(QStringLiteral("10:00"), QStringLiteral("B"))},
-                                     {makeRow(QStringLiteral("11:00"), QStringLiteral("C")),
-                                      makeRow(QStringLiteral("12:00"), QStringLiteral("D")),
-                                      makeRow(QStringLiteral("13:00"), QStringLiteral("E"))}),
+        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("sleep")),
+                                      makeRow(QStringLiteral("10:00"), QStringLiteral("idle"))},
+                                     {makeRow(QStringLiteral("11:00"), QStringLiteral("study")),
+                                      makeRow(QStringLiteral("12:00"), QStringLiteral("game")),
+                                      makeRow(QStringLiteral("13:00"), QStringLiteral("sleep"))}),
                          3);
 
         QCOMPARE(panel.rowCount(), 3);                // 两段合计上限
         QCOMPARE(panel.hiddenCount(), 2);
-        QCOMPARE(panel.rowTexts().at(0), QStringLiteral("09:00  A"));
-        QCOMPARE(panel.rowTexts().at(2), QStringLiteral("11:00  C"));   // 先今天后明天
+        QCOMPARE(panel.rowTexts().at(0), QStringLiteral("09:00  SLEEP"));
+        QCOMPARE(panel.rowTexts().at(2), QStringLiteral("11:00  STUDY"));   // 先今天后明天
         QVERIFY(panel.noteText().contains(QStringLiteral("还有 2 项")));
         QVERIFY(!panel.noteIsWarning());               // 截断不是错误
     }
@@ -146,21 +147,21 @@ private slots:
     void maxRowsOneKeepsTodayFirst()
     {
         SchedulePanel panel;
-        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("A")),
-                                      makeRow(QStringLiteral("10:00"), QStringLiteral("B"))},
-                                     {makeRow(QStringLiteral("11:00"), QStringLiteral("C"))}),
+        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("sleep")),
+                                      makeRow(QStringLiteral("10:00"), QStringLiteral("idle"))},
+                                     {makeRow(QStringLiteral("11:00"), QStringLiteral("study"))}),
                          1);
         QCOMPARE(panel.rowCount(), 1);
         QCOMPARE(panel.hiddenCount(), 2);
-        QCOMPARE(panel.rowTexts().at(0), QStringLiteral("09:00  A"));
+        QCOMPARE(panel.rowTexts().at(0), QStringLiteral("09:00  SLEEP"));
     }
 
     void maxRowsZeroMeansNoLimit()
     {
         SchedulePanel panel;
-        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("A")),
-                                      makeRow(QStringLiteral("10:00"), QStringLiteral("B"))},
-                                     {makeRow(QStringLiteral("11:00"), QStringLiteral("C"))}),
+        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("sleep")),
+                                      makeRow(QStringLiteral("10:00"), QStringLiteral("idle"))},
+                                     {makeRow(QStringLiteral("11:00"), QStringLiteral("study"))}),
                          0);
         QCOMPARE(panel.rowCount(), 3);
         QCOMPARE(panel.hiddenCount(), 0);
@@ -185,9 +186,9 @@ private slots:
 
     void badEntriesAreReportedButGoodOnesStay()
     {
-        ScheduleResult result = makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("好的"))}, {});
+        ScheduleResult result = makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("study"))}, {});
         result.problems << QStringLiteral("recurring #2: start 时间要写成 HH:MM（得到 99:99）")
-                        << QStringLiteral("recurring #3: 缺少 title");
+                        << QStringLiteral("recurring #3: 没有 state —— 日程只有「时间 + 状态」");
 
         SchedulePanel panel;
         panel.setSchedule(result, 6);
@@ -199,10 +200,10 @@ private slots:
 
     void truncationAndProblemsShareOneNote()
     {
-        ScheduleResult result = makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("A")),
-                                            makeRow(QStringLiteral("10:00"), QStringLiteral("B"))},
+        ScheduleResult result = makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("study")),
+                                            makeRow(QStringLiteral("10:00"), QStringLiteral("game"))},
                                            {});
-        result.problems << QStringLiteral("recurring #9: 缺少 title");
+        result.problems << QStringLiteral("recurring #9: 没有 state —— 日程只有「时间 + 状态」");
 
         SchedulePanel panel;
         panel.setSchedule(result, 1);
@@ -215,17 +216,17 @@ private slots:
     void setScheduleTwiceDoesNotAccumulate()
     {
         SchedulePanel panel;
-        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("A")),
-                                      makeRow(QStringLiteral("10:00"), QStringLiteral("B")),
-                                      makeRow(QStringLiteral("11:00"), QStringLiteral("C"))},
+        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("sleep")),
+                                      makeRow(QStringLiteral("10:00"), QStringLiteral("idle")),
+                                      makeRow(QStringLiteral("11:00"), QStringLiteral("study"))},
                                      {}),
                          6);
         QCOMPARE(panel.rowCount(), 3);
 
-        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("只剩一条"))}, {}), 6);
+        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("game"))}, {}), 6);
         QCOMPARE(panel.rowCount(), 1);
         QCOMPARE(panel.rowTexts().size(), 1);
-        QCOMPARE(panel.rowTexts().at(0), QStringLiteral("09:00  只剩一条"));
+        QCOMPARE(panel.rowTexts().at(0), QStringLiteral("09:00  GAME"));
     }
 
     void resultWithoutDaysIsSafe()
@@ -239,18 +240,20 @@ private slots:
         QCOMPARE(panel.subtitleText(), QStringLiteral("接下来 24 小时里没有日程"));
     }
 
-    void longTitleIsElidedButFullTextKept()
+    void overflowingStateIsElidedButFullTextKept()
     {
+        // 状态名只有 sleep/idle/study/game 五个字母，正常宽度下走不到省略号；
+        // 这条是**防御性**用例：万一以后状态名变长，截断这条路得还在。
         SchedulePanel panel;
         panel.resize(320, 400);
         panel.show();
-        const QString longTitle = QStringLiteral("这是一个很长的日程标题需要被省略号截断");
-        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:00"), longTitle)}, {}), 6);
+        const QString longState = QStringLiteral("这是一个很长的状态名需要被省略号截断");
+        panel.setSchedule(makeResult({makeRow(QStringLiteral("09:00"), longState)}, {}), 6);
 
-        QCOMPARE(panel.rowTexts().at(0), QStringLiteral("09:00  ") + longTitle);   // 全文保留
+        QCOMPARE(panel.rowTexts().at(0), QStringLiteral("09:00  ") + longState);   // 全文保留
         const QList<QLabel*> labels = panel.findChildren<QLabel*>(QStringLiteral("ScheduleTitle"));
         QCOMPARE(labels.size(), 1);
-        QVERIFY2(!labels.at(0)->text().isEmpty(), "标题不该被清空");
+        QVERIFY2(!labels.at(0)->text().isEmpty(), "状态那格不该被清空");
         panel.hide();
     }
 
@@ -264,12 +267,11 @@ private slots:
         QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
         const QByteArray text = QByteArray(R"(scheduler:
   recurring:
-    - title: 每天喝水
+    - state: study
       start: "10:00"
-    - title: 周二站会
+    - state: game
       days: [tue]
       start: "09:30"
-      end: "09:45"
 )");
         QCOMPARE(file.write(text), static_cast<qint64>(text.size()));
         file.close();
@@ -277,14 +279,15 @@ private slots:
         // R 系列起走**窗口**入口：kNow = 周一 15:00 -> 窗口 [15:00, 周二 15:00)
         const ScheduleResult result = ScheduleModel::loadWindowed(path, kNow);
         QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(result.problems.size(), 0);
         QCOMPARE(result.windowEndText, QStringLiteral("明天 15:00"));
 
         SchedulePanel panel;
         panel.setSchedule(result, 6);
-        // 今天那条（10:00）已经出了窗口 -> 只剩明天两条：周二站会 + 每天喝水
+        // 今天那条（10:00）已经出了窗口 -> 只剩明天两条：game 09:30 排在 study 10:00 前面
         QCOMPARE(panel.rowCount(), 2);
-        QCOMPARE(panel.rowTexts().at(0), QStringLiteral("09:30-09:45  周二站会"));
-        QCOMPARE(panel.rowTexts().at(1), QStringLiteral("10:00  每天喝水"));
+        QCOMPARE(panel.rowTexts().at(0), QStringLiteral("09:30  GAME"));
+        QCOMPARE(panel.rowTexts().at(1), QStringLiteral("10:00  STUDY"));
         // 窗口只往前看 -> 界面上不会再有"已过"的行（变暗那条路径留着, 但走不到）
         QCOMPARE(panel.isRowPast(0), false);
         QCOMPARE(panel.isRowPast(1), false);

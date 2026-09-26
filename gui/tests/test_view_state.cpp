@@ -130,11 +130,14 @@ void TestViewState::scheduleTopicIsStillIgnoredByTheGui()
     // 一个不完整的 schedule 分支，这里会红，逼他先把行为想清楚。
     //
     // 两种线上形态都过一遍（kind="fired" 实时 / kind="state" 应答快照）。
+    // T12-4 起触发事实是 `{state, date, scheduled_at, fired_at, actions}`（没有 title）。
     ViewState state;
     const QJsonObject fired{
         {QStringLiteral("kind"), QStringLiteral("fired")},
         {QStringLiteral("event"),
-         QJsonObject{{QStringLiteral("title"), QStringLiteral("午休")},
+         QJsonObject{{QStringLiteral("state"), QStringLiteral("study")},
+                     {QStringLiteral("date"), QStringLiteral("2026-09-22")},
+                     {QStringLiteral("scheduled_at"), QStringLiteral("13:00")},
                      {QStringLiteral("fired_at"), QStringLiteral("2026-09-22T13:00:03")}}}};
     const QJsonObject snapshot{
         {QStringLiteral("kind"), QStringLiteral("state")},

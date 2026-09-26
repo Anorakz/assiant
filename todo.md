@@ -1749,6 +1749,51 @@ Phase 7 T11-10f — **视频 CLI**（`assistant video play|pause|toggle|next|pre
       `control_result`）+ §4（`video_control`）、`docs/bilibili.md` §4/§7/§10、`Readme.md`
 ☑ 板端验收新加 **H 段**（真 CLI 子进程 + 真 GUI）: `--parts` 加 `h`, 默认全跑含它
 
+Phase 7 T12 — **日程 = 时间 + 状态**（你 2026-09-26 的指令: "push 后加入一个日程设置到工具列表，
+     日程更新为时间以及状态，即日程内容只有那几个状态，同时状态转换时要严格遵循状态转换流程
+     设计要求，即如果游戏/学习模式要到睡眠模式，退出时要先到 idle 释放在对应模式的东西，
+     然后再从 idle 释放对应的，最后到 sleep 模式"）
+
+T12-1 — **状态机严格路径**（先落地"转换必须走流程"这条地基）
+☑ `StateMachine.plan_path(to)` + `transition_to(to, reason)`: 返回 `{ok, steps:[{from,to}…], why}`,
+      **逐跳执行**（每跳都触发 `on_change`）—— 所以"离开那个模式要释放的东西"按步发生;
+      非法目标/不认识的值不猜, 如实 `why` 拒绝; `transition()` 仍是单跳原语, 语义没变
+☑ `Runtime` 侧把 `_on_state_change` 拆成 `_release_state(state)` / `_enter_state(state)`:
+      离开 GAME -> 停缓冲 + `bilibili.clear()` + 补推 + 卸载 SigLIP; 离开 STUDY -> 卸载 SigLIP;
+      进入 SLEEP -> 停 llama-server; 离开 SLEEP -> 起 llama-server
+☑ `switch_mode`（IPC）与 `assistant mode` 都改走 `transition_to`; CLI 等到**目标**状态为止,
+      并把"路上经过哪几跳"如实写出来（`已切到 SLEEP（路上经过 IDLE）`）
+☑ 单测: `tests/test_state_machine.py::TestTransitionTo` +8、`tests/test_main.py::TestStateRelease` +5、
+      `tests/test_ipc_local_server.py`（switch_mode 逐跳推送）、`tests/test_cli.py`（路径文案）
+☑ 板端实跑: GUI 点「睡眠」(GAME 中) -> Agent `[('game','idle'),('idle','sleep')]`
+
+T12-2 — **日程只有「时间 + 状态」**（配置语义 + 触发只切状态）
+☑ `ScheduleEvent`: 字段变成 `state` / `start` / `days` / `date`; `title` / `end` / `remind_before_min`
+      / `prompt` **不再读**（出现即忽略, 并逐条记一句"该怎么照做"的警告 —— `LEGACY_FIELD_NOTES`）;
+      老写法 `action: {state: …}` 仍然收; `label()` 变成 `"HH:MM → state"`
+☑ 没有 `state` 的条目 -> 新增 `SkippedScheduleEntry`：**跳过这一条 + 记警告**,
+      **不整份拒绝**（板端真配置里那 4 条 `{"title": …}` 老提醒不能把 Agent 弄得起不来）
+☑ 触发只做两件事: `transition_to(state)`（严格路径）+ 推**一行** `llm` 展示文本
+      （`日程到点：切到 STUDY（13:00）` / 切不过去时如实说 `why`）——
+      **不再往 bus 里推文本**, 所以**不进 LLM**（你定的）
+☑ 事实形状: `{state, date, scheduled_at, fired_at, actions}`（没有 `title`）;
+      `remove_fired_oneoff` 的匹配键从 `title+date+start` 换成 **`state+date+start`**
+☑ `schedule_config._fields_of` 跟着换成 `state/date/start`（否则 `cleanup --apply` 一条都匹配不上）
+☑ 单测: `tests/test_scheduler.py`（102）、`tests/test_schedule_config.py`（28）、
+      `tests/test_ipc_local_server.py`（新加"展示那一行"3 条）、`tests/test_cli.py`
+
+T12-3 — **展示层跟着改**（CLI + GUI 同一行格式）
+☑ CLI 行 = GUI 行 = **`HH:MM  状态`**（大写）: `cli.row_text()` / `SchedulePanel::rowTextOf()` 同一口径,
+      所以"CLI 列的"与"界面显示的"可以直接逐行 diff
+☑ `gui/src/core/schedule_model.{h,cpp}`: `ScheduleRow{time,state,past}`; 解析要求 `state`
+      （也认老的 `action.state`）; 老字段忽略; 没有 state -> 记 problem + 跳过
+☑ GUI 模式按钮**四档都点得动**, 跨模式由 Agent 走 `当前→IDLE→目标`（`view_state.modeSwitchChoices`）
+☑ **跨实现一致性守卫**（parity）: `tests/data/schedule_parity/*.yaml` + `*.expect.json`
+      （由 `tests/test_schedule_parity.py --write` 在**板端 py3.8** 生成）+
+      `gui/tests/test_schedule_model.cpp::parityWithPythonFixtures` 逐行比对
+☑ `config/config.example.yaml` 的 `scheduler:` 段注释重写 + `docs/{architecture,config-sources,cli,gui}.md`
+      + `Readme.md`; `tests/test_docs.py` 黑名单加 `日程提醒` / `kind=fired title=`
+
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档

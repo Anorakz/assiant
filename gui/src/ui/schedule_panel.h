@@ -81,8 +81,8 @@ private:
     struct RowWidgets {
         QWidget* host = nullptr;
         QLabel* time = nullptr;
-        QLabel* title = nullptr;
-        QString fullText;      ///< "HH:MM[-HH:MM] 标题"（单测/省略号都用它）
+        QLabel* state = nullptr;   ///< 控件名（objectName）仍叫 ScheduleTitle，给 QSS 用
+        QString fullText;          ///< "HH:MM  状态"（单测/省略号都用它）
         bool past = false;
     };
 

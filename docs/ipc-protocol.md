@@ -167,11 +167,11 @@ GUI 收到后按 `topic` 分发。**不认识的 topic 忽略**。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `title` | string | 日程标题（就是配置里写的那个） |
+| `state` | string | **这条日程要切到的状态**（小写 `sleep`/`idle`/`study`/`game`）—— T12-4 起日程的内容就是"时间 + 状态"，没有 `title` 了 |
 | `date` | string | **事件日** `YYYY-MM-DD`（配置里那条日程属于哪天） |
-| `scheduled_at` | string | 该触发的时刻 `YYYY-MM-DDTHH:MM`。⚠ 配了提前量时它可能落在 `date` **前一天**（例如 `00:05` 提前 10 分钟 → 前一天 `23:55`） |
+| `scheduled_at` | string | 该触发的时刻 `YYYY-MM-DDTHH:MM`（= `date` + 配置里那个 `start`） |
 | `fired_at` | string | Agent **真的触发**它的时刻 `YYYY-MM-DDTHH:MM:SS`。通常比 `scheduled_at` 晚几秒 —— 检查是每分钟一次，窗口内第一次检查才触发 |
-| `actions` | array | Agent 实际做了的动作摘要，每条是 object 且至少含 `type`（如 `type:"message"` 时还有 `text`、`timestamp`）。**动作种类会增长，客户端按 `type` 取自己认识的，其余忽略** |
+| `actions` | array | Agent 实际做了的动作摘要，每条是 object 且至少含 `type`。当前只有 `type:"state"`：`{type, state, ok, steps, why, current}` —— `ok=false` 时 `why` 是状态机/machine 给的原话，`steps` 是**逐跳**走过的 `[{from,to}…]`（例如 `GAME→SLEEP` 会是 `game→idle`、`idle→sleep` 两跳，见 `docs/architecture.md` 的"状态转换"）。**动作种类会增长，客户端按 `type` 取自己认识的，其余忽略** |
 
 > ⚠ **`schedule` 不是"日程表"**：日程本身在配置里，想显示"接下来有什么安排"应当读配置
 > （GUI 的日程区就是这么做的，见 `docs/gui-agent-integration.md`）。这条 topic 传的是
@@ -198,9 +198,13 @@ GUI 收到后按 `topic` 分发。**不认识的 topic 忽略**。
 {"topic":"llm","data":{"text":"已经切换到学习模式。"},"timestamp":1234567890.456}
 {"topic":"wallpaper","data":{"path":"/home/kickpi/wallpapers/04.jpg","index":3},"timestamp":1234567891.0}
 {"topic":"music","data":{"title":"夜曲","playing":true},"timestamp":1234567891.5}
-{"topic":"schedule","data":{"kind":"fired","event":{"title":"午休","date":"2026-09-22","scheduled_at":"2026-09-22T13:00","fired_at":"2026-09-22T13:00:03","actions":[{"type":"message","text":"日程提醒：午休","timestamp":1234567890.5}]}},"timestamp":1234567891.8}
-{"topic":"schedule","data":{"kind":"state","now":"2026-09-22T13:05:00","limit":50,"fired":[{"title":"午休","date":"2026-09-22","scheduled_at":"2026-09-22T13:00","fired_at":"2026-09-22T13:00:03","actions":[{"type":"message","text":"日程提醒：午休","timestamp":1234567890.5}]}]},"timestamp":1234567891.9}
+{"topic":"schedule","data":{"kind":"fired","event":{"state":"study","date":"2026-09-22","scheduled_at":"2026-09-22T13:00","fired_at":"2026-09-22T13:00:03","actions":[{"type":"state","state":"study","ok":true,"steps":[{"from":"idle","to":"study"}],"why":"日程: 13:00 → study","current":"study"}]}},"timestamp":1234567891.8}
+{"topic":"schedule","data":{"kind":"state","now":"2026-09-22T13:05:00","limit":50,"fired":[{"state":"study","date":"2026-09-22","scheduled_at":"2026-09-22T13:00","fired_at":"2026-09-22T13:00:03","actions":[{"type":"state","state":"study","ok":true,"steps":[{"from":"idle","to":"study"}],"why":"日程: 13:00 → study","current":"study"}]}]},"timestamp":1234567891.9}
 ```
+
+> ⚠ 到点触发时，Agent 还会往 `llm` topic 推**一行展示文本**（`日程到点：切到 STUDY（13:00）`；
+> 切不过去就是 `日程到点：想切到 SLEEP，但没切过去 —— <原因>`）。那一行**只给界面显示**
+> —— 它压根不经过对话总线，所以**不进模型输入**（日程是"到点照做"，不是给 LLM 的一句话）。
 
 ---
 

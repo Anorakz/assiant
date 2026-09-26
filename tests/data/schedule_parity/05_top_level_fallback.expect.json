@@ -5,16 +5,14 @@
       "label": "今天",
       "rows": [
         {
-          "end": "",
           "past": true,
-          "time": "08:00",
-          "title": "顶层的"
+          "state": "game",
+          "time": "08:00"
         },
         {
-          "end": "",
           "past": true,
-          "time": "09:00",
-          "title": "段里的"
+          "state": "study",
+          "time": "09:00"
         }
       ]
     },
@@ -23,10 +21,9 @@
       "label": "明天",
       "rows": [
         {
-          "end": "",
           "past": false,
-          "time": "08:00",
-          "title": "顶层的"
+          "state": "game",
+          "time": "08:00"
         }
       ]
     }

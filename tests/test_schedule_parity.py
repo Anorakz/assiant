@@ -79,7 +79,10 @@ def _load_events(text):
 
 
 def _expand(events):
-    """今天 / 明天两段（显示规则见模块开头）。"""
+    """今天 / 明天两段（显示规则见模块开头）。
+
+    @note T12-4: 行 = **时间 + 状态**（没有 title/end 了）。
+    """
     today = NOW.date()
     tomorrow = today + timedelta(days=1)
     now_minute = NOW.hour * 60 + NOW.minute
@@ -93,11 +96,10 @@ def _expand(events):
             start_minute = event.start[0] * 60 + event.start[1]
             rows.append({
                 "time": "%02d:%02d" % event.start,
-                "end": ("%02d:%02d" % event.end) if event.end else "",
-                "title": event.title,
+                "state": event.state.value,
                 "past": bool(label == "今天" and now_minute > start_minute),
             })
-        rows.sort(key=lambda row: (row["time"], row["title"]))
+        rows.sort(key=lambda row: (row["time"], row["state"]))
         days.append({"label": label, "date": day.isoformat(), "rows": rows})
     return days
 

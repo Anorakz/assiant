@@ -26,13 +26,20 @@ const char* const kWeekdays[7] = {"mon", "tue", "wed", "thu", "fri", "sat", "sun
 
 /// 解析出来的一条日程（内部表示，不外泄）。
 struct Entry {
-    QString title;
+    QString state;        ///< 小写：sleep / idle / study / game（日程的内容）
     int startMinute = 0;
-    int endMinute = -1;   ///< -1 = 没有 end
     bool oneoff = false;
     QDate on;             ///< 仅 oneoff
     QSet<int> days;       ///< 仅 recurring；空 = 每天
 };
+
+/// 四个状态（与 agent/core/state_machine.py 的 State 取值一致）。
+bool isKnownState(const QString& raw)
+{
+    const QString text = raw.trimmed().toLower();
+    return text == QLatin1String("sleep") || text == QLatin1String("idle")
+           || text == QLatin1String("study") || text == QLatin1String("game");
+}
 
 QString clockText(int minute)
 {
@@ -167,7 +174,7 @@ QString scalarText(const YAML::Node& node)
 }
 
 /// PyYAML（YAML 1.1）会把某些 **plain** 标量解析成 int / float / bool / null，
-/// 那些值到 Python 侧就不是 str 了 —— 而 `title` / `start` / `end` 都要求 str
+/// 那些值到 Python 侧就不是 str 了 —— 而 `state` / `start` / `date` 都要求 str
 /// （`isinstance(text, str)`）。这里做一个保守的同形状判断：
 /// 命中就认为"这个 plain 标量在 Python 眼里不是字符串"。
 /// ⚠ 只覆盖常见形状；更冷的写法（锚点、显式 !tag、复杂 flow）不在保证范围内，
@@ -227,20 +234,27 @@ bool parseEntry(YAML::Node node, const QString& key, int index,
     };
 
     if (!node.IsMap()) {
-        return fail(QStringLiteral("不是一个映射（- title: ... 这种）"));
+        return fail(QStringLiteral("不是一个映射（- state: study 这种）"));
     }
 
-    // ---- title：非空字符串，去首尾空白 ----
-    YAML::Node titleNode = node["title"];
-    if (!titleNode.IsDefined() || !titleNode.IsScalar()) {
-        return fail(QStringLiteral("缺少 title"));
+    // ---- state：**日程的内容**（T12-4）。老写法 `action: {state: …}` 也认 ----
+    YAML::Node stateNode = node["state"];
+    if (missing(stateNode)) {
+        YAML::Node actionNode = node["action"];
+        if (actionNode.IsMap()) {
+            stateNode = actionNode["state"];
+        }
     }
-    if (!isStringScalar(titleNode)) {
-        return fail(QStringLiteral("title 必须是字符串（加引号）"));
+    if (missing(stateNode)) {
+        return fail(QStringLiteral("没有 state —— 日程只有「时间 + 状态」，"
+                                   "写 state: sleep|idle|study|game"));
     }
-    const QString title = scalarText(titleNode).trimmed();
-    if (title.isEmpty()) {
-        return fail(QStringLiteral("title 是空的"));
+    if (!stateNode.IsScalar() || !isStringScalar(stateNode)) {
+        return fail(QStringLiteral("state 必须是字符串（sleep/idle/study/game）"));
+    }
+    const QString state = scalarText(stateNode).trimmed().toLower();
+    if (!isKnownState(state)) {
+        return fail(QStringLiteral("state 只认 sleep/idle/study/game（得到 %1）").arg(state));
     }
 
     // ---- date / days 互斥 ----
@@ -267,41 +281,12 @@ bool parseEntry(YAML::Node node, const QString& key, int index,
                         .arg(clockWhy, scalarText(startNode)));
     }
 
-    // ---- end（可选）----
-    int endMinute = -1;
-    YAML::Node endNode = node["end"];
-    if (endNode.IsDefined() && !endNode.IsNull()) {
-        if (!endNode.IsScalar() || !isStringScalar(endNode)
-            || !parseClock(scalarText(endNode), &endMinute, &clockWhy)) {
-            return fail(QStringLiteral("end %1").arg(clockWhy));
-        }
-        if (endMinute < startMinute) {
-            return fail(QStringLiteral("end 早于 start"));
-        }
-    }
-
-    // ---- remind_before_min（可选，非负整数）----
-    YAML::Node remindNode = node["remind_before_min"];
-    if (remindNode.IsDefined() && !remindNode.IsNull()) {
-        const bool plain = (remindNode.Tag() == "?");
-        if (!remindNode.IsScalar() || !plain || !allDigits(scalarText(remindNode))) {
-            return fail(QStringLiteral("remind_before_min 要是非负整数"));
-        }
-    }
-
-    // ---- action（可选，必须是映射；空值视为没给）----
-    YAML::Node actionNode = node["action"];
-    if (actionNode.IsDefined() && !actionNode.IsNull()) {
-        const bool empty = (actionNode.IsSequence() || actionNode.IsMap()) && actionNode.size() == 0;
-        if (!actionNode.IsMap() && !empty) {
-            return fail(QStringLiteral("action 必须是一个映射"));
-        }
-    }
+    // ⚠ T12-4 起 `title` / `end` / `remind_before_min` / `prompt` **不再读**:
+    //   出现了就当没写（Agent 那边会在启动日志里逐条说明该怎么照做）。
 
     Entry entry;
-    entry.title = title;
+    entry.state = state;
     entry.startMinute = startMinute;
-    entry.endMinute = endMinute;
 
     if (hasDate) {
         entry.oneoff = true;
@@ -348,7 +333,7 @@ bool rowBefore(const ScheduleRow& a, const ScheduleRow& b)
     if (a.time != b.time) {
         return a.time < b.time;
     }
-    return a.title < b.title;
+    return a.state < b.state;
 }
 
 /// 窗口终点的说法：`明天 18:26` / `09-25 18:26`。
@@ -469,8 +454,7 @@ ScheduleResult ScheduleModel::parse(const QString& yamlText, const QDateTime& no
             }
             ScheduleRow row;
             row.time = clockText(entry.startMinute);
-            row.end = (entry.endMinute >= 0) ? clockText(entry.endMinute) : QString();
-            row.title = entry.title;
+            row.state = entry.state;
             // 只有"今天"段才有过去/将来之分；纯时间比较，不代表 Agent 触发过
             row.past = (i == 0) && (nowMinute > entry.startMinute);
             day.rows.append(row);

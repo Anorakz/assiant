@@ -5,40 +5,34 @@
       "label": "今天",
       "rows": [
         {
-          "end": "",
           "past": true,
-          "time": "08:00",
-          "title": "整数0也是周一"
+          "state": "idle",
+          "time": "08:00"
         },
         {
-          "end": "",
           "past": true,
-          "time": "08:01",
-          "title": "大写MON"
+          "state": "study",
+          "time": "08:01"
         },
         {
-          "end": "",
           "past": true,
-          "time": "08:02",
-          "title": "全名monday"
+          "state": "game",
+          "time": "08:02"
         },
         {
-          "end": "",
           "past": true,
-          "time": "09:00",
-          "title": "周一学习"
+          "state": "game",
+          "time": "09:00"
         },
         {
-          "end": "",
           "past": true,
-          "time": "10:00",
-          "title": "每天喝水"
+          "state": "study",
+          "time": "10:00"
         },
         {
-          "end": "",
           "past": false,
-          "time": "23:00",
-          "title": "空days等于每天"
+          "state": "sleep",
+          "time": "23:00"
         }
       ]
     },
@@ -47,22 +41,19 @@
       "label": "明天",
       "rows": [
         {
-          "end": "09:45",
           "past": false,
-          "time": "09:30",
-          "title": "周二站会"
+          "state": "sleep",
+          "time": "09:30"
         },
         {
-          "end": "",
           "past": false,
-          "time": "10:00",
-          "title": "每天喝水"
+          "state": "study",
+          "time": "10:00"
         },
         {
-          "end": "",
           "past": false,
-          "time": "23:00",
-          "title": "空days等于每天"
+          "state": "sleep",
+          "time": "23:00"
         }
       ]
     }

@@ -359,7 +359,7 @@ scheduler:
   # 一次性日程触发后, 自动把它从**本文件**里删掉 (R3)。
   #   · 只对 oneoff 生效; recurring 删了明天就不响了, 所以一条都不动
   #   · 做的是**文本级**删除: 只删属于那条的行, 注释与顺序原样保留;
-  #     写之前会重新读一遍并核对 title/date/start, 对不上就不删;
+  #     写之前会重新读一遍并核对 state/date/start, 对不上就不删;
   #     原文件旁留一份 config.yaml.bak (第一次写前会覆盖上一份)
   #   · 默认 false: 这是"程序自动改真源"的行为。打开前想清楚: Agent 会成为
   #     config.yaml 的第二个写入者 (另一个是 GUI 的设置页/模型页)
@@ -368,26 +368,28 @@ scheduler:
   # -------------------------------------------------------------------------
   # 日程: recurring (每周固定) / oneoff (只有那一天)
   #
-  # 下面是**会被读**的键 (agent/core/scheduler.py 的 ScheduleEvent.from_config)。
-  # 写成注释而不是真条目: 触发时**没有 action 的日程也会推一条**
-  # 「日程提醒：<标题>」进对话区 (见 docs/architecture.md), 所以模板里不放真日程,
-  # 免得刚 clone 下来就凭空多出提醒。要加日程就把这几行抄下来、取消注释。
+  # T12-4 起 **日程的内容只有「时间 + 状态」**:
+  #   到点了就把设备切到那个状态; 切换严格走状态机 (要经过 IDLE 释放/接管资源,
+  #   见 docs/architecture.md 的"状态转换"一节), 同时往对话区推**一行**显示文本。
+  #   ⚠ 这一行**不进 LLM** —— 日程是"到点照做", 不是给模型的一句话。
+  #
+  # 下面这些是**会被读**的键 (agent/core/scheduler.py 的 ScheduleEvent.from_config)。
+  # 写成注释而不是真条目: 模板里不放真日程, 免得刚 clone 下来就凭空多出切换。
+  # 要加日程就把这几行抄下来、取消注释 (或者让工具 `set_schedule` 代写)。
   #
   #   recurring:
-  #     - title: 站会             # 必填, 非空
-  #       days: [mon, tue, wed]   # 星期缩写 mon..sun; 不写 = 每天
-  #       start: "09:30"          # 必填 "HH:MM" (也收 9:30 / 0930)
-  #       end: "09:45"            # 可选: 给了就在日程区显示成时间段
-  #       remind_before_min: 5    # 可选: 提前多少分钟触发 (默认 0)
-  #       action: {state: study, prompt: "开始学习", reason: "到点了"}
-  #                               # 可选: 切状态/发消息; 不给就只提醒
+  #     - state: study          # 必填: sleep | idle | study | game
+  #       days: [mon, tue, wed] # 星期缩写 mon..sun (或 0..6); 不写 = 每天
+  #       start: "09:30"        # 必填 "HH:MM" (也收 9:30 / 0930)
   #   oneoff:
-  #     - title: 项目评审
-  #       date: 2026-09-20        # 必填 YYYY-MM-DD; 与 days **互斥**
-  #       start: "14:00"
-  #       end: "15:30"
-  #       remind_before_min: 30
+  #     - state: sleep
+  #       date: 2026-09-20      # 必填 YYYY-MM-DD; 与 days **互斥**
+  #       start: "22:30"
   #
+  # ⚠ 老字段 `title` / `end` / `remind_before_min` / `prompt` **不再生效**:
+  #   出现了会当没写, 并在启动日志里逐条说明该怎么照做 (不报错, 免得老配置起不来)。
+  #   ⚠ 一条日程要是**没有 state**, 那条会被跳过并记一条警告
+  #     (老配置里那些"纯提醒"条目就是这个下场), 其余日程照常工作。
   # ⚠ 这几个键**没有任何读取者**, 写了也不生效 (不要再往这里加):
   #     timezone / defaults.remind_before_min / location
   # -------------------------------------------------------------------------

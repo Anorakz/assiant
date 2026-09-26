@@ -38,10 +38,10 @@ from agent.core.state_machine import StateMachine  # noqa: E402
 IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
 
-def matches_exactly(title, date_iso, start):
+def matches_exactly(state, date_iso, start):
     """测试用匹配器：按字符串比（Scheduler 里那份会归一化时钟/日期）。"""
     def matches(fields):
-        return (fields.get("title") == title
+        return (fields.get("state") == state
                 and fields.get("date") == date_iso
                 and fields.get("start") == start)
     return matches
@@ -65,164 +65,164 @@ class TestRemoveOneoffEntry(unittest.TestCase):
         "scheduler:\n"
         "  interval_min: 1\n"
         "  recurring:\n"
-        "    - title: 每天喝水\n"
+        "    - state: sleep\n"
         "      start: \"10:00\"\n"
         "  oneoff:\n"
-        "    - title: 项目评审\n"
+        "    - state: game\n"
         "      date: 2026-09-22\n"
         "      start: \"14:00\"\n"
         "      end: \"15:30\"\n"
-        "    - title: 体检\n"
+        "    - state: study\n"
         "      date: 2026-10-08\n"
         "      start: \"08:00\"\n"
     )
 
     def test_removes_the_first_item_and_keeps_everything_else(self):
         new_text, why = schedule_config.remove_oneoff_entry(
-            self.BODY, matches_exactly("项目评审", "2026-09-22", "14:00"))
+            self.BODY, matches_exactly("game", "2026-09-22", "14:00"))
         self.assertEqual(why, "")
         self.assertEqual(
             new_text,
             "scheduler:\n"
             "  interval_min: 1\n"
             "  recurring:\n"
-            "    - title: 每天喝水\n"
+            "    - state: sleep\n"
             "      start: \"10:00\"\n"
             "  oneoff:\n"
-            "    - title: 体检\n"
+            "    - state: study\n"
             "      date: 2026-10-08\n"
             "      start: \"08:00\"\n")
 
     def test_removes_the_last_item(self):
         new_text, why = schedule_config.remove_oneoff_entry(
-            self.BODY, matches_exactly("体检", "2026-10-08", "08:00"))
+            self.BODY, matches_exactly("study", "2026-10-08", "08:00"))
         self.assertEqual(why, "")
         self.assertTrue(new_text.endswith(
             "  oneoff:\n"
-            "    - title: 项目评审\n"
+            "    - state: game\n"
             "      date: 2026-09-22\n"
             "      start: \"14:00\"\n"
             "      end: \"15:30\"\n"))
 
     def test_removing_the_only_item_leaves_an_empty_sequence(self):
-        body = "oneoff:\n  - title: 只有这条\n    date: 2026-09-22\n    start: \"14:00\"\n"
+        body = "oneoff:\n  - state: sleep\n    date: 2026-09-22\n    start: \"14:00\"\n"
         new_text, why = schedule_config.remove_oneoff_entry(
-            body, matches_exactly("只有这条", "2026-09-22", "14:00"))
+            body, matches_exactly("sleep", "2026-09-22", "14:00"))
         self.assertEqual(why, "")
         self.assertEqual(new_text, "oneoff: []\n")   # 不留一个空值看着像写错了
 
     def test_top_level_layout_works_too(self):
         body = ("oneoff:\n"
-                "  - title: 甲\n    date: 2026-09-22\n    start: \"14:00\"\n"
-                "  - title: 乙\n    date: 2026-09-23\n    start: \"14:00\"\n")
+                "  - state: study\n    date: 2026-09-22\n    start: \"14:00\"\n"
+                "  - state: game\n    date: 2026-09-23\n    start: \"14:00\"\n")
         new_text, why = schedule_config.remove_oneoff_entry(
-            body, matches_exactly("甲", "2026-09-22", "14:00"))
+            body, matches_exactly("study", "2026-09-22", "14:00"))
         self.assertEqual(why, "")
         self.assertEqual(new_text,
                          "oneoff:\n"
-                         "  - title: 乙\n    date: 2026-09-23\n    start: \"14:00\"\n")
+                         "  - state: game\n    date: 2026-09-23\n    start: \"14:00\"\n")
 
     def test_comment_between_keys_goes_with_the_entry(self):
         body = ("oneoff:\n"
-                "  - title: 甲\n"
+                "  - state: study\n"
                 "    # 这条要提前三天准备\n"
                 "    date: 2026-09-22\n"
                 "    start: \"14:00\"\n"
-                "  - title: 乙\n    date: 2026-09-23\n    start: \"14:00\"\n")
+                "  - state: game\n    date: 2026-09-23\n    start: \"14:00\"\n")
         new_text, why = schedule_config.remove_oneoff_entry(
-            body, matches_exactly("甲", "2026-09-22", "14:00"))
+            body, matches_exactly("study", "2026-09-22", "14:00"))
         self.assertEqual(why, "")
         self.assertNotIn("提前三天准备", new_text)
         self.assertEqual(new_text,
                          "oneoff:\n"
-                         "  - title: 乙\n    date: 2026-09-23\n    start: \"14:00\"\n")
+                         "  - state: game\n    date: 2026-09-23\n    start: \"14:00\"\n")
 
     def test_comment_before_the_next_entry_stays(self):
         """紧贴在**下一条**前面的注释留着 —— 宁可有行悬空注释, 也不误删信息。"""
         body = ("oneoff:\n"
-                "  - title: 甲\n    date: 2026-09-22\n    start: \"14:00\"\n"
+                "  - state: study\n    date: 2026-09-22\n    start: \"14:00\"\n"
                 "  # 乙是每周例会的替代品\n"
-                "  - title: 乙\n    date: 2026-09-23\n    start: \"14:00\"\n")
+                "  - state: game\n    date: 2026-09-23\n    start: \"14:00\"\n")
         new_text, why = schedule_config.remove_oneoff_entry(
-            body, matches_exactly("甲", "2026-09-22", "14:00"))
+            body, matches_exactly("study", "2026-09-22", "14:00"))
         self.assertEqual(why, "")
         self.assertIn("# 乙是每周例会的替代品", new_text)
         self.assertEqual(new_text,
                          "oneoff:\n"
                          "  # 乙是每周例会的替代品\n"
-                         "  - title: 乙\n    date: 2026-09-23\n    start: \"14:00\"\n")
+                         "  - state: game\n    date: 2026-09-23\n    start: \"14:00\"\n")
 
     def test_blank_lines_between_entries_stay(self):
         body = ("oneoff:\n"
-                "  - title: 甲\n    date: 2026-09-22\n    start: \"14:00\"\n"
+                "  - state: study\n    date: 2026-09-22\n    start: \"14:00\"\n"
                 "\n"
-                "  - title: 乙\n    date: 2026-09-23\n    start: \"14:00\"\n")
+                "  - state: game\n    date: 2026-09-23\n    start: \"14:00\"\n")
         new_text, _ = schedule_config.remove_oneoff_entry(
-            body, matches_exactly("甲", "2026-09-22", "14:00"))
+            body, matches_exactly("study", "2026-09-22", "14:00"))
         self.assertTrue(new_text.startswith("oneoff:\n\n"))
-        self.assertIn("乙", new_text)
+        self.assertIn("state: game", new_text)
 
     def test_crlf_is_preserved(self):
         body = ("oneoff:\r\n"
-                "  - title: 甲\r\n    date: 2026-09-22\r\n    start: \"14:00\"\r\n"
-                "  - title: 乙\r\n    date: 2026-09-23\r\n    start: \"14:00\"\r\n")
+                "  - state: study\r\n    date: 2026-09-22\r\n    start: \"14:00\"\r\n"
+                "  - state: game\r\n    date: 2026-09-23\r\n    start: \"14:00\"\r\n")
         new_text, why = schedule_config.remove_oneoff_entry(
-            body, matches_exactly("甲", "2026-09-22", "14:00"))
+            body, matches_exactly("study", "2026-09-22", "14:00"))
         self.assertEqual(why, "")
         self.assertEqual(new_text,
                          "oneoff:\r\n"
-                         "  - title: 乙\r\n    date: 2026-09-23\r\n    start: \"14:00\"\r\n")
+                         "  - state: game\r\n    date: 2026-09-23\r\n    start: \"14:00\"\r\n")
         self.assertNotIn("\n", new_text.replace("\r\n", ""))
 
     def test_trailing_comment_on_a_value_is_ignored(self):
         body = ("oneoff:\n"
-                "  - title: 甲   # 下午那场\n"
+                "  - state: study   # 下午那场\n"
                 "    date: 2026-09-22   # 周二\n"
                 "    start: \"14:00\"  # 别迟到\n")
         new_text, why = schedule_config.remove_oneoff_entry(
-            body, matches_exactly("甲", "2026-09-22", "14:00"))
+            body, matches_exactly("study", "2026-09-22", "14:00"))
         self.assertEqual(why, "")
         self.assertEqual(new_text, "oneoff: []\n")
 
     def test_flow_style_is_refused_with_a_reason(self):
-        body = 'oneoff: [{title: 甲, date: 2026-09-22, start: "14:00"}]\n'
+        body = 'oneoff: [{state: study, date: 2026-09-22, start: "14:00"}]\n'
         new_text, why = schedule_config.remove_oneoff_entry(
-            body, matches_exactly("甲", "2026-09-22", "14:00"))
+            body, matches_exactly("study", "2026-09-22", "14:00"))
         self.assertEqual(new_text, body, "不认识的写法不许改文件")
         self.assertIn("flow 风格", why)
 
     def test_empty_sequence_is_not_found(self):
         body = "oneoff: []\n"
         new_text, why = schedule_config.remove_oneoff_entry(
-            body, matches_exactly("甲", "2026-09-22", "14:00"))
+            body, matches_exactly("study", "2026-09-22", "14:00"))
         self.assertEqual(new_text, body)
         self.assertIn("没有匹配", why)
 
     def test_missing_oneoff_key_is_not_found(self):
         body = "llm:\n  mode: disabled\n"
         new_text, why = schedule_config.remove_oneoff_entry(
-            body, matches_exactly("甲", "2026-09-22", "14:00"))
+            body, matches_exactly("study", "2026-09-22", "14:00"))
         self.assertEqual(new_text, body)
         self.assertIn("没有匹配", why)
 
     def test_duplicate_titles_differ_by_date(self):
         body = ("oneoff:\n"
-                "  - title: 复盘\n    date: 2026-09-22\n    start: \"20:00\"\n"
-                "  - title: 复盘\n    date: 2026-09-23\n    start: \"20:00\"\n")
+                "  - state: study\n    date: 2026-09-22\n    start: \"20:00\"\n"
+                "  - state: study\n    date: 2026-09-23\n    start: \"20:00\"\n")
         new_text, why = schedule_config.remove_oneoff_entry(
-            body, matches_exactly("复盘", "2026-09-23", "20:00"))
+            body, matches_exactly("study", "2026-09-23", "20:00"))
         self.assertEqual(why, "")
         self.assertEqual(new_text,
                          "oneoff:\n"
-                         "  - title: 复盘\n    date: 2026-09-22\n    start: \"20:00\"\n")
+                         "  - state: study\n    date: 2026-09-22\n    start: \"20:00\"\n")
 
     def test_recurring_with_the_same_title_is_untouched(self):
         body = ("recurring:\n"
-                "  - title: 站会\n    days: [mon]\n    start: \"09:30\"\n"
+                "  - state: study\n    days: [mon]\n    start: \"09:30\"\n"
                 "oneoff:\n"
-                "  - title: 站会\n    date: 2026-09-22\n    start: \"09:30\"\n")
+                "  - state: study\n    date: 2026-09-22\n    start: \"09:30\"\n")
         new_text, why = schedule_config.remove_oneoff_entry(
-            body, matches_exactly("站会", "2026-09-22", "09:30"))
+            body, matches_exactly("study", "2026-09-22", "09:30"))
         self.assertEqual(why, "")
         self.assertIn("recurring", new_text, "recurring 那条必须原样留着")
         self.assertNotIn("date: 2026-09-22", new_text)
@@ -236,13 +236,13 @@ class TestRemoveOneoffEntry(unittest.TestCase):
 
     def test_find_oneoff_block_reports_the_span(self):
         span, why = schedule_config.find_oneoff_block(
-            self.BODY, matches_exactly("项目评审", "2026-09-22", "14:00"))
+            self.BODY, matches_exactly("game", "2026-09-22", "14:00"))
         self.assertEqual(why, "")
         self.assertEqual(span, (6, 10))       # 6..9 行（0 基）
 
     def test_find_oneoff_block_reports_why_not(self):
         span, why = schedule_config.find_oneoff_block(
-            self.BODY, matches_exactly("不存在", "2026-09-22", "14:00"))
+            self.BODY, matches_exactly("sleep", "2026-09-22", "14:00"))
         self.assertIsNone(span)
         self.assertIn("没有匹配", why)
 
@@ -257,28 +257,28 @@ class TestRemoveOneoffFromFile(unittest.TestCase):
         self.path = self.tmp / "config.yaml"
         self.original = ("scheduler:\n"
                          "  oneoff:\n"
-                         "    - title: 项目评审\n"
+                         "    - state: game\n"
                          "      date: 2026-09-22\n"
                          "      start: \"14:00\"\n"
-                         "    - title: 体检\n"
+                         "    - state: study\n"
                          "      date: 2026-10-08\n"
                          "      start: \"08:00\"\n")
         self.path.write_text(self.original, encoding="utf-8")
 
     def test_writes_the_new_text_and_a_backup(self):
         removed = schedule_config.remove_oneoff_from_file(
-            self.path, matches_exactly("项目评审", "2026-09-22", "14:00"))
+            self.path, matches_exactly("game", "2026-09-22", "14:00"))
         self.assertTrue(removed)
         text = self.path.read_text(encoding="utf-8")
-        self.assertNotIn("项目评审", text)
-        self.assertIn("体检", text)
+        self.assertNotIn("2026-09-22", text)
+        self.assertIn("2026-10-08", text)
         backup = Path(str(self.path) + ".bak")
         self.assertTrue(backup.is_file())
         self.assertEqual(backup.read_text(encoding="utf-8"), self.original)
 
     def test_no_match_touches_nothing(self):
         removed = schedule_config.remove_oneoff_from_file(
-            self.path, matches_exactly("不存在", "2026-09-22", "14:00"))
+            self.path, matches_exactly("sleep", "2026-09-22", "14:00"))
         self.assertFalse(removed)
         self.assertEqual(self.path.read_text(encoding="utf-8"), self.original)
         self.assertFalse(Path(str(self.path) + ".bak").exists(), "没删就别留 .bak")
@@ -286,7 +286,7 @@ class TestRemoveOneoffFromFile(unittest.TestCase):
     def test_missing_file_raises_oserror(self):
         with self.assertRaises(OSError):
             schedule_config.remove_oneoff_from_file(
-                self.tmp / "nope.yaml", matches_exactly("甲", "2026-09-22", "14:00"))
+                self.tmp / "nope.yaml", matches_exactly("study", "2026-09-22", "14:00"))
 
     @unittest.skipIf(os.name == "nt", "只读目录在 Windows 上不拦 root/管理员")
     @unittest.skipIf(IS_ROOT, "root 无视目录权限（板端就是 root）")
@@ -295,7 +295,7 @@ class TestRemoveOneoffFromFile(unittest.TestCase):
         self.addCleanup(os.chmod, str(self.tmp), stat.S_IRWXU)
         with self.assertRaises(OSError):
             schedule_config.remove_oneoff_from_file(
-                self.path, matches_exactly("项目评审", "2026-09-22", "14:00"))
+                self.path, matches_exactly("game", "2026-09-22", "14:00"))
 
 
 # ===========================================================================
@@ -314,10 +314,10 @@ class TestSchedulerRemoval(unittest.IsolatedAsyncioTestCase):
         if remove_fired is not None:
             lines.append("  remove_fired_oneoff: %s" % ("true" if remove_fired else "false"))
         if recurring:
-            lines += ["  recurring:", "    - title: 每天喝水", "      start: \"09:00\""]
+            lines += ["  recurring:", "    - state: sleep", "      start: \"09:00\""]
         if oneoff:
             lines += ["  oneoff:",
-                      "    - title: 项目评审",
+                      "    - state: game",
                       "      date: %s" % self.ONE_DAY,
                       "      start: \"14:00\""]
         self.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -347,7 +347,7 @@ class TestSchedulerRemoval(unittest.IsolatedAsyncioTestCase):
         bus = FakeBus()
         scheduler = Scheduler(state=StateMachine(), bus=bus,
                               config={"scheduler": {"remove_fired_oneoff": True,
-                                                    "oneoff": [{"title": "项目评审",
+                                                    "oneoff": [{"state": "game",
                                                                 "date": self.ONE_DAY,
                                                                 "start": "14:00"}]}},
                               config_path=str(self.path))
@@ -355,9 +355,9 @@ class TestSchedulerRemoval(unittest.IsolatedAsyncioTestCase):
         fired = await scheduler.check_schedule(datetime(2026, 9, 22, 14, 0, 3))
 
         self.assertEqual(len(fired), 1)
-        self.assertEqual(len(bus.events), 1, "触发本身照做")
+        self.assertEqual(bus.events, [], "日程不往 bus 推文本（T12-4）")
         text = self.path.read_text(encoding="utf-8")
-        self.assertNotIn("项目评审", text)
+        self.assertNotIn("14:00", text)
         self.assertTrue(Path(str(self.path) + ".bak").is_file())
         self.assertEqual(len(scheduler.recent_fired()), 1, "事实照记")
 
@@ -373,23 +373,23 @@ class TestSchedulerRemoval(unittest.IsolatedAsyncioTestCase):
     async def test_default_is_off(self):
         self._write(remove_fired=False)
         scheduler = Scheduler(state=StateMachine(), bus=FakeBus(),
-                              config={"scheduler": {"oneoff": [{"title": "项目评审",
+                              config={"scheduler": {"oneoff": [{"state": "game",
                                                                 "date": self.ONE_DAY,
                                                                 "start": "14:00"}]}},
                               config_path=str(self.path))
         self.assertFalse(scheduler.remove_fired_oneoff)
         await scheduler.check_schedule(datetime(2026, 9, 22, 14, 0, 3))
-        self.assertIn("项目评审", self.path.read_text(encoding="utf-8"))
+        self.assertIn("14:00", self.path.read_text(encoding="utf-8"))
 
     async def test_recurring_is_never_removed(self):
         self._write(remove_fired=True, oneoff=False, recurring=True)
         scheduler = Scheduler(state=StateMachine(), bus=FakeBus(),
                               config={"scheduler": {"remove_fired_oneoff": True,
-                                                    "recurring": [{"title": "每天喝水",
+                                                    "recurring": [{"state": "sleep",
                                                                    "start": "09:00"}]}},
                               config_path=str(self.path))
         await scheduler.check_schedule(datetime(2026, 9, 22, 9, 0, 3))
-        self.assertIn("每天喝水", self.path.read_text(encoding="utf-8"))
+        self.assertIn("09:00", self.path.read_text(encoding="utf-8"))
 
     async def test_write_failure_does_not_break_the_fire(self):
         self._write(remove_fired=True)
@@ -397,7 +397,7 @@ class TestSchedulerRemoval(unittest.IsolatedAsyncioTestCase):
             self.skipTest("只读目录在 Windows / root 下拦不住")
         scheduler = Scheduler(state=StateMachine(), bus=FakeBus(),
                               config={"scheduler": {"remove_fired_oneoff": True,
-                                                    "oneoff": [{"title": "项目评审",
+                                                    "oneoff": [{"state": "game",
                                                                 "date": self.ONE_DAY,
                                                                 "start": "14:00"}]}},
                               config_path=str(self.path))
@@ -413,13 +413,13 @@ class TestSchedulerRemoval(unittest.IsolatedAsyncioTestCase):
         self._write(remove_fired=True)
         scheduler = Scheduler(state=StateMachine(), bus=FakeBus(),
                               config={"scheduler": {"remove_fired_oneoff": True,
-                                                    "oneoff": [{"title": "项目评审",
+                                                    "oneoff": [{"state": "game",
                                                                 "date": self.ONE_DAY,
                                                                 "start": "14:00"}]}},
                               config_path=None)
         fired = await scheduler.check_schedule(datetime(2026, 9, 22, 14, 0, 3))
         self.assertEqual(len(fired), 1)
-        self.assertIn("项目评审", self.path.read_text(encoding="utf-8"))
+        self.assertIn("14:00", self.path.read_text(encoding="utf-8"))
 
     async def test_non_bool_switch_is_a_warning_and_means_off(self):
         scheduler = Scheduler(state=StateMachine(), bus=FakeBus(),
@@ -433,17 +433,18 @@ class TestSchedulerRemoval(unittest.IsolatedAsyncioTestCase):
         self.assertRaises(SchedulerError, parse_clock, "坏的")
         self._write(remove_fired=True)
         self.path.write_text("scheduler:\n  remove_fired_oneoff: true\n"
-                             "  oneoff:\n    - title: 项目评审\n"
+                             "  oneoff:\n    - state: game\n"
                              "      date: 2026-09-22\n      start: \"14:00\"\n",
                              encoding="utf-8")
         scheduler = Scheduler(state=StateMachine(), bus=FakeBus(),
                               config={"scheduler": {"remove_fired_oneoff": True,
-                                                    "oneoff": [{"title": "项目评审",
+                                                    "oneoff": [{"state": "game",
                                                                 "date": self.ONE_DAY,
                                                                 "start": "14:00"}]}},
                               config_path=str(self.path))
-        # 把文件里那条的 title 改掉 -> 匹配不上 -> 文件不动
-        self.path.write_text(self.path.read_text(encoding="utf-8").replace("项目评审", "别的"),
+        # 把文件里那条的状态改掉 -> 匹配不上 -> 文件不动
+        self.path.write_text(self.path.read_text(encoding="utf-8").replace("state: game",
+                                                                          "state: study"),
                              encoding="utf-8")
         before = self.path.read_text(encoding="utf-8")
         fired = await scheduler.check_schedule(datetime(2026, 9, 22, 14, 0, 3))

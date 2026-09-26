@@ -888,11 +888,13 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
             self.scheduler = scheduler
 
     FACT = {
-        "title": "午休",
+        "state": "study",
         "date": "2026-09-22",
         "scheduled_at": "2026-09-22T13:00",
         "fired_at": "2026-09-22T13:00:03",
-        "actions": [{"type": "message", "text": "日程提醒：午休", "timestamp": 1.0}],
+        "actions": [{"type": "state", "state": "study", "ok": True,
+                     "steps": [{"from": "idle", "to": "study"}],
+                     "why": "日程: 13:00 → study", "current": "study"}],
     }
 
     async def test_scheduler_gets_the_on_fire_hook(self):
@@ -963,8 +965,8 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
             None, runtime=runtime, push=lambda topic, data: pushed.append((topic, data))
         )
         await handler(COMMAND_QUERY_SCHEDULE, {})
-        pushed[0][1]["fired"][0]["title"] = "改坏了"
-        self.assertEqual(scheduler.recent_fired()[0]["title"], "午休")
+        pushed[0][1]["fired"][0]["state"] = "game"
+        self.assertEqual(scheduler.recent_fired()[0]["state"], "study")
 
     async def test_query_schedule_without_scheduler_replies_with_a_note(self):
         from agent.ipc import _make_command_handler
@@ -1045,7 +1047,7 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         runtime = self._RuntimeWithScheduler(None)
         scheduler = Scheduler(
             state=runtime.state, bus=_Bus(),
-            config={"recurring": [{"title": "站会", "start": "09:30"}]},
+            config={"recurring": [{"state": "study", "start": "09:30"}]},
         )
         runtime.scheduler = scheduler
         pushed = []
@@ -1061,10 +1063,56 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
         await handler(COMMAND_QUERY_SCHEDULE, {})
 
         data = pushed[-1][1]
-        self.assertEqual([f["title"] for f in data["fired"]], ["站会"])
+        self.assertEqual([f["state"] for f in data["fired"]], ["study"])
         self.assertEqual(data["fired"][0]["fired_at"], "2026-09-16T09:30:04")
         self.assertEqual(data["fired"][0]["date"], "2026-09-16")
-        self.assertEqual(data["fired"][0]["actions"][0]["type"], "message")
+        self.assertEqual(data["fired"][0]["actions"][0]["type"], "state")
+
+    async def test_fired_event_also_pushes_one_display_line(self):
+        """T12-4（你定的）: 到点触发 -> 先推事实, 再推**一行**给界面看的文本。
+
+        这一行只走 `llm` 这个**推送通道**, 不进对话总线 —— 模型看不到它。
+        """
+        from agent.ipc import _wire_outbound
+
+        scheduler = self._StubScheduler()
+        runtime = self._RuntimeWithScheduler(scheduler)
+        pushed = []
+        _wire_outbound(None, runtime, dispatch=lambda topic, data: pushed.append((topic, data)))
+
+        scheduler.on_fire(dict(self.FACT))
+
+        self.assertEqual([topic for topic, _ in pushed],
+                         [TOPIC_SCHEDULE, TOPIC_LLM], "事实在前, 展示那行在后")
+        self.assertEqual(pushed[1][1], {"text": "日程到点：切到 STUDY（13:00）"})
+
+    async def test_a_refused_state_change_is_said_honestly(self):
+        """切不过去时, 展示那行要说清"想切到哪、为什么没成"（不假装成功）。"""
+        from agent.ipc import _wire_outbound
+
+        scheduler = self._StubScheduler()
+        runtime = self._RuntimeWithScheduler(scheduler)
+        pushed = []
+        _wire_outbound(None, runtime, dispatch=lambda topic, data: pushed.append((topic, data)))
+
+        refused = dict(self.FACT)
+        refused["state"] = "sleep"
+        refused["actions"] = [{"type": "state", "state": "sleep", "ok": False,
+                               "steps": [], "why": "no route from study to sleep",
+                               "current": "study"}]
+        scheduler.on_fire(refused)
+
+        self.assertEqual(pushed[1][1]["text"],
+                         "日程到点：想切到 SLEEP，但没切过去 —— no route from study to sleep")
+
+    def test_display_text_is_empty_without_a_state(self):
+        """没有 state 的旧事实 -> 不推那句 (推一句 "日程到点：切到 " 更糟)。"""
+        from agent.ipc import _schedule_fired_text
+
+        self.assertEqual(_schedule_fired_text({"title": "老日程"}), "")
+        self.assertEqual(_schedule_fired_text({}), "")
+        # 没有 scheduled_at 也要能出话（只是不带括号里的时刻）
+        self.assertEqual(_schedule_fired_text({"state": "IDLE"}), "日程到点：切到 IDLE")
 
     async def test_client_connect_hook_fires_before_any_command(self):
         """T6: 新 GUI 连上 -> 立刻补推当前壁纸（`wallpaper` 只在变化时推, 连上收不到）。

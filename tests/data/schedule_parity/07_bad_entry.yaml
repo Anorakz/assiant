@@ -6,7 +6,7 @@
 # ============================================================================
 scheduler:
   recurring:
-    - title: 好的
+    - state: study
       start: "09:00"
-    - title: 坏的
+    - state: game
       start: "99:99"

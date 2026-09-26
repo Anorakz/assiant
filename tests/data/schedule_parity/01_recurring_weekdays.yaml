@@ -7,24 +7,23 @@
 scheduler:
   interval_min: 1
   recurring:
-    - title: 每天喝水
+    - state: study
       start: "10:00"
-    - title: 周一学习
+    - state: game
       days: [mon]
       start: "09:00"
-    - title: 周二站会
+    - state: sleep
       days: [tue]
       start: "09:30"
-      end: "09:45"
-    - title: 整数0也是周一
+    - state: idle
       days: [0]
       start: "08:00"
-    - title: 大写MON
+    - state: study
       days: [MON]
       start: "08:01"
-    - title: 全名monday
+    - state: game
       days: [monday]
       start: "08:02"
-    - title: 空days等于每天
+    - state: sleep
       days: []
       start: "23:00"

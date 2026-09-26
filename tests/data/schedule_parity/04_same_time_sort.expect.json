@@ -7,27 +7,22 @@
         {
           "past": true,
           "state": "game",
-          "time": "09:30"
+          "time": "09:00"
+        },
+        {
+          "past": true,
+          "state": "study",
+          "time": "09:00"
         },
         {
           "past": true,
           "state": "idle",
-          "time": "09:30"
+          "time": "11:59"
         },
         {
           "past": true,
           "state": "sleep",
-          "time": "09:30"
-        },
-        {
-          "past": true,
-          "state": "study",
-          "time": "09:30"
-        },
-        {
-          "past": true,
-          "state": "study",
-          "time": "09:30"
+          "time": "14:00"
         }
       ]
     },
@@ -38,34 +33,29 @@
         {
           "past": false,
           "state": "game",
-          "time": "09:30"
+          "time": "09:00"
+        },
+        {
+          "past": false,
+          "state": "study",
+          "time": "09:00"
         },
         {
           "past": false,
           "state": "idle",
-          "time": "09:30"
+          "time": "11:59"
         },
         {
           "past": false,
           "state": "sleep",
-          "time": "09:30"
-        },
-        {
-          "past": false,
-          "state": "study",
-          "time": "09:30"
-        },
-        {
-          "past": false,
-          "state": "study",
-          "time": "09:30"
+          "time": "14:00"
         }
       ]
     }
   ],
-  "fixture": "03_clock_forms.yaml",
+  "fixture": "04_same_time_sort.yaml",
   "now": "2026-09-21T15:00:00",
   "python_error": null,
   "python_ok": true,
-  "total_in_config": 5
+  "total_in_config": 4
 }

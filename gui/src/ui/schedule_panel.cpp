@@ -19,14 +19,15 @@ namespace {
 const char* const kWarnColor = "color:#F59E0B; background:transparent;";
 /// "已过"的行用 AreaHint 那档灰
 const char* const kPastColor = "color:#6F757C; background:transparent;";
-/// 时间列宽度：足够放下 "00:00-00:00"
+/// 时间列宽度：足够放下 "00:00"
 constexpr int kTimeWidth = 92;
 
 QString rowTextOf(const core::ScheduleRow& row)
 {
-    const QString time = row.end.isEmpty() ? row.time
-                                           : QStringLiteral("%1-%2").arg(row.time, row.end);
-    return QStringLiteral("%1  %2").arg(time, row.title);
+    // T12-4: 一行 = **时间 + 状态**（日程的内容就是那几个状态之一：SLEEP/IDLE/STUDY/GAME）。
+    // ⚠ 与 CLI 的 `row_text` 同一格式（`HH:MM  STATE`）—— 这样"CLI 的日程"与
+    //   "界面上的日程"可以直接逐行 diff。
+    return QStringLiteral("%1  %2").arg(row.time, row.state.toUpper());
 }
 
 } // namespace
@@ -209,20 +210,21 @@ void SchedulePanel::addRow(const core::ScheduleRow& row)
     widgets.time = new QLabel(host);
     widgets.time->setObjectName(QStringLiteral("ScheduleTime"));
     widgets.time->setMinimumWidth(kTimeWidth);
-    widgets.time->setText(row.end.isEmpty()
-                              ? row.time
-                              : QStringLiteral("%1-%2").arg(row.time, row.end));
+    widgets.time->setText(row.time);                  // T12-4: 只有时刻（没有时段了）
     box->addWidget(widgets.time);
 
-    widgets.title = new QLabel(host);
-    widgets.title->setObjectName(QStringLiteral("ScheduleTitle"));
-    widgets.title->setText(row.title);
-    widgets.title->setToolTip(row.title);
-    box->addWidget(widgets.title, 1);
+    // 控件名仍旧叫 ScheduleTitle（QSS `#ScheduleTitle` 那档样式照用），
+    // 但它现在显示的是**状态**（日程的内容就是那几个状态之一）。
+    const QString state = row.state.toUpper();
+    widgets.state = new QLabel(host);
+    widgets.state->setObjectName(QStringLiteral("ScheduleTitle"));
+    widgets.state->setText(state);
+    widgets.state->setToolTip(state);
+    box->addWidget(widgets.state, 1);
 
     if (row.past) {
         widgets.time->setStyleSheet(QLatin1String(kPastColor));
-        widgets.title->setStyleSheet(QLatin1String(kPastColor));
+        widgets.state->setStyleSheet(QLatin1String(kPastColor));
     }
 
     sections_->addWidget(host);
@@ -232,16 +234,16 @@ void SchedulePanel::addRow(const core::ScheduleRow& row)
 void SchedulePanel::elideRows()
 {
     for (const RowWidgets& row : rows_) {
-        if (row.title == nullptr) {
+        if (row.state == nullptr) {
             continue;
         }
-        const int width = row.title->width();
+        const int width = row.state->width();
         if (width <= 0) {
-            row.title->setText(row.title->toolTip());     // 宽度未定：原样
+            row.state->setText(row.state->toolTip());     // 宽度未定：原样
             continue;
         }
-        const QFontMetrics metrics(row.title->font());
-        row.title->setText(metrics.elidedText(row.title->toolTip(), Qt::ElideRight, width));
+        const QFontMetrics metrics(row.state->font());
+        row.state->setText(metrics.elidedText(row.state->toolTip(), Qt::ElideRight, width));
     }
 }
 

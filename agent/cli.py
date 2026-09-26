@@ -240,7 +240,8 @@ def format_push(topic: str, data: Optional[Dict[str, Any]],
 def schedule_push_pairs(data: Dict[str, Any]) -> str:
     """`schedule` 推送压成 key=value，只挑人真正要看的字段。
 
-    · `kind="fired"` 刚触发了一条 -> title / date / scheduled_at / fired_at
+    · `kind="fired"` 刚触发了一条 -> **state** / date / scheduled_at / fired_at
+      （T12-4: 日程没有 title 了，事实里带的是状态）
     · `kind="state"` 应答查询的快照 -> 条数 + 上限（不把 N 条事实全倒出来）
     · 不认识的 kind（将来加的）-> 原样给出来：**不装懂**，也不假装没有
     """
@@ -248,7 +249,7 @@ def schedule_push_pairs(data: Dict[str, Any]) -> str:
     if kind == SCHEDULE_KIND_FIRED:
         event = data.get("event") or {}
         parts = ["kind=%s" % SCHEDULE_KIND_FIRED]
-        for key in ("title", "date", "scheduled_at", "fired_at"):
+        for key in ("state", "date", "scheduled_at", "fired_at"):
             if event.get(key) is not None:
                 parts.append("%s=%s" % (key, format_value(event[key])))
         return " ".join(parts)
@@ -841,18 +842,17 @@ def load_events(config: Dict[str, Any]) -> List[Any]:
 
 
 def row_text(row: Dict[str, Any]) -> str:
-    """一行的文本：`HH:MM[-HH:MM]  标题`。
+    """一行的文本：`HH:MM  状态`（T12-4 起日程只有 时间 + 状态）。
 
     ⚠ 与 GUI 日程区同一行格式（`SchedulePanel::rowTextOf`）—— 这样"CLI 的日程"
       与"界面上的日程"可以直接逐行 diff，不用人眼对着两张图读。
     """
-    clock = row["time"] if not row["end"] else "%s-%s" % (row["time"], row["end"])
-    return "%s  %s" % (clock, row["title"])
+    return "%s  %s" % (row["time"], row["state"])
 
 
 def schedule_rows(events: List[Any], day, now: datetime,
                   facts: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
-    """某一天的日程行（按 `(时间, 标题)` 升序）。
+    """某一天的日程行（按 `(时间, 状态)` 升序）。
 
     `occurs_on()` 是**真的** Python 语义（recurring 看星期、oneoff 看日期）；
     `past` 只在**今天**才有意义 —— "现在时刻已经过了 start"。对明天来说
@@ -863,9 +863,7 @@ def schedule_rows(events: List[Any], day, now: datetime,
     @param facts 运行中 Agent 报回来的触发事实（`query_schedule` 的应答）。给了就在
                  行里带上 `fired_at`（这一条**真的**被触发过的时刻）；不给就是 None。
     @note 事实与行按 **`trigger_at`**（就是 `scheduled_at` 那个字符串）对齐 ——
-          这是 Agent 与 CLI 用**同一个** `ScheduleEvent.trigger_at()` 算出来的，
-          所以提前量跨天（00:05 提前 10 分钟 → 前一天 23:55）也能对上。
-          按 `start` 对齐会漏掉那种跨天的情况。
+          这是 Agent 与 CLI 用**同一个** `ScheduleEvent.trigger_at()` 算出来的。
     @note 配置改过（比如把 start 挪了）时对不上 -> 那条历史就落不到任何行上：
           这是如实的结果（"这个时刻没触发过"），不是 bug。
     """
@@ -881,19 +879,16 @@ def schedule_rows(events: List[Any], day, now: datetime,
     for event in events:
         if not event.occurs_on(day):
             continue
-        start = "%02d:%02d" % event.start
-        end = ("%02d:%02d" % event.end) if event.end else ""
         trigger_at = event.trigger_at(day).isoformat(timespec="minutes")
         rows.append({
-            "time": start,
-            "end": end,
-            "title": event.title,
+            "time": "%02d:%02d" % event.start,
+            "state": event.state.value.upper(),
             "past": bool(is_today and now_minute > (event.start[0] * 60 + event.start[1])),
             "day": day,
             "trigger_at": trigger_at,
             "fired_at": (by_trigger.get(trigger_at) or {}).get("fired_at"),
         })
-    rows.sort(key=lambda row: (row["time"], row["title"]))
+    rows.sort(key=lambda row: (row["time"], row["state"]))
     return rows
 
 
@@ -1051,8 +1046,7 @@ def window_days(events: List[Any], now: datetime, hours: float,
             continue
         by_day.setdefault(moment.date(), []).append({
             "time": moment.strftime("%H:%M"),
-            "end": "",
-            "title": fact.get("title") or "",
+            "state": str(fact.get("state") or "").upper(),
             "past": True,
             "day": moment.date(),
             "trigger_at": key,
@@ -1062,7 +1056,7 @@ def window_days(events: List[Any], now: datetime, hours: float,
         })
 
     for rows in by_day.values():
-        rows.sort(key=lambda row: (row["time"], row["title"]))
+        rows.sort(key=lambda row: (row["time"], row["state"]))
     return sorted(by_day.items())
 
 
@@ -1256,8 +1250,8 @@ async def cmd_cleanup(args: argparse.Namespace) -> int:
     else:
         print("要清理的一次性日程（已经过去、不会再触发）：")
         for event in stale:
-            print("  %s  %s %02d:%02d"
-                  % (event.title, event.on.isoformat(), event.start[0], event.start[1]))
+            print("  %s  %s %s" % (event.on.isoformat(), "%02d:%02d" % event.start,
+                                   event.state.value.upper()))
         print("共 %d 条；%s" % (len(stale),
                               "已开始删除" if args.apply
                               else "加 --apply 才会真删（会留一份 config.yaml.bak）"))
@@ -1276,21 +1270,21 @@ async def cmd_cleanup(args: argparse.Namespace) -> int:
 
     removed, failed = 0, []
     for event in stale:
+        label = "%s %s" % (event.on.isoformat(), "%02d:%02d" % event.start)
         try:
             ok = schedule_config.remove_oneoff_from_file(target, oneoff_matcher(event))
         except OSError as exc:
-            failed.append((event.title, str(exc)))
+            failed.append((label, str(exc)))
             continue
         if ok:
             removed += 1
-            print("已删除 %s  %s %02d:%02d"
-                  % (event.title, event.on.isoformat(), event.start[0], event.start[1]))
+            print("已删除 %s  %s" % (label, event.state.value.upper()))
         else:
-            failed.append((event.title, "配置里对不上（可能已经删过了，或者被人改过）"))
+            failed.append((label, "配置里对不上（可能已经删过了，或者被人改过）"))
 
     print("共删除 %d 条（原文件留了一份 %s.bak）。" % (removed, target.name))
-    for title, reason in failed:
-        print("  没删成 %s：%s" % (title, reason), file=sys.stderr)
+    for label, reason in failed:
+        print("  没删成 %s：%s" % (label, reason), file=sys.stderr)
     return EXIT_ERROR if failed else EXIT_OK
 
 

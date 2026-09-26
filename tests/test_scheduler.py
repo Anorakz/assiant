@@ -186,94 +186,118 @@ class TestConfig(unittest.TestCase):
     def test_events_loaded_from_both_lists(self):
         config = {
             "recurring": [
-                {"title": "站会", "days": ["mon", "wed"], "start": "09:30", "end": "09:45"},
+                {"days": ["mon", "wed"], "start": "09:30", "state": "study"},
             ],
             "oneoff": [
-                {"title": "评审", "date": "2026-09-16", "start": "14:00"},
+                {"date": "2026-09-16", "start": "14:00", "state": "game"},
             ],
         }
         scheduler, _, _, _ = make_scheduler(config)
         self.assertEqual(len(scheduler.events), 2)
         kinds = sorted(e.kind for e in scheduler.events)
         self.assertEqual(kinds, ["oneoff", "recurring"])
+        self.assertEqual(sorted(e.state.value for e in scheduler.events),
+                         ["game", "study"])
 
     def test_event_fields(self):
+        # T12-4: 日程 = **时间 + 状态**（没有 title / end / remind_before_min / action 了）
         config = {"recurring": [{
-            "title": "站会", "days": ["wed"], "start": "09:30",
-            "end": "09:45", "remind_before_min": 5,
-            "action": {"state": "study", "prompt": "该开会了"},
+            "days": ["wed"], "start": "09:30", "state": "study",
         }]}
         event = make_scheduler(config)[0].events[0]
-        self.assertEqual(event.title, "站会")
+        self.assertIs(event.state, State.STUDY)
         self.assertEqual(event.start, (9, 30))
-        self.assertEqual(event.end, (9, 45))
         self.assertEqual(event.days, {2})
-        self.assertEqual(event.remind_before_min, 5)
-        self.assertEqual(event.trigger_minute(), 9 * 60 + 25)
-        self.assertEqual(event.action["state"], "study")
+        self.assertEqual(event.trigger_minute(), 9 * 60 + 30)
+        self.assertEqual(event.label(), "09:30 → study")
+        self.assertFalse(hasattr(event, "end"))
+        self.assertFalse(hasattr(event, "title"))
+        self.assertFalse(hasattr(event, "remind_before_min"))
+
+    def test_legacy_fields_are_warned_about_but_ignored(self):
+        # 老配置（title/end/remind_before_min）不再生效, 但**各记一句"怎么照做"**
+        config = {"recurring": [{
+            "title": "站会", "days": ["wed"], "start": "09:30", "end": "09:45",
+            "remind_before_min": 5, "state": "study",
+        }]}
+        scheduler, _, _, _ = make_scheduler(config)
+        self.assertEqual(len(scheduler.events), 1)
+        event = scheduler.events[0]
+        self.assertEqual(event.start, (9, 30))
+        self.assertEqual(event.trigger_minute(), 9 * 60 + 30, "提前量不再生效")
+        notes = " / ".join(scheduler.warnings)
+        self.assertIn("title", notes)
+        self.assertIn("end", notes)
+        self.assertIn("remind_before_min", notes)
 
     def test_event_days_accept_multiple_spellings(self):
-        config = {"recurring": [{"title": "x", "start": "09:00",
+        config = {"recurring": [{"start": "09:00", "state": "study",
                                  "days": ["mon", "TUE", "wednesday", 4]}]}
         event = make_scheduler(config)[0].events[0]
         self.assertEqual(event.days, {0, 1, 2, 4})
 
     def test_event_without_days_means_every_day(self):
-        config = {"recurring": [{"title": "x", "start": "09:00"}]}
+        config = {"recurring": [{"start": "09:00", "state": "study"}]}
         event = make_scheduler(config)[0].events[0]
         self.assertEqual(event.days, set())
         self.assertTrue(event.occurs_on(MONDAY))
         self.assertTrue(event.occurs_on(WEDNESDAY))
 
-    def test_missing_title(self):
+    def test_an_entry_without_a_state_is_skipped_with_a_warning(self):
+        """T12-4: 没有 state 的条目（老配置里那些纯提醒）**跳过 + 警告**, 不整份拒绝。
+
+        ⚠ 板端真配置里就有三条这样的: 整份拒绝会让 Agent 起不来, 连别的一起废掉。
+        """
+        scheduler, _, _, _ = make_scheduler({"recurring": [
+            {"title": "晨间计划", "start": "08:30"},
+            {"start": "09:00", "state": "study"},
+        ]})
+        self.assertEqual([e.start for e in scheduler.events], [(9, 0)])
+        notes = " / ".join(scheduler.warnings)
+        self.assertIn("没有 state", notes)
+        self.assertIn("08:30", notes)
+
+    def test_legacy_action_state_is_still_accepted(self):
+        # 老写法 `action: {state: study}` 仍然收（归一化成 state）
+        config = {"recurring": [{"start": "09:00", "action": {"state": "game"}}]}
+        event = make_scheduler(config)[0].events[0]
+        self.assertIs(event.state, State.GAME)
+
+    def test_a_wrong_state_is_an_error(self):
         with self.assertRaises(SchedulerError):
-            make_scheduler({"recurring": [{"start": "09:00"}]})
+            make_scheduler({"recurring": [{"start": "09:00", "state": "banana"}]})
 
     def test_missing_start(self):
         with self.assertRaises(SchedulerError):
-            make_scheduler({"recurring": [{"title": "x"}]})
+            make_scheduler({"recurring": [{"state": "study"}]})
 
     def test_bad_start(self):
         with self.assertRaises(SchedulerError):
-            make_scheduler({"recurring": [{"title": "x", "start": "25:00"}]})
-
-    def test_end_before_start(self):
-        with self.assertRaises(SchedulerError):
-            make_scheduler({"recurring": [
-                {"title": "x", "start": "10:00", "end": "09:00"}]})
+            make_scheduler({"recurring": [{"start": "25:00", "state": "study"}]})
 
     def test_both_date_and_days_rejected(self):
         with self.assertRaises(SchedulerError):
             make_scheduler({"recurring": [
-                {"title": "x", "start": "09:00", "days": ["mon"], "date": "2026-09-16"}]})
+                {"start": "09:00", "state": "study",
+                 "days": ["mon"], "date": "2026-09-16"}]})
 
     def test_bad_date(self):
         with self.assertRaises(SchedulerError):
-            make_scheduler({"oneoff": [{"title": "x", "start": "09:00", "date": "16/09/2026"}]})
-
-    def test_bad_remind(self):
-        for bad in (-1, "5", 1.5):
-            with self.subTest(bad=bad):
-                with self.assertRaises(SchedulerError):
-                    make_scheduler({"recurring": [
-                        {"title": "x", "start": "09:00", "remind_before_min": bad}]})
+            make_scheduler({"oneoff": [{"start": "09:00", "state": "study",
+                                        "date": "16/09/2026"}]})
 
     def test_bad_days_type(self):
         with self.assertRaises(SchedulerError):
-            make_scheduler({"recurring": [{"title": "x", "start": "09:00", "days": "mon"}]})
+            make_scheduler({"recurring": [{"start": "09:00", "state": "study",
+                                           "days": "mon"}]})
 
     def test_recurring_must_be_a_list(self):
         with self.assertRaises(SchedulerError):
-            make_scheduler({"recurring": {"title": "x"}})
+            make_scheduler({"recurring": {"start": "09:00", "state": "study"}})
 
     def test_entry_must_be_object(self):
         with self.assertRaises(SchedulerError):
             make_scheduler({"recurring": ["not an object"]})
-
-    def test_bad_action_type(self):
-        with self.assertRaises(SchedulerError):
-            make_scheduler({"recurring": [
-                {"title": "x", "start": "09:00", "action": "study"}]})
 
 
 # ===========================================================================
@@ -281,24 +305,24 @@ class TestConfig(unittest.TestCase):
 # ===========================================================================
 class TestCheckSchedule(unittest.IsolatedAsyncioTestCase):
     async def test_fires_at_start_time(self):
-        config = {"recurring": [{"title": "站会", "days": ["wed"], "start": "09:30"}]}
-        scheduler, _, bus, _ = make_scheduler(config)
+        config = {"recurring": [{"days": ["wed"], "start": "09:30", "state": "study"}]}
+        scheduler, state, bus, _ = make_scheduler(config)
         fired = await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 10))
         self.assertEqual(len(fired), 1)
-        self.assertEqual(fired[0]["title"], "站会")
+        self.assertEqual(fired[0]["state"], "study")
         self.assertEqual(fired[0]["kind"], "schedule")
-        self.assertEqual(len(bus.events), 1)
-        self.assertEqual(bus.events[0]["source"], "scheduler")
-        self.assertIn("站会", bus.events[0]["text"])
+        self.assertIs(state.current(), State.STUDY, "到点要真的切过去")
+        # ⚠ T12-4: 日程**不再往 bus 里推文本**（不叫 LLM 做事）
+        self.assertEqual(bus.events, [])
 
     async def test_does_not_fire_before_window(self):
-        config = {"recurring": [{"title": "站会", "start": "09:30"}]}
+        config = {"recurring": [{"start": "09:30", "state": "study"}]}
         scheduler, _, bus, _ = make_scheduler(config)
         self.assertEqual(await scheduler.check_schedule(datetime(2026, 9, 16, 9, 29, 0)), [])
         self.assertEqual(bus.events, [])
 
     async def test_does_not_fire_after_window(self):
-        config = {"recurring": [{"title": "站会", "start": "09:30"}]}
+        config = {"recurring": [{"start": "09:30", "state": "study"}]}
         scheduler, _, bus, _ = make_scheduler(config)
         # 默认 window_min=1 -> 09:31 已经出窗
         self.assertEqual(await scheduler.check_schedule(datetime(2026, 9, 16, 9, 31, 0)), [])
@@ -306,54 +330,58 @@ class TestCheckSchedule(unittest.IsolatedAsyncioTestCase):
 
     async def test_fires_only_once_within_window(self):
         # 这是核心去重: 每 interval_min 都会 check, 但只能触发一次
-        config = {"recurring": [{"title": "站会", "start": "09:30"}]}
-        scheduler, _, bus, _ = make_scheduler(config)
+        config = {"recurring": [{"start": "09:30", "state": "study"}]}
+        scheduler, _, _, _ = make_scheduler(config)
         first = await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 5))
         again = await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 40))
         self.assertEqual(len(first), 1)
         self.assertEqual(again, [], "同一时间窗内不该重复触发")
-        self.assertEqual(len(bus.events), 1)
 
     async def test_fires_again_next_day(self):
-        config = {"recurring": [{"title": "每天", "start": "09:30"}]}
-        scheduler, _, bus, _ = make_scheduler(config)
+        config = {"recurring": [{"start": "09:30", "state": "study"}]}
+        scheduler, _, _, _ = make_scheduler(config)
         self.assertEqual(len(await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))), 1)
         self.assertEqual(len(await scheduler.check_schedule(datetime(2026, 9, 17, 9, 30, 0))), 1)
-        self.assertEqual(len(bus.events), 2)
 
     async def test_recurring_only_on_configured_days(self):
-        config = {"recurring": [{"title": "周一站会", "days": ["mon"], "start": "09:30"}]}
+        config = {"recurring": [{"days": ["mon"], "start": "09:30", "state": "study"}]}
         scheduler, _, _, _ = make_scheduler(config)
         self.assertEqual(await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0)), [])
         self.assertEqual(len(await scheduler.check_schedule(datetime(2026, 9, 14, 9, 30, 0))), 1)
 
     async def test_oneoff_only_on_its_date(self):
-        config = {"oneoff": [{"title": "评审", "date": "2026-09-16", "start": "14:00"}]}
+        config = {"oneoff": [{"date": "2026-09-16", "start": "14:00", "state": "study"}]}
         scheduler, _, _, _ = make_scheduler(config)
         self.assertEqual(await scheduler.check_schedule(datetime(2026, 9, 15, 14, 0, 0)), [])
         self.assertEqual(len(await scheduler.check_schedule(datetime(2026, 9, 16, 14, 0, 0))), 1)
         self.assertEqual(await scheduler.check_schedule(datetime(2026, 9, 17, 14, 0, 0)), [])
 
-    async def test_remind_before_shifts_trigger_earlier(self):
-        config = {"recurring": [{
-            "title": "站会", "start": "09:30", "remind_before_min": 10}]}
-        scheduler, _, _, _ = make_scheduler(config)
-        # 09:20 正是触发点
-        self.assertEqual(len(await scheduler.check_schedule(datetime(2026, 9, 16, 9, 20, 0))), 1)
+    async def test_schedules_no_longer_push_text_to_the_bus(self):
+        """T12-4（你定的）: 日程到点**只切状态**, 不再往对话里发消息（不叫 LLM）。
 
-    async def test_remind_before_crossing_midnight(self):
-        config = {"recurring": [{
-            "title": "跨天", "start": "00:05", "remind_before_min": 10}]}
+        给用户看的那一句由 IPC 层的 `on_fire` 推成 `llm` **展示** —— 那条路不进模型输入,
+        所以这里断言**bus 一个事件都没有**（有的话就会被当成用户输入送给 LLM）。
+        """
+        config = {"recurring": [{"start": "09:30", "state": "study"}]}
+        scheduler, state, bus, _ = make_scheduler(config)
+        fired = await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
+        self.assertEqual(len(fired), 1)
+        self.assertIs(state.current(), State.STUDY)
+        self.assertEqual(bus.events, [], "日程不该往 bus 推文本（那会喂给 LLM）")
+        self.assertEqual([a["type"] for a in fired[0]["actions"]], ["state"])
+
+    async def test_remind_before_min_no_longer_shifts_anything(self):
+        # 老字段被忽略: 09:30 的日程**不会**在 09:20 触发, 到 09:30 才触发
+        config = {"recurring": [{"start": "09:30", "state": "study",
+                                 "remind_before_min": 10}]}
         scheduler, _, _, _ = make_scheduler(config)
-        # 触发点落在前一天 23:55
-        self.assertEqual(
-            len(await scheduler.check_schedule(datetime(2026, 9, 16, 23, 55, 0))), 1
-        )
+        self.assertEqual(await scheduler.check_schedule(datetime(2026, 9, 16, 9, 20, 0)), [])
+        self.assertEqual(len(await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))), 1)
 
     async def test_late_grace_allows_late_fire(self):
         config = {
             "scheduler": {"late_grace_min": 10},
-            "recurring": [{"title": "站会", "start": "09:30"}],
+            "recurring": [{"start": "09:30", "state": "study"}],
         }
         scheduler, _, _, _ = make_scheduler(config)
         # 晚 5 分钟仍然认, 且只触发一次
@@ -364,7 +392,7 @@ class TestCheckSchedule(unittest.IsolatedAsyncioTestCase):
         # 另一种布局: 日程写在 scheduler 段里面
         config = {"scheduler": {
             "interval_min": 5,
-            "recurring": [{"title": "x", "start": "09:30"}],
+            "recurring": [{"start": "09:30", "state": "study"}],
         }}
         scheduler, _, _, _ = make_scheduler(config)
         self.assertEqual(scheduler.interval_min, 5.0)
@@ -373,22 +401,24 @@ class TestCheckSchedule(unittest.IsolatedAsyncioTestCase):
     async def test_late_grace_still_bounded(self):
         config = {
             "scheduler": {"late_grace_min": 5},
-            "recurring": [{"title": "站会", "start": "09:30"}],
+            "recurring": [{"start": "09:30", "state": "study"}],
         }
         scheduler, _, _, _ = make_scheduler(config)
         self.assertEqual(await scheduler.check_schedule(datetime(2026, 9, 16, 9, 40, 0)), [])
 
     async def test_multiple_events(self):
+        # 同一时刻两条不同状态的日程: 都生效（第二次经 IDLE 走两跳, 见 T12-1）
         config = {"recurring": [
-            {"title": "a", "start": "09:30"},
-            {"title": "b", "start": "09:30"},
+            {"start": "09:30", "state": "study"},
+            {"start": "09:30", "state": "game"},
         ]}
-        scheduler, _, _, _ = make_scheduler(config)
+        scheduler, state, _, _ = make_scheduler(config)
         fired = await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
-        self.assertEqual(sorted(f["title"] for f in fired), ["a", "b"])
+        self.assertEqual([f["state"] for f in fired], ["study", "game"])
+        self.assertIs(state.current(), State.GAME)
 
     async def test_uses_injected_clock_by_default(self):
-        config = {"recurring": [{"title": "x", "start": "09:30"}]}
+        config = {"recurring": [{"start": "09:30", "state": "study"}]}
         # 默认时钟在 09:30 整点, 先把它拨到整点之前
         clock = FakeClock(datetime(2026, 9, 16, 9, 0, 0))
         scheduler, _, _, _ = make_scheduler(config, clock=clock)
@@ -396,23 +426,10 @@ class TestCheckSchedule(unittest.IsolatedAsyncioTestCase):
         clock.set(datetime(2026, 9, 16, 9, 30, 0))
         self.assertEqual(len(await scheduler.check_schedule()), 1)
 
-    async def test_default_message_when_no_prompt(self):
-        config = {"recurring": [{"title": "站会", "start": "09:30"}]}
-        scheduler, _, bus, _ = make_scheduler(config)
-        await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
-        self.assertIn("站会", bus.events[0]["text"])
-
-    async def test_custom_prompt_used(self):
-        config = {"recurring": [{
-            "title": "站会", "start": "09:30", "action": {"prompt": "去开会"}}]}
-        scheduler, _, bus, _ = make_scheduler(config)
-        await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
-        self.assertEqual(bus.events[0]["text"], "去开会")
-
     # ------------------------------------------------------- 触发动作 ---
     async def test_action_transitions_state(self):
         config = {"recurring": [{
-            "title": "开工", "start": "09:30", "action": {"state": "study"}}]}
+            "start": "09:30", "state": "study"}]}
         scheduler, state, _, _ = make_scheduler(config)
         fired = await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
         self.assertIs(state.current(), State.STUDY)
@@ -427,8 +444,8 @@ class TestCheckSchedule(unittest.IsolatedAsyncioTestCase):
         现在按状态图的规矩走过去: `study -> idle -> game`, 两条都成功, 第二条两步。
         """
         config = {"recurring": [
-            {"title": "先学习", "start": "09:30", "action": {"state": "study"}},
-            {"title": "再游戏", "start": "09:30", "action": {"state": "game"}},
+            {"start": "09:30", "state": "study"},
+            {"start": "09:30", "state": "game"},
         ]}
         scheduler, state, _, _ = make_scheduler(config)
         fired = await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
@@ -440,36 +457,27 @@ class TestCheckSchedule(unittest.IsolatedAsyncioTestCase):
         self.assertIs(state.current(), State.GAME)
 
     async def test_action_with_an_unknown_state_is_refused_not_crashed(self):
-        """认不出来的目标（配置写错）: 如实记 ok=False + why, 不抛异常、不动状态。"""
-        config = {"recurring": [{
-            "title": "乱写", "start": "09:30", "action": {"state": "banana"}}]}
-        scheduler, state, _, _ = make_scheduler(config)
-        fired = await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
-        state_action = [a for f in fired for a in f["actions"] if a["type"] == "state"][0]
-        self.assertFalse(state_action["ok"])
-        self.assertIn("不认识的模式", state_action["why"])
-        self.assertEqual(state_action["steps"], [])
+        """认不出来的目标: `_apply_action` 如实记 ok=False + why, 不抛异常、不动状态。
+
+        @note T12-4 起配置里的 state 拼错是**加载期**报错（见 TestConfig 那条）,
+              所以这里直接喂给 `_apply_action` —— 钉的是"这一层不会炸"。
+        """
+        scheduler, state, _, _ = make_scheduler({"recurring": []})
+        done = await scheduler._apply_action({"state": "banana"}, "测试")
+        self.assertFalse(done[0]["ok"])
+        self.assertIn("不认识的模式", done[0]["why"])
+        self.assertEqual(done[0]["steps"], [])
         self.assertIs(state.current(), State.IDLE)
 
     async def test_action_with_reason(self):
-        config = {"recurring": [{
-            "title": "开工", "start": "09:30",
-            "action": {"state": "study", "reason": "该学习了"}}]}
+        # 理由由 时间+状态 自动生成（T12-4 起配置里没有 reason 了）
+        config = {"recurring": [{"start": "09:30", "state": "study"}]}
         scheduler, state, _, _ = make_scheduler(config)
         await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
-        self.assertEqual(state.last_reason, "该学习了")
-
-    async def test_both_state_and_message(self):
-        config = {"recurring": [{
-            "title": "开局", "start": "09:30",
-            "action": {"state": "game", "prompt": "该玩游戏了"}}]}
-        scheduler, state, bus, _ = make_scheduler(config)
-        await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
-        self.assertIs(state.current(), State.GAME)
-        self.assertEqual(bus.events[0]["text"], "该玩游戏了")
+        self.assertEqual(state.last_reason, "日程: 09:30 → study")
 
     async def test_stats(self):
-        config = {"recurring": [{"title": "x", "start": "09:30"}]}
+        config = {"recurring": [{"start": "09:30", "state": "study"}]}
         scheduler, _, _, _ = make_scheduler(config)
         await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
         stats = scheduler.stats
@@ -488,7 +496,7 @@ class TestFiredHistory(unittest.IsolatedAsyncioTestCase):
       触发判定与去重 (_fired)。
     """
 
-    CONFIG = {"recurring": [{"title": "站会", "start": "09:30"}]}
+    CONFIG = {"recurring": [{"start": "09:30", "state": "study"}]}
 
     async def test_empty_before_any_fire(self):
         scheduler, _, _, _ = make_scheduler(self.CONFIG)
@@ -496,20 +504,21 @@ class TestFiredHistory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scheduler.stats["fired_history"], 0)
 
     async def test_records_the_fact_after_fire(self):
-        scheduler, _, bus, _ = make_scheduler(self.CONFIG)
+        scheduler, _, _, _ = make_scheduler(self.CONFIG)
         await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 10))
 
         facts = scheduler.recent_fired()
         self.assertEqual(len(facts), 1)
         fact = facts[0]
-        self.assertEqual(fact["title"], "站会")
+        self.assertEqual(fact["state"], "study")            # T12-4: 事实里是状态, 没有 title
         self.assertEqual(fact["date"], "2026-09-16")
         self.assertEqual(fact["scheduled_at"], "2026-09-16T09:30")
         # fired_at 是**真的触发时刻** (检查那一刻), 不是日程写的时刻
         self.assertEqual(fact["fired_at"], "2026-09-16T09:30:10")
         self.assertEqual(len(fact["actions"]), 1)
-        self.assertEqual(fact["actions"][0]["type"], "message")
-        self.assertEqual(fact["actions"][0]["text"], bus.events[0]["text"])
+        self.assertEqual(fact["actions"][0]["type"], "state")
+        self.assertTrue(fact["actions"][0]["ok"])
+        self.assertEqual([s["to"] for s in fact["actions"][0]["steps"]], ["study"])
 
     async def test_no_fire_no_history(self):
         scheduler, _, _, _ = make_scheduler(self.CONFIG)
@@ -533,10 +542,10 @@ class TestFiredHistory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([f["date"] for f in facts], ["2026-09-17", "2026-09-18"])
 
     async def test_history_limit_zero_records_nothing_but_still_fires(self):
-        scheduler, _, bus, _ = make_scheduler(self.CONFIG, history_limit=0)
+        scheduler, state, _, _ = make_scheduler(self.CONFIG, history_limit=0)
         fired = await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
         self.assertEqual(len(fired), 1, "关掉历史不该影响触发")
-        self.assertEqual(len(bus.events), 1)
+        self.assertIs(state.current(), State.STUDY, "也不该影响切状态")
         self.assertEqual(scheduler.recent_fired(), [])
 
     async def test_recent_fired_limit_takes_the_tail(self):
@@ -554,8 +563,8 @@ class TestFiredHistory(unittest.IsolatedAsyncioTestCase):
     async def test_recent_fired_returns_copies(self):
         scheduler, _, _, _ = make_scheduler(self.CONFIG)
         await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 0))
-        scheduler.recent_fired()[0]["title"] = "改坏了"
-        self.assertEqual(scheduler.recent_fired()[0]["title"], "站会",
+        scheduler.recent_fired()[0]["state"] = "改坏了"
+        self.assertEqual(scheduler.recent_fired()[0]["state"], "study",
                          "拿到的应是副本, 改不动真源")
 
     async def test_default_history_limit_is_the_documented_one(self):
@@ -581,7 +590,7 @@ class TestFiredHistory(unittest.IsolatedAsyncioTestCase):
         scheduler.on_fire = seen.append
         await scheduler.check_schedule(datetime(2026, 9, 16, 9, 30, 7))
         self.assertEqual(len(seen), 1)
-        self.assertEqual(seen[0]["title"], "站会")
+        self.assertEqual(seen[0]["state"], "study")
         self.assertEqual(seen[0]["fired_at"], "2026-09-16T09:30:07")
 
     async def test_on_fire_sees_what_recent_fired_keeps(self):
@@ -611,7 +620,6 @@ class TestFiredHistory(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(first), 1)
         self.assertEqual(again, [], "回调炸了不能把去重一起炸掉")
-        self.assertEqual(len(bus.events), 1)
         self.assertEqual(scheduler.stats["triggers"], 1)
         self.assertEqual(len(scheduler.recent_fired()), 1)
 
@@ -665,7 +673,7 @@ class TestParseCommandConfig(unittest.TestCase):
     def test_split_action_is_merged(self):
         # 允许 {action: {...}} 与直接写两种形态
         bindings = parse_command_config(
-            [{"command": "study", "action": {"state": "study"}}])
+            [{"command": "study", "state": "study"}])
         self.assertEqual(bindings[0].action["state"], "study")
 
     def test_dict_form(self):
@@ -694,7 +702,7 @@ class TestParseCommandConfig(unittest.TestCase):
 
     def test_missing_command_rejected(self):
         with self.assertRaises(SchedulerError):
-            parse_command_config([{"action": {"state": "study"}}])
+            parse_command_config([{"state": "study"}])
 
     def test_bad_command_type_rejected(self):
         with self.assertRaises(SchedulerError):
@@ -753,21 +761,21 @@ class TestListenCommands(unittest.IsolatedAsyncioTestCase):
 
     async def test_whitespace_and_case_tolerated(self):
         scheduler, state, _ = self._scheduler(
-            [{"command": "study", "action": {"state": "study"}}]
+            [{"command": "study", "state": "study"}]
         )
         await scheduler._on_bus_event({"source": "terminal", "text": "  StUdY  "})
         self.assertIs(state.current(), State.STUDY)
 
     async def test_chinese_command(self):
         scheduler, state, _ = self._scheduler(
-            [{"command": "回桌面", "action": {"state": "idle"}}]
+            [{"command": "回桌面", "state": "idle"}]
         )
         await scheduler._on_bus_event({"source": "terminal", "text": " 回桌面 "})
         self.assertIs(state.current(), State.IDLE)
 
     async def test_wrong_command_does_not_fire(self):
         scheduler, state, _ = self._scheduler(
-            [{"command": "study", "action": {"state": "study"}}]
+            [{"command": "study", "state": "study"}]
         )
         for text in ("stud", "study please", "studyx", "开始学习"):
             with self.subTest(text=text):
@@ -777,7 +785,7 @@ class TestListenCommands(unittest.IsolatedAsyncioTestCase):
     async def test_other_sources_ignored(self):
         # 界面/别的来源打出一句像命令的文本, 不该触发状态切换
         scheduler, state, _ = self._scheduler(
-            [{"command": "study", "action": {"state": "study"}}]
+            [{"command": "study", "state": "study"}]
         )
         for source in ("gui", "scheduler", "host_keyboard"):
             await scheduler._on_bus_event({"source": source, "text": "study"})
@@ -786,7 +794,7 @@ class TestListenCommands(unittest.IsolatedAsyncioTestCase):
 
     async def test_unusable_text_skipped(self):
         scheduler, state, _ = self._scheduler(
-            [{"command": "study", "action": {"state": "study"}}]
+            [{"command": "study", "state": "study"}]
         )
         for text in ("", "   ", None, 123, "[key s modifier=2]"):
             await scheduler._on_bus_event({"source": "terminal", "text": text})
@@ -832,7 +840,7 @@ class TestListenCommandsLoop(unittest.IsolatedAsyncioTestCase):
     async def test_subscription_fires_and_does_not_steal_events(self):
         bus = ChatInputBus()
         config = {"scheduler": {"commands": [
-            {"command": "game", "action": {"state": "game"}}]}}
+            {"command": "game", "state": "game"}]}}
         state = StateMachine()
         scheduler = Scheduler(state=state, bus=bus, config=config)
 
@@ -876,7 +884,7 @@ class TestListenCommandsLoop(unittest.IsolatedAsyncioTestCase):
     async def test_fake_bus_without_subscribe_warns(self):
         # 只提供 get() 的替身: 监听退化, 但要有明确 warning (静默失效更难查)
         scheduler, state, _, _ = make_scheduler(
-            {"scheduler": {"commands": [{"command": "game", "action": {"state": "game"}}]}}
+            {"scheduler": {"commands": [{"command": "game", "state": "game"}]}}
         )
         await scheduler.start()
         await asyncio.sleep(0)
@@ -891,7 +899,7 @@ class TestListenCommandsLoop(unittest.IsolatedAsyncioTestCase):
 class TestLifecycle(unittest.IsolatedAsyncioTestCase):
     async def test_start_is_idempotent(self):
         scheduler, _, _, _ = make_scheduler(
-            {"recurring": [{"title": "x", "start": "09:30"}]}
+            {"recurring": [{"start": "09:30", "state": "study"}]}
         )
         await scheduler.start()
         self.assertTrue(scheduler.running)
@@ -930,26 +938,27 @@ class TestLifecycle(unittest.IsolatedAsyncioTestCase):
         scheduler = Scheduler(
             state=state, bus=bus,
             config={"scheduler": {"interval_min": 1},
-                    "recurring": [{"title": "x", "start": "09:30",
-                                   "action": {"state": "study"}}]},
+                    "recurring": [{"start": "09:30",
+                                   "state": "study"}]},
             clock=clock,
             monotonic=bounded,
             sleep=fake_sleep,
         )
         await scheduler.start()
         for _ in range(50):
-            if bus.events:
+            if scheduler.stats["triggers"]:
                 break
             await asyncio.sleep(0)
         await scheduler.stop()
 
         self.assertIs(state.current(), State.STUDY)
-        self.assertEqual(len(bus.events), 1)
+        self.assertEqual(scheduler.stats["triggers"], 1)
+        self.assertEqual(bus.events, [], "日程不往 bus 推文本（T12-4）")
         self.assertFalse(scheduler.running)
 
     async def test_stop_prevents_further_firing(self):
         scheduler, _, bus, clock = make_scheduler(
-            {"recurring": [{"title": "x", "start": "09:30"}]}
+            {"recurring": [{"start": "09:30", "state": "study"}]}
         )
         await scheduler.start()
         await scheduler.stop()
@@ -990,7 +999,7 @@ class TestSyncTime(unittest.TestCase):
 class TestRepr(unittest.TestCase):
     def test_repr(self):
         scheduler, _, _, _ = make_scheduler(
-            {"recurring": [{"title": "x", "start": "09:00"}]}
+            {"recurring": [{"start": "09:00", "state": "study"}]}
         )
         text = repr(scheduler)
         self.assertIn("events=1", text)

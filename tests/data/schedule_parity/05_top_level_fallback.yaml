@@ -8,9 +8,9 @@
 scheduler:
   interval_min: 1
   oneoff:
-    - title: 段里的
+    - state: study
       date: 2026-09-21
       start: "09:00"
 recurring:
-  - title: 顶层的
+  - state: game
     start: "08:00"

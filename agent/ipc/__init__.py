@@ -340,16 +340,49 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
         runtime.on_bilibili = _on_bilibili
         _log.debug("ipc: 已接上 B 站推送 (runtime.on_bilibili -> bilibili)")
 
-    # · 日程触发 -> schedule{kind:"fired", event}
+    # · 日程触发 -> schedule{kind:"fired", event} + **一句展示**
     # 与上面 on_reply 同款"有就接": runtime 没带调度器 (或它还没起来) 就跳过 ——
     # 老 Runtime 与测试替身不该因为少这一样而接不上其余推送。
     scheduler = _scheduler_of(runtime)
     if scheduler is not None:
         def _on_fire(fact: Dict[str, Any]) -> None:
             dispatch(TOPIC_SCHEDULE, {"kind": SCHEDULE_KIND_FIRED, "event": fact})
+            # T12-4: 日程到点**只切状态**, 不再往 bus 里推文本（不叫 LLM）。给用户看的话
+            # 在这里推成 `llm` **展示** —— 与"助手气泡"同一个通道, 但它不进模型输入。
+            text = _schedule_fired_text(fact)
+            if text:
+                dispatch(TOPIC_LLM, {"text": text})
 
         scheduler.on_fire = _on_fire
-        _log.debug("ipc: 已接上日程触发推送 (scheduler.on_fire -> schedule)")
+        _log.debug("ipc: 已接上日程触发推送 (scheduler.on_fire -> schedule + llm)")
+
+
+def _schedule_fired_text(fact: Dict[str, Any]) -> str:
+    """日程触发后给用户看的那一句（**纯格式化**, 单测钉它）。
+
+    @return 形如 `日程到点：切到 STUDY`；切不过去时如实说清楚（`actions` 里有 ok/why）
+    @note 时刻取 `scheduled_at`（"这条日程是几点"）；它可能比 `fired_at` 早几秒 ——
+          报"日程的时刻"比报"我们什么时候才发现"更有用。
+    """
+    state = str(fact.get("state") or "").strip().upper()
+    if not state:
+        return ""
+    clock = str(fact.get("scheduled_at") or "")
+    _, sep, time_part = clock.partition("T")
+    if sep and len(time_part) >= 5:
+        clock = time_part[:5]
+    else:
+        clock = ""
+    where = "（%s）" % clock if clock else ""
+
+    failed = ""
+    for action in fact.get("actions") or []:
+        if isinstance(action, dict) and action.get("type") == "state" and not action.get("ok"):
+            failed = str(action.get("why") or "状态机没让切")
+            break
+    if failed:
+        return "日程到点：想切到 %s，但没切过去 —— %s" % (state, failed)
+    return "日程到点：切到 %s%s" % (state, where)
 
 
 #: 还没接下游的命令 -> 回给用户的那句话 (Phase 6 D7 / 决策 7)。

@@ -7,13 +7,13 @@
 # ============================================================================
 scheduler:
   recurring:
-    - title: 一位小时
+    - state: study
       start: "9:30"
-    - title: 两位小时
+    - state: game
       start: "09:30"
-    - title: 紧凑带引号
+    - state: sleep
       start: "0930"
-    - title: 紧凑不加引号
+    - state: idle
       start: 0930
-    - title: 全角冒号
+    - state: study
       start: "09：30"

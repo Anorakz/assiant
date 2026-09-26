@@ -144,7 +144,12 @@ def _sequence_items(lines: List[str], key_index: int, key_indent: int) -> List[T
 
 
 def _fields_of(lines: List[str], start: int, end: int) -> Dict[str, str]:
-    """条目块里抽 `title` / `date` / `start`（每个键取第一次出现）。"""
+    """条目块里抽 `state` / `date` / `start`（每个键取第一次出现）。
+
+    @note T12-4: 日程 = **时间 + 状态**，所以匹配用的三个键是 `state`/`date`/`start`
+          （老版是 `title`/`date`/`start`）。这里仍旧只抽**裸标量** —— 语义归一
+          （大小写、时间写法）在 `scheduler.oneoff_matcher` 里做。
+    """
     fields: Dict[str, str] = {}
     for index in range(start, end):
         line = lines[index]
@@ -154,7 +159,7 @@ def _fields_of(lines: List[str], start: int, end: int) -> Dict[str, str]:
         if not match:
             continue
         key = match.group(1)
-        if key in ("title", "date", "start") and key not in fields:
+        if key in ("state", "date", "start") and key not in fields:
             fields[key] = strip_scalar(match.group(2))
     return fields
 

@@ -5,10 +5,9 @@
       "label": "今天",
       "rows": [
         {
-          "end": "15:30",
           "past": true,
-          "time": "14:00",
-          "title": "今天评审"
+          "state": "study",
+          "time": "14:00"
         }
       ]
     },
@@ -17,10 +16,9 @@
       "label": "明天",
       "rows": [
         {
-          "end": "",
           "past": false,
-          "time": "08:00",
-          "title": "明天体检"
+          "state": "game",
+          "time": "08:00"
         }
       ]
     }

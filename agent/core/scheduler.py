@@ -8,11 +8,14 @@
 #        └── 命令循环:   从 ChatInputBus 旁观 source=="terminal" 的整行文本
 #                        → 与配置里的命令名比 → 命中就触发
 #
-#  触发动作只有两种 (按约定)
+#  触发动作 (T12-4 起)
 #  ---------------------------------------------------------------------------
-#      1. 状态转换      state_machine.transition(目标状态, reason)
-#      2. 发消息给 Agent bus.push("scheduler", 文本)  ← 和终端/GUI 同一个入口
-#    行动作本来就是单条 dict, 组合起来是"切到 GAME 并告诉 Agent 该开局了"。
+#      日程 = **时间 + 状态**: 到点就 `StateMachine.transition_to(状态, reason)` ——
+#      按状态图的规矩走（跨模式经 IDLE 两跳, 每一跳都会释放那个模式里的东西）。
+#      ⚠ 日程**不再往 bus 里推文本**（不叫 LLM 做任何事）; 给用户看的那一句由 `on_fire`
+#        （IPC 层）推成 `llm` 展示。
+#      终端命令（`commands:` 段）仍是老那套: 可以带 `state` 也可以带 `prompt`
+#      （`prompt` 会 `bus.push("scheduler", 文本)` —— 那条是"敲了命令"的意思, 与日程无关）。
 #
 #  关于"同步系统时间"
 #  ---------------------------------------------------------------------------
@@ -42,7 +45,7 @@
 #  ---------------------------------------------------------------------------
 #  去重集合 _fired 只回答"这条触发过没" (而且是 (日期, key) 的集合), 说不出
 #  "什么时候触发的"。所以 _fire() 成功后再往 _history 记一条**事实** (有界 deque,
-#  默认 DEFAULT_HISTORY_LIMIT 条): title / date / scheduled_at / fired_at / actions。
+#  默认 DEFAULT_HISTORY_LIMIT 条): **state** / date / scheduled_at / fired_at / actions。
 #  它是给 IPC 的 "schedule" topic 与 CLI 的 `assistant schedule` 看的 —— 即
 #  "本进程内真的发生过的事", 与"按时间比较出来的 已过"是两回事 (后者与 Agent
 #  有没有跑、有没有触发完全无关)。
@@ -103,6 +106,15 @@ TERMINAL_SOURCE = "terminal"
 
 class SchedulerError(ValueError):
     """调度器配置/参数错误。继承 ValueError, 与其他模块一致。"""
+
+
+class SkippedScheduleEntry(SchedulerError):
+    """这条日程按新规矩"没有内容"（缺 state）—— **跳过它并记一条警告**, 不整份拒绝。
+
+    @note 为什么不一刀切报错: 板端真配置里那几条纯提醒（只有 title + start）就是这样,
+          整份拒绝会让 Agent 起不来、连别的功能一起废掉。跳过 + 警告 + 界面上标出来,
+          用户照着改一条 `state:` 就好了。
+    """
 
 
 def _log_task_exception(task: "asyncio.Task") -> None:
@@ -170,36 +182,39 @@ def _weekday_index(value: Any) -> int:
 # ---------------------------------------------------------------------------
 @dataclass
 class ScheduleEvent:
-    """一条日程。
+    """一条日程 = **时间 + 状态**（T12-4 你定的：内容只有那四个状态之一）。
 
-    @param source_id  来源标记, 用来生成稳定的去重 key (重复 cron 之类的不做,
-                      但同一个 title 在不同天应各自触发)
-    @param title      名字 (触发理由里会带上)
+    @param source_id 来源标记, 用来生成稳定的去重 key
     @param kind       "recurring" | "oneoff"
     @param start      起始 (hour, minute)
-    @param end        结束 (hour, minute); 可为 None (只关心起始)
+    @param state      **到点切到哪个状态**（`State`）—— 日程的内容就是它
     @param days       仅 recurring: 生效的星期 (0=周一); 空集合 = 每天
     @param on         仅 oneoff: 生效日期
-    @param remind_before_min 提前多少分钟触发
-    @param action     触发动作 dict: {"state": "game", "prompt": "...", "reason": "..."}
+
+    ⚠ 与旧版的区别（老字段**全部去掉**了）:
+        · `title`    —— 显示名不再由配置给, 显示就是状态名（`label()` 由 时间+状态 拼出来）;
+        · `end`      —— 没有"时段"这回事了: 要"到点退出"就再加一条切到 idle 的日程;
+        · `remind_before_min` —— 没有提前提醒: 到点就是到点;
+        · `action`   —— 内容只有 state; 老写法 `action: {state: …}` 仍然**收**（归一化）。
     """
     source_id: str
-    title: str
     kind: str
     start: Tuple[int, int]
-    end: Optional[Tuple[int, int]] = None
+    state: State
     days: Set[int] = field(default_factory=set)
     on: Optional[date] = None
-    remind_before_min: int = 0
-    action: Dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------ 计算 ---
     def start_minute(self) -> int:
         return self.start[0] * 60 + self.start[1]
 
     def trigger_minute(self) -> int:
-        """应当触发的分钟数 (= 起始 - 提前量)。"""
-        return self.start_minute() - int(self.remind_before_min)
+        """应当触发的分钟数（= 起始; 提前量那套已经取消）。"""
+        return self.start_minute()
+
+    def label(self) -> str:
+        """人看的名字：`09:30 → STUDY`（CLI/GUI/日志/触发理由都用它）。"""
+        return "%02d:%02d → %s" % (self.start[0], self.start[1], self.state.value)
 
     def occurs_on(self, day: date) -> bool:
         if self.kind == "oneoff":
@@ -209,71 +224,74 @@ class ScheduleEvent:
         return False
 
     def trigger_at(self, day: date) -> datetime:
-        """当天的触发时刻 (可能落在前一天, 若提前量跨零点)。
+        """当天的触发时刻。
 
-        @note 用 (day 00:00 + 分钟数) 而不是 replace(hour=..., minute=...),
-              因为提前量可能让触发时刻变成负数分钟 -> 自然落到前一天。
+        @note 用 (day 00:00 + 分钟数) 而不是 replace(hour=..., minute=...):
+              一来与旧实现口径一致（那时提前量可能让分钟数为负、自然落到前一天）,
+              二来这种写法对"起始就是 00:00"也一样。
         """
         return datetime(day.year, day.month, day.day) + timedelta(
             minutes=self.trigger_minute()
         )
 
     def dedup_key(self, day: date) -> str:
-        """同一天内同一条日程只触发一次。"""
+        """同一天内同一条日程只触发一次（键里带状态, 所以同时间去不同模式是两条）。"""
         return "%s|%s|%04d-%02d-%02d|%d" % (
-            self.source_id, self.title[:64], day.year, day.month, day.day,
+            self.source_id, self.state.value, day.year, day.month, day.day,
             self.trigger_minute(),
         )
+
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "title": self.title,
+            "state": self.state.value,
             "kind": self.kind,
             "start": "%02d:%02d" % self.start,
-            "end": None if self.end is None else "%02d:%02d" % self.end,
             "days": sorted(self.days) if self.days else "every-day",
             "date": self.on.isoformat() if self.on else None,
-            "remind_before_min": self.remind_before_min,
-            "action": dict(self.action),
         }
 
     @classmethod
     def from_config(cls, entry: Dict[str, Any], index: int) -> "ScheduleEvent":
-        """从 config 的一条日程构造。
+        """从 config 的一条日程构造（**时间 + 状态**）。
 
-        @raise SchedulerError 缺字段/字段类型不对/时间格式不对
+        @raise SchedulerError       格式不对（缺 start / 时间不合法 / date 与 days 同时给）
+        @raise SkippedScheduleEntry  这条按新规矩"没有内容"（缺 state）—— 调用方**跳过它并记一条警告**
+                                     （不整份拒绝: 老配置里那几条纯提醒就是这样, 不能让 Agent 起不来）
+
+        @note 老字段（`title` / `end` / `remind_before_min` / `prompt`）**不再生效**,
+              出现了就记一条能照做的警告（见 `legacy_notes`）; `action: {state: …}` 仍然收。
         """
         if not isinstance(entry, dict):
             raise SchedulerError("schedule entry #%d must be an object" % index)
-
-        title = entry.get("title")
-        if not isinstance(title, str) or not title.strip():
-            raise SchedulerError("schedule entry #%d needs a non-empty title" % index)
-        title = title.strip()
 
         has_date = entry.get("date") is not None
         has_days = entry.get("days") is not None
         if has_date and has_days:
             raise SchedulerError(
-                "schedule entry %r must not have both 'date' and 'days'" % title
+                "schedule entry #%d must not have both 'date' and 'days'" % index
             )
 
         kind = "oneoff" if has_date else "recurring"
 
         if "start" not in entry:
-            raise SchedulerError("schedule entry %r needs a 'start' time" % title)
+            raise SchedulerError("schedule entry #%d needs a 'start' time" % index)
         start = parse_clock(entry["start"])
-        end = parse_clock(entry["end"]) if entry.get("end") is not None else None
-        if end is not None and end < start:
-            raise SchedulerError(
-                "schedule entry %r has end before start (%s < %s)"
-                % (title, entry["end"], entry["start"])
-            )
 
-        remind = entry.get("remind_before_min", 0)
-        if not isinstance(remind, int) or isinstance(remind, bool) or remind < 0:
+        # 状态: 新写法 `state: study`; 老写法 `action: {state: study}`
+        raw_state = entry.get("state")
+        action = entry.get("action")
+        if raw_state is None and isinstance(action, dict):
+            raw_state = action.get("state")
+        if raw_state is None:
+            raise SkippedScheduleEntry(
+                "schedule entry #%d（%s）没有 state —— 日程现在只有「时间 + 状态」, "
+                "这条不生效; 想要它就写 state: sleep|idle|study|game"
+                % (index, entry.get("start")))
+        state = _coerce_state(raw_state)
+        if state is None:
             raise SchedulerError(
-                "schedule entry %r: remind_before_min must be a non-negative int, got %r"
-                % (title, remind)
+                "schedule entry #%d: state 只认 sleep/idle/study/game, 得到 %r"
+                % (index, raw_state)
             )
 
         on: Optional[date] = None
@@ -282,8 +300,8 @@ class ScheduleEvent:
                 on = date.fromisoformat(str(entry["date"]).strip())
             except ValueError:
                 raise SchedulerError(
-                    "schedule entry %r: date must be YYYY-MM-DD, got %r"
-                    % (title, entry["date"])
+                    "schedule entry #%d: date must be YYYY-MM-DD, got %r"
+                    % (index, entry["date"])
                 ) from None
 
         days: Set[int] = set()
@@ -291,26 +309,45 @@ class ScheduleEvent:
             raw_days = entry["days"]
             if not isinstance(raw_days, (list, tuple, set)):
                 raise SchedulerError(
-                    "schedule entry %r: days must be a list, got %r" % (title, raw_days)
+                    "schedule entry #%d: days must be a list, got %r" % (index, raw_days)
                 )
             for value in raw_days:
                 days.add(_weekday_index(value))
 
-        action = entry.get("action") or {}
-        if not isinstance(action, dict):
-            raise SchedulerError("schedule entry %r: action must be an object" % title)
+        return cls(source_id="schedule", kind=kind, start=start, state=state,
+                   days=days, on=on)
 
-        return cls(
-            source_id="schedule",
-            title=title,
-            kind=kind,
-            start=start,
-            end=end,
-            days=days,
-            on=on,
-            remind_before_min=remind,
-            action=dict(action),
-        )
+
+#: 旧字段 -> 该怎么照做（T12-4 起日程只有时间+状态）
+LEGACY_FIELD_NOTES: Dict[str, str] = {
+    "title": "显示名不再由配置给（显示就是状态名）",
+    "end": "没有'时段'了 —— 要'到点退出'就再加一条切到 idle 的日程",
+    "remind_before_min": "没有提前提醒了 —— 到点就是到点",
+    "prompt": "日程不再往对话里发消息（只切状态, 另给一句展示）",
+    "reason": "转换理由由 时间+状态 自动生成",
+}
+
+
+def legacy_field_notes(entry: Dict[str, Any], index: int) -> List[str]:
+    """这条配置里出现的**老字段**各记一句（调用方拼进 warnings）。"""
+    notes = []
+    for field, why in LEGACY_FIELD_NOTES.items():
+        if field in entry:
+            notes.append("schedule entry #%d 的 %r 已不再生效: %s"
+                         % (index, field, why))
+    return notes
+
+
+def _coerce_state(value: Any) -> Optional[State]:
+    """把配置里的状态值归一成 `State`（认不出来返回 None）。"""
+    if isinstance(value, State):
+        return value
+    if isinstance(value, str):
+        try:
+            return State(value.strip().lower())
+        except ValueError:
+            return None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -436,16 +473,18 @@ def _as_action(value: Any, label: str) -> Dict[str, Any]:
 def oneoff_matcher(event: "ScheduleEvent") -> Callable[[Dict[str, str]], bool]:
     """造一个"匹配这条 oneoff"的 predicate，给**文本级删除**用（`schedule_config`）。
 
-    @param event  要匹配的那条日程（用它自己的 `title` / `on` / `start`）
+    @param event  要匹配的那条日程（用它自己的 `state` / `on` / `start`）
     @return matches(fields) -> bool；fields 是从配置**文件**里抽出来的裸标量
-            （已去引号与行尾注释），键是 title / date / start
+            （已去引号与行尾注释），键是 state / date / start
 
-    @note 归一化在这里做、不在 `schedule_config` 里：`start` 走 `parse_clock`（所以文件里写
-          `9:30` 还是 `"09:30"` 都认），`date` 走 `date.fromisoformat`。这样"懂日程语义"与
-          "只懂文本"两层不用互相 import，也保证 Agent 与 CLI 两边**同一套**匹配规则。
+    @note T12-4: 匹配的三个键从 `title+date+start` 换成 **`state+date+start`**（日程没有
+          title 了）。归一化在这里做、不在 `schedule_config` 里：`start` 走 `parse_clock`
+          （所以文件里写 `9:30` 还是 `"09:30"` 都认），`date` 走 `date.fromisoformat`，
+          `state` 走 `_coerce_state`（大小写不敏感）。这样"懂日程语义"与"只懂文本"两层
+          不用互相 import，也保证 Agent 与 CLI 两边**同一套**匹配规则。
     """
     def matches(fields: Dict[str, str]) -> bool:
-        if (fields.get("title") or "").strip() != event.title:
+        if _coerce_state(fields.get("state")) is not event.state:
             return False
         try:
             if date.fromisoformat((fields.get("date") or "").strip()) != event.on:
@@ -525,6 +564,10 @@ class Scheduler:
         grace = section.get("late_grace_min", 0)
         self.late_grace_min = self._non_negative_int(grace, "late_grace_min")
 
+        #: 警告（老字段被忽略 / 缺 state 的条目被跳过 / 配置里写了老键名…）。
+        #: ⚠ 必须在 `_load_events` **之前**建好 —— 那一步就会往里记东西（T12-4）。
+        self._warnings: List[str] = []
+
         self._events: List[ScheduleEvent] = self._load_events(section)
         self._bindings: List[CommandBinding] = parse_command_config(section.get("commands"))
 
@@ -543,7 +586,6 @@ class Scheduler:
         self._checks = 0
         self._triggers = 0
         self._command_hits = 0
-        self._warnings: List[str] = []
         self._running = False
         #: listen_commands 建立的订阅句柄 (stop 时注销)
         self._unsubscribe: Optional[Callable[[], bool]] = None
@@ -595,7 +637,7 @@ class Scheduler:
         return value
 
     def _load_events(self, section: Dict[str, Any]) -> List[ScheduleEvent]:
-        """把 recurring / oneoff 读成 ScheduleEvent。
+        """把 recurring / oneoff 读成 ScheduleEvent（**时间 + 状态**）。
 
         两个位置都找, 因为两种布局都合理:
           · {"scheduler": {"recurring": [...]}}   —— 日程属于调度器
@@ -604,6 +646,10 @@ class Scheduler:
                                                   —— 日程来自 schedule.yaml 那种
                                                      顶层就是 recurring/oneoff 的配置,
                                                      这里同时带了 interval 等参数
+
+        @note T12-4: 缺 `state` 的条目（老配置里的纯提醒）**跳过并记警告**, 老字段
+              （title/end/remind_before_min/prompt）各记一句"该怎么照做"—— 但**不整份拒绝**。
+              真正写错的（时间不合法、date+days 同时给、state 拼错）仍旧照旧抛 SchedulerError。
         """
         events: List[ScheduleEvent] = []
         for key in ("recurring", "oneoff"):
@@ -615,8 +661,34 @@ class Scheduler:
             if not isinstance(entries, (list, tuple)):
                 raise SchedulerError("%s must be a list, got %r" % (key, type(entries).__name__))
             for index, entry in enumerate(entries):
-                events.append(ScheduleEvent.from_config(entry, index))
+                for note in legacy_field_notes(entry if isinstance(entry, dict) else {}, index):
+                    self._warnings.append(note)
+                try:
+                    events.append(ScheduleEvent.from_config(entry, index))
+                except SkippedScheduleEntry as exc:
+                    self._warnings.append(str(exc))
+                    continue
         return events
+
+    def reload(self, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """重新读一遍日程/命令（T12-4：`set_schedule` 工具写完配置后立刻生效）。
+
+        @param config 新的配置 dict; 不给就用**同一个** config（`self._config`）
+        @return {"events": n, "bindings": n, "warnings": [...]}
+
+        @note 只重建 `_events` / `_bindings` —— **去重集合 `_fired` 与触发事实不动**:
+              刚触发过的那条不会因为"重读了一遍配置"又被触发一次。
+        @note 坏配置照旧按老规矩抛（`SchedulerError`）—— 调用方（工具/CLI）自己决定怎么如实说。
+        """
+        if config is not None:
+            self._config = config
+        section = self._scheduler_section(self._config)
+        self._warnings = []
+        events = self._load_events(section)
+        self._bindings = parse_command_config(section.get("commands"))
+        self._events = events
+        return {"events": len(events), "bindings": len(self._bindings),
+                "warnings": list(self._warnings)}
 
     @property
     def events(self) -> List[ScheduleEvent]:
@@ -780,24 +852,22 @@ class Scheduler:
     async def _fire(
         self, event: ScheduleEvent, day: date, trigger_at: datetime, moment: datetime
     ) -> Dict[str, Any]:
-        """执行一条日程的触发动作。"""
-        reason = event.action.get("reason") or ("日程: %s" % event.title)
+        """执行一条日程的触发动作：**切到那个状态**（按状态图的规矩走, 见 `_apply_action`）。
+
+        @note T12-4: 日程**不再往 bus 里推文本** —— 它不叫 LLM 做任何事。给用户看的那一句
+              由 `on_fire`（IPC 层）推成 `llm` 展示（"日程到点：切到 STUDY"）。
+        """
+        reason = "日程: %s" % event.label()
         detail: Dict[str, Any] = {
             "kind": "schedule",
-            "title": event.title,
+            "state": event.state.value,
             "date": day.isoformat(),
             "scheduled_at": trigger_at.isoformat(timespec="minutes"),
             "now": moment.isoformat(timespec="seconds"),
             "actions": [],
         }
 
-        detail["actions"] += await self._apply_action(event.action, reason)
-
-        text = event.action.get("prompt")
-        if not text:
-            text = "日程提醒：%s" % event.title
-        pushed = await self._bus.push("scheduler", text)
-        detail["actions"].append({"type": "message", "text": text, "timestamp": pushed["timestamp"]})
+        detail["actions"] += await self._apply_action({"state": event.state}, reason)
 
         self._record_fired(detail)
         self._remove_fired_oneoff(event)
@@ -810,8 +880,8 @@ class Scheduler:
         · **只对 oneoff 做**：recurring 删了明天就不响了
         · 失败**只记 WARNING**：写配置失败（只读挂载 / 权限 / 磁盘满）绝不能影响这次触发
           —— 与 `on_fire` 回调同一口径
-        · 匹配用 `title` + `date` + `start` 三者（start 按 `parse_clock` 归一，所以
-          `9:30` 与 `"09:30"` 都认）；对不上就不删（可能配置已经被人改过）
+        · 匹配用 `state` + `date` + `start` 三者（start 按 `parse_clock` 归一，所以
+          `9:30` 与 `"09:30"` 都认；state 大小写不敏感）；对不上就不删（可能配置已经被人改过）
         """
         if not self.remove_fired_oneoff or event.on is None or self._config_path is None:
             return
@@ -820,16 +890,15 @@ class Scheduler:
             removed = schedule_config.remove_oneoff_from_file(self._config_path,
                                                               oneoff_matcher(event))
         except OSError as exc:
-            _log.warning("scheduler: 删不掉已触发的一次性日程 %r（%s）: %r",
-                         event.title, self._config_path, exc)
+            _log.warning("scheduler: 删不掉已触发的一次性日程 %s（%s）: %r",
+                         event.label(), self._config_path, exc)
             return
         if removed:
-            _log.info("scheduler: 已从 %s 删掉已触发的一次性日程 %r（%s %02d:%02d）",
-                      self._config_path, event.title, event.on.isoformat(),
-                      event.start[0], event.start[1])
+            _log.info("scheduler: 已从 %s 删掉已触发的一次性日程 %s（%s）",
+                      self._config_path, event.label(), event.on.isoformat())
         else:
-            _log.info("scheduler: %s 里没有匹配的一次性日程 %r（%s）—— 没删",
-                      self._config_path, event.title, event.on.isoformat())
+            _log.info("scheduler: %s 里没有匹配的一次性日程 %s（%s）—— 没删",
+                      self._config_path, event.label(), event.on.isoformat())
 
     async def _apply_action(self, action: Dict[str, Any], reason: str) -> List[Dict[str, Any]]:
         """把 action dict 落到状态机/消息上。
@@ -1037,7 +1106,8 @@ class Scheduler:
         """最近触发过的日程事实 (时间正序, 只含**本进程内真的触发过**的)。
 
         @param limit 只要最后 limit 条 (None = 全部, 最多 history_limit 条)
-        @return 事实 dict: title / date / scheduled_at / fired_at / actions
+        @return 事实 dict: **state** / date / scheduled_at / fired_at / actions
+               （T12-4: 没有 `title` 了 —— 客户端拿 `scheduled_at` 的时刻 + `state` 显示）
         @note 与"按时间算出来的 已过"不是一回事: 这个是"真发生过", 且**重启即清零**
               (触发记录只在内存里, 见模块头)。
         """
@@ -1056,7 +1126,7 @@ class Scheduler:
               触发了"才是它要的。其余字段一一对应, 不改语义。
         """
         fact = {
-            "title": detail.get("title"),
+            "state": detail.get("state"),
             "date": detail.get("date"),
             "scheduled_at": detail.get("scheduled_at"),
             "fired_at": detail.get("now"),

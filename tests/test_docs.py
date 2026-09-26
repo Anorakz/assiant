@@ -80,6 +80,12 @@ STALE_CLAIMS = [
      "T8-5b 把七个工具合并成三个（next_wallpaper / next_music / back_to_desktop）: "
      "旧工具名已经是**历史**, 现状类文档里出现就是漂移 —— 现在写 "
      "next_wallpaper(action=\"tags\") / next_music(action=\"enqueue\")"),
+    (r"日程提醒",
+     "T12-4 起日程到点**不往对话里发消息**: 它只切状态 + 推一行展示文本"
+     "（`日程到点：切到 STUDY`）, 模型看不到。没有「日程提醒：<标题>」这种推送了"),
+    (r"kind=fired title=",
+     "T12-4 起日程事实里是 `state`（没有 `title` 了）: `assistant watch` 打的那行是 "
+     "`kind=fired state=study date=… scheduled_at=… fired_at=…`"),
 ]
 
 

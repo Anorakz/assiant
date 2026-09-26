@@ -393,8 +393,9 @@ assistant doctor            # 体检: 配置 / socket / 派生 llm.env / 日程 
 
 ## 调度器
 
-日程检查 + 定时触发 + 终端命令监听。触发动作只有两种：**状态转换** 和 **发消息给 Agent**
-（`bus.push("scheduler", ...)`，和终端/GUI 同一个入口）。触发时两者可同时做。
+日程检查 + 定时触发 + 终端命令监听。日程本身只有**时间 + 状态**：到点按状态机切到那个状态
+（严格走 `当前→IDLE→目标`，逐跳释放/接管资源），并往 `llm` 推一行显示文本 —— **不叫 LLM**。
+终端命令那条路仍然能把一句话发给 Agent（`bus.push("scheduler", ...)`，和终端/GUI 同一个入口）。
 
 ```python
 from agent.core import Scheduler
@@ -418,17 +419,21 @@ scheduler:
     - command: "study"
       action: {state: study, prompt: "开始学习"}
 recurring:
-  - {title: 站会, days: [mon, tue, wed, thu, fri], start: "09:30", remind_before_min: 5}
+  # T12-4 起日程的内容**只有「时间 + 状态」**: 到点就把设备切到那个状态
+  # (严格走状态机, 跨模式要经 IDLE 释放/接管资源), 同时给界面推一行显示文本。
+  # `title` / `end` / `remind_before_min` / `prompt` 不再被读; 没有 state 的条目跳过 + 警告。
+  - {state: study, days: [mon, tue, wed, thu, fri], start: "09:30"}
 oneoff:
-  - {title: 评审, date: "2026-09-20", start: "14:00", action: {state: study}}
+  - {state: sleep, date: "2026-09-20", start: "22:30"}
 ```
 
 约定：
 
 - **去重**：`check_schedule()` 每 `interval_min` 跑一次，但同一时间窗内只触发一次
   （key 是「哪一天 + 事件 + 触发分钟」）。重启后同一窗口内会再触发一次——不做持久化。
-- **提前量可以跨天**：`00:05` 提前 10 分钟 → 前一天 `23:55` 触发，所以查找时同时看
-  「今天」和「明天」两个事件日。
+- **到点只做两件事**：① 按状态机切到那条日程的 `state`（跨模式自动 `当前→IDLE→目标`，
+  逐跳触发释放/进入）② 往 `llm` 推**一行**显示文本（`日程到点：切到 STUDY（13:00）`）。
+  那一行**不进对话总线**，所以**不叫 LLM 做任何事**（T12-4 你定的）。
 - **命令是订阅式的**：`bus.subscribe()` 只看不取。**不能**用 `get()` 读——那会把
   终端/GUI 的用户消息一起吃进调度器，下游再也看不到。只认 `source == "terminal"`。
 - **命令匹配是"整行相等"**（去首尾空白、大小写不敏感，不做分词/前缀/缩写）——
@@ -546,9 +551,9 @@ cp config/config.example.yaml       config/config.yaml
 cp config/user_profile.example.yaml config/user_profile.yaml
 ```
 
-日程写在 `config.yaml` 的 `scheduler:` 段（`recurring` / `oneoff` 的写法与真正会被读的键，
-见 `config/config.example.yaml` 里那一大段注释 —— 模板里不放真日程，免得刚 clone 下来
-就凭空多出提醒）。
+日程写在 `config.yaml` 的 `scheduler:` 段（`recurring` / `oneoff` 的写法与真正会被读的键
+—— `state` / `days` / `start` / `date` —— 见 `config/config.example.yaml` 里那一大段注释；
+模板里不放真日程，免得刚 clone 下来就凭空多出状态切换）。
 
 没有建真实配置时会自动退回读模板，所以刚 clone 下来也能直接跑。
 
