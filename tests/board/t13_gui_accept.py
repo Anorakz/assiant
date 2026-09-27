@@ -415,6 +415,7 @@ def part_c(args):
     print("\n== C. 真配置: 三段落盘 + 学习监督开启（--apply-live）")
     live_before_text = read_text(CONFIG)
     before_md5 = md5(CONFIG)
+    before_bak_md5 = md5(CONFIG + ".bak")
     before_sections = set(top_level_keys(live_before_text.split("\n")))
     note("真配置 md5（保存前）: %s" % before_md5)
     note("真配置保存前已有段: %s" % (", ".join(sorted(before_sections)) or "(空)"))
@@ -431,7 +432,12 @@ def part_c(args):
         check("真配置: `%s:` 段在（%s）" % (section, "本次新建" if section not in before_sections
                                           else "保存前就有"),
               section in after_sections)
-    check("真配置: 真的变了（md5 %s -> %s）" % (before_md5, md5(CONFIG)), md5(CONFIG) != before_md5)
+    wrote = md5(CONFIG) != before_md5
+    if wrote:
+        check("真配置: 真的变了（md5 %s -> %s）" % (before_md5, md5(CONFIG)), True)
+    else:
+        # 再跑一遍验收时会走到这里: 值已经就是约定值 -> GUI 一个字节都不写（幂等, 也不留新 .bak）
+        note("真配置已经是约定值 -> 本次没写文件（幂等）; `.bak` 还是上一次写入前那一份")
 
     rc, dumped, dump_out = dump_cards(CONFIG)
     check("真配置: GUI 读回来可用", rc == 0 and bool(dumped), dump_out.strip()[-100:])
@@ -456,8 +462,12 @@ def part_c(args):
                                                         ", ".join(new_sections) or "无"))
 
     bak = CONFIG + ".bak"
-    check("真配置: `.bak` == 保存前原文（回滚材料）",
-          os.path.isfile(bak) and read_text(bak) == live_before_text, bak)
+    if wrote:
+        check("真配置: `.bak` == 保存前原文（回滚材料）",
+              os.path.isfile(bak) and read_text(bak) == live_before_text, bak)
+    else:
+        check("真配置: 没写文件时 `.bak` 也没被动（%s）" % before_bak_md5,
+              md5(bak) == before_bak_md5)
 
     # 幂等: 值都没变 -> 不写文件、也不留新 .bak
     tmp_bak = os.path.join(args.tmp, "live.bak.copy")
