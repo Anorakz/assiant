@@ -305,14 +305,16 @@ def outage_test():
     print("  兜底已挂：240 秒后每 20 秒把 %s 拉回来一次（试 9 次，约 3 分钟）" % LIVE_PROFILE,
           flush=True)
 
-    # ⚠ 必须同时关掉**设备级** autoconnect：第一次实测只关了 connection.autoconnect，
-    #   结果 `device disconnect` 之后 NM 5 秒就把链路接回来了（守护压根没机会看到失败）。
+    # ⚠ 用 `connection down`（档案停用、设备还在）而不是 `device disconnect`：
+    #   后者板端实测 **5 秒**就被 NM/wpa_supplicant 接回来了（两级 autoconnect 都关也拦不住），
+    #   守护压根看不到 3 次连续失败。`connection down` 才是"掉线了、需要有人主动 up"这种
+    #   形态 —— 也正是现网那次断网的样子（守护的 `con up` 能修）。
     nmcli("connection", "modify", LIVE_PROFILE, "connection.autoconnect", "no")
     nmcli("device", "set", "wlan0", "autoconnect", "no")
-    print("  已关掉 connection/device 两级 autoconnect，现在断开设备…", flush=True)
+    print("  已关掉 connection/device 两级 autoconnect，现在把档案停用（= 掉线）…", flush=True)
     started = time.time()
-    subprocess.Popen(["setsid", "sh", "-c", "sleep 2; nmcli device disconnect wlan0"],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    rc, down_out, down_err = nmcli("connection", "down", LIVE_PROFILE)
+    check("D0 掉线动作成功（档案已停用）", rc == 0, down_out or down_err)
 
     # 等守护自己把链路救回来（约 90 秒后动手）
     healthy = False
