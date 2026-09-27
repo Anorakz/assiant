@@ -1,0 +1,76 @@
+# ============================================================================
+#  .github/workflows/host-ci.yml — 主机侧 CI（T14-4）
+#
+#  跑什么 / 不跑什么（写清楚，别让人以为它验了交叉编译）
+#  ---------------------------------------------------------------------------
+#    跑：
+#      · **host C++ 单测**（`cmake -DAGENT_BUILD_TESTS=ON` + ctest）——
+#        根 CMakeLists 里 moonlight-common-c 与 Rockchip MPP 都套在
+#        `if(CMAKE_CROSSCOMPILING)` 里，所以**这里真的能编、能跑**（不需要板端库）。
+#        它同时也把 `native/` 的 host 分支**真编译**了一遍 —— 比 `-fsyntax-only` 强。
+#      · **Python 套件**：`scripts/test-python.sh`（本机与板端同一个入口，含文档/配置守卫）。
+#      · **ruff 窄口径**：只查 E9/F63/F7/F82（语法错、未定义名、坏 f-string）——
+#        仓库里一行 lint 配置都没有，全量风格检查会把几千行卷进来，先不干那件事。
+#    不跑：
+#      · **真交叉编译**：需要 Arm GNU 工具链 + 板端 sysroot（含 RKNN/MPP 私有库），
+#        两者都不在仓库里 → 真交叉编译是**本地门禁**（`scripts/build.ps1`），
+#        以及 release 里的**自托管 runner**（见 .github/workflows/release.yml）。
+#        ⚠ 所以：CI 绿 ≠ 板端能编。这句话也写在 docs/ci.md 里。
+#      · GUI（Qt5 aarch64 在板端才有）：GUI 的门禁是板端 ctest（scripts/sync-gui.ps1 -Test）。
+#
+#  为什么固定 ubuntu-22.04 + Python 3.8
+#  ---------------------------------------------------------------------------
+#    板端跑的是 Ubuntu 20.04 的 python3.8（Agent 的真正解释器）。CI 用 22.04 + 3.8
+#    是为了"能装到 3.8"且与板端解释器同版本 —— 版本差异导致的失败（例如
+#    `date.fromisoformat` 的宽容度）不该在 CI 里被放过。
+# ============================================================================
+name: host-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: host-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: 取源码（含子模块）
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive        # pybind11 / googletest / moonlight-common-c
+
+      - name: 装 Python 3.8（与板端解释器同版本）
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+
+      - name: 装系统依赖
+        run: |
+          sudo apt-get update
+          # python3-dev: pybind11 要 Python.h；cmake/g++: host 构建；libyaml-cpp-dev 不需要
+          # （那是 GUI 的日程区才用，GUI 不在 CI 里编）
+          sudo apt-get install -y cmake g++ python3-dev
+
+      - name: 装 Python 测试依赖（pytest / pytest-asyncio 只给 tests/test_ipc.py 用）
+        run: python -m pip install --upgrade pip pytest pytest-asyncio
+
+      - name: ruff（窄口径：语法错 / 未定义名 / 坏 f-string）
+        run: |
+          python -m pip install ruff
+          ruff check --select E9,F63,F7,F82 agent tests
+
+      - name: host C++ 单测（真编译 + ctest）
+        run: |
+          cmake -S . -B build-host -DCMAKE_BUILD_TYPE=Debug -DAGENT_BUILD_TESTS=ON
+          cmake --build build-host --parallel 4
+          ctest --test-dir build-host --output-on-failure
+
+      - name: Python 套件（与板端同一个入口）
+        run: bash scripts/test-python.sh
