@@ -151,6 +151,7 @@ agent/
 │   ├── gui-agent-integration.md # GUI 那一端实际收/发什么
 │   ├── cross-build-rk3568.md    # 交叉编译与 sysroot
 │   ├── decoder-mpp.md           # MPP 硬解
+│   ├── adr/                     # 架构决策记录: 为什么是现在这样、被否决的方案与代价 (T14-1)
 │   └── sunshine-pairing-findings.md
 ├── build-host/                  # 宿主机构建产物 (不入 git)
 ├── build-rk3568/                # 交叉编译产物 (不入 git)

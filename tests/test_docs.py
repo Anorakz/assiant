@@ -156,6 +156,17 @@ _LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 #: 不检查的目标: 外链 / 纯锚点 / 空
 _SKIP_PREFIX_RE = re.compile(r"^(?:[a-zA-Z][a-zA-Z0-9+.\-]*:|#|$)")
 
+#: **ADR 不参与"过时声明"检查**（链接仍然要有效）。
+#:
+#: 为什么: ADR 的工作就是记"当时为什么没选另一条路" —— 里面**必然**出现 ZMQ / PySide6
+#: 这些被否决的东西（`docs/adr/0001-ipc-unix-socket.md` 的"替代方案与代价"整节就是讲它们）。
+#: 那不是在声称"现状还是 ZMQ"，恰恰相反。所以判据用**路径**，而不是"这一行怎么措辞"——
+#: 后者要靠给每条黑名单加免检正则，越加越松，最后等于把守卫关了。
+#:
+#: 这个口子不会变成后门: `docs/adr/` 下的文件另有一条守卫（`tests/test_adr.py`）
+#: 强制它长得像 ADR（编号命名 / 必需小节 / 索引登记），不能拿来塞普通文档。
+ADR_PREFIX = "docs/adr/"
+
 
 class TestDocLinksExist(unittest.TestCase):
     """相对链接必须能解析到存在的文件。"""
@@ -184,13 +195,15 @@ class TestDocLinksExist(unittest.TestCase):
 
 
 class TestNoStaleClaims(unittest.TestCase):
-    """已被清掉的旧说法不得回来。"""
+    """已被清掉的旧说法不得回来（ADR 除外，见 ADR_PREFIX 的说明）。"""
 
     def test_stale_claims_are_gone(self):
         found = []
         for path in _doc_paths():
-            text = path.read_text(encoding="utf-8")
             rel = path.relative_to(_PROJECT_ROOT).as_posix()
+            if rel.startswith(ADR_PREFIX):
+                continue          # ADR 记的就是"被否决的方案"，见 ADR_PREFIX 的说明
+            text = path.read_text(encoding="utf-8")
             for lineno, line in enumerate(text.splitlines(), 1):
                 for entry in STALE_CLAIMS:
                     if _entry_hits(entry, line):
@@ -201,6 +214,30 @@ class TestNoStaleClaims(unittest.TestCase):
             self.fail("文档里出现了 %d 处过时声明 (改掉, 或如果是合理例外就调整"
                       " STALE_CLAIMS 并说明原因):\n  %s"
                       % (len(found), "\n  ".join(found)))
+
+    def test_adr_exemption_is_scoped_to_adr_files(self):
+        """反空转: ADR 那条免检只按**路径**生效 —— 别的地方说"现状还是 ZMQ"照样要被抓。
+
+        四步把机制钉住: ① 黑名单对 zmq 仍有牙; ② 路径判据只为 `docs/adr/` 开头放行;
+        ③ ADR 里**确实**有这些词（否则这条豁免没有存在理由）; ④ ADR 确实在扫描范围内
+        （否则豁免是多余的）。
+        """
+        entry = next(e for e in STALE_CLAIMS if e[0] == r"\bzmq\b")
+        self.assertTrue(_entry_hits(entry, "IPC 还是 zmq 的 pub_bind（现状）"),
+                        "黑名单对 zmq 没牙了")
+
+        self.assertTrue("docs/adr/0001-ipc-unix-socket.md".startswith(ADR_PREFIX))
+        self.assertFalse("docs/architecture.md".startswith(ADR_PREFIX))
+
+        adr_paths = sorted((_PROJECT_ROOT / ADR_PREFIX).glob("*.md"))
+        self.assertTrue(adr_paths, "docs/adr/ 下没有文件 —— 免检规则成了空话")
+        text = "".join(p.read_text(encoding="utf-8") for p in adr_paths)
+        for probe in ("zmq", "PySide6"):
+            self.assertIn(probe, text, "ADR 里没有 %r —— 那这条豁免就没有存在理由，删掉它" % probe)
+
+        scanned = {p.relative_to(_PROJECT_ROOT).as_posix() for p in _doc_paths()}
+        self.assertTrue(any(rel.startswith(ADR_PREFIX) for rel in scanned),
+                        "ADR 根本没被扫描 —— 那这个豁免是多余的")
 
     def test_exempt_marker_only_waives_marked_lines(self):
         """免检正则的语义: 只有**写了免检词**的行被放过, 别的行照样命中。"""
