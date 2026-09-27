@@ -261,6 +261,19 @@ def line_keys(lines):
     return mapping
 
 
+def same_value(got, want):
+    """值相等？（布尔按字面比，数字允许 0.90 vs 0.9 这种写法差）"""
+    if got is None:
+        return False
+    text = str(got).strip()
+    if str(want).strip().lower() in ("true", "false"):
+        return text.lower() == str(want).strip().lower()
+    try:
+        return abs(float(text) - float(want)) < 1e-9
+    except ValueError:
+        return text == str(want).strip()
+
+
 def is_whitelisted(key):
     if key is None:
         return True                      # 空行/注释行: 跟着它所在的那次改动一起算
@@ -368,18 +381,17 @@ def part_b(tmp):
           dump_out.strip()[-100:])
     for key, want in CARDS_DEMO.items():
         got = dumped.get(key)
-        same = got is not None and abs(float(got) - float(want)) < 1e-9
-        check("副本: GUI 读回 %s == %s（区分度那组）" % (key, want), same, "读回 %s" % got)
+        check("副本: GUI 读回 %s == %s（区分度那组）" % (key, want), same_value(got, want),
+              "读回 %s" % got)
 
     parsed = parse_scalars(after_text)
     mismatched = []
     for key, want in CARDS_DEMO.items():
-        got = parsed.get(key)
-        if got is None or abs(float(got) - float(want)) > 1e-9:
-            mismatched.append("%s=%s(要 %s)" % (key, got, want))
+        if not same_value(parsed.get(key), want):
+            mismatched.append("%s=%s(要 %s)" % (key, parsed.get(key), want))
     check("副本: 文件里的值 == 卡片上那组（14 个键）", not mismatched, "；".join(mismatched))
     check("副本: GUI 读回的值 == 文件里的值",
-          all(abs(float(dumped[key]) - float(parsed[key])) < 1e-9
+          all(same_value(dumped.get(key), parsed.get(key))
               for key in CARDS_DEMO if key in dumped and key in parsed))
 
     changed, added, removed, problems, new_sections = diff_report(before_text, after_text)
@@ -425,17 +437,15 @@ def part_c(args):
     check("真配置: GUI 读回来可用", rc == 0 and bool(dumped), dump_out.strip()[-100:])
     bad = []
     for key, want in FINAL_VALUES.items():
-        got = dumped.get(key)
-        if got is None or abs(float(got) - float(want)) > 1e-9:
-            bad.append("%s=%s(要 %s)" % (key, got, want))
+        if not same_value(dumped.get(key), want):
+            bad.append("%s=%s(要 %s)" % (key, dumped.get(key), want))
     check("真配置: 卡片值 == 约定值（三段默认 + 学习监督开）", not bad, "；".join(bad))
 
     parsed = parse_scalars(after_text)
     bad = []
     for key, want in FINAL_VALUES.items():
-        got = parsed.get(key)
-        if got is None or abs(float(got) - float(want)) > 1e-9:
-            bad.append("%s=%s(要 %s)" % (key, got, want))
+        if not same_value(parsed.get(key), want):
+            bad.append("%s=%s(要 %s)" % (key, parsed.get(key), want))
     check("真配置: 文件里的值 == 约定值", not bad, "；".join(bad))
 
     changed, added, removed, problems, new_sections = diff_report(live_before_text, after_text)
