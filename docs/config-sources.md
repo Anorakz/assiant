@@ -27,7 +27,7 @@ GUI 读它的 `gui:` 段、读写它的 `llm:` 段、**只读**它的 `scheduler
                     │  Agent    │   │  GUI (Qt5, 板端)        │
                     │ agent/    │   │  gui/src/**             │
                     └───────────┘   └───┬────────────────────┘
-                                        │ 派生（ConfigSyncer，8 个 LLM_* 键）
+                                        │ 派生（agent/core/llm_env.py，8 个 LLM_* 键）
                                         ▼
                               llm/config/llm.env    ← 派生文件（板端本地，不入库）
                                         │
@@ -68,7 +68,7 @@ GUI 读它的 `gui:` 段、读写它的 `llm:` 段、**只读**它的 `scheduler
 
 `llm.env` 里可推导的只有 8 个键：`LLM_MODEL_PATH`、`LLM_MODEL_NAME`、`LLM_PORT`、
 `LLM_CTX_SIZE`、`LLM_BATCH_SIZE`、`LLM_THREADS`、`LLM_THREADS_BATCH`、`LLM_API_KEY`
-（映射表在 `gui/src/core/config_sync.cpp` 的 `envTargetKeys()`）。
+（映射表在 `agent/core/llm_env.py` 的 `LLM_ENV_KEYS`）。
 其余布局类键 —— `LLM_HOST`、`LLM_LOG_DIR`、`LLM_RUN_DIR`、`LLM_PID_FILE`、`LLM_LOG_FILE`
 —— 由板端自己维护，派生**不碰**。
 
@@ -388,14 +388,11 @@ ssh rk3568 'cd /home/kickpi/myproject/assitant && python3 tests/test_schedule_pa
 # 起一份自己的配置（新环境 / 沙箱验收）
 cp config/config.example.yaml config/config.yaml
 
-# 只预览"真源 → llm.env"会发生什么（默认 dry-run，不写文件）
-gui/build/gui_config_sync
+# 只看"真源 → llm.env"一不一致（不写文件；T14-2 起是 Python 实现）
+python3 -m agent.cli doctor | grep '派生 llm.env'
 
-# 真写（留 .bak + 原子 rename）
-gui/build/gui_config_sync --apply
-
-# 指定别的路径（验收用临时仓库）
-gui/build/gui_config_sync --config /tmp/g/config.yaml --env /tmp/g/llm.env --apply
+# 真写：GUI 保存（经 IPC 让 Agent 写）或 CLI 改设置项
+python3 -m agent.cli set study --relative-band 0.06 --apply
 
 # 设置页那三张卡片：板端点「保存」就是这条路的 GUI 版（缺段会按模板新建）
 python3 tests/board/t13_gui_accept.py            # 先在副本上跑一遍，看它要改哪些键

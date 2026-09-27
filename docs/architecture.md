@@ -410,7 +410,7 @@ GUI **不是** PC 上的 Python 程序：它是 `gui/` 下的 Qt5 C++ 程序，*
 ```
 gui/src/
 ├── main.cpp / main_window.*     入口与主窗口（--socket / --windowed / --config / --page …）
-├── core/    config_store / config_sync / cookie_store（B 站凭据 JSON，T13-9）/
+├── core/    config_store（只读+预览）/ cookie_store（B 站凭据**只读**）/
 │            view_state / idle_watcher / image_fit / system_stats / lyrics / schedule_model
 ├── services/ local_client（Unix socket 客户端）/ onboard_ctl（屏幕键盘）
 └── ui/       top_bar / bottom_bar / mode_panel / chat_panel / schedule_panel /

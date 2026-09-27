@@ -9,7 +9,7 @@
 #  ---------------------------------------------------------------------------
 #    · `llm.env` 是**派生文件**（喂 llama-server），而 T14 起 **GUI 不再自己写任何东西**：
 #      GUI 把"要改哪些键"交给 Agent，Agent 一次把「真源 + 派生」都落到位。
-#    · 原来这份映射表的唯一实现是 `gui/src/core/config_sync.cpp`；`gui_config_sync`
+#    · 原来这份映射表的唯一实现是 `gui/src/core/config_sync.cpp`（**T14-3 已随 GUI 侧改道一起删除**）；`gui_config_sync`
 #      那个 CLI 与 `assistant doctor` 都靠它。既然写入者只剩 Agent 一个，实现也只剩
 #      这一份（Python）—— 两个语言各写一遍同一个映射表，迟早会漂。
 #    · ⚠ 本模块**只写不读**：它绝不把 llm.env 当配置来源（那是归一化 D 系列清掉的
@@ -63,8 +63,8 @@ __all__ = [
 #: 备份后缀（与 ConfigStore / settings_config 同一约定；`*.bak` 已被 .gitignore 覆盖）
 BACKUP_SUFFIX = ".bak"
 
-#: 派生文件相对**仓库根**的默认位置（与 `gui/src/core/config_sync.cpp` 的
-#: `llm/config/llm.env`、`gui_config_sync --env` 的默认值一致）。
+#: 派生文件相对**仓库根**的默认位置（与已退役的 C++ 那份 `llm/config/llm.env`、
+#: 以及 `gui_config_sync --env` 的默认值一致）。
 DEFAULT_ENV_RELATIVE = os.path.join("llm", "config", "llm.env")
 
 #: (llm.env 里的键, config.yaml 里的点号路径) —— **顺序就是 C++ 那版的顺序**。

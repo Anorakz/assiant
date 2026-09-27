@@ -1,6 +1,6 @@
 # ADR 0005 — `config.yaml` 只有一个写入者：GUI 经 Agent 写
 
-- **状态**：已定（T14-2 落地协议与 Agent 侧；T14-3 落地 GUI 侧改道）
+- **状态**：已生效（T14-2 落地协议与 Agent 侧写入器；T14-3 起 GUI 侧全部改道 —— `ConfigStore` 只读、三个写入点走 `set_config`、C++ `ConfigSyncer`/`gui_config_sync` 已退役）
 - **影响面**：`agent/ipc/`（新命令 + 回执 topic）、`agent/core/llm_env.py`（新）、
   `agent/core/settings_config.py` / `settings_credentials.py`（复用）、`agent/cli.py`（doctor）、
   `gui/src/core/config_store.*`（写路径退役）、`gui/src/ui/{settings_page,model_page}.cpp`、

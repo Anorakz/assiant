@@ -322,7 +322,7 @@ llm/config/llm.env  OK    在
 
 六项各自独立判 OK/警告，**不因为一项失败就跳过其余**。**只要有一项警告，退出码就是 1** ——
 所以它能直接当脚本里的健康检查用（`assistant doctor || echo 需要处理`）。"派生 llm.env"那一项
-跑的是 C++ 侧 `gui/build/gui_config_sync` 的 dry-run（映射表只有 `gui/src/core/config_sync.cpp`
+跑的是 Python 那份唯一实现（`agent/core/llm_env.py`，T14-2 从 C++ 搬过来 —— 映射表只有一份）
 一份），CLI 只负责跑它、读它的结论。
 
 Agent 没在跑时它照样能跑，只是 socket 那一项变成警告：

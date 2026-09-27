@@ -114,7 +114,7 @@ T12-4 起日程的内容只有「时间 + 状态」，没有标题、也没有�
 派生链路是**单向**的：
 
 ```
-config/config.yaml  ──ConfigSyncer──▶  llm/config/llm.env      （喂 llama-server）
+config/config.yaml  ──agent/core/llm_env.py──▶  llm/config/llm.env   （喂 llama-server）
    （唯一真源）                         （派生文件，不是真源）
 ```
 
@@ -124,8 +124,8 @@ config/config.yaml  ──ConfigSyncer──▶  llm/config/llm.env      （喂 
 由板端自己维护，派生**不碰**。手动跑一次：
 
 ```bash
-./build/gui_config_sync                # 只打印将要发生的 diff（默认 dry-run）
-./build/gui_config_sync --apply        # 真写 llm/config/llm.env（留 .bak + 原子 rename）
+# ⚠ T14-3 起没有这个工具了：GUI 只读配置，写入走 IPC 让 Agent 做（docs/adr/0005）
+python3 -m agent.cli doctor             # 只看派生文件跟真源一不一致
 ```
 
 ⚠ 反向不成立：手改 `llm.env` 会在下一次「保存并同步」时被 `config.yaml` 覆盖。
