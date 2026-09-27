@@ -220,6 +220,52 @@ def load_frames():
     return out
 
 
+def scan_dataset(watcher):
+    """数据集**逐张**过真管线 + 真 NPU, 回 [{"cls","path","relative","verdict","frame"}]。
+
+    ⚠ 这是**自匹配**（这些帧就是锚点库的来源, T13-4 播的种）—— 所以它**不是准确率**,
+      只说明"判定这条路通不通、带的分界落在哪儿"。真正的准确率（留一法）在 T13-4 的报告里。
+    """
+    from agent.vision import frame_pipeline as fp
+
+    rows = []
+    for name in ("code", "doc", "real", "anime", "game"):
+        folder = os.path.join(DATASET, name)
+        if not os.path.isdir(folder):
+            continue
+        for entry in sorted(os.listdir(folder)):
+            path = os.path.join(folder, entry)
+            try:
+                frame = fp.from_screenshot(path)
+            except Exception as exc:                    # noqa: BLE001
+                note("读不出 %s: %s" % (path, exc))
+                continue
+            decision = watcher.verdict(frame)
+            rows.append({"cls": name, "path": path, "relative": decision["relative"],
+                         "verdict": decision["verdict"], "frame": frame})
+    return rows
+
+
+def pick(rows, *, want_study):
+    """挑一张**真的落在带外**的帧（升级链要验的是链, 不是分类器）。
+
+    @return (row 或 None, 为什么)
+    """
+    low = None
+    for row in rows:
+        relative = row["relative"]
+        if relative is None:
+            continue
+        if want_study and relative > 0 and (low is None or relative > low["relative"]):
+            low = row
+        if not want_study and relative < 0 and (low is None or relative < low["relative"]):
+            low = row
+    if low is None:
+        return None, "数据集里没有落在带外的帧（相对分全是 0 / 算不出来）"
+    return low, "挑了相对分 %+.3f 的「%s」（%s）" % (low["relative"], low["cls"],
+                                                  os.path.basename(low["path"]))
+
+
 def host_display():
     """问 PC: 现在显示分辨率是多少（串流时 Sunshine 可能把主机模式切成客户端的）。
 
@@ -324,17 +370,18 @@ async def part_a(runtime, frames, no_stream):
         else:
             skip("问 PC 显示分辨率", "ssh 不通 / 没配 pc_host")
         bars = black_bars(real_frame)
-        note("真帧黑边（上/下/左/右）: %s" % bars)
-        inside = bars["top"] + bars["bottom"] + bars["left"] + bars["right"]
-        check("真帧**没有大片黑边**（不是 letterbox 出来的画面）", inside < 40,
-              "黑边合计 %d 行/列" % inside)
-        if bars["top"] + bars["bottom"] > 20:
-            note("几何: 上下有黑边 -> 内容比 16:9 矮, 是**等比缩放 + letterbox**")
-        elif bars["left"] + bars["right"] > 20:
-            note("几何: 左右有黑边 -> 内容比 16:9 窄, 两侧补黑")
+        dark_cols = bars["left"] + bars["right"]
+        note("真帧黑边（上/下/左/右）: %s（整帧均值 %.1f）" % (bars, arr.mean()))
+        if arr.mean() < 40:
+            note("⚠ 画面整体很暗 —— 黑边这条**判不出来**（暗画面本身就接近「黑」）; "
+                 "要判几何得让 PC 显示亮内容, 或者读 PC 的分辨率（下面那条）")
+        elif dark_cols > 40:
+            note("几何: 左右各有 %d 列接近全黑 -> 内容比 16:9 窄, 两侧补黑"
+                 % (dark_cols // 2))
+        elif bars["top"] + bars["bottom"] > 20:
+            note("几何: 上下有黑边 -> 内容比 16:9 矮, 上下补黑")
         else:
-            note("几何: 四边都没有黑边 -> 画面铺满 16:9（要么主机已经切成 1280×720, "
-                 "要么就是拉伸铺满）—— 所以标定里 h1 那条「先缩到流分辨率」是对的")
+            note("几何: 四边都没有大片黑边 -> 画面铺满 16:9")
         decision = watcher.verdict(real_frame)
         note("真帧判定: %s（来源 %s，相对分 %s，band %.2f）%s"
              % (decision["verdict"], decision["source"] or "-", decision["relative"],
@@ -342,21 +389,43 @@ async def part_a(runtime, frames, no_stream):
         check("真帧能算出相对分（两个大类原型都在）", decision["relative"] is not None)
 
     check("数据集五类各一张都能过真管线", len(frames) == 5, "拿到 %s" % sorted(frames))
-    if frames:
-        row = frames["game"] if frames.get("game") is not None else list(frames.values())[0]
-        if runtime._game_watch is None or runtime._game_watch.encoder() is None:
-            skip("数据集截图走真 NPU", "SigLIP 没在内存里（不在 STUDY/GAME？）")
-        else:
-            t = time.time()
-            decision = watcher.verdict(row)
-            check("数据集截图走真 NPU 也有结论", decision["relative"] is not None,
-                  "%.2f s/张, 相对分 %s" % (time.time() - t, decision["relative"]))
+
+
+# ---------------------------------------------------------------------------
+#  A2. 数据集全量扫一遍（自匹配, 只看"带的分界落在哪儿"）
+# ---------------------------------------------------------------------------
+def part_a2(rows):
+    print("\n== A2. 数据集 %d 张全过真 NPU（⚠ 自匹配: 这些帧就是锚点库的来源）" % len(rows))
+    from agent.core.study_watch import (VERDICT_NOT_STUDY, VERDICT_STUDY, VERDICT_UNKNOWN)
+
+    check("全量扫完（每张都算出了相对分）",
+          bool(rows) and all(row["relative"] is not None for row in rows),
+          "%d 张" % len(rows))
+    table = {}
+    for row in rows:
+        table.setdefault(row["cls"], {}).setdefault(row["verdict"], 0)
+        table[row["cls"]][row["verdict"]] += 1
+    for name in ("code", "doc", "real", "anime", "game"):
+        if name in table:
+            counts = table[name]
+            note("%-6s（%s 类）: study %d / not_study %d / unknown %d"
+                 % (name, "学习" if name in ("code", "doc", "real") else "非学习",
+                    counts.get(VERDICT_STUDY, 0), counts.get(VERDICT_NOT_STUDY, 0),
+                    counts.get(VERDICT_UNKNOWN, 0)))
+    study_rows = [row for row in rows if row["cls"] in ("code", "doc", "real")]
+    naughty_rows = [row for row in rows if row["cls"] in ("anime", "game")]
+    wrong_way = [row for row in study_rows if row["verdict"] == VERDICT_NOT_STUDY]
+    check("自匹配下**没有一张学习帧被判成不像学习**（那会误弹气泡）",
+          not wrong_way, "%d 张" % len(wrong_way))
+    note("非学习帧里落在带内的: %d/%d（带内 = unknown, 不会打扰你）"
+         % (len([r for r in naughty_rows if r["verdict"] == VERDICT_UNKNOWN]),
+            len(naughty_rows)))
 
 
 # ---------------------------------------------------------------------------
 #  B. 三条升级链（假时钟 + 真帧 + 真 IPC 气泡）
 # ---------------------------------------------------------------------------
-async def part_b(runtime, sock, frames, no_stream):
+async def part_b(runtime, sock, frames, rows, no_stream):
     print("\n== B. 升级链: 提醒 -> 3 次 -> 返回桌面 -> 冷却（假时钟, 不真等）")
     from agent.core.study_watch import (ACTION_BACK_TO_DESKTOP, ACTION_REMIND, REMIND_TEXT,
                                         VERDICT_NOT_STUDY, VERDICT_STUDY, VERDICT_UNKNOWN)
@@ -371,11 +440,16 @@ async def part_b(runtime, sock, frames, no_stream):
         runtime.state.transition_to(State.STUDY, "T13-6 验收")
     await asyncio.sleep(0.2)
 
-    study_frame = frames.get("code")
-    naughty_frame = frames["game"] if frames.get("game") is not None else frames.get("anime")
-    if study_frame is None or naughty_frame is None:
-        skip("升级链", "数据集不全（需要 code 与 game/anime 各一张）")
+    # ⚠ 升级链验的是**链**, 不是分类器: 所以在**量出来的**结果里挑两张真落在带外的帧
+    #   （"数据集里有没有这样的帧"本身就是 A2 那个表要回答的事）。
+    study_row, why_study = pick(rows, want_study=True)
+    naughty_row, why_naughty = pick(rows, want_study=False)
+    note("选帧: %s；%s" % (why_study, why_naughty))
+    if study_row is None or naughty_row is None:
+        skip("升级链", "数据集里挑不出「带外」的帧 —— 这一轮带太宽或库分不开")
         return
+    study_frame = study_row["frame"]
+    naughty_frame = naughty_row["frame"]
 
     # ① 不像学习 -> 提醒（**不算一次不通过**）
     decision = watcher.tick(naughty_frame, state="study")
@@ -559,7 +633,12 @@ async def main():
             await wait_for(lambda: runtime.image_reader is not None, 20, "io 层就位")
         frames = load_frames()
         await part_a(runtime, frames, args.no_stream)
-        await part_b(runtime, sock, frames, args.no_stream)
+        rows = scan_dataset(runtime._study_watch) if not args.no_stream else []
+        if rows:
+            part_a2(rows)
+        else:
+            skip("数据集全量扫（自匹配）", "--no-stream（没模型就不扫了）")
+        await part_b(runtime, sock, frames, rows, args.no_stream)
         await part_c(runtime, stats_copy)
         if runtime._study_anchors is not None:
             check("验收全程锚点库是副本（真那两份没被写）",
