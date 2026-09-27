@@ -14,6 +14,8 @@
 #include "core/schedule_model.h"
 #include "services/local_client.h"
 #include "services/onboard_ctl.h"
+#include <QGuiApplication>      // T15-1 1b：platformName() 判断"有没有 X"
+#include <QInputMethod>         // T15-1 1b：无 X 时把软键盘交给 Qt 输入法
 #include "ui/bilibili_cover.h"
 #include "ui/bilibili_preview.h"
 #include "ui/bottom_bar.h"
@@ -741,6 +743,19 @@ void MainWindow::showOnboard(const QString& why)
     if (onboard_ == nullptr) {
         return;
     }
+    // ---- T15-1 1b：无 X 的形态（EGLFS / linuxfb）下，onboard 根本不存在 ----
+    // onboard 是 GTK/X11 时代的软键盘；极小镜像（路线 B）里没有 X，所以这里**不再去找它**，
+    // 直接把面板交给 Qt 的输入法（部署侧设 QT_IM_MODULE=qtvirtualkeyboard，由它接管弹出）。
+    // ⚠ 别再走下面那条"探不到 onboard 就报错"的路：那在无 X 下是**正常的**，不是错误。
+    if (QGuiApplication::platformName() != QLatin1String("xcb")) {
+        if (QGuiApplication::inputMethod() != nullptr) {
+            QGuiApplication::inputMethod()->show();
+        }
+        qInfo().noquote() << QStringLiteral("[ui] 无 X（%1）：软键盘交给 Qt 输入法（QT_IM_MODULE=%2，%3）")
+                                 .arg(QGuiApplication::platformName(),
+                                      qEnvironmentVariable("QT_IM_MODULE", "(未设置)"), why);
+        return;
+    }
     QString detail;
     if (!onboard_->available() && !onboard_->probe(&detail)) {
         qWarning().noquote() << "[ui] 软键盘不可用（" << why << "）:" << detail;
@@ -770,6 +785,15 @@ void MainWindow::showOnboard(const QString& why)
 void MainWindow::hideOnboard(const QString& why)
 {
     if (onboard_ == nullptr) {
+        return;
+    }
+    // T15-1 1b：无 X 时同样交给 Qt 输入法（onboard 没有可收的东西）
+    if (QGuiApplication::platformName() != QLatin1String("xcb")) {
+        if (QGuiApplication::inputMethod() != nullptr) {
+            QGuiApplication::inputMethod()->hide();
+        }
+        qInfo().noquote() << QStringLiteral("[ui] 无 X（%1）：收起 Qt 输入法（%2）")
+                                 .arg(QGuiApplication::platformName(), why);
         return;
     }
     if (!onboard_->available() && !onboard_->probe(nullptr)) {

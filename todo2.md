@@ -23,7 +23,9 @@
 | T15-1 切片1a | **我们的 GUI 在 EGLFS（无 X）下跑通**：`--screenshot` 出图、退出码 0；加 `QT_QPA_EGLFS_ROTATION=90` 后是 **1280×800 横屏**、逐项与 X 基线布局一致 | QPA 日志 `New DRM/KMS via GBM integration created` → `Creating GBM device for /dev/dri/card0`；截图 935×1280（未转）与 1280×800（转后）；唯一告警是 EGLFS 下的光标 `Failed to move cursor on screen DSI1: -14` |
 | T15-1 切片1b 取证 | **Qt 虚拟键盘可用**：`qtvirtualkeyboard-plugin` 装上后，EGLFS 下日志 `qt.virtualkeyboard: Loading extension "default"/"hangul"/"thai"` + `PlatformInputContext::setFocusObject()` 收到焦点；我们自己的键盘按钮那条路**如实报错**（`[ui] 软键盘不可用（输入框获得焦点）: 没找到 onboard 进程`）| 1b 只剩**代码**：无 X（`QGuiApplication::platformName() != "xcb"`）时不去找 onboard，直接依赖 Qt 输入法；⚠ **验证方法**：Qt 虚拟键盘是**独立窗口**，`QWidget::grab()`（`--screenshot`）**抓不到它** —— 要用 **linuxfb + 读 `/dev/fb0`**（竖屏 800×1280、stride 3200）来取证 |
 | T15-1 切片1c 取证 | GStreamer 控制路径已验证（`mp4→qtdemux→h264parse→mppvideodec→videoconvert→kmssink` 退出码 0）；但**上一轮 `--video` 的截图无效** —— 视频面板**只在 GAME 模式**显示，HOME 模式主区是壁纸（截图里主区纯蓝、底部仍是「未播放」）| 1c 下一步：`--mode-demo GAME --video <mp4>` 在 EGLFS 下重跑；若 `QMediaPlayer` 在 EGLFS 渲染不出来，再实现"Agent 侧 ffmpeg→`kmssink` 直出"那条路（T15-8 一并做） |
-| T15-1 切片1d | 无 X 全功能回归 + 三组数字（内存/CPU/启动） | 待 1b/1c 收口后做 |
+| T15-1 1b 代码 | **已改**：`main_window.cpp` 的 `showOnboard/hideOnboard` 在 `QGuiApplication::platformName() != "xcb"` 时不再去找 onboard，改为 `inputMethod()->show()/hide()`（软键盘交给 Qt 虚拟键盘） | ⚠ **待一次验证**：取 fb 证据的时机错了 —— 我在**进程退出之后**才读 `/dev/fb0`（0.1% 非黑），必须在**运行中**读；另外 Qt 虚拟键盘是独立窗口，linuxfb 下要配 `QT_QUICK_BACKEND=software` 才画得出来 |
+| T15-1 1c 真实卡点 | **`--video` 驱动不了 GAME 模式的面板**：那张截图里模式已切到「游戏」、主区是视频面板，但显示 **「视频源未接入」/「(还没有队列)」** —— 那个面板是 **B站队列**驱动的（`--video` 只改了"本地文件源"，没进队列） | 1c 正确做法二选一：(a) 走队列路径（Agent 侧把本地文件当"假队列"喂进去）(b) 用真 B 站流（需要真搜索 + Agent 的 stream）——(b) 本来就属于 T15-8 视频调优，建议合并 |
+| T15-1 1d 数据（部分） | 停桌面后总内存 used **1482 → 1256 MB**（`agent_rss=121`、`gui_rss=0`）；桌面栈本体：xfwm4 73 + evolution-alarm 60 + onboard 58 + 面板/通知等 ≈ **703 MB**；GUI 在 EGLFS 下 RSS **84 MB**（对比有 X 时 87 MB） | 还缺：无 X 下的启动时间（属 T15-12 镜像改造后才有意义）与"空转 CPU"长采样 |
 
 **结论：极小镜像可以不要 X**（省实测 703 MB 桌面栈 + 整条 X 依赖链）。
 
