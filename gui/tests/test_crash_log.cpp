@@ -118,12 +118,21 @@ private slots:
             QVERIFY(::utime(qPrintable(old.fileName()), &times) == 0);
         }
         qputenv("AGENT_CRASH_KEEP", "3");
-        QVERIFY(!core::installCrashLogger(dir(), QStringLiteral("probe")).isEmpty());
-        const QStringList left = logs();
-        QCOMPARE(left.size(), 3);
-        QVERIFY2(left.contains(QStringLiteral("old-5.log")), "最新的旧报告要留");
-        QVERIFY2(!left.contains(QStringLiteral("old-0.log")), "最老的该被删");
-        QVERIFY2(!left.contains(QStringLiteral("old-3.log")), "第 4 老的也该被删");
+        const QString session = core::installCrashLogger(dir(), QStringLiteral("probe"));
+        QVERIFY(!session.isEmpty());
+        // 本次会话文件不算"历史报告"（它正常退出会被删掉），所以这里只数 old-*
+        QStringList old;
+        for (const QString& name : logs()) {
+            if (name.startsWith(QStringLiteral("old-"))) {
+                old << name;
+            }
+        }
+        QCOMPARE(old.size(), 3);
+        QVERIFY2(old.contains(QStringLiteral("old-5.log")), "最新的旧报告要留");
+        QVERIFY2(!old.contains(QStringLiteral("old-0.log")), "最老的该被删");
+        QVERIFY2(!old.contains(QStringLiteral("old-2.log")), "第 4 老的（old-2）也该被删");
+        QVERIFY2(old.contains(QStringLiteral("old-3.log")), "第 3 老的要留着");
+        QVERIFY2(QFile::exists(session), "本次会话文件不该被保留策略删掉");
     }
 
     /// 启动横幅：带上一份的头尾；同一份只报一次

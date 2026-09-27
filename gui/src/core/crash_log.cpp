@@ -152,13 +152,24 @@ void writeHeaderFile()
     file.flush();
 }
 
+/// 只留最新 g_keep 份**历史报告**。
+///
+/// ⚠ 本次会话文件**不算**在里面（与 Agent 侧同一个理由）：它正常退出会被删掉，
+///   算进去就成了"每次启动白扔一份老报告"，而且会与 GUI 的单测
+///   （6 份 + KEEP=3 → 剩 3 份）对不上。
 void pruneOldReports()
 {
     QDir dir(g_dir);
-    QFileInfoList entries = dir.entryInfoList(QStringList() << QStringLiteral("*.log"),
-                                             QDir::Files, QDir::Time);   // 新 → 旧
-    for (int i = g_keep; i < entries.size(); ++i) {
-        QFile::remove(entries.at(i).absoluteFilePath());
+    const QFileInfoList entries = dir.entryInfoList(QStringList() << QStringLiteral("*.log"),
+                                                   QDir::Files, QDir::Time);   // 新 → 旧
+    int kept = 0;
+    for (const QFileInfo& info : entries) {
+        if (info.absoluteFilePath() == g_path) {
+            continue;                       // 本次会话（还没崩，所以不是历史报告）
+        }
+        if (++kept > g_keep) {
+            QFile::remove(info.absoluteFilePath());
+        }
     }
 }
 

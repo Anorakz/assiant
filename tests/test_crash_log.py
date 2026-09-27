@@ -201,18 +201,36 @@ class TestCrashLogger(unittest.TestCase):
 
     # ------------------------------------------------------------- 4) 保留份数
     def test_retention_keeps_only_the_newest(self):
+        """保留策略数的是**历史报告**，本次会话文件不算（它正常退出会被删掉）。
+
+        所以这里用一次**干净退出**的会话去触发 prune：6 份旧报告 + KEEP=3 → 剩最新的 3 份。
+        （如果哪天把"本次会话"也算进去，就会白扔一份 —— 板端验收实测过这个 off-by-one。）
+        """
         for i in range(6):
             (self.dir / ("old-%02d.log" % i)).write_text("x", encoding="utf-8")
             os.utime(self.dir / ("old-%02d.log" % i), (time.time() - (60 - i),) * 2)
-        proc = run_child("raise SystemError('留着最新的')", self.dir,
-                         extra_env={"AGENT_CRASH_KEEP": "3"})
+        proc = run_child("pass", self.dir,
+                         extra_env={"AGENT_CRASH_KEEP": "3", "PROBE_CLEAN": "1"})
+        self.assertEqual(proc.returncode, 0, proc.stdout)
         reports = self._reports()
         self.assertEqual(len(reports), 3, "%r" % ([p.name for p in reports],))
-        # 最新的那份（本次的）必须在，最老的必须没了
-        self.assertTrue(any("留着最新的" in p.read_text(encoding="utf-8") for p in reports))
         self.assertFalse((self.dir / "old-00.log").exists(), "最老的应该被删掉")
-        self.assertFalse((self.dir / "old-03.log").exists(), "第 4 老的也该被删掉")
+        self.assertFalse((self.dir / "old-02.log").exists(), "第 4 老的（old-02）也该被删")
+        self.assertTrue((self.dir / "old-03.log").exists(), "第 3 老的要留着")
         self.assertTrue((self.dir / "old-05.log").exists(), "最新的那份旧报告要留着")
+
+    def test_retention_counts_the_live_session_separately(self):
+        """本次会话**崩了**时会变成一份报告：那时最多 keep+1 份（下次启动裁回来）。"""
+        for i in range(6):
+            (self.dir / ("old-%02d.log" % i)).write_text("x", encoding="utf-8")
+            os.utime(self.dir / ("old-%02d.log" % i), (time.time() - (60 - i),) * 2)
+        proc = run_child("raise RuntimeError('这次崩了')", self.dir,
+                         extra_env={"AGENT_CRASH_KEEP": "3"})
+        self.assertNotEqual(proc.returncode, 0)
+        reports = self._reports()
+        self.assertEqual(len(reports), 4, "%r" % ([p.name for p in reports],))
+        self.assertFalse((self.dir / "old-00.log").exists())
+        self.assertTrue(any("这次崩了" in p.read_text(encoding="utf-8") for p in reports))
 
     # ------------------------------------------------------------- 5) 启动横幅
     def test_banner_reads_previous_report_and_reports_once(self):

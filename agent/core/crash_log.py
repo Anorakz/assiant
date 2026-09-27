@@ -175,10 +175,11 @@ class CrashLogger:
         return value if value > 0 else DEFAULT_KEEP
 
     # -- 安装 ---------------------------------------------------------------
-    def install(self, enable_faulthandler: bool = True) -> "CrashLogger":
+    def install(self, enable_faulthandler: bool = True, sigusr1_dump: bool = True) -> "CrashLogger":
         """装好钩子并把"本次会话"的文件建出来。
 
         @param enable_faulthandler 关掉它 = 只留未捕获异常（给单测用，免得抢全局信号）
+        @param sigusr1_dump 额外把 SIGUSR1 注册成"按需 dump 全线程栈"
         @return self（方便链式调用）
         """
         if self._installed:
@@ -207,6 +208,17 @@ class CrashLogger:
                 self._fh_file = None
                 if self.log is not None:
                     self.log.warning("faulthandler 装不上: %s", exc)
+
+        if enable_faulthandler and sigusr1_dump and self._fh_file is not None:
+            sig = getattr(signal, "SIGUSR1", None)          # Windows 上没有这个信号
+            if sig is not None:
+                try:
+                    # ⚠ 必须显式传 file：`register()` 的默认文件是 **stderr**，
+                    #    不是 `enable(file=…)` 给的那个 —— 不传的话 dump 会跑到 stderr，
+                    #    会话文件里什么都看不到（板端 T14-8 验收实测踩到）。
+                    faulthandler.register(sig, file=self._fh_file, all_threads=True, chain=False)
+                except (OSError, ValueError, RuntimeError):
+                    pass
 
         self._prev_hook = sys.excepthook
         sys.excepthook = self._excepthook
@@ -375,11 +387,18 @@ class CrashLogger:
             pass
 
     def _prune(self) -> List[Path]:
-        """只留最新 keep 份报告（跳过 `.last-reported` 这类点文件）。"""
+        """只留最新 keep 份**历史报告**（跳过 `.last-reported` 这类点文件）。
+
+        ⚠ 本次会话文件**不算**在里面：它正常退出就会被删掉，算进去就成了"每次启动白扔
+        一份老报告"（板端验收实测：6 份 + KEEP=3 只剩 2 份）。它真崩了才会变成一份报告，
+        那种情况最多是 keep+1 份，下次启动就会被裁回来。
+        """
         removed: List[Path] = []
         try:
+            mine = self.path.resolve()
             reports = sorted(
-                (p for p in self.dir.glob("*.log") if p.is_file() and not p.name.startswith(".")),
+                (p for p in self.dir.glob("*.log")
+                 if p.is_file() and not p.name.startswith(".") and p.resolve() != mine),
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
@@ -467,14 +486,7 @@ def install_crash_logging(
                         （`kill -USR1 <pid>`，板端排查卡死时很顺手）
     """
     logger = CrashLogger(app=app, crash_dir=crash_dir, keep=keep, context=context, log=log)
-    logger.install()
+    logger.install(sigusr1_dump=sigusr1_dump)
     if log is not None:
         logger.attach_log_tail(log)
-    if sigusr1_dump:
-        sig = getattr(signal, "SIGUSR1", None)          # Windows 上没有这个信号
-        if sig is not None:
-            try:
-                faulthandler.register(sig, all_threads=True, chain=False)
-            except (OSError, ValueError, RuntimeError):
-                pass
     return logger

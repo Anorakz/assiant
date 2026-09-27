@@ -157,7 +157,10 @@ def check_agent(crash_dir):
     banner_line = [ln for ln in first.stdout.splitlines() if "上次崩溃报告" in ln]
     check("A5 启动横幅指出上一份报告", bool(banner_line),
           banner_line[0][:100] if banner_line else first.stdout[-200:])
-    check("A5 横幅里带上次的原因", "上次没有干净退出" in first.stdout and "SIGSEGV" in first.stdout)
+    # 上一份是 A4 的 SIGSEGV → 它的现场是 faulthandler 段（不是"崩溃/异常"那一段）
+    check("A5 横幅里带上次的现场", "上次没有干净退出" in first.stdout
+          and ("Fatal Python error" in first.stdout or "崩溃/异常" in first.stdout),
+          first.stdout[-200:])
     second = run_agent(["--check-config"], crash_dir)
     check("A5 同一份不重复报（.last-reported）", "上次崩溃报告" not in second.stdout)
     check("A5 报告份数没有因为重启而变", len(reports(crash_dir)) == before,
@@ -251,20 +254,24 @@ def check_gui(crash_dir):
     env.pop("AGENT_CRASH_DIR", None)
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
     env["PYTHONIOENCODING"] = "utf-8"
+    want = os.path.join(REPO, "logs", "crash")
+    os.makedirs(want, exist_ok=True)
+    before_default = set(os.listdir(want))
     proc = subprocess.run([GUI, "--page", "home", "--dump-layout", "--screenshot-delay", "300"],
                           cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           encoding="utf-8", errors="replace", timeout=120, env=env)
-    want = os.path.join(REPO, "logs", "crash") + os.sep
     lines = [ln for ln in proc.stdout.splitlines() if "[gui] 崩溃日志:" in ln]
-    check("B5 默认崩溃目录 = <仓库根>/logs/crash", bool(lines) and want in lines[0],
+    check("B5 默认崩溃目录 = <仓库根>/logs/crash", bool(lines) and want + os.sep in lines[0],
           (lines[0] if lines else proc.stdout[-200:]))
     ignored = subprocess.run(["git", "check-ignore", "-v", "logs/crash/probe.log"],
                              cwd=REPO, stdout=subprocess.PIPE, universal_newlines=True)
     check("B5 logs/crash 被 git 忽略", ignored.returncode == 0, ignored.stdout.strip()[:80])
     os.makedirs(want, exist_ok=True)
-    check("B5 默认目录里没留下干净退出的文件",
-          not [f for f in os.listdir(want) if f.endswith(".log") and f.startswith("gui-")],
-          "%r" % (os.listdir(want),))
+    # ⚠ 不能断言"目录里没有 gui-*.log"：systemd 的 GUI 服务**正在跑**，它那一份会话文件
+    #    本来就在（只有干净退出才删）。要判的是"我们这一次跑完没留下东西"。
+    after = set(os.listdir(want))
+    check("B5 这次干净退出没在默认目录留下文件", after == before_default,
+          "新增=%r" % (sorted(after - before_default),))
 
 
 # ---------------------------------------------------------------------------
