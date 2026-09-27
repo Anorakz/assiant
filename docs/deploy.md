@@ -243,6 +243,13 @@ cd gui/build && QT_QPA_PLATFORM=offscreen ctest --output-on-failure
 PC 侧另有一条守卫 `tests/test_gui_includes.py`：GUI 源码里任何 `#include "…"` 都必须在
 仓库里找得到（悬空 include 在 PC 上永远不会暴露，因为 PC 不编 GUI）。
 
+### 跑起来之后看什么：`scripts/monitor.sh`（T14-10）
+
+与本节的自检**互补**：这里管"部署对不对"，它管"机器什么状态"——
+`bash scripts/monitor.sh`（人看）/ `--csv`（喂给脚本）/ `--json` / `--watch 5 --csv`（连续采样）/
+`--health`（顺手跑一次本节的 health_check.sh）。CPU / 内存 / 各进程 RSS / NPU 频率与负载 /
+soc·gpu 温度都在里面，**只读内核接口**（Agent 挂了它照样能跑）。
+
 ### 窗口必须真的是一屏（T14-7b，已修）
 
 第一次交付时 kiosk 窗口是 `1280x883`、底部 83px 在屏幕外（`WM_NORMAL_HINTS` 里写着
