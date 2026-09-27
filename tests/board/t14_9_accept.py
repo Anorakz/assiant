@@ -304,6 +304,11 @@ def outage_test():
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print("  兜底已挂：240 秒后每 20 秒把 %s 拉回来一次（试 9 次，约 3 分钟）" % LIVE_PROFILE,
           flush=True)
+    log = "/home/kickpi/myproject/assitant/logs/agent.log"
+    repairs_before = 0
+    if os.path.exists(log):
+        with open(log, encoding="utf-8", errors="replace") as handle:
+            repairs_before = handle.read()[-60000:].count("开始主动重连")
 
     # ⚠ 用 `connection down`（档案停用、设备还在）而不是 `device disconnect`：
     #   后者板端实测 **5 秒**就被 NM/wpa_supplicant 接回来了（两级 autoconnect 都关也拦不住），
@@ -326,8 +331,17 @@ def outage_test():
             break
     elapsed = time.time() - started
     check("D1 断掉之后链路自己回来了", healthy, "用了 %.0f 秒" % elapsed)
-    check("D1 是**守护**修的（不是 NM 自己秒接：>60 秒）", elapsed > 60,
-          "%.0f 秒（若几十秒内就回来，说明模拟没真断住）" % elapsed)
+
+    # ⚠ 判据用**日志计数**而不是挂钟：多次跑重叠时"5 秒就回来"可能只是上一轮已经修好了，
+    #   挂钟阈值会假红。真正的判据是"这一段里守护确实记了一次重连动作"。
+    log = "/home/kickpi/myproject/assitant/logs/agent.log"
+    tail = ""
+    if os.path.exists(log):
+        with open(log, encoding="utf-8", errors="replace") as handle:
+            tail = handle.read()[-60000:]
+    repairs_now = tail.count("开始主动重连")
+    check("D1 这段里守护真的动手重连过（日志计数）", repairs_now > repairs_before,
+          "开始主动重连 %d -> %d" % (repairs_before, repairs_now))
 
     nmcli("connection", "modify", LIVE_PROFILE, "connection.autoconnect", "yes")
     nmcli("device", "set", "wlan0", "autoconnect", "yes")
