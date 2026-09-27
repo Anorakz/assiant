@@ -124,6 +124,8 @@ QToolButton#InputTypeButton {
 QToolButton#InputTypeButton:hover { background: #2B2D31; }
 QToolButton#InputTypeButton::menu-indicator { image: none; }
 QScrollArea#ChatScroll { background: transparent; border: none; }
+/* T14-7b：模型测试页整页在滚动区里 → 视口与内容都要透明，壁纸才透得出来 */
+QScrollArea#ModelScroll, QScrollArea#ModelScroll > QWidget { background: transparent; border: none; }
 /* T7：下区域音乐条 */
 QLabel#MusicTitle { color: #E6E6E6; font-size: 20px; font-weight: bold; background: transparent; }
 QLabel#MusicPlaceholder { color: #6F757C; font-size: 16px; background: transparent; }

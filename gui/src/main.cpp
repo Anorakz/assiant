@@ -69,6 +69,9 @@
 
 namespace {
 
+/// T14-7b 取证：递归打印控件树的真实尺寸（定义在文件末尾，这里先声明以便 GUI 分支调用）。
+void dumpLayoutTree(QWidget* widget, int depth = 0);
+
 /// 命令行解析结果。
 struct Options {
     bool stdio = false;            ///< 纯终端模式
@@ -106,6 +109,7 @@ int modeDemoMs = 3000;          ///< 上面那一下在启动后多久点（默�
     bool settingsOneKeyDemo = false; ///< 启动后改一个键并保存（T14-3 端到端验收用）
     int settingsScrollDemo = -1;    ///< >=0 = 启动后把设置页滚到该像素再截图（T13-10 取证用）
     bool settingsDumpCards = false; ///< 打印三张卡片**当前读到的值**并退出（T13-10 取证用）
+    bool dumpLayout = false;        ///< 打印控件树真实尺寸/最小尺寸并退出（T14-7b 取证用）
     bool dumpSchedule = false;      ///< 打印日程区**真实渲染出来的行**并退出（S8 取证用）
     bool focusInputDemo = false;    ///< 启动后把焦点给对话输入框（S10 取证：软键盘应这时才弹）
     QString videoNoteDemo;         ///< 非空 = 触发视频区占位说明（验收用）
@@ -154,6 +158,7 @@ void printUsage()
         "  --settings-scroll-demo <px>  启动后把设置页滚到该像素再截图（T13-10 取证用）\n"
         "  --settings-dump-cards    打印三张卡片当前读到的值并退出（T13-10 取证用）\n"
         "  --dump-schedule      打印日程区真实渲染出来的行并退出（取证用）\n"
+        "  --dump-layout        打印整棵控件树的真实尺寸/最小尺寸并退出（T14-7b 取证用，配 --screenshot-delay）\n"
         "  --focus-input-demo   启动后把焦点给对话输入框（取证：软键盘应这时才弹）\n"        "  --config <path>      指定 config/config.yaml（默认自动在仓库里找）\n"
         "  --socket <path>      Agent 的 unix socket 路径（默认 /tmp/agent.sock）\n"
         "  -h, --help           显示本帮助\n";
@@ -310,6 +315,8 @@ Options parseArgs(int argc, char** argv)
             }
         } else if (arg == QLatin1String("--dump-schedule")) {
             opt.dumpSchedule = true;
+        } else if (arg == QLatin1String("--dump-layout")) {
+            opt.dumpLayout = true;
         } else if (arg == QLatin1String("--focus-input-demo")) {
             opt.focusInputDemo = true;
         } else if (arg == QLatin1String("--video-note-demo")
@@ -641,6 +648,22 @@ int runGuiMode(const Options& opt, int argc, char** argv)
 
     window.startIpc(opt.socketPath);
 
+    // T14-7b 取证：把整棵控件树的**真实尺寸 / 最小尺寸**打出来并退出。
+    //
+    // 起因：1280×800 的屏上窗口被撑成 1280×883，底部 83 px 在屏幕外。
+    // `xprop WM_NORMAL_HINTS` 已经证明"全屏请求是发出去的"（_NET_WM_STATE_FULLSCREEN
+    // 也在），而 `program specified minimum size: 831 by 883` 说明是**应用自己的最小
+    // 尺寸**比屏幕高 —— 但截图只能看出"底下被切了"，看不出是**谁**要的这 83 px。
+    // 这份文本就是答案：每个控件的 size / minimumSizeHint / sizeHint / 可见性。
+    // 输出走 stdout（Qt 日志在 stderr），格式：LAYOUT + TAB + 缩进 + Class#objectName …
+    if (opt.dumpLayout) {
+        const int delay = opt.screenshotDelayMs;      // 复用 --screenshot-delay（默认 1500）
+        QTimer::singleShot(delay, &window, [&window]() {
+            dumpLayoutTree(&window);
+            QCoreApplication::exit(0);
+        });
+    }
+
     if (!opt.chatDemo.isEmpty()) {
         const QString text = opt.chatDemo;
         QTimer::singleShot(1200, &window, [&window, text]() { window.demoSend(text); });
@@ -861,6 +884,34 @@ int runGuiMode(const Options& opt, int argc, char** argv)
                       << (opt.windowed ? "(窗口)" : "(全屏)")
                       << "连接:" << opt.socketPath;
     return app.exec();
+}
+
+/// T14-7b 取证：递归打印控件树。`min` 是 `minimumSizeHint()`（= 布局算出来的最小尺寸，
+//  也就是把窗口撑过屏幕的那个数），`hint` 是 `sizeHint()`（"我想要多大"）。
+/// 隐藏的控件也打（`visible=0`）：QStackedWidget 的最小尺寸是**所有页**的最大值，
+/// 所以"当前没显示的那一页"完全可能是撑高窗口的元凶 —— 不列出来就看不出来。
+void dumpLayoutTree(QWidget* widget, int depth)
+{
+    if (widget == nullptr) {
+        return;
+    }
+    const QSize minSize = widget->minimumSizeHint();
+    const QSize hint = widget->sizeHint();
+    const QString name = widget->objectName().isEmpty() ? QStringLiteral("-")
+                                                        : widget->objectName();
+    std::printf("LAYOUT\t%*s%s#%s size=%dx%d min=%dx%d hint=%dx%d visible=%d\n",
+                depth * 2, "",
+                widget->metaObject()->className(), qPrintable(name),
+                widget->width(), widget->height(),
+                minSize.width(), minSize.height(),
+                hint.width(), hint.height(),
+                widget->isVisible() ? 1 : 0);
+    const QObjectList children = widget->children();
+    for (QObject* child : children) {
+        if (auto* childWidget = qobject_cast<QWidget*>(child)) {
+            dumpLayoutTree(childWidget, depth + 1);
+        }
+    }
 }
 
 } // namespace

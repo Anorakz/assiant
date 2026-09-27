@@ -216,6 +216,7 @@ systemctl --failed --no-pager                            # 不该有这三个单
 systemctl show agent-gui.service -p MainPID -p NRestarts # MainPID 非 0、NRestarts 是 0
 DISPLAY=:0 xrandr --query | grep DSI                     # 1280x800 ... left
 DISPLAY=:0 xwininfo -root -tree | grep agent_gui         # 有 GUI 窗口
+DISPLAY=:0 xwininfo -root -tree | grep 板端助手          # 尺寸必须是 1280x800（不是 883，见下）
 assistant status                                         # 已连上 /tmp/agent.sock
 ```
 
@@ -224,12 +225,31 @@ assistant status                                         # 已连上 /tmp/agent.
 GUI 自己重连上 Agent。守卫测试是 `tests/test_systemd_units.py`（不改板端也能跑：
 单元形状、键写在哪一段、三个单元合起来有没有环、文档有没有点名三个文件）。
 
-### 一处已知的观感问题（不属于 T14-7）
+### GUI 换了代码就必须真的重编（T14-7b 的教训）
 
-GUI 首页内容的**布局最小高度是 883 px**，而面板逻辑尺寸是 1280×800 —— kiosk 走
-`showFullScreen()`，窗口最后是 `1280×883`，底部约 83 px 被切掉（截图里「日程」卡片最后
-一行贴着屏幕下沿）。这与开机自启无关（`gui/src/main.cpp` 的 kiosk 分支只有
-`showFullScreen()` 一句，是布局的最小尺寸把窗口撑高的），要不要单独开一条任务由你定。
+`agent_gui` 与各 GUI 测试二进制都是**文件**：`cmake --build` 失败时它们**原地不动**，
+于是 ctest 照样能跑出一串绿（甚至跑的是上一版的行为）。T14-3 删掉
+`gui/src/core/config_sync.*` 时漏删了 `model_page.cpp` 里那行 include，
+结果板端从那时起 **GUI 编不过**，而报出来的一切都是"通过"。
+
+规矩：改完 `gui/` 之后看**构建日志**与**二进制时间戳**，别只看 ctest 结果：
+
+```bash
+cmake -S gui -B gui/build && cmake --build gui/build -j4   # 必须 exit 0、且无 error 行
+ls -l --time-style=+%H:%M:%S gui/build/agent_gui            # 时间该是刚刚
+cd gui/build && QT_QPA_PLATFORM=offscreen ctest --output-on-failure
+```
+
+PC 侧另有一条守卫 `tests/test_gui_includes.py`：GUI 源码里任何 `#include "…"` 都必须在
+仓库里找得到（悬空 include 在 PC 上永远不会暴露，因为 PC 不编 GUI）。
+
+### 窗口必须真的是一屏（T14-7b，已修）
+
+第一次交付时 kiosk 窗口是 `1280x883`、底部 83px 在屏幕外（`WM_NORMAL_HINTS` 里写着
+`program specified minimum size: 935 by 883`）—— **不是"没全屏"**，而是隐藏着的模型页
+把 `QStackedWidget` 的最小高度顶到了 811（页面只有 728）。修法：模型页整页放进
+`QScrollArea`；现在窗口是 `1280x800`、最小尺寸 **935x674**。
+机制、取证命令与"每页 min ≤ 728"这条规矩写在 [`gui.md` §2.1](gui.md)。
 
 ---
 

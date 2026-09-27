@@ -4,10 +4,16 @@
 #include "ui/model_page.h"
 
 #include "core/config_store.h"
-#include "core/config_sync.h"
+// ⚠ 这里原来还有一条 `#include "core/config_sync.h"` —— T14-3 删掉了 config_sync.*，
+//    却漏了这行 include。板端 `cmake --build` 因此直接失败在
+//    `fatal error: core/config_sync.h: No such file or directory`，
+//    而旧的可执行文件与旧测试二进制都还在，于是"看起来一切正常"
+//    （ctest 还能跑出 22/22，里面混着已经退役的 test_config_sync）。
+//    T14-7b 起有 tests/test_gui_includes.py 专门守这类"悬空 include"。
 
 #include <QComboBox>
 #include <QDebug>
+#include <QScrollArea>
 #include <QDoubleSpinBox>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -92,7 +98,28 @@ ModelPage::~ModelPage()
 
 void ModelPage::build()
 {
-    auto* root = new QVBoxLayout(this);
+    // ---- T14-7b：整页放进 QScrollArea（与设置页同一套路）----
+    //  为什么必须这么做：`QStackedWidget` 的最小尺寸是**所有页**（含当前隐藏的页）的
+    //  最大值，而本页内容要 811px；1280×800 的面板只给页面 72..800 这 728px。
+    //  于是窗口被撑到 883 —— 全屏请求照样发出去了，但底部 83px 永远在屏幕外
+    //  （板端 `xprop WM_NORMAL_HINTS` 原文：`program specified minimum size: 935 by 883`）。
+    //  放进滚动区之后本页最小尺寸降到 ~68px，"内容比一屏高"由滚动条兜住，
+    //  不再由隐藏页决定整个窗口的高度。
+    auto* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->setSpacing(0);
+    scroll_ = new QScrollArea(this);
+    scroll_->setObjectName(QStringLiteral("ModelScroll"));
+    scroll_->setWidgetResizable(true);
+    scroll_->setFrameShape(QFrame::NoFrame);
+    scroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto* content = new QWidget(scroll_);
+    scroll_->setWidget(content);
+    outer->addWidget(scroll_);
+
+    // 下面所有卡片都挂这个布局：它的宿主是滚动区里的 content（不再是本页自己）
+    auto* root = new QVBoxLayout(content);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(10);
 

@@ -27,9 +27,12 @@ cd gui && cmake -S . -B build && cmake --build build -j4
 `--chat-demo <文本>`、`--input-type-demo <terminal|keyboard>`、`--focus-input-demo`
 （取证：软键盘应在这时才弹）、`--model-mode-demo <mode>`、
 `--bench-demo <qwen_precheck|qwen_full|multimodal>`、`--report-demo`、`--settings-save-demo`、
-`--dump-schedule`（打印日程区真实渲染的行）等。
+`--dump-schedule`（打印日程区真实渲染的行）、`--dump-layout`（打印整棵控件树的
+`size/min/hint`，用来查"窗口为什么不是一屏"这类问题，见 §2.1）等。
 
-测试：`cd gui/build && ctest --output-on-failure`（**19 个测试**：核心逻辑 + 控件级 + 图标守卫 + e2e IPC）。
+测试：`cd gui/build && ctest --output-on-failure`（**23 个测试**：核心逻辑 + 控件级 + 图标守卫
++ 面板尺寸守卫 `test_page_heights` + e2e IPC）。⚠ GUI 只能在**板端**编（PC 没有 Qt），
+所以"源码树自洽"另有一条 PC 侧守卫 `tests/test_gui_includes.py`（悬空 include 见 §2.1）。
 
 ## 2. 界面结构
 
@@ -46,11 +49,37 @@ cd gui && cmake -S . -B build && cmake --build build -j4
 **伸缩因子**：窗口矮时最小高度会占超过 2/5，所以别把 3:2 当成硬比例。
 
 **真机显示尺寸（S8 实测，别再靠猜）**：面板的 DRM 模式是 `800x1280`，但 xrandr 把它旋成了
-`DSI-1 connected 1280x800+0+0 left` —— 所以 **X 桌面与全屏 kiosk 窗口都是 1280×800**
-（`xwininfo` 实测窗口 `1280x800+0+0`）。右区域是 320 × 约 700，日程区实得约 200px
-（正好放下"标题 + 副标题 + 6 行 + 提示行"）。
+`DSI-1 connected 1280x800+0+0 left` —— 所以 **X 桌面与全屏 kiosk 窗口都是 1280×800**。
+右区域是 320 × 约 700，日程区实得约 200px（正好放下"标题 + 副标题 + 6 行 + 提示行"）。
 ⚠ `/sys/class/graphics/fb0/virtual_size` 报的 `800,1280` 是**面板模式**，不是给应用用的
 逻辑尺寸 —— 拿它推布局会错。
+
+### 2.1 全屏 kiosk 必须真的是一屏（T14-7b）
+
+`showFullScreen()` **不等于**窗口就是一屏：Qt 只把几何设成屏幕大小，而顶层窗口还有一条
+**应用自己的最小尺寸**。板端实测到的症状是窗口 `1280x883`（底部 83px 永远在屏幕外），
+而 `_NET_WM_STATE_FULLSCREEN` 是有的 —— 也就是说"全屏请求发出去了、WM 也答应了，
+但应用自己要 883 高"。取证要看这两条：
+
+```bash
+wid=$(DISPLAY=:0 xwininfo -root -tree | grep -m1 板端助手 | awk '{print $1}')
+DISPLAY=:0 xprop -id "$wid" WM_NORMAL_HINTS     # program specified minimum size: 935 by 883
+DISPLAY=:0 ./gui/build/agent_gui --dump-layout  # 逐控件打印 size/min/hint（就是这条链）
+```
+
+**根因（`--dump-layout` 量出来的链）**：`QStackedWidget` 的最小尺寸取**所有页**的最大值，
+**包括当前隐藏的页**。当时 `ModelPage`（隐藏着）要 811px，而 1280×800 的面板只给页面
+`800-72=728`px，于是 `72 + 811 = 883`。真正显示着的 `MainPage` 只要 602。
+
+**规矩**：**每一页的 `minimumSizeHint().height()` 都必须 ≤ 728**（宽 ≤ 1280）。内容真的比一屏
+高，就把整页放进 `QScrollArea`（`setWidgetResizable(true)`、横向滚动条关掉、视口背景透明）
+—— 设置页本来就这么做，模型页 T14-7b 起也这么做；那样页面 min 会掉到 ~68，由滚动条兜住。
+`gui/tests/test_page_heights.cpp` 逐页钉这条不变式（先 `createPage(key)` 再量），
+新增页面若又比屏幕高，ctest 会直接红。
+
+⚠ 量最小尺寸时**别在最小宽度下量**：`QLabel` 开了 `wordWrap`，宽度越小折行越多、
+最小高度越大 —— 模型页在最小宽度下量出 811，按真实宽度铺开只要 510。要判的是
+"页面 min 远小于内容 min"（滚动区在起作用），不是"内容 min > 728"。
 
 - **唤醒机制**：四区域各自 `active`（空闲折叠，点一下出现）或 `locked`（常显）；
   任一区域的点击都会唤醒全部；隐藏区域设 `WA_TransparentForMouseEvents`，150ms 滑动。

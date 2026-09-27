@@ -25,6 +25,7 @@ class QPlainTextEdit;
 class QProcess;
 class QPushButton;
 class QRadioButton;
+class QScrollArea;
 class QSpinBox;
 class QDoubleSpinBox;
 class QStackedWidget;
@@ -66,6 +67,8 @@ public:
     QPushButton* stopButton() const { return stop_; }
     QPushButton* statusButton() const { return status_; }
     QPlainTextEdit* logView() const { return log_; }
+    /// T14-7b：整页所在的滚动区（本页内容比 1280×800 的屏幕高，靠它兜住，见 .cpp 顶部注释）
+    QScrollArea* scrollArea() const { return scroll_; }
     QString statusText() const;
     QString currentMode() const { return mode_; }
 
@@ -118,6 +121,8 @@ private:
     QPushButton* status_ = nullptr;
     QPlainTextEdit* log_ = nullptr;
     QLabel* state_ = nullptr;
+    /// T14-7b：整页的滚动区（内容比屏幕高时靠它，别让 QStackedWidget 把窗口撑过屏幕）
+    QScrollArea* scroll_ = nullptr;
 
     // T12
     QPushButton* qwenPrecheck_ = nullptr;

@@ -13,7 +13,8 @@
      · 副本 config.yaml **一个字节都没变**（不退回直写）；
      · GUI 把"没连上"如实写出来，并露出「启动 Agent」。
   C. 不变量：板端真实 `config/config.yaml` / `llm/config/llm.env` md5 未变、
-     `git status` 干净、没留下 Agent/GUI 进程。
+     `git status` 干净、本次验收的临时进程都收掉了（Agent/GUI 自 T14-7 起是 systemd
+     常驻服务，**不算**残留；llama-server 由 Agent 按 `llm.mode: edge` 自己拉起）。
 
 跑法（板端, 仓库根）::
 
@@ -225,14 +226,28 @@ def main():
                         universal_newlines=True)
     check("板端 git status 干净", rc.returncode == 0 and not rc.stdout.strip(),
           rc.stdout.strip()[:80])
-    leftovers = []
-    for name in ("agent.main", "agent_gui", "llama-server", "moonlight"):
-        proc = subprocess.run(["pgrep", "-af", name], stdout=subprocess.PIPE,
+    # T14-7 起 Agent 与 GUI 是 **systemd 常驻服务**（agent.service / agent-gui.service），
+    # 所以"没有 agent.main / agent_gui 进程"这条老判据已经不成立了 —— 它们**本来**就该在跑。
+    # 同样地，`llama-server` 是 Agent 按 `llm.mode: edge` 自己拉起来的（板端实测：Agent
+    # 起来 3 秒后 llama-server 起，端口 9000），也不是这次的残留。
+    # 现在要判的是：**本次验收自己起的**那些临时进程都收掉了（本脚本用的是 /tmp 下的
+    # 副本 socket + 自己的子进程），以及 systemd 那两个服务仍然健康。
+    stray = []
+    for pattern in (os.path.join(TMP, "agent"), "moonlight"):
+        proc = subprocess.run(["pgrep", "-af", pattern], stdout=subprocess.PIPE,
                               universal_newlines=True)
         if proc.stdout.strip():
-            leftovers.append(name)
-    check("没留下 Agent / GUI / llama-server / moonlight 进程", not leftovers,
-          "；".join(leftovers))
+            stray.append("%s -> %s" % (pattern, proc.stdout.strip()[:60]))
+    check("本次验收的临时进程都收掉了（/tmp 副本 socket / moonlight）", not stray,
+          "；".join(stray))
+
+    services_ok = True
+    for unit in ("agent.service", "agent-gui.service"):
+        proc = subprocess.run(["systemctl", "is-active", unit], stdout=subprocess.PIPE,
+                              universal_newlines=True)
+        if proc.stdout.strip() != "active":
+            services_ok = False
+    check("常驻服务仍是 active（T14-7：Agent / GUI 由 systemd 管，不是残留）", services_ok)
     check("验收 socket 已收掉", not os.path.exists(socket_path))
 
     print("\n== 结果: %s（%d 项通过%s）"
