@@ -193,6 +193,10 @@ private:
     QString nextConfigRequestId(const QString& prefix);
     /// 请 Agent 跑 `llm/scripts/<action>.sh`
     void sendLlmServiceRequest(const QString& action);
+
+    /// T14-9：把一次 WiFi 请求发给 Agent（`wifi_control`）。
+    /// 没连上时就地回一条 ok=false 的 ack 给设置页（不静默失败）。
+    void sendWifiRequest(const QString& action, const QJsonObject& payload);
     /// 「启动 Agent」：`systemctl start agent.service`（T14-7 的单元就位后真能起）
     void startAgentService();
 };

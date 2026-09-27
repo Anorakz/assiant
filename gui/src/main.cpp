@@ -39,6 +39,7 @@
 #include <QDoubleSpinBox>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMouseEvent>
 #include <QObject>
 #include <QScrollArea>
@@ -114,6 +115,7 @@ int modeDemoMs = 3000;          ///< 上面那一下在启动后多久点（默�
     int settingsScrollDemo = -1;    ///< >=0 = 启动后把设置页滚到该像素再截图（T13-10 取证用）
     bool settingsDumpCards = false; ///< 打印三张卡片**当前读到的值**并退出（T13-10 取证用）
     bool dumpLayout = false;        ///< 打印控件树真实尺寸/最小尺寸并退出（T14-7b 取证用）
+    bool dumpWifi = false;          ///< 打印网络卡片渲染出来的状态/列表并退出（T14-9 取证用）
     QString crashDemo;              ///< 非空 = 装好崩溃日志后立刻崩一次（T14-8 验收用）
     bool dumpSchedule = false;      ///< 打印日程区**真实渲染出来的行**并退出（S8 取证用）
     bool focusInputDemo = false;    ///< 启动后把焦点给对话输入框（S10 取证：软键盘应这时才弹）
@@ -164,6 +166,7 @@ void printUsage()
         "  --settings-dump-cards    打印三张卡片当前读到的值并退出（T13-10 取证用）\n"
         "  --dump-schedule      打印日程区真实渲染出来的行并退出（取证用）\n"
         "  --dump-layout        打印整棵控件树的真实尺寸/最小尺寸并退出（T14-7b 取证用，配 --screenshot-delay）\n"
+        "  --dump-wifi          打印网络卡片渲染出来的状态/SSID 列表并退出（T14-9 取证用）\n"
         "  --crash-demo <fatal|segv>  装好崩溃日志后立刻崩一次并退出（T14-8 验收用）\n"
         "  --focus-input-demo   启动后把焦点给对话输入框（取证：软键盘应这时才弹）\n"        "  --config <path>      指定 config/config.yaml（默认自动在仓库里找）\n"
         "  --socket <path>      Agent 的 unix socket 路径（默认 /tmp/agent.sock）\n"
@@ -323,6 +326,8 @@ Options parseArgs(int argc, char** argv)
             opt.dumpSchedule = true;
         } else if (arg == QLatin1String("--dump-layout")) {
             opt.dumpLayout = true;
+        } else if (arg == QLatin1String("--dump-wifi")) {
+            opt.dumpWifi = true;
         } else if (arg == QLatin1String("--crash-demo")
                    || arg.startsWith(QLatin1String("--crash-demo="))) {
             opt.crashDemo = optionValue(arg, QStringLiteral("--crash-demo"), i, argc, argv, opt);
@@ -703,6 +708,37 @@ int runGuiMode(const Options& opt, int argc, char** argv)
         const int delay = opt.screenshotDelayMs;      // 复用 --screenshot-delay（默认 1500）
         QTimer::singleShot(delay, &window, [&window]() {
             dumpLayoutTree(&window);
+            QCoreApplication::exit(0);
+        });
+    }
+
+    // T14-9 取证：打印**网络卡片渲染出来的**状态与 SSID 列表，然后退出。
+    // 截图只能证明"画出来了"，卡片里到底有没有真实数字要以这条文本为准
+    // （与 --dump-schedule / --settings-dump-cards 同一条规矩）。
+    // 流程：先要一次 status，再要一次 scan（扫描要几秒），够时间了再打印。
+    if (opt.dumpWifi) {
+        SettingsPage* page = window.settingsPage();
+        if (page == nullptr) {
+            qWarning().noquote() << "[dump] 没有设置页";
+            return 2;
+        }
+        window.showPage(QStringLiteral("settings"));
+        const int delay = opt.screenshotDelayMs;
+        QTimer::singleShot(delay, &window, [page]() {
+            page->requestWifiStatus();
+            page->requestWifiScan();
+        });
+        QTimer::singleShot(delay + 8000, &window, [page]() {
+            std::printf("WIFI_STATUS\t%s\n", qPrintable(page->wifiStatusLabel()->text()));
+            std::printf("WIFI_RESULT\t%s\n", qPrintable(page->wifiResultLabel()->text()));
+            QListWidget* list = page->wifiList();
+            std::printf("WIFI_ROWS\t%d\n", list == nullptr ? 0 : list->count());
+            if (list != nullptr) {
+                for (int i = 0; i < list->count(); ++i) {
+                    std::printf("WIFI_ROW\t%s\n", qPrintable(list->item(i)->text()));
+                }
+            }
+            std::printf("WIFI_SELECTED\t%s\n", qPrintable(page->selectedSsid()));
             QCoreApplication::exit(0);
         });
     }

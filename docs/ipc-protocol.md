@@ -194,6 +194,17 @@ GUI 收到后按 `topic` 分发。**不认识的 topic 忽略**。
 > ⚠ **关联字段放在 payload 里**（`id`），不是新增信封字段 —— 协议从来没有版本号/关联字段
 > （见 §4 里 `query_schedule` 的说明），这里照旧：Agent 把同一个 `id` 塞回这条推送。
 > ⚠ 老 GUI 不认识这条 topic —— 按 §3 开头的要求**忽略**即可，不会因此出错。
+| `wifi` | `kind` | string | **本机 WiFi**（T14-9）：`"status"` 状态快照 / `"scan"` 扫描结果 / `"ack"` 动作回执 |
+| | `device` / `state` / `ssid` / `signal` / `security` / `ip` / `gateway` / `dns` / `profile` / `autoconnect` / `connectivity` / `connected` | — | `kind=status` 时：一次 `Wifi.status()` 的快照（`connected` = `state` 以 connected 开头**且**有 IP） |
+| | `guard` | object | `kind=status` 时附带：链路守护的真实数字 `{probes, consecutive_failures, repairs, threshold, interval_s, last{ok,gateway_reachable,…}}` |
+| | `points` / `count` | array / number | `kind=scan` 时：`[{ssid, signal, security, secured, in_use}…]`，**同名多 AP 只留信号最强的那个** |
+| | `id` / `ok` / `action` / `message` | — | `kind=ack` 时：把请求里的 `id` 原样带回 + 成败 + 人话（失败时是 nmcli 的原话） |
+| | `was_active` | bool | `action=forget` 的回执里：**删掉的是不是当前正在用的那个**（⚠ 板端只有这一条链路，删它 = 失联） |
+
+> ⚠ 为什么扫描/动作走**推送**而不是"请求-应答"：扫描要几秒（`nmcli --rescan yes`），
+> 而且它不幂等 —— 与 `video_state` / `config_result` 同一条路子（§4 里 `query_schedule`
+> 那段说明同样适用）。**不认识的客户端忽略即可**。
+> ⚠ 板端实测：eth0/eth1 都是 `unavailable`，**wlan0 是唯一链路**。
 
 ### `status.mode` 的取值
 
@@ -247,6 +258,19 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
 | `set_config` | `id` | string | **回执 id**（调用方随便给，非空字符串；Agent 原样带回）—— 见 §3 的 `config_result` |
 | | `keys` | object | `{"点号路径": "字符串值"}`：要改的那些设置项（T14-2）。⚠ **键清单以 `config.example.yaml` 为准**：不在模板里的键、结构级（映射/序列）的键、类型不对的值一律**拒绝且一个字节都不写**；值没变就不写、不留 `.bak`。空对象 `{}` 是合法的（= 只让 Agent 重新派生一次 `llm.env`） |
 | | `credentials` | object | **可选**：B 站凭据 `{"SESSDATA"/"bili_jct"/"DedeUserID": "…"}`（写进 `bilibili.cookie_file` 指的**另一个文件**）。⚠ 它在**写配置之前**就校验：键写错时配置那一行也不落盘（不留"配置写了、凭据没写"的中间态） |
+| `wifi_control` | `action` | string | **本机 WiFi**（T14-9）：`status` / `scan` / `connect` / `forget` / `autoconnect` / `reconnect`。应答**就是**随后那条 `wifi` 推送（§3） |
+| | `id` | string | 回执 id（**动作类建议给**，界面靠它认领；查询类可省） |
+| | `ssid` | string | `connect` / `forget` / `autoconnect` 要操作的那个网络 |
+| | `password` | string | `connect` 时的密码。⚠ **只在这一条命令里经过一次**：Agent 侧要么走 `nmcli --ask` 的 **stdin**，要么写进 NM 自己的 keyfile（**0600 root**）—— **永不进 argv、不进 `config.yaml`、不进日志** |
+| | `autoconnect` | bool | `connect` 时"记住并自动连接"（默认 true）；`autoconnect` 动作时是目标值 |
+
+> ⚠ **为什么名字是 `wifi_control` 而不是 `wifi`**：协议不变式是"topic 与 command 的名字
+> **不相交**"（`tests/test_ipc_protocol.py::test_topics_and_commands_do_not_overlap`），
+> 而 topic 已经叫 `wifi` 了。同款的还有 `video_control`（topic 是 `bilibili`）。
+> ⚠ **为什么 GUI 不自己调 nmcli**：与 `set_config` 同一条立场（[`adr/0005`](adr/0005-config-single-writer.md)）——
+> 系统动作只由板端那个 root 服务做；GUI 只发命令。
+> ⚠ **`forget` 的危险**：板端 wlan0 是唯一链路，忘记正在用的档案 = 板子失联。
+> 回执里的 `was_active` 就是给界面弹确认用的；Agent 侧只删点名的那一个档案。
 
 > ⚠ **为什么 GUI 要"求"Agent 去写**（T14-2）：`config.yaml` 与 `llm.env` 的写入者**只有 Agent 一个**
 > （见 [`adr/0005`](adr/0005-config-single-writer.md)）—— 两个进程各写一份，就会互相覆盖、
@@ -465,6 +489,8 @@ while b"\n" in buf:
 | `TOPIC_SCHEDULE` | `"schedule"` |
 | `TOPIC_BILIBILI` | `"bilibili"` |
 | `TOPIC_CONFIG_RESULT` | `"config_result"` |
+| `TOPIC_SERVICE_RESULT` | `"service_result"` |
+| `TOPIC_WIFI` | `"wifi"` |
 | `COMMAND_SWITCH_MODE` | `"switch_mode"` |
 | `COMMAND_CHAT_INPUT` | `"chat_input"` |
 | `COMMAND_NEXT_BILIBILI` | `"next_bilibili"` |
@@ -474,6 +500,7 @@ while b"\n" in buf:
 | `COMMAND_MUSIC_PREV` | `"music_prev"` |
 | `COMMAND_MUSIC_STOP` | `"music_stop"` |
 | `COMMAND_SET_CONFIG` | `"set_config"` |
+| `COMMAND_WIFI` | `"wifi_control"` |
 
 > ⚠ T7-3 删掉了 `COMMAND_NEXT_WALLPAPER`（`"next_wallpaper"`）：换壁纸只走对话，
 > 不再有这条命令 —— 见 §4 的说明。C++ 侧也请把对应分支删掉（留着也不会有人发）。

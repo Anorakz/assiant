@@ -325,6 +325,10 @@ class Runtime:
         self.llm: Optional[LLMProvider] = None
         #: 本机 llama-server 的启停（T7-4）—— **None = 不管**（mode 不是 edge 或开关没开）
         self.llm_service: Optional[LlamaService] = None
+        # T14-9: WiFi 链路（`net.enabled` 关着时保持 None —— 界面仍能只读查看）
+        self.wifi: Any = None
+        self.link_guard: Any = None
+        self._link_task: Optional[asyncio.Task] = None
         self.scheduler: Optional[Scheduler] = None
         self.image_reader: Optional[ImageReader] = None
         self.input_sender: Optional[InputSender] = None
@@ -459,6 +463,9 @@ class Runtime:
         # ⚠ 画像在 LLM 之后: 判心情那一步要问模型（构建是后台任务, 步骤本身只是读配置）
         "_start_profile",
         "_start_scheduler",
+        # T14-9: WiFi 链路守护。放在 IPC 之前 —— 界面一打开就能看到真实状态；
+        # 它与其它组件没有依赖（只碰 nmcli / ping）。
+        "_start_net",
         "_start_ipc",
         "_start_terminal_input",
     )
@@ -1200,7 +1207,66 @@ class Runtime:
 
         await self._guarded(_Component("music", _start, _stop), fatal=False)
 
-    # ---- 3.7) B 站视频 (T11-6) ----
+    # ---- 3.8) WiFi 链路（T14-9）----
+    async def _start_net(self) -> None:
+        """按配置起 WiFi 封装 + 链路守护（`net.enabled`）。
+
+        ⚠ 关掉时**什么都不做**（`self.wifi is None`）—— IPC 的 `wifi_control` 会自己
+          现建一个只读封装，界面照样能看到状态（只是没有主动重连）。
+        ⚠ 探测与 nmcli 都在线程池里跑：它们是阻塞调用，不能卡事件循环
+          （扫描要几秒，那时 GUI 还在等推送）。
+        """
+
+        async def _start() -> None:
+            from agent.net.wifi import LinkGuard, Wifi
+
+            if not bool(self._cfg("net", "enabled", default=True)):
+                self.log.info("net: 没开（config 的 net.enabled=false）—— 不做链路健康检查")
+                return
+            ifname = str(self._cfg("net", "ifname", default="wlan0") or "wlan0")
+            wifi = Wifi(ifname=ifname, log=self.log)
+            if not wifi.available():
+                self.log.warning("net: 找不到 %s（板端没装 NetworkManager？）—— WiFi 功能不启用",
+                                 wifi.nmcli)
+                return
+            self.wifi = wifi
+            self.link_guard = LinkGuard(
+                wifi,
+                failures=int(self._cfg("net", "probe_failures", default=3) or 3),
+                interval_s=float(self._cfg("net", "health_interval_s", default=30) or 30),
+                reconnect_wait_s=float(self._cfg("net", "reconnect_wait_s", default=15) or 15),
+                log=self.log,
+            )
+            status = await asyncio.get_running_loop().run_in_executor(None, wifi.status)
+            self.log.info("net: WiFi 就绪 (%s, %s, ssid=%s, ip=%s)；每 %ss 体检一次，"
+                          "连续 %d 次探不到网关才主动重连",
+                          status.device, status.state or "?", status.ssid or "-",
+                          status.ip or "-", self.link_guard.interval_s, self.link_guard.failures)
+            self._link_task = asyncio.ensure_future(self._link_loop())
+
+        async def _stop() -> None:
+            if self._link_task is not None:
+                self._link_task.cancel()
+                self._link_task = None
+
+        await self._guarded(_Component("net", _start, _stop), fatal=False)
+
+    async def _link_loop(self) -> None:
+        """周期性链路体检（T14-9）：探不到就按 guard 的节奏重连，间隔带退避。"""
+        while True:
+            guard = self.link_guard
+            if guard is None:
+                return
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, guard.probe)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:                     # noqa: BLE001
+                # 体检自己出错不该把 Agent 带走（下一次继续）
+                self.log.warning("net: 链路体检出错: %r", exc)
+            await asyncio.sleep(guard.next_interval)
+
+    # ---- 3.9) B 站视频 (T11-6) ----
     async def _start_bilibili(self) -> None:
         """按配置接上 B 站视频: 网络层 + 队列 + 锚点库 + 游戏观察器 + GAME 里的观察循环。
 

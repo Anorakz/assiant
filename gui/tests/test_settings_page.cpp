@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 //  gui/tests/test_settings_page.cpp — 设置页测试（T13 / T14-3）
 //
 //  ⚠ T14-3 起本页**不写 config.yaml**：点「保存」只发出 `saveRequested(keys, credentials)`，
@@ -15,7 +15,10 @@
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonObject>
+#include <QListWidget>
+#include <QSignalSpy>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -74,6 +77,15 @@ private slots:
     void resultLabelShowsSuccess();
     void resultLabelShowsTheAgentsWordsAndOffersStart();
     void restoreDefaultsOnlyTouchesUi();
+    // T14-9: 网络卡片
+    void wifiStatusRendersRealNumbers();
+    void wifiDisconnectedStatusSaysSo();
+    void wifiScanFillsTheList();
+    void wifiConnectSendsOnlyTheNeededFields();
+    void wifiOpenNetworkNeedsNoPassword();
+    void wifiForgetIsOnlyOfferedForTheActiveOne();
+    void wifiAckRendersTheAgentsWords();
+    void wifiScanButtonAsksForAScan();
 
 private:
     QString writeConfig(QTemporaryDir& tmp, const QString& extra = QString());
@@ -319,6 +331,210 @@ void TestSettingsPage::restoreDefaultsOnlyTouchesUi()
     QVERIFY(page.profileEnabledCheck()->isChecked());
     QCOMPARE(page.profileCharsSpin()->value(), 2000);
     QCOMPARE(page.cookiePathEdit()->text(), QStringLiteral("config/bilibili_cookie.json"));
+}
+
+// ===========================================================================
+//  T14-9：网络（WiFi）卡片
+// ===========================================================================
+void TestSettingsPage::wifiStatusRendersRealNumbers()
+{
+    SettingsPage page;
+    QJsonObject status;
+    status.insert(QStringLiteral("kind"), QStringLiteral("status"));
+    status.insert(QStringLiteral("device"), QStringLiteral("wlan0"));
+    status.insert(QStringLiteral("state"), QStringLiteral("connected"));
+    status.insert(QStringLiteral("ssid"), QStringLiteral("Anorak_host"));
+    status.insert(QStringLiteral("signal"), 96);
+    status.insert(QStringLiteral("ip"), QStringLiteral("192.168.137.30"));
+    status.insert(QStringLiteral("gateway"), QStringLiteral("192.168.137.1"));
+    status.insert(QStringLiteral("connected"), true);
+    status.insert(QStringLiteral("autoconnect"), true);
+    QJsonObject guard;
+    guard.insert(QStringLiteral("probes"), 12);
+    guard.insert(QStringLiteral("consecutive_failures"), 0);
+    guard.insert(QStringLiteral("threshold"), 3);
+    guard.insert(QStringLiteral("repairs"), 0);
+    status.insert(QStringLiteral("guard"), guard);
+    page.onWifiResult(status);
+
+    const QString text = page.wifiStatusLabel()->text();
+    QVERIFY2(text.contains(QStringLiteral("Anorak_host")), qPrintable(text));
+    QVERIFY2(text.contains(QStringLiteral("96")), qPrintable(text));
+    QVERIFY2(text.contains(QStringLiteral("192.168.137.30")), qPrintable(text));
+    QVERIFY2(text.contains(QStringLiteral("体检")), qPrintable(text));
+    QVERIFY2(page.wifiAutoconnectCheck()->isChecked(), "回填当前网络的自动连接状态");
+}
+
+void TestSettingsPage::wifiDisconnectedStatusSaysSo()
+{
+    SettingsPage page;
+    QJsonObject status;
+    status.insert(QStringLiteral("kind"), QStringLiteral("status"));
+    status.insert(QStringLiteral("device"), QStringLiteral("wlan0"));
+    status.insert(QStringLiteral("state"), QStringLiteral("disconnected"));
+    status.insert(QStringLiteral("connected"), false);
+    page.onWifiResult(status);
+    QVERIFY2(page.wifiStatusLabel()->text().contains(QStringLiteral("没连上")),
+             qPrintable(page.wifiStatusLabel()->text()));
+}
+
+void TestSettingsPage::wifiScanFillsTheList()
+{
+    SettingsPage page;
+    QJsonArray points;
+    const auto add = [&points](const QString& ssid, int signal, bool secured, bool inUse) {
+        QJsonObject point;
+        point.insert(QStringLiteral("ssid"), ssid);
+        point.insert(QStringLiteral("signal"), signal);
+        point.insert(QStringLiteral("secured"), secured);
+        point.insert(QStringLiteral("in_use"), inUse);
+        point.insert(QStringLiteral("security"), secured ? QStringLiteral("WPA2") : QString());
+        points.append(point);
+    };
+    add(QStringLiteral("Anorak_host"), 100, true, true);
+    add(QStringLiteral("开放网络"), 42, false, false);
+    QJsonObject scan;
+    scan.insert(QStringLiteral("kind"), QStringLiteral("scan"));
+    scan.insert(QStringLiteral("points"), points);
+    scan.insert(QStringLiteral("count"), 2);
+    page.onWifiResult(scan);
+
+    QCOMPARE(page.wifiList()->count(), 2);
+    QVERIFY2(page.wifiList()->item(0)->text().contains(QStringLiteral("Anorak_host")),
+             qPrintable(page.wifiList()->item(0)->text()));
+    QVERIFY2(page.wifiList()->item(0)->text().contains(QStringLiteral("●")), "已连的要标出来");
+    QVERIFY2(page.wifiList()->item(1)->text().contains(QStringLiteral("开放")), "开放网络要标出来");
+    QCOMPARE(page.selectedSsid(), QStringLiteral("Anorak_host"));   // 默认选第一个
+}
+
+void TestSettingsPage::wifiConnectSendsOnlyTheNeededFields()
+{
+    SettingsPage page;
+    QSignalSpy spy(&page, &SettingsPage::wifiRequested);
+    QJsonObject scan;
+    scan.insert(QStringLiteral("kind"), QStringLiteral("scan"));
+    QJsonArray points;
+    QJsonObject point;
+    point.insert(QStringLiteral("ssid"), QStringLiteral("家里WiFi"));
+    point.insert(QStringLiteral("signal"), 80);
+    point.insert(QStringLiteral("secured"), true);
+    point.insert(QStringLiteral("in_use"), false);
+    points.append(point);
+    scan.insert(QStringLiteral("points"), points);
+    page.onWifiResult(scan);
+
+    // 没填密码：secured 的网络不该发出去（界面先拦）
+    page.wifiConnectButton()->click();
+    QCOMPARE(spy.count(), 0);
+    QVERIFY2(page.wifiResultLabel()->text().contains(QStringLiteral("需要密码")),
+             qPrintable(page.wifiResultLabel()->text()));
+
+    page.wifiPasswordEdit()->setText(QStringLiteral("s3cret"));
+    page.wifiAutoconnectCheck()->setChecked(false);
+    page.wifiConnectButton()->click();
+    QCOMPARE(spy.count(), 1);
+    const QList<QVariant> args = spy.takeFirst();
+    QCOMPARE(args.at(0).toString(), QStringLiteral("connect"));
+    const QJsonObject payload = args.at(1).toJsonObject();
+    QCOMPARE(payload.value(QStringLiteral("ssid")).toString(), QStringLiteral("家里WiFi"));
+    QCOMPARE(payload.value(QStringLiteral("password")).toString(), QStringLiteral("s3cret"));
+    QCOMPARE(payload.value(QStringLiteral("autoconnect")).toBool(), false);
+}
+
+void TestSettingsPage::wifiOpenNetworkNeedsNoPassword()
+{
+    SettingsPage page;
+    QSignalSpy spy(&page, &SettingsPage::wifiRequested);
+    QJsonObject scan;
+    scan.insert(QStringLiteral("kind"), QStringLiteral("scan"));
+    QJsonArray points;
+    QJsonObject point;
+    point.insert(QStringLiteral("ssid"), QStringLiteral("免费WiFi"));
+    point.insert(QStringLiteral("signal"), 30);
+    point.insert(QStringLiteral("secured"), false);
+    point.insert(QStringLiteral("in_use"), false);
+    points.append(point);
+    scan.insert(QStringLiteral("points"), points);
+    page.onWifiResult(scan);
+    page.wifiConnectButton()->click();
+    QCOMPARE(spy.count(), 1);
+    const QJsonObject payload = spy.takeFirst().at(1).toJsonObject();
+    QCOMPARE(payload.value(QStringLiteral("ssid")).toString(), QStringLiteral("免费WiFi"));
+    QVERIFY2(!payload.contains(QStringLiteral("password")), "开放网络不该带 password 字段");
+}
+
+void TestSettingsPage::wifiForgetIsOnlyOfferedForTheActiveOne()
+{
+    SettingsPage page;
+    QSignalSpy spy(&page, &SettingsPage::wifiRequested);
+    QJsonObject status;
+    status.insert(QStringLiteral("kind"), QStringLiteral("status"));
+    status.insert(QStringLiteral("ssid"), QStringLiteral("Anorak_host"));
+    status.insert(QStringLiteral("connected"), true);
+    page.onWifiResult(status);
+
+    QJsonObject scan;
+    scan.insert(QStringLiteral("kind"), QStringLiteral("scan"));
+    QJsonArray points;
+    QJsonObject active;
+    active.insert(QStringLiteral("ssid"), QStringLiteral("Anorak_host"));
+    active.insert(QStringLiteral("signal"), 100);
+    active.insert(QStringLiteral("secured"), true);
+    active.insert(QStringLiteral("in_use"), true);
+    QJsonObject other;
+    other.insert(QStringLiteral("ssid"), QStringLiteral("邻居家"));
+    other.insert(QStringLiteral("signal"), 20);
+    other.insert(QStringLiteral("secured"), true);
+    other.insert(QStringLiteral("in_use"), false);
+    points.append(active);
+    points.append(other);
+    scan.insert(QStringLiteral("points"), points);
+    page.onWifiResult(scan);
+    QCOMPARE(page.selectedSsid(), QStringLiteral("Anorak_host"));
+    QVERIFY(page.wifiForgetButton()->isEnabled());
+
+    // 选一个"不是当前连接"的网络 → 「忘记」该禁用（避免误删别人的档案）
+    page.wifiList()->setCurrentRow(1);
+    QCOMPARE(page.selectedSsid(), QStringLiteral("邻居家"));
+    QVERIFY2(!page.wifiForgetButton()->isEnabled(),
+             "非当前网络的「忘记」应该禁用（板端只有一条链路，删档案要非常小心）");
+    Q_UNUSED(spy);
+}
+
+void TestSettingsPage::wifiAckRendersTheAgentsWords()
+{
+    SettingsPage page;
+    QJsonObject ack;
+    ack.insert(QStringLiteral("kind"), QStringLiteral("ack"));
+    ack.insert(QStringLiteral("action"), QStringLiteral("connect"));
+    ack.insert(QStringLiteral("ok"), false);
+    ack.insert(QStringLiteral("message"), QStringLiteral("Error: no network with SSID 'x' found"));
+    page.onWifiResult(ack);
+    QVERIFY2(page.wifiResultLabel()->text().contains(QStringLiteral("no network with SSID")),
+             qPrintable(page.wifiResultLabel()->text()));
+    QVERIFY2(page.wifiResultLabel()->text().contains(QStringLiteral("✘")),
+             "失败要有记号");
+
+    QJsonObject ok;
+    ok.insert(QStringLiteral("kind"), QStringLiteral("ack"));
+    ok.insert(QStringLiteral("action"), QStringLiteral("connect"));
+    ok.insert(QStringLiteral("ok"), true);
+    ok.insert(QStringLiteral("message"), QStringLiteral("已连接 Anorak_host（192.168.137.30）"));
+    page.onWifiResult(ok);
+    QVERIFY2(page.wifiResultLabel()->text().contains(QStringLiteral("✔")), "成功要有记号");
+}
+
+void TestSettingsPage::wifiScanButtonAsksForAScan()
+{
+    SettingsPage page;
+    QSignalSpy spy(&page, &SettingsPage::wifiRequested);
+    page.wifiScanButton()->click();
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.takeFirst().at(0).toString(), QStringLiteral("scan"));
+
+    page.wifiReconnectButton()->click();
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.takeFirst().at(0).toString(), QStringLiteral("reconnect"));
 }
 
 QTEST_MAIN(TestSettingsPage)

@@ -23,10 +23,13 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -301,6 +304,63 @@ void SettingsPage::build()
         "用户在对话里说什么都触发不了它，模型也看不到它。结果写 config/user_profile.jsonl。")));
     root->addWidget(profile);
 
+    // ---- T14-9：第四张卡片「网络」（WiFi）--------------------------------------
+    //  为什么是卡片而不是首页一整块（你 2026-09-27 定的）：与现有三张卡片一致，
+    //  不占首页版面；状态与操作都在卡片里。
+    //  ⚠ 这一整张卡片**只发 IPC**：nmcli 由 Agent 调（docs/adr/0005）。
+    QVBoxLayout* netBox = nullptr;
+    QFrame* net = makeCard(this, QStringLiteral("网络（WiFi）"), &netBox);
+
+    wifiStatus_ = new QLabel(net);
+    wifiStatus_->setObjectName(QStringLiteral("SysValueSmall"));
+    wifiStatus_->setWordWrap(true);
+    netBox->addWidget(wifiStatus_);
+
+    auto* netButtons = new QHBoxLayout();
+    netButtons->setSpacing(8);
+    wifiScan_ = new QPushButton(QStringLiteral("扫描"), net);
+    wifiReconnect_ = new QPushButton(QStringLiteral("重连"), net);
+    wifiForget_ = new QPushButton(QStringLiteral("忘记"), net);
+    for (QPushButton* button : {wifiScan_, wifiReconnect_, wifiForget_}) {
+        button->setObjectName(QStringLiteral("VideoCtl"));
+        button->setCursor(Qt::PointingHandCursor);
+        button->setMinimumHeight(36);
+        netButtons->addWidget(button);
+    }
+    netButtons->addStretch(1);
+    netBox->addLayout(netButtons);
+
+    wifiList_ = new QListWidget(net);
+    wifiList_->setObjectName(QStringLiteral("WifiList"));
+    wifiList_->setMinimumHeight(150);
+    wifiList_->setSelectionMode(QAbstractItemView::SingleSelection);
+    netBox->addWidget(wifiList_);
+
+    auto* netForm = new QFormLayout();
+    netForm->setLabelAlignment(Qt::AlignLeft);
+    wifiPassword_ = new QLineEdit(net);
+    wifiPassword_->setEchoMode(QLineEdit::Password);
+    wifiPassword_->setPlaceholderText(QStringLiteral("密码（开放网络留空）"));
+    wifiAutoconnect_ = new QCheckBox(QStringLiteral("记住并自动连接"), net);
+    wifiAutoconnect_->setChecked(true);
+    wifiConnect_ = new QPushButton(QStringLiteral("连接"), net);
+    wifiConnect_->setObjectName(QStringLiteral("ChatSend"));
+    wifiConnect_->setCursor(Qt::PointingHandCursor);
+    wifiConnect_->setMinimumHeight(40);
+    netForm->addRow(QStringLiteral("密码"), wifiPassword_);
+    netForm->addRow(QString(), wifiAutoconnect_);
+    netBox->addLayout(netForm);
+    netBox->addWidget(wifiConnect_);
+
+    wifiResult_ = new QLabel(net);
+    wifiResult_->setObjectName(QStringLiteral("ChatSystem"));
+    wifiResult_->setWordWrap(true);
+    netBox->addWidget(wifiResult_);
+    netBox->addWidget(makeNote(net, QStringLiteral(
+        "⚠ 板端只有 wlan0 这一条链路：忘记正在用的那个网络 = 板子马上失联。"
+        "密码只发给 Agent（写进 NetworkManager 自己的档案，0600），不进 config.yaml。")));
+    root->addWidget(net);
+
     QVBoxLayout* cfgBox = nullptr;
     QFrame* cfg = makeCard(this, QStringLiteral("配置"), &cfgBox);
     path_ = new QLabel(cfg);
@@ -365,6 +425,229 @@ void SettingsPage::build()
         emit startAgentRequested();
     });
     connect(defaults_, &QPushButton::clicked, this, [this]() { restoreDefaults(); });
+
+    // ---- T14-9：网络卡片的按钮 ------------------------------------------------
+    //  每一个都只发 IPC（Agent 去调 nmcli）。回执到了由 onWifiResult() 显示。
+    //  密码**只在 connect 那一次进 payload**，不写进任何配置文件。
+    const auto askWifi = [this](const QString& action, const QJsonObject& extra) {
+        emit wifiRequested(action, extra);
+    };
+    connect(wifiScan_, &QPushButton::clicked, this, [this, askWifi]() {
+        wifiResult_->setText(QStringLiteral("正在扫描…（要几秒）"));
+        askWifi(QStringLiteral("scan"), {});
+    });
+    connect(wifiReconnect_, &QPushButton::clicked, this, [this, askWifi]() {
+        wifiResult_->setText(QStringLiteral("正在体检链路…"));
+        askWifi(QStringLiteral("reconnect"), {});
+    });
+    connect(wifiConnect_, &QPushButton::clicked, this, [this, askWifi]() {
+        const QString ssid = selectedSsid();
+        if (ssid.isEmpty()) {
+            wifiResult_->setText(QStringLiteral("先在上面选一个网络"));
+            return;
+        }
+        const bool secured = wifiSecured_.value(ssid, true);
+        if (secured && wifiPassword_->text().isEmpty()) {
+            wifiResult_->setText(QStringLiteral("%1 需要密码").arg(ssid));
+            return;
+        }
+        QJsonObject payload;
+        payload.insert(QStringLiteral("ssid"), ssid);
+        if (!wifiPassword_->text().isEmpty()) {
+            payload.insert(QStringLiteral("password"), wifiPassword_->text());
+        }
+        payload.insert(QStringLiteral("autoconnect"), wifiAutoconnect_->isChecked());
+        wifiResult_->setText(QStringLiteral("正在连 %1 …").arg(ssid));
+        askWifi(QStringLiteral("connect"), payload);
+    });
+    connect(wifiForget_, &QPushButton::clicked, this, [this, askWifi]() {
+        const QString ssid = selectedSsid();
+        if (ssid.isEmpty()) {
+            wifiResult_->setText(QStringLiteral("先在上面选一个网络"));
+            return;
+        }
+        // ⚠ 板端只有这一条链路：忘记正在用的那个 = 板子失联，必须确认
+        const QString active = wifiStatusData_.value(QStringLiteral("ssid")).toString();
+        if (ssid == active) {
+            const auto answer = QMessageBox::warning(
+                this, QStringLiteral("忘记网络"),
+                QStringLiteral("「%1」正在使用中 —— 忘记它之后板子会**立刻失联**，"
+                               "要重新连上得有人手动操作。确定忘记吗？").arg(ssid),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (answer != QMessageBox::Yes) {
+                wifiResult_->setText(QStringLiteral("已取消"));
+                return;
+            }
+        }
+        QJsonObject payload;
+        payload.insert(QStringLiteral("ssid"), ssid);
+        askWifi(QStringLiteral("forget"), payload);
+    });
+    connect(wifiList_, &QListWidget::itemSelectionChanged, this, [this]() {
+        const QString ssid = selectedSsid();
+        const bool secured = wifiSecured_.value(ssid, true);
+        wifiPassword_->setEnabled(ssid.isEmpty() ? true : secured);
+        wifiPassword_->setPlaceholderText(
+            ssid.isEmpty() ? QStringLiteral("密码（先在列表里选一个网络）")
+                           : (secured ? QStringLiteral("密码") 
+                                      : QStringLiteral("开放网络，不用密码")));
+        // 选中的是不是当前连着的那个 → 「忘记」才有意义
+        const QString active = wifiStatusData_.value(QStringLiteral("ssid")).toString();
+        wifiForget_->setEnabled(!ssid.isEmpty() && ssid == active);
+    });
+    connect(wifiAutoconnect_, &QCheckBox::toggled, this, [this, askWifi](bool on) {
+        const QString ssid = selectedSsid();
+        if (ssid.isEmpty()) {
+            return;                       // 没选网络时它只是个"连接时要不要记住"的勾
+        }
+        const QString active = wifiStatusData_.value(QStringLiteral("ssid")).toString();
+        if (ssid != active) {
+            return;                       // 非当前网络：等点「连接」时一起发
+        }
+        QJsonObject payload;
+        payload.insert(QStringLiteral("ssid"), ssid);
+        payload.insert(QStringLiteral("autoconnect"), on);
+        askWifi(QStringLiteral("autoconnect"), payload);
+    });
+}
+
+// ---------------------------------------------------------------------------
+//  T14-9：网络卡片
+// ---------------------------------------------------------------------------
+QString SettingsPage::selectedSsid() const
+{
+    if (wifiList_ == nullptr) {
+        return QString();
+    }
+    QListWidgetItem* item = wifiList_->currentItem();
+    if (item == nullptr || !item->isSelected()) {
+        return QString();
+    }
+    return item->data(Qt::UserRole).toString();
+}
+
+void SettingsPage::requestWifiStatus()
+{
+    if (wifiStatus_ != nullptr) {
+        emit wifiRequested(QStringLiteral("status"), QJsonObject());
+    }
+}
+
+void SettingsPage::requestWifiScan()
+{
+    if (wifiList_ != nullptr) {
+        emit wifiRequested(QStringLiteral("scan"), QJsonObject());
+    }
+}
+
+void SettingsPage::onWifiResult(const QJsonObject& data)
+{
+    const QString kind = data.value(QStringLiteral("kind")).toString();
+
+    if (kind == QLatin1String("status")) {
+        wifiStatusData_ = data;
+        const QString device = data.value(QStringLiteral("device")).toString();
+        const QString state = data.value(QStringLiteral("state")).toString();
+        const QString ssid = data.value(QStringLiteral("ssid")).toString();
+        const int signal = data.value(QStringLiteral("signal")).toInt();
+        const QString ip = data.value(QStringLiteral("ip")).toString();
+        const QString gateway = data.value(QStringLiteral("gateway")).toString();
+        const bool connected = data.value(QStringLiteral("connected")).toBool();
+        const bool autoconnect = data.value(QStringLiteral("autoconnect")).toBool();
+
+        QString text;
+        if (connected) {
+            text = QStringLiteral("%1 · 已连接 %2 · 信号 %3 · IP %4 · 网关 %5 · 自动连接 %6")
+                       .arg(device, ssid.isEmpty() ? QStringLiteral("(未知)") : ssid)
+                       .arg(signal)
+                       .arg(ip.isEmpty() ? QStringLiteral("无") : ip,
+                            gateway.isEmpty() ? QStringLiteral("无") : gateway,
+                            autoconnect ? QStringLiteral("开") : QStringLiteral("关"));
+        } else {
+            text = QStringLiteral("%1 · %2 · 没连上（点「扫描」挑一个网络）")
+                       .arg(device, state.isEmpty() ? QStringLiteral("未知") : state);
+        }
+        // 链路体检那一段（Agent 侧 LinkGuard 的真实数字）
+        const QJsonObject guard = data.value(QStringLiteral("guard")).toObject();
+        if (!guard.isEmpty()) {
+            const QJsonObject last = guard.value(QStringLiteral("last")).toObject();
+            text += QStringLiteral("\n体检：%1 次；连续失败 %2/%3；已主动重连 %4 次")
+                        .arg(guard.value(QStringLiteral("probes")).toInt())
+                        .arg(guard.value(QStringLiteral("consecutive_failures")).toInt())
+                        .arg(guard.value(QStringLiteral("threshold")).toInt())
+                        .arg(guard.value(QStringLiteral("repairs")).toInt());
+            if (!last.isEmpty()) {
+                text += QStringLiteral("；网关 %1")
+                            .arg(last.value(QStringLiteral("gateway_reachable")).toBool()
+                                     ? QStringLiteral("可达") : QStringLiteral("不可达"));
+            }
+        }
+        wifiStatus_->setText(text);
+        if (wifiAutoconnect_ != nullptr && connected) {
+            QSignalBlocker blocker(wifiAutoconnect_);      // 回填不该再触发一次请求
+            wifiAutoconnect_->setChecked(autoconnect);
+        }
+        return;
+    }
+
+    if (kind == QLatin1String("scan")) {
+        const QJsonArray points = data.value(QStringLiteral("points")).toArray();
+        wifiSecured_.clear();
+        if (wifiList_ != nullptr) {
+            const QString previous = selectedSsid();
+            wifiList_->clear();
+            for (const QJsonValue& value : points) {
+                const QJsonObject point = value.toObject();
+                const QString ssid = point.value(QStringLiteral("ssid")).toString();
+                if (ssid.isEmpty()) {
+                    continue;
+                }
+                const bool secured = point.value(QStringLiteral("secured")).toBool();
+                wifiSecured_.insert(ssid, secured);
+                const bool inUse = point.value(QStringLiteral("in_use")).toBool();
+                auto* item = new QListWidgetItem(
+                    QStringLiteral("%1%2  %3  %4")
+                        .arg(inUse ? QStringLiteral("● ") : QStringLiteral("   "), ssid,
+                             QStringLiteral("信号 %1").arg(
+                                 point.value(QStringLiteral("signal")).toInt()),
+                             secured ? QStringLiteral("🔒") : QStringLiteral("开放")));
+                item->setData(Qt::UserRole, ssid);
+                if (inUse) {
+                    QFont font = item->font();
+                    font.setBold(true);
+                    item->setFont(font);
+                }
+                wifiList_->addItem(item);
+                if (ssid == previous) {
+                    wifiList_->setCurrentItem(item);
+                }
+            }
+            if (wifiList_->currentItem() == nullptr && wifiList_->count() > 0) {
+                wifiList_->setCurrentRow(0);       // 默认选第一个（已连的排在最前）
+            }
+        }
+        wifiResult_->setText(QStringLiteral("扫到 %1 个网络（同名只留信号最强的那个）")
+                                 .arg(data.value(QStringLiteral("count")).toInt()));
+        return;
+    }
+
+    if (kind == QLatin1String("ack")) {
+        const bool ok = data.value(QStringLiteral("ok")).toBool();
+        const QString message = data.value(QStringLiteral("message")).toString();
+        const QString action = data.value(QStringLiteral("action")).toString();
+        wifiResult_->setText(QStringLiteral("%1 %2")
+                                 .arg(ok ? QStringLiteral("✔") : QStringLiteral("✘"), message));
+        if (ok) {
+            wifiPassword_->clear();               // 密码用完就丢，不留在一个可见控件里
+            if (action == QLatin1String("connect") || action == QLatin1String("forget")
+                || action == QLatin1String("autoconnect")) {
+                // 动作会改变状态 → 立刻重新拉一次快照
+                QTimer::singleShot(300, this, [this]() { requestWifiStatus(); });
+            }
+        }
+        return;
+    }
+    qWarning().noquote() << "[settings] 不认识的 wifi 载荷 kind:" << kind;
 }
 
 QComboBox* SettingsPage::regionMode(const QString& region) const
@@ -398,6 +681,8 @@ void SettingsPage::showEvent(QShowEvent* event)
     toTop();
     QTimer::singleShot(0, this, toTop);
     QTimer::singleShot(300, this, toTop);
+    // T14-9：显示时顺手要一次 WiFi 状态（很便宜；卡片打开就该有真实数字）
+    requestWifiStatus();
 }
 
 QString SettingsPage::repoRootFor(const QString& configPath)

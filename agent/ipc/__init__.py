@@ -19,7 +19,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from agent.config import read_config_file
 from agent.core import llm_env, settings_config, settings_credentials
@@ -47,6 +47,7 @@ from .protocol import (
     COMMAND_BILIBILI_VIEWPORT,
     COMMAND_CHAT_INPUT,
     COMMAND_LLM_SERVICE,
+    COMMAND_WIFI,
     COMMAND_MUSIC_NEXT,
     COMMAND_MUSIC_PLAY_PAUSE,
     COMMAND_MUSIC_PREV,
@@ -75,6 +76,7 @@ from .protocol import (
     TOPIC_MUSIC,
     TOPIC_SCHEDULE,
     TOPIC_SERVICE_RESULT,
+    TOPIC_WIFI,
     TOPIC_STATUS,
     TOPIC_WALLPAPER,
     TOPICS,
@@ -472,6 +474,125 @@ def _handle_llm_service(runtime: Any, payload: dict, push: Any) -> None:
     _finish()
 
 
+def _wifi_work(runtime: Any, payload: dict) -> List[Tuple[str, Dict[str, Any]]]:
+    """`wifi` 命令的**纯计算**部分：返回要推的 `[(kind, data)]`。
+
+    ⚠ 刻意不碰 `push`：它会在线程池里跑（nmcli 扫描要几秒，不能卡住事件循环），
+      而 IPC 的推送只能由事件循环线程做（见 `_handle_wifi`）。
+
+    payload: `{action, id?, ssid?, password?, autoconnect?}`
+    ⚠ 密码只在这里出现一次，**不写日志、不写 config.yaml**（`Wifi.connect` 负责
+      "进 stdin / 进 0600 keyfile"）。日志里只记 `action` 与 SSID。
+    """
+    from agent.net.wifi import Wifi, WifiError      # 局部导入: ipc 层不往外扩依赖
+
+    request_id = payload.get("id")
+    if not isinstance(request_id, str):
+        request_id = ""
+    action = payload.get("action")
+    ssid = payload.get("ssid")
+    password = payload.get("password")
+    if password is not None and not isinstance(password, str):
+        password = None
+    events: List[Tuple[str, Dict[str, Any]]] = []
+
+    def _ack(ok: bool, message: str, **extra: Any) -> None:
+        reply: Dict[str, Any] = {"id": request_id, "ok": ok, "action": action,
+                                 "message": message}
+        reply.update(extra)
+        events.append(("ack", reply))
+
+    if not isinstance(action, str) or action not in (
+            "status", "scan", "connect", "forget", "autoconnect", "reconnect"):
+        _ack(False, "action 只能是 status / scan / connect / forget / autoconnect / "
+                    "reconnect（收到 %r）" % (action,))
+        return events
+
+    wifi = getattr(runtime, "wifi", None) if runtime is not None else None
+    if wifi is None:
+        try:
+            wifi = Wifi(log=_log)
+        except Exception as exc:                       # noqa: BLE001
+            _ack(False, "起不了 Wifi 封装: %s" % exc)
+            return events
+
+    def _status_payload() -> Dict[str, Any]:
+        payload_out = wifi.status().to_dict()
+        guard = getattr(runtime, "link_guard", None) if runtime is not None else None
+        if guard is not None and hasattr(guard, "status_dict"):
+            payload_out["guard"] = guard.status_dict()
+        return payload_out
+
+    try:
+        if action == "status":
+            events.append(("status", _status_payload()))
+        elif action == "scan":
+            points = [point.to_dict() for point in wifi.scan()]
+            events.append(("scan", {"points": points, "count": len(points)}))
+        elif action == "connect":
+            if not isinstance(ssid, str) or not ssid:
+                _ack(False, "connect 需要 ssid")
+                return events
+            autoconnect = payload.get("autoconnect")
+            autoconnect = True if autoconnect is None else bool(autoconnect)
+            result = wifi.connect(ssid, password, autoconnect=autoconnect)
+            _log.info("ipc: wifi connect %r -> %s", ssid, result.get("profile"))
+            _ack(True, "已连接 %s（%s）" % (ssid, result.get("ip") or "无 IP"),
+                 ssid=ssid, profile=result.get("profile"),
+                 autoconnect=bool(result.get("autoconnect")))
+        elif action == "forget":
+            if not isinstance(ssid, str) or not ssid:
+                _ack(False, "forget 需要 ssid")
+                return events
+            result = wifi.forget(ssid)
+            _log.info("ipc: wifi forget %r（was_active=%s）", ssid, result.get("was_active"))
+            message = "已忘记 %s" % ssid
+            if result.get("was_active"):
+                message += "（它正在用 —— 链路会断）"
+            _ack(True, message, ssid=ssid, was_active=bool(result.get("was_active")))
+        elif action == "autoconnect":
+            if not isinstance(ssid, str) or not ssid:
+                _ack(False, "autoconnect 需要 ssid")
+                return events
+            on = bool(payload.get("autoconnect", True))
+            result = wifi.set_autoconnect(ssid, on)
+            _ack(True, "%s 自动连接已%s" % (ssid, "打开" if on else "关闭"),
+                 ssid=ssid, autoconnect=bool(result.get("autoconnect")))
+        else:                                          # reconnect
+            guard = getattr(runtime, "link_guard", None) if runtime is not None else None
+            if guard is not None and hasattr(guard, "probe"):
+                health = guard.probe()                 # 里面会按需重连（含日志）
+                _ack(bool(health.ok), "链路体检：%s" % ("正常" if health.ok else "仍不通"),
+                     health=health.to_dict())
+            else:
+                wifi.reconnect()
+                health = wifi.health()
+                _ack(bool(health.ok), "已尝试重连：%s" % ("通了" if health.ok else "仍不通"),
+                     health=health.to_dict())
+    except WifiError as exc:
+        _log.warning("ipc: wifi %s 失败: %s", action, exc)
+        _ack(False, str(exc))
+    except Exception as exc:                           # noqa: BLE001
+        _log.warning("ipc: wifi %s 意外失败: %r", action, exc)
+        _ack(False, "WiFi 操作失败: %s" % exc)
+    return events
+
+
+async def _handle_wifi(runtime: Any, payload: dict, push: Any) -> None:
+    """`wifi` 命令（T14-9）：**计算放线程池、推送回事件循环**。
+
+    nmcli 的扫描要几秒（`--rescan yes`），直接同步跑会把推送循环卡住（扫描时 GUI
+    还在等 status）。而 IPC 的 `push` 只能在事件循环线程调用 —— 所以这里分成两步。
+    """
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    events = await loop.run_in_executor(None, _wifi_work, runtime, payload)
+    for kind, data in events:
+        if push is not None:
+            push(TOPIC_WIFI, dict(data, kind=kind))
+
+
 def _handle_set_config(runtime: Any, payload: dict, push: Any) -> None:
     """`set_config`：**Agent 是配置真源唯一的写入者**（T14-2，见 docs/adr/0005）。
 
@@ -647,6 +768,10 @@ def _make_command_handler(bus: Any, runtime: Any = None, push: Any = None):
 
         if action == COMMAND_LLM_SERVICE:
             _handle_llm_service(runtime, payload, push)
+            return
+
+        if action == COMMAND_WIFI:
+            await _handle_wifi(runtime, payload, push)
             return
 
         if action in _MUSIC_ACTIONS:

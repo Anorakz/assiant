@@ -51,9 +51,11 @@ class TestConstants(unittest.TestCase):
         self.assertEqual(p.TOPIC_CONFIG_RESULT, "config_result")
         # T14-3: 一次 llm_service（启停本机 llama-server）的回执
         self.assertEqual(p.TOPIC_SERVICE_RESULT, "service_result")
+        # T14-9: 本机 WiFi 链路（kind=status|scan|ack）
+        self.assertEqual(p.TOPIC_WIFI, "wifi")
         self.assertEqual(p.TOPICS,
                          ("status", "llm", "wallpaper", "music", "schedule", "bilibili",
-                          "config_result", "service_result"))
+                          "config_result", "service_result", "wifi"))
 
     def test_commands(self):
         self.assertEqual(p.COMMAND_SWITCH_MODE, "switch_mode")
@@ -63,12 +65,15 @@ class TestConstants(unittest.TestCase):
         self.assertEqual(p.COMMAND_SET_CONFIG, "set_config")
         # T14-3: 让 Agent 跑 llm/scripts/*.sh（模型页那两颗按钮）
         self.assertEqual(p.COMMAND_LLM_SERVICE, "llm_service")
+        # T14-9: 让 Agent 操作 wlan0（nmcli）—— 名字不能也叫 "wifi"（topic 已占用）
+        self.assertEqual(p.COMMAND_WIFI, "wifi_control")
+        self.assertNotEqual(p.COMMAND_WIFI, p.TOPIC_WIFI)
         self.assertEqual(p.COMMANDS,
                          ("switch_mode", "chat_input",
                           "next_bilibili", "prev_bilibili", "bilibili_pick",
                           "bilibili_viewport", "video_state", "video_control", "query_schedule",
                           "music_play_pause", "music_next", "music_prev", "music_stop",
-                          "set_config", "llm_service"))
+                          "set_config", "llm_service", "wifi_control"))
 
     def test_bilibili_commands(self):
         # T11-6: B 站那几个按钮/回报。⚠ 与音乐同一条口径: 它们**不决定放什么**
@@ -421,9 +426,9 @@ class TestWireContract(unittest.TestCase):
                                  (topic, data))
 
     def test_every_documented_topic_and_command_is_covered(self):
-        # 防止"文档加了条目但测试漏了"（8 个 topic + 15 条命令 = 23）
+        # 防止"文档加了条目但测试漏了"（9 个 topic + 16 条命令 = 25）
         documented = set(p.TOPICS) | set(p.COMMANDS)
-        self.assertEqual(len(documented), 23)
+        self.assertEqual(len(documented), 25)
 
     def test_one_message_is_exactly_one_line(self):
         # NDJSON 的前提: 消息里不能出现裸换行

@@ -271,7 +271,7 @@ class TestNoGuiConfigLeftovers(unittest.TestCase):
 WRITE_PRIMITIVES = (r"(os\.replace|mkstemp|\.write_text\(|write_text_atomic\("
                     r"|open\([^)]*,\s*[\"']a)")
 
-#: 允许出现写入原语的文件（**只有**这十二个）。
+#: 允许出现写入原语的文件（**只有**这十三个）。
 ALLOWED_WRITERS = {
     "agent/config.py",               # write_text_atomic: 全仓唯一的"原子写文本"实现
     "agent/core/schedule_config.py", # 唯一被允许的调用方: 删掉已触发的一次性日程 (R3) +
@@ -334,6 +334,14 @@ ALLOWED_WRITERS = {
     #   边界由 TestCrashLogWritesOnlyItsOwnDirectory 钉住: 这个文件里**不许出现**任何
     #   配置/凭据/派生文件的名字（config.yaml / llm.env / bilibili_cookie.json …）。
     "agent/core/crash_log.py",
+    # T14-9 新增的第十三个写入者: **NetworkManager 的 WiFi 档案**
+    #   （/etc/NetworkManager/system-connections/*.nmconnection）。
+    # ⚠ 写它只为一件事：GUI/CLI 要连一个新网络时，**密码不能进 argv**（`ps` 会看见），
+    #   所以由 Agent 写一份 NM 自己的 keyfile（**0600 root**）再 `con reload && con up`。
+    #   它写的既不是真源也不是派生数据，是 NM 自己的档案格式；密码只落在这一个文件里。
+    #   边界由 TestWifiWritesOnlyNetworkManagerProfiles 钉住: 不许 import 任何配置写入者、
+    #   写原语那几行不许出现 config/llm 字样、目标必须来自 `self.nm_dir` + `.nmconnection`。
+    "agent/net/wifi.py",
 }
 
 
@@ -360,7 +368,7 @@ class TestWhoWritesTheConfig(unittest.TestCase):
                       % (", ".join(sorted(ALLOWED_WRITERS)), "\n  ".join(offenders)))
 
     def test_the_writer_scan_is_not_vacuous(self):
-        """反空转：白名单里那十二个文件**真的**命中了写入原语，否则这条守卫什么都没查。
+        """反空转：白名单里那十三个文件**真的**命中了写入原语，否则这条守卫什么都没查。
 
         ⚠ T11-8：这条断言正是"补上追加写"的理由 —— 只把 `game_anchors.py` 加进白名单
         而正则不认 `open(path, "a")`，这里就会红（那份白名单是假的）。
@@ -425,6 +433,55 @@ class TestCrashLogWritesOnlyItsOwnDirectory(unittest.TestCase):
         self.assertTrue(re.search(WRITE_PRIMITIVES, probe))
         self.assertIn("config.yaml", probe)          # 上面那条检查的判据
         self.assertNotIn("config.yaml", "self.path.write_text(line)")   # 正常写法不该命中
+
+
+class TestWifiWritesOnlyNetworkManagerProfiles(unittest.TestCase):
+    """T14-9：`agent/net/wifi.py` 进了白名单，但它的边界是"只写 NM 的档案目录"。
+
+    它必须写文件（新网络的密码不能进 argv，只能落进 NM 自己的 keyfile），
+    所以这里把"它不可能是配置写入者"钉成机械可查的事实：
+      · 不许 import 任何配置/凭据写入者（要动那些文件就得走它们那条边界）；
+      · 写原语那几行不许出现 config / llm 字样（路径只能用 `self.nm_dir` 拼）；
+      · 目标必须是 `self.nm_dir` 下的 `.nmconnection`（不是随便一个路径）。
+    """
+
+    #: 别的写入者的模块名 —— wifi.py 一个都不许 import
+    FORBIDDEN_IMPORTS = (
+        "settings_config", "settings_credentials", "llm_env", "schedule_config",
+        "user_profile", "music_library", "wall_data", "study_anchors", "study_stats",
+        "game_anchors",
+    )
+
+    def _path(self):
+        return _PROJECT_ROOT / "agent" / "net" / "wifi.py"
+
+    def test_it_does_not_import_other_config_writers(self):
+        self.assertTrue(self._path().is_file(), "agent/net/wifi.py 不见了")
+        text = self._path().read_text(encoding="utf-8")
+        named = [name for name in self.FORBIDDEN_IMPORTS if name in text]
+        self.assertFalse(named,
+                         "wifi.py 提到了别的写入者 %r —— 配置/凭据不归它管" % (named,))
+
+    def test_write_primitives_do_not_name_a_config_path(self):
+        bad = []
+        for lineno, line in enumerate(self._path().read_text(encoding="utf-8").splitlines(), 1):
+            if not re.search(WRITE_PRIMITIVES, line):
+                continue
+            if "config" in line or "llm/" in line or "creds" in line:
+                bad.append("%d: %s" % (lineno, line.strip()))
+        self.assertFalse(bad, "wifi.py 的写原语瞄准了配置路径:\n  %s" % "\n  ".join(bad))
+
+    def test_the_target_is_a_networkmanager_profile(self):
+        text = self._path().read_text(encoding="utf-8")
+        self.assertIn("self.nm_dir", text, "写文件的目标必须来自 self.nm_dir")
+        self.assertIn(".nmconnection", text, "写的必须是 NM 的档案格式")
+
+    def test_the_boundary_check_has_teeth(self):
+        """反空转：把一句真的配置写入喂进来必须被抓到。"""
+        probe = "path.write_text(cfg)   # config.yaml"
+        self.assertTrue(re.search(WRITE_PRIMITIVES, probe))
+        self.assertIn("config", probe)
+        self.assertNotRegex("path.write_text(text, encoding=\"utf-8\")", r"config|llm/")
 
 
 if __name__ == "__main__":

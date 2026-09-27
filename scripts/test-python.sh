@@ -1,4 +1,4 @@
-#!/bin/sh
+﻿#!/bin/sh
 # ---------------------------------------------------------------------------
 # scripts/test-python.sh -- run the Python test suite on Linux / WSL / the board
 #
@@ -69,6 +69,7 @@ tests/test_adr.py
 tests/test_systemd_units.py
 tests/test_gui_includes.py
 tests/test_crash_log.py
+tests/test_wifi.py
 tests/test_config_source_guard.py
 tests/test_schedule_parity.py
 tests/test_schedule_config.py

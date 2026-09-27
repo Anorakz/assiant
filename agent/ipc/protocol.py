@@ -45,6 +45,7 @@ __all__ = [
     "TOPIC_BILIBILI",
     "TOPIC_CONFIG_RESULT",
     "TOPIC_SERVICE_RESULT",
+    "TOPIC_WIFI",
     "TOPICS",
     # command (GUI -> Agent)
     "COMMAND_SWITCH_MODE",
@@ -62,6 +63,7 @@ __all__ = [
     "COMMAND_MUSIC_STOP",
     "COMMAND_SET_CONFIG",
     "COMMAND_LLM_SERVICE",
+    "COMMAND_WIFI",
     "COMMANDS",
     # 命令方向的信封字段名 (GUI 实际实现为准)
     "ACTION_FIELD",
@@ -145,9 +147,20 @@ TOPIC_CONFIG_RESULT = "config_result"
 #: 显示在模型页的日志里。与 `config_result` 同一条路子：id 放在 payload 里带回来。
 TOPIC_SERVICE_RESULT = "service_result"
 
+#: 本机 WiFi 链路（T14-9）。data.kind 三取一：
+#:     "status"  一次状态快照（`Wifi.status()` 的字段 + guard 那一段）
+#:     "scan"    一次扫描结果（`data.points` = [{ssid,signal,security,secured,in_use}…]）
+#:     "ack"     一次**动作**的回执（connect / forget / autoconnect / reconnect），
+#:               带 `id`（调用方给的）、`ok`、`action`、`message`（人话）
+#: ⚠ 为什么扫描/动作要走推送而不是"请求-应答"：扫描要几秒（`--rescan yes`），
+#:   而且它不是幂等查询 —— 与 `video_state` / `config_result` 同一条路子。
+#: ⚠ WiFi 是**板端唯一链路**（eth0/eth1 都 unavailable）：`forget` 掉正在用的档案
+#:   等于把板子锁在门外，界面必须有确认；协议这层如实回报 `was_active`。
+TOPIC_WIFI = "wifi"
+
 #: 全部 topic (Agent -> GUI)
 TOPICS = (TOPIC_STATUS, TOPIC_LLM, TOPIC_WALLPAPER, TOPIC_MUSIC, TOPIC_SCHEDULE,
-          TOPIC_BILIBILI, TOPIC_CONFIG_RESULT, TOPIC_SERVICE_RESULT)
+          TOPIC_BILIBILI, TOPIC_CONFIG_RESULT, TOPIC_SERVICE_RESULT, TOPIC_WIFI)
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +246,24 @@ COMMAND_SET_CONFIG = "set_config"
 COMMAND_LLM_SERVICE = "llm_service"
 
 
+# ---- 本机 WiFi（T14-9）----
+#: 让 **Agent** 去操作 wlan0（nmcli）—— GUI 不自己调 nmcli（同 docs/adr/0005 的立场：
+#: 系统动作只由板端 root 服务做）。payload:
+#:     {"action": "status"|"scan"|"connect"|"forget"|"autoconnect"|"reconnect",
+#:      "id": "任意非空字符串（动作回执里原样带回，查询类可省）",
+#:      "ssid": "要连/要忘记的那个", "password": "…（只在 connect 时给）",
+#:      "autoconnect": true|false}
+#: 应答**就是**随后那条 `topic=wifi` 的推送（kind=status / scan / ack）。
+#: ⚠ **密码只走这一条命令，Agent 不会把它写进 config.yaml / 日志**：
+#:   已有档案 → `nmcli --ask connection up`（stdin）；新档案 → 写 NM 自己的 keyfile（0600）。
+#: ⚠ 板端 WiFi 是唯一链路：`forget` 正在用的档案 = 板子离线（回执里带 `was_active`）。
+#: ⚠ 名字为什么是 `wifi_control` 而不是 `wifi`：**topic 与 command 不许同名** ——
+#:   `TOPIC_WIFI` 已经叫 "wifi" 了，两条集合必须不相交（见
+#:   `tests/test_ipc_protocol.py::test_topics_and_commands_do_not_overlap`）。
+#:   与本条同款的还有 `video_control`（topic 是 `bilibili`）。
+COMMAND_WIFI = "wifi_control"
+
+
 #: 全部 command (GUI -> Agent)
 COMMANDS = (
     COMMAND_SWITCH_MODE,
@@ -250,6 +281,7 @@ COMMANDS = (
     COMMAND_MUSIC_STOP,
     COMMAND_SET_CONFIG,
     COMMAND_LLM_SERVICE,
+    COMMAND_WIFI,
 )
 
 # 命令方向的信封字段名。**以 GUI 的实际实现为准** (Phase 6 决策 1):

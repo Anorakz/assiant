@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 # Absolute paths only -- never depend on the current directory.
 # NOTE: keep this file ASCII-only. Windows PowerShell 5.1 decodes .ps1 as ANSI
@@ -59,6 +59,7 @@ $tests = @(
     "tests\test_systemd_units.py",
     "tests\test_gui_includes.py",
     "tests\test_crash_log.py",
+    "tests\test_wifi.py",
     "tests\test_config_source_guard.py",
     "tests\test_schedule_parity.py",
     "tests\test_schedule_config.py",

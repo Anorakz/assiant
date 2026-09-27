@@ -40,10 +40,12 @@ const char kTopicMusic[]     = "music";
 const char kTopicBilibili[]  = "bilibili";   // T11-7: B 站队列/当前条/缓冲状态
 const char kTopicConfigResult[] = "config_result";   // T14-3: set_config 的回执
 const char kTopicServiceResult[] = "service_result"; // T14-3: llm_service 的回执
+const char kTopicWifi[] = "wifi";                    // T14-9: WiFi 状态/扫描/动作回执
 //: 命令名（GUI -> Agent）—— 只列这里真的会发的那些；全量表在
 //: `agent/ipc/protocol.py::COMMANDS` / docs/ipc-protocol.md §8。
 const char kActionSetConfig[] = "set_config";        // T14-3: 让 Agent 改配置真源
 const char kActionLlmService[] = "llm_service";      // T14-3: 让 Agent 跑 llm/scripts/*.sh
+const char kActionWifi[] = "wifi_control";           // T14-9: 让 Agent 操作 wlan0（nmcli）
 
 //: 断线后固定 1 秒重连 (按任务约定: 不做指数退避)
 constexpr int kReconnectDelayMs = 1000;
@@ -188,6 +190,29 @@ bool LocalClient::sendSetConfig(const QString& requestId, const QJsonObject& key
     return true;
 }
 
+bool LocalClient::sendWifiRequest(const QString& requestId, const QString& action,
+                                  const QJsonObject& payload)
+{
+    if (!isConnected()) {
+        // 与 set_config 同一条规矩：**不退回"GUI 自己调 nmcli"**。
+        //   GUI 不做系统动作（docs/adr/0005）；界面要如实说"Agent 没在跑"。
+        qWarning().noquote() << "[ipc] 未连接到 Agent, 拒绝 wifi_control:" << action;
+        return false;
+    }
+    if (action.trimmed().isEmpty()) {
+        qWarning().noquote() << "[ipc] wifi_control 缺 action, 拒绝";
+        return false;
+    }
+    QJsonObject body = payload;
+    if (!requestId.trimmed().isEmpty()) {
+        body.insert(QStringLiteral("id"), requestId);
+    }
+    body.insert(QStringLiteral("action"), action);
+    // ⚠ `password` 只在这一条命令里经过一次：不落盘、不进日志（Agent 侧写 stdin / 0600 keyfile）。
+    sendCommand(QLatin1String(kActionWifi), body);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 //  收数据: 累积 -> 按 '\n' 切行 -> 逐行解析
 // ---------------------------------------------------------------------------
@@ -284,6 +309,9 @@ void LocalClient::processLine(const QByteArray& line)
     } else if (topic == QLatin1String(kTopicServiceResult)) {
         // T14-3: llm_service 的回执（模型页把它写进日志）
         emit serviceResultReceived(data);
+    } else if (topic == QLatin1String(kTopicWifi)) {
+        // T14-9: WiFi（kind=status|scan|ack）—— 设置页的网络卡片消化
+        emit wifiReceived(data);
     } else {
         // 协议 §6: 不认识的 topic 是"忽略", 不是错误 —— 可能对端版本更新了
         qDebug().noquote() << "[ipc] 忽略未知 topic:" << topic;

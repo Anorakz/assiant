@@ -28,6 +28,7 @@
 // ============================================================================
 #pragma once
 
+#include <QHash>
 #include <QJsonObject>
 #include <QString>
 #include <QWidget>
@@ -37,6 +38,7 @@ class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
+class QListWidget;
 class QPushButton;
 class QScrollArea;
 class QSpinBox;
@@ -104,12 +106,37 @@ public:
     QSpinBox* profileCharsSpin() const { return profileChars_; }
     QSpinBox* profileTurnsSpin() const { return profileTurns_; }
 
+    // ---- T14-9：第四张卡片「网络」（WiFi）----
+    /// Agent 推来的 `wifi` 载荷（kind=status|scan|ack）—— 由 MainWindow 转发进来。
+    void onWifiResult(const QJsonObject& data);
+    /// 让卡片主动要一次状态（页面显示时调；MainWindow 转成一次 IPC）
+    void requestWifiStatus();
+    /// 让卡片主动要一次扫描（取证开关与"刷新"用）
+    void requestWifiScan();
+    /// 状态行（"wlan0 · 已连接 Anorak_host · 信号 96 · 192.168.137.30"）
+    QLabel* wifiStatusLabel() const { return wifiStatus_; }
+    /// 扫描结果列表（每项 = 一个 SSID）
+    QListWidget* wifiList() const { return wifiList_; }
+    /// 结果/回执那行字（连接成功、失败原话、忘记结果都写这里）
+    QLabel* wifiResultLabel() const { return wifiResult_; }
+    QPushButton* wifiScanButton() const { return wifiScan_; }
+    QPushButton* wifiConnectButton() const { return wifiConnect_; }
+    QPushButton* wifiForgetButton() const { return wifiForget_; }
+    QPushButton* wifiReconnectButton() const { return wifiReconnect_; }
+    QLineEdit* wifiPasswordEdit() const { return wifiPassword_; }
+    QCheckBox* wifiAutoconnectCheck() const { return wifiAutoconnect_; }
+    /// 当前选中的 SSID（没选就是空）
+    QString selectedSsid() const;
+
 signals:
     /// 用户点了「保存」：把"要改哪些键 / 哪些凭据"交给 MainWindow 发 IPC（T14-3）。
     /// ⚠ 本页**不写文件**：落盘由 Agent 做（docs/adr/0005）。
     void saveRequested(QJsonObject keys, QJsonObject credentials);
     /// 用户点了「启动 Agent」（只在"没连上"时出现）。MainWindow 去 systemctl start。
     void startAgentRequested();
+    /// T14-9：一次 WiFi 请求（`action` = status/scan/connect/forget/autoconnect/reconnect）。
+    /// ⚠ 走 IPC 让 **Agent** 去调 nmcli —— GUI 不做系统动作（docs/adr/0005）。
+    void wifiRequested(QString action, QJsonObject payload);
 
 protected:
     /// 每次显示都把滚动拉回顶部：焦点落在第一个控件上会被 QScrollArea 滚进视野，
@@ -166,6 +193,23 @@ private:
     QCheckBox* profileEnabled_ = nullptr;
     QSpinBox* profileChars_ = nullptr;
     QSpinBox* profileTurns_ = nullptr;
+
+    // ---- T14-9：网络（WiFi）----
+    QLabel* wifiStatus_ = nullptr;
+    QListWidget* wifiList_ = nullptr;
+    QLabel* wifiResult_ = nullptr;
+    QPushButton* wifiScan_ = nullptr;
+    QPushButton* wifiConnect_ = nullptr;
+    QPushButton* wifiForget_ = nullptr;
+    QPushButton* wifiReconnect_ = nullptr;
+    QLineEdit* wifiPassword_ = nullptr;
+    QCheckBox* wifiAutoconnect_ = nullptr;
+    /// 最近一次 status 快照（决定「忘记」按钮要不要提示"会断链路"）
+    QJsonObject wifiStatusData_;
+    /// 已扫到的 SSID -> 是否需要密码（开放网络不弹密码框）
+    QHash<QString, bool> wifiSecured_;
+    /// 下一次请求的 id（回执里原样带回；界面靠它认领）
+    int wifiRequestSeq_ = 0;
 
     QPushButton* save_ = nullptr;
     QPushButton* defaults_ = nullptr;

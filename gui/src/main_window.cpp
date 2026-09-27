@@ -126,6 +126,13 @@ QToolButton#InputTypeButton::menu-indicator { image: none; }
 QScrollArea#ChatScroll { background: transparent; border: none; }
 /* T14-7b：模型测试页整页在滚动区里 → 视口与内容都要透明，壁纸才透得出来 */
 QScrollArea#ModelScroll, QScrollArea#ModelScroll > QWidget { background: transparent; border: none; }
+/* T14-9：设置页的网络卡片里的 SSID 列表 */
+QListWidget#WifiList {
+    background: #1E1F22; border: 1px solid #3A3D42; border-radius: 6px;
+    color: #E6E6E6; font-size: 16px;
+}
+QListWidget#WifiList::item { padding: 6px 8px; }
+QListWidget#WifiList::item:selected { background: #7AA2F7; color: #1E1F22; }
 /* T7：下区域音乐条 */
 QLabel#MusicTitle { color: #E6E6E6; font-size: 20px; font-weight: bold; background: transparent; }
 QLabel#MusicPlaceholder { color: #6F757C; font-size: 16px; background: transparent; }
@@ -361,6 +368,12 @@ MainWindow::MainWindow(QWidget* parent)
     connect(client_, &LocalClient::serviceResultReceived, this, [this](const QJsonObject& d) {
         if (modelPage_ != nullptr) {
             modelPage_->onServiceResult(d);
+        }
+    });
+    // T14-9：WiFi（kind=status|scan|ack）—— 只有设置页那张卡片关心
+    connect(client_, &LocalClient::wifiReceived, this, [this](const QJsonObject& d) {
+        if (settingsPage_ != nullptr) {
+            settingsPage_->onWifiResult(d);
         }
     });
 
@@ -812,6 +825,30 @@ void MainWindow::sendConfigRequest(const QString& prefix, const QJsonObject& key
     }
 }
 
+void MainWindow::sendWifiRequest(const QString& action, const QJsonObject& payload)
+{
+    // T14-9：与 set_config / llm_service 同一条规矩 —— GUI 不做系统动作（不自己调 nmcli），
+    // 只把请求发给 Agent；没连上就**如实报**（界面显示"Agent 没在跑"），不静默失败。
+    const QString requestId = nextConfigRequestId(QStringLiteral("wifi"));
+    QJsonObject body = payload;
+    const bool sent = client_ != nullptr && client_->sendWifiRequest(requestId, action, body);
+    if (!sent) {
+        QJsonObject failure;
+        failure.insert(QStringLiteral("kind"), QStringLiteral("ack"));
+        failure.insert(QStringLiteral("id"), requestId);
+        failure.insert(QStringLiteral("action"), action);
+        failure.insert(QStringLiteral("ok"), false);
+        failure.insert(QStringLiteral("message"),
+                       QStringLiteral("Agent 没连上（命令没发出去）：WiFi 操作要 Agent 在跑。"));
+        if (settingsPage_ != nullptr) {
+            settingsPage_->onWifiResult(failure);
+        }
+        return;
+    }
+    qInfo().noquote() << QStringLiteral("[ui] 已请 Agent 处理 WiFi（%1, id=%2）")
+                             .arg(action, requestId);
+}
+
 void MainWindow::sendLlmServiceRequest(const QString& action)
 {
     if (client_ == nullptr || !client_->connected()) {
@@ -1099,6 +1136,11 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
                 }, Qt::UniqueConnection);
         connect(settingsPage_, &SettingsPage::startAgentRequested, this,
                 [this]() { startAgentService(); }, Qt::UniqueConnection);
+        // T14-9：网络卡片的请求（status/scan/connect/forget/autoconnect/reconnect）
+        connect(settingsPage_, &SettingsPage::wifiRequested, this,
+                [this](QString action, QJsonObject payload) {
+                    sendWifiRequest(action, payload);
+                }, Qt::UniqueConnection);
     }
     if (modelPage_ != nullptr) {
         connect(modelPage_, &ModelPage::configSaveRequested, this,

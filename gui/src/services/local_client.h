@@ -82,6 +82,19 @@ public:
     bool sendSetConfig(const QString& requestId, const QJsonObject& keys,
                        const QJsonObject& credentials = {});
 
+    /// 让 **Agent** 操作本机 WiFi（T14-9；线格式见 docs/ipc-protocol.md §4 的 `wifi_control`）。
+    ///
+    /// GUI 不自己调 nmcli（同 docs/adr/0005：系统动作只由板端 root 服务做）。
+    /// 应答走 `wifiReceived`（`{kind: "status"|"scan"|"ack", …}`，带同一个 requestId）。
+    ///
+    /// @param requestId 回执 id（动作类必给；界面靠它对回自己那一次请求）
+    /// @param action    status / scan / connect / forget / autoconnect / reconnect
+    /// @param payload   其余字段（ssid / password / autoconnect …）
+    /// @return false = **没连上**（命令被丢弃），调用方要如实报"Agent 没在跑"
+    /// @note `password` 只在这里经过一次，**不会被写进任何配置文件**（Agent 侧处理）。
+    bool sendWifiRequest(const QString& requestId, const QString& action,
+                         const QJsonObject& payload = {});
+
     /// 与 Agent 的连接状态（界面在"保存"前可以先问一句）—— T14-3 起给设置页用。
     bool connected() const { return isConnected(); }
 
@@ -104,6 +117,9 @@ signals:
 
     /// `llm_service` 的回执（T14-3）：`{id, ok, action, message}` —— 模型页的启停日志。
     void serviceResultReceived(QJsonObject data);
+
+    /// `wifi` 推送（T14-9）：`{kind: "status"|"scan"|"ack", …}` —— 设置页「网络」卡片。
+    void wifiReceived(QJsonObject data);
 
     /// 与 Agent 的连接状态发生变化（只报变化，不重复报）。T4 起给顶栏用。
     void connectionChanged(bool connected);
