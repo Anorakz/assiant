@@ -2046,24 +2046,100 @@ T14-2 ☑ **单一写入者（Agent 侧 + 协议）+ llm.env 搬 Python**（ADR 
         ③ 给运行器加一行时用了 `Get-Content | Set-Content -NoNewline`，把两个脚本的行尾
         整片吃掉（仓库老坑）—— `git checkout` 恢复 + 改用 edit 工具，最终 diff 是 +1 行
 
-□ T14-3 单一写入者 · GUI 侧改道: `ConfigStore` 退化成只读 + diff 预览（删 `save()`、
-      删缺段新建那套、`cookie_store` 缩成只读+掩码）; 三个写入点（设置页卡片 / 模型页 `llm.*` /
-      切输入源）改发 `set_config` 并处理回执; 凭据走 `credentials`; 模型页「启动服务」
-      （`llm/scripts/*.sh`）也交 Agent; C++ `ConfigSyncer` / `gui_config_sync` 退役;
-      白名单契约测试改成"**发出去的 keys** 只许是这些"
-□ T14-4 CI · `host-ci.yml`（host C++ 单测 + `test-python.sh` + ruff 窄口径 `E9,F63,F7,F82`
-      + `native/*.cpp` 的 `-fsyntax-only`）
-□ T14-5 CI · `release.yml`（源码包 + **自托管 runner** 跑 `build.ps1` 出 `.so`）
-□ T14-6 `scripts/bench.sh`（NPU 推理 / MPP 解码 / 端到端）+ 入库基线 + `docs/bench.md`
-□ T14-7 自启: **Agent 与 GUI 都走 root systemd**（`agent-gui.service` 带 `DISPLAY=:0`，
-      `After=display-manager.service xrandr-startup.service agent.service`）+ `Restart=on-failure`
-□ T14-8 崩溃落盘 `logs/crash/`（`faulthandler` + `excepthook` + GUI 的 Qt 消息处理器）
-□ T14-9 WiFi: 后端用板端**已有的 NetworkManager/nmcli** + 设置页第 4 张卡片（扫描/连接/
-      记住并自动接入/忘记）+ **主动链路健康检查**（本次掉线板端零日志 = autoconnect 救不了）
-□ T14-10 `scripts/monitor.sh`（CPU/RAM/NPU/温度/RSS/帧计数；先读 `health_check.sh` 能扩就扩）
-□ T14-11 同跑验收 `tests/board/p8_coexist.py`（含"保存设置时写入者是 Agent"）
-□ T14-12 文档收口（`docs/ci.md` / `docs/bench.md` / `docs/net.md` / deploy 自启那节）+ todo 记录
+☑ T14-3 单一写入者 · GUI 侧改道（`8fd31b0` + `220b1f6`）: `ConfigStore` 退化成只读 +
+      diff 预览（删 `save()`、缺段新建那套、`cookie_store` 缩成只读+掩码）; 三个写入点
+      （设置页卡片 / 模型页 `llm.*` / 切输入源）改发 `set_config` 并处理回执; 凭据走
+      `credentials`; 模型页「启动服务」交 Agent; C++ `ConfigSyncer` / `gui_config_sync` 退役;
+      白名单契约测试改成"**发出去的 keys** 只许是这些"。
+      ⚠ 教训（T14-7b 才发现）：`config_sync.h` 删了、`model_page.cpp` 里那行 include 忘删，
+      **板端 GUI 从此编不过** —— 而旧二进制还在，ctest 照样绿。现在有
+      `tests/test_gui_includes.py`（悬空 include）盯着，见 T14-7b。
+☑ T14-4 CI · `host-ci.yml`（`6f24aa6` `b81759f` `f7a824c` `54e6d43` `8032d75` `7d6005f`）:
+      host C++ 单测 + `test-python.sh` + ruff 窄口径 `E9,F63,F7,F82` + `native/*.cpp`
+      `-fsyntax-only`; `docs/ci.md` 写清"验什么/不验什么/自托管 runner 怎么注册（标签
+      `rk3568-cross`）"。⚠ ruff 第一次就抓到 8 处 F821（真错误路径 bug）; 之后依次补
+      `pyyaml` / `opencv-python-headless` / 修一条链到未完成文件的相对链接。
+☑ T14-5 CI · `release.yml`（`57bce3d`）: 源码包（含子模块 SHA + sha256）+ 自托管 runner
+      跑 `build.ps1` 出 `.so`（`vars.CROSS_BUILD == '1'` 才跑）。
+      ⚠ **还差你一步**：runner 本身要在板端/一台 aarch64 机上注册（标签 `rk3568-cross`），
+      在那之前 tag/dispatch 会把 cross job 排队等着。
+☑ T14-6 `scripts/bench.sh` + 入库基线 + `docs/bench.md`（`05696ce`）: 三段（NPU SigLIP
+      `encode_image` p50/p95、MPP 解码 ms/帧、`--with-stream` 端到端）+ `--json` /
+      `--write-baseline` / `--baseline`（默认 `--tolerance 1.35`，超了退非 0）。
+      基线（36 ℃ / NPU 600 MHz / load 0.57）：`npu_encode.p50_ms=1827.3`、
+      `mpp_decode.ms_per_frame=75.42`（12 帧 / 900 ms）。
+      ⚠ 踩坑：RKNN 会在 stdout 打 banner，`json.loads` 解析不了 → 改成**从后往前扫**找可解析行。
+☑ T14-7 自启（`f365803`）: **Agent 与 GUI 都走 root systemd**（`agent-gui.service` 带
+      `DISPLAY=:0`）+ `Restart` + `StartLimit*` 挪进 `[Unit]`。
+      ⚠ 取证结论：第一次交付 GUI **开机不启动**（`inactive(dead)`、journal 里连 `Starting`
+      都没有）—— 不是"起不来"，是**排序成环**：板端自带的 `xrandr-startup.service` 同时
+      `After=graphical.target` 与 `WantedBy=graphical.target`，而 GUI `After=xrandr`、
+      又被 graphical 隐式排在前面；systemd 破环的手段是**删掉启动作业**。
+      修法：整份替换 `xrandr-startup.service`（`After=display-manager.service` + 轮询
+      `xrandr --query` 等 X 就绪 + `User=root`）。`tests/test_systemd_units.py` 23 项钉住
+      （键写在哪一段 / `WantedBy=T` 又 `After=T` / 三个单元合起来做**排序环检测**）。
+☑ T14-7b 全屏尺寸（`ff85af8`）: 窗口在 1280×800 屏上是 `1280x883`（底部 83px 永远在屏幕外）
+      —— `xprop WM_NORMAL_HINTS` 证明**全屏请求发出去了**，是**应用自己的最小尺寸**（935x883）
+      太大。`--dump-layout` 量出链条：`883 = 顶栏 72 + 页面栈 811`，而栈的最小高度取**所有页
+      （含隐藏页）**的最大值 —— 隐藏着的模型页要 811（真正显示的首页只要 602）。
+      修法：模型页整页进 `QScrollArea`；现在窗口 `1280x800`、最小尺寸 `831x674`。
+      ⚠ 顺带修掉 T14-3 漏删的悬空 include（`gui/src/ui/model_page.cpp` 还 include 着已删除的
+      `core/config_sync.h`）—— 板端 GUI 从 T14-3 起**根本编不过**，而旧二进制让 ctest 一直绿。
+      新增守卫：`tests/test_gui_includes.py` + `gui/tests/test_page_heights.cpp`（每页 min 高
+      ≤ 728、宽 ≤ 1280）+ `--dump-layout`。
+☑ T14-8 崩溃落盘 `logs/crash/`（`55063da` `0d47d76` `0afafde` `a8980eb`）: Agent 侧
+      `faulthandler` + `excepthook` / `threading.excepthook` / `unraisablehook`；GUI 侧 Qt
+      消息处理器 + `std::terminate` + 致命信号（信号处理器里只写 64KB 裸缓冲，不分配内存）；
+      约定：**每个进程一份会话文件，正常退出就删** → 目录里剩下的都是"没干净退出"；启动时把
+      上一份报告的**头尾**打进日志（同一份只报一次）；保留最新 20 份。
+      ⚠ 验收逼出来的三处真 bug：保留份数把"本次会话"算进去（6 份 + KEEP=3 只剩 2 份）；
+      `faulthandler.register()` 的默认文件是 **stderr**（`kill -USR1` 的 dump 没进会话文件）；
+      GUI 收到 SIGTERM 没走干净退出 → 每次 `systemctl stop` 都留一份**假崩溃**
+      （`Restart=always` 的服务尤其明显）→ 改成 self-pipe + `QSocketNotifier` 干净退出。
+      `docs/crash.md` 写清"留下什么 / 怎么看 / 手动 `kill -USR1` / 两条拿不到的东西"。
+☑ T14-9 WiFi（`0636f41` `167fe4d` `e4f12de` `8fd7a46` `a5dedaf` `3b732f1`）:
+      `agent/net/wifi.py`（只用 nmcli）+ IPC `wifi` / `wifi_control` + 设置页第 4 张卡片
+      （扫描/连接/记住并自动连接/忘记/重连）+ `LinkGuard`（连续 3 次探不到网关才动手 →
+      `con up` → 还不行 `device disconnect/connect`，退避 + 每步写日志）。
+      **密码三条边界**：不进 argv（已有档案走 `nmcli --ask` 的 stdin；新档案写 NM 自己的
+      keyfile **0600**）、不进 `config.yaml`、不进日志。
+      ⚠ 实测踩坑：`GENERAL.STATE` 是 `100 (connected)`（状态词在括号里）；`nmcli connection
+      show` 的**列表**形式不认 `802-11-wireless.ssid`；`device disconnect` 5 秒就被 NM 自己
+      接回来（真断链路要用 `connection down`）。
+      ⚠ 顺手修掉一个现网故障：**正在退出的旧 Agent 会把新实例的 socket 名字 unlink 掉**
+      （`ss -lx` 里还在监听、`/tmp/agent.sock` 却没了 → CLI/GUI 全连不上）→ 收尾前核对 inode。
+      `docs/net.md` 含"手动救回来"的现场步骤。
+☑ T14-10 `scripts/monitor.sh`（`59681d9`）: CPU（两次 `/proc/stat` 取差）/ 负载 / 内存 /
+      各进程 RSS（agent / gui / llama-server）/ NPU 频率与负载（debugfs 优先，devfreq 回退）/
+      soc·gpu 温度；`--csv`（18 列）/ `--json` / `--watch` / `--count` / `--health`（转调
+      `health_check.sh`，两件事不重复）。
+      ⚠ 测试逼出来的三处：参数解析漏 `shift`（`--csv --json` 死循环）、JSON 里把缺失值写成
+      `"-"`（不是合法数字）、debugfs 多核格式 `Core0: 12%, Core1: 30%` 的字段带逗号。
+      ⚠ **帧计数两列恒为 `-`**：Agent 侧目前没有对外暴露帧/丢帧计数器（没找到现成来源），
+      脚本不编数字，留了 `--frames-file` 口子；要不要加一个计数器面（IPC `stats` 或小文件）
+      是**另一件事**，等你定。
+      ⚠ 守卫里那条"`scripts/*.sh` 必须 LF 且无 BOM"是踩出来的：PowerShell 的
+      `Set-Content -Encoding utf8` 会塞 BOM+CRLF，板端直接报
+      `#!/bin/bash: No such file or directory`（`test-python.sh` 也被带进一个 BOM，已清）。
+☑ T14-11 同跑验收 `tests/board/p8_coexist.py`（`46dd570`）: 真 Agent（systemd）+ 真 GUI
+      （offscreen，点保存 → IPC → Agent 写）同时跑，两个 IPC 客户端**并发** `set_config`
+      （改不同键，最后都还原）。**19/19**：扫 `/proc/*/fd` 证明 GUI 连只读句柄都没有；
+      每次改动后真源与 `.bak` 都是合法 YAML（没写坏）；并发不丢更新；最后把键写回原值 →
+      真源 md5 与跑之前**一字不差**。
+      ⚠ 已知薄弱处（留档）：其中两条"没有别的写入者"是**否定式**检查，这次采样到的写句柄是
+      0 个（Agent 开-写-关，窗口没抓到它正在写的那一刻）→ 属于**空真通过**；要更硬就得在
+      并发爆发期高频采样、抓到一个属于 `agent.main` 的写句柄。
+☑ T14-12 文档收口（本次提交）: `docs/ci.md`（T14-4）、`docs/bench.md`（T14-6）、
+      `docs/net.md`（T14-9）、`docs/crash.md`（T14-8）、`docs/gui.md` §2.1（T14-7b）、
+      `docs/deploy.md` §9（开机自启 + monitor.sh 指针 + 全屏尺寸）；`docs/ipc-protocol.md`
+      补 `set_config`/`llm_service`/`wifi`/`wifi_control`（协议表 **9 topics + 16 commands**）；
+      `docs/adr/0005`（单一写入者）。本节就是 todo 留档。
 
 Phase 8 里**已经做完**的老条目（留档）: `docs/ipc-protocol.md`、`docs/deploy.md`、
 `docs/adr/0001…0004`（T14-1）、CI 的两条在 T14-4/T14-5、systemd 与崩溃落盘在 T14-7/T14-8、
 bench 在 T14-6、monitor 与同跑在 T14-10/T14-11。
+
+**T14 收尾后的三处待办（不在本阶段，留给下一阶段第一件事）**：
+  ① 自托管 runner 注册（标签 `rk3568-cross`）—— T14-5 的 cross job 现在只会排队；
+  ② 帧计数面（Agent 侧加 IPC `stats` 或写小文件）—— monitor.sh 那两列现在恒为 `-`；
+  ③ T14-11 里那两条否定式检查加严（并发爆发期高频采样写句柄）。
