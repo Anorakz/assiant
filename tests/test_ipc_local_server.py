@@ -66,6 +66,7 @@ from agent.ipc.local_server import (  # noqa: E402
 )
 from agent.ipc.protocol import (  # noqa: E402
     COMMAND_CHAT_INPUT,
+    COMMAND_LLM_SERVICE,
     COMMAND_MUSIC_NEXT,
     COMMAND_MUSIC_PLAY_PAUSE,
     COMMAND_MUSIC_PREV,
@@ -80,6 +81,7 @@ from agent.ipc.protocol import (  # noqa: E402
     TOPIC_CONFIG_RESULT,
     TOPIC_LLM,
     TOPIC_SCHEDULE,
+    TOPIC_SERVICE_RESULT,
     TOPIC_STATUS,
     IpcProtocolError,
     decode,
@@ -1381,6 +1383,104 @@ class TestSetConfigCommand(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data["ok"])
         self.assertEqual(data["changed"], 0)
         self.assertEqual(self.config_text(), before)
+
+
+# ===========================================================================
+#  llm_service: 让 Agent 去跑 llm/scripts/*.sh（T14-3）
+# ===========================================================================
+class _StubLlamaService(object):
+    """只记"被要求做了什么"的替身 —— 绝不在测试里真起 llama-server。"""
+
+    def __init__(self, log=None):          # 与真 LlamaService 的构造签名兼容
+        self.calls = []
+        self.result = (True, "ok")
+
+    def start(self):
+        self.calls.append("start")
+        return self.result
+
+    def stop(self):
+        self.calls.append("stop")
+        return self.result
+
+
+class TestLlmServiceCommand(unittest.IsolatedAsyncioTestCase):
+    """模型页那两颗按钮：GUI 不自己跑脚本了，改成让 Agent 跑（T14-3）。"""
+
+    def _handler(self, runtime):
+        from agent.ipc import _make_command_handler
+
+        self.pushed = []
+        return _make_command_handler(
+            None, runtime=runtime,
+            push=lambda topic, data: self.pushed.append((topic, data)))
+
+    async def test_start_goes_through_the_runtime_service(self):
+        service = _StubLlamaService()
+
+        class _Rt(object):
+            llm_service = service
+
+        handler = self._handler(_Rt())
+        await handler(COMMAND_LLM_SERVICE, {"id": "s1", "action": "start"})
+
+        self.assertEqual(service.calls, ["start"])
+        topic, data = self.pushed[0]
+        self.assertEqual(topic, TOPIC_SERVICE_RESULT)
+        self.assertEqual(data["id"], "s1")
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["action"], "start")
+
+    async def test_stop_and_a_failure_are_reported_verbatim(self):
+        service = _StubLlamaService()
+        service.result = (False, "start.sh 退出码 3（端口被占）")
+
+        class _Rt(object):
+            llm_service = service
+
+        handler = self._handler(_Rt())
+        await handler(COMMAND_LLM_SERVICE, {"id": "s2", "action": "stop"})
+        self.assertEqual(service.calls, ["stop"])
+        _, data = self.pushed[0]
+        self.assertFalse(data["ok"])
+        self.assertIn("退出码 3", data["message"])
+
+    async def test_bad_action_is_refused_with_a_receipt(self):
+        service = _StubLlamaService()
+
+        class _Rt(object):
+            llm_service = service
+
+        handler = self._handler(_Rt())
+        await handler(COMMAND_LLM_SERVICE, {"id": "s3", "action": "restart"})
+        self.assertEqual(service.calls, [], "不合法的动作不许落到脚本上")
+        _, data = self.pushed[0]
+        self.assertFalse(data["ok"])
+        self.assertIn("start / stop", data["message"])
+
+    async def test_without_a_runtime_it_builds_a_service_itself(self):
+        """没接服务对象（manage_service 没开）时现建一个 —— 但**必须真跑脚本之前
+        就被替身接住**，所以这里把 LlamaService 换掉（测试绝不启动 llama-server）。"""
+        import agent.llm.service as service_module
+
+        created = []
+
+        class _FakeLlamaService(_StubLlamaService):
+            def __init__(self, *args, **kwargs):
+                super(_FakeLlamaService, self).__init__()
+                created.append(kwargs)
+
+        original = service_module.LlamaService
+        service_module.LlamaService = _FakeLlamaService
+        try:
+            handler = self._handler(None)
+            await handler(COMMAND_LLM_SERVICE, {"id": "s4", "action": "start"})
+        finally:
+            service_module.LlamaService = original
+
+        self.assertEqual(len(created), 1, "没接服务对象时要现建一个")
+        _, data = self.pushed[0]
+        self.assertTrue(data["ok"], data)
 
 
 # ===========================================================================

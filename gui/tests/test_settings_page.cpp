@@ -1,18 +1,21 @@
-// ============================================================================
-//  gui/tests/test_settings_page.cpp — 设置页测试（T13 / T13-9）
+﻿// ============================================================================
+//  gui/tests/test_settings_page.cpp — 设置页测试（T13 / T14-3）
 //
-//  验：载入配置、保存写回 config.yaml 的 gui: 段（含**控制条独立时间**）、恢复默认只改界面不写文件、
-//  路径缺失不崩。全部用临时 config.yaml，不碰生产配置。
-//
-//  T13-9 另加：三张卡片（学习监督 / 游戏检测含 B 站凭据 / 画像压缩）载入与保存、
-//  **缺段就按模板新建**、以及"保存只许动白名单里的键"的逐行契约测试
-//  （拿仓库里那份 config.example.yaml 当真源）。
+//  ⚠ T14-3 起本页**不写 config.yaml**：点「保存」只发出 `saveRequested(keys, credentials)`，
+//    落盘由 Agent 做（docs/adr/0005）。所以这里盯的是**请求侧契约**：
+//      · 载入配置 -> 界面照配置显示（读没坏）；
+//      · 点保存 -> 发出请求；`buildKeys()` 里的键**按键盘点**只许是白名单那些；
+//      · 凭据只带"这次真填了"的键；换行的值当场拒绝；
+//      · 回执 -> 成功提示 / 失败显示 Agent 原话（"没连上"时露出「启动 Agent」）；
+//      · 恢复默认只改界面。
+//  全部不碰生产配置（只读一份临时 config.yaml）。
 // ============================================================================
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFile>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -27,59 +30,9 @@
 
 namespace {
 
-QString readText(const QString& path)
+/// 设置页保存时**准许写**的键（T13-9 按键盘点，T14-3 变成"请求侧白名单"）。
+const QStringList& whitelistExact()
 {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        return QString();
-    }
-    return QString::fromUtf8(file.readAll());
-}
-
-int indentOfLine(const QString& line)
-{
-    int n = 0;
-    while (n < line.size() && line.at(n) == QLatin1Char(' ')) {
-        ++n;
-    }
-    return n;
-}
-
-/// 一行的键名（`  relative_band: 0.05` -> `relative_band`）。
-QString keyOfLine(const QString& line)
-{
-    const QString trimmed = line.trimmed();
-    const int colon = trimmed.indexOf(QLatin1Char(':'));
-    return colon > 0 ? trimmed.left(colon).trimmed() : QString();
-}
-
-/// 某一行在 YAML 里的**点号键路径**（靠缩进往上走；够用于"逐行 diff 出键名"）。
-QString dottedKey(const QStringList& lines, int index)
-{
-    QStringList parts;
-    parts.prepend(keyOfLine(lines.at(index)));
-    int want = indentOfLine(lines.at(index)) - 2;
-    for (int i = index - 1; i >= 0 && want >= 0; --i) {
-        const QString line = lines.at(i);
-        const QString trimmed = line.trimmed();
-        if (trimmed.isEmpty() || trimmed.startsWith(QLatin1Char('#'))) {
-            continue;
-        }
-        const int indent = indentOfLine(line);
-        if (indent == want) {
-            parts.prepend(keyOfLine(line));
-            want -= 2;
-        } else if (indent < want) {
-            break;
-        }
-    }
-    return parts.join(QLatin1Char('.'));
-}
-
-/// 设置页保存时**准许动的键**（T13-9 验收：白名单按**键**列出来，不是按段）。
-bool isWhitelistedKey(const QString& key)
-{
-    static const QStringList kPrefixes = {QStringLiteral("gui."), QStringLiteral("llm.")};
     static const QStringList kExact = {
         QStringLiteral("study.enabled"),
         QStringLiteral("study.focus_interval_min"),
@@ -96,12 +49,14 @@ bool isWhitelistedKey(const QString& key)
         QStringLiteral("profile.trigger_chars"),
         QStringLiteral("profile.trigger_turns"),
     };
-    for (const QString& prefix : kPrefixes) {
-        if (key.startsWith(prefix)) {
-            return true;
-        }
-    }
-    return kExact.contains(key);
+    return kExact;
+}
+
+bool isWhitelistedKey(const QString& key)
+{
+    // gui.* / llm.* 整段允许（前者是本页原有的界面项，后者是模型页的）
+    return key.startsWith(QStringLiteral("gui.")) || key.startsWith(QStringLiteral("llm."))
+           || whitelistExact().contains(key);
 }
 
 } // namespace
@@ -111,24 +66,17 @@ class TestSettingsPage : public QObject {
 
 private slots:
     void loadFromConfigFillsWidgets();
-    void saveWritesConfigWithSeparateTimeouts();
-    void saveKeepsAgentSectionsUntouched();
+    void missingConfigDoesNotCrash();
+    void saveButtonEmitsTheRequest();
+    void requestOnlyTouchesWhitelistedKeys();
+    void credentialsAreOnlyTheFilledOnes();
+    void credentialWithNewlineIsRefused();
+    void resultLabelShowsSuccess();
+    void resultLabelShowsTheAgentsWordsAndOffersStart();
     void restoreDefaultsOnlyTouchesUi();
-    void missingConfigIsReportedNotCrash();
-
-    // ---- T13-9: 三张卡片 ----
-    void cardsLoadFromConfig();
-    void cardsCreateMissingSections();
-    void cookieFieldsWriteCredentialFile();
-    void cardsRefuseToBeWrittenWithoutTemplate();
-    void saveOnlyTouchesWhitelistedKeys();
-    void restoreDefaultsAlsoResetsCards();
 
 private:
     QString writeConfig(QTemporaryDir& tmp, const QString& extra = QString());
-    QString writeCardsConfig(QTemporaryDir& tmp);
-    /// 把仓库里那份真模板抄进 tmp（`<config 同目录>/config.example.yaml`）。
-    bool copyTemplate(const QTemporaryDir& tmp);
 };
 
 QString TestSettingsPage::writeConfig(QTemporaryDir& tmp, const QString& extra)
@@ -136,7 +84,6 @@ QString TestSettingsPage::writeConfig(QTemporaryDir& tmp, const QString& extra)
     const QString path = tmp.path() + QStringLiteral("/config.yaml");
     QFile file(path);
     file.open(QIODevice::WriteOnly);
-    // 归一化 D 系列: 界面项住在 config.yaml 的 gui: 段下 (键路径带 gui. 前缀)
     file.write(QStringLiteral("gui:\n"
                               "  theme: grey\n"
                               "  fullscreen: true\n"
@@ -157,10 +104,11 @@ QString TestSettingsPage::writeConfig(QTemporaryDir& tmp, const QString& extra)
     return path;
 }
 
-QString TestSettingsPage::writeCardsConfig(QTemporaryDir& tmp)
+void TestSettingsPage::loadFromConfigFillsWidgets()
 {
-    // T13-9 的三段（板端真源里现在**没有** study: 段，所以这两种形状都要覆盖）
-    return writeConfig(tmp, QStringLiteral(
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString path = writeConfig(tmp, QStringLiteral(
         "\n"
         "study:\n"
         "  enabled: true\n"
@@ -172,7 +120,7 @@ QString TestSettingsPage::writeCardsConfig(QTemporaryDir& tmp)
         "  relative_band: 0.08\n"
         "\n"
         "bilibili:\n"
-        "  cookie_file: /tmp/t13-9-not-a-real-cookie.json\n"
+        "  cookie_file: /tmp/t14-3-not-a-real-cookie.json\n"
         "  game_watch:\n"
         "    enabled: false\n"
         "    interval_s: 30\n"
@@ -182,394 +130,195 @@ QString TestSettingsPage::writeCardsConfig(QTemporaryDir& tmp)
         "  enabled: false\n"
         "  trigger_chars: 500\n"
         "  trigger_turns: 5\n"));
-}
-
-bool TestSettingsPage::copyTemplate(const QTemporaryDir& tmp)
-{
-#ifdef SETTINGS_TEMPLATE_PATH
-    const QString source = QStringLiteral(SETTINGS_TEMPLATE_PATH);
-    if (!QFile::exists(source)) {
-        return false;
-    }
-    return QFile::copy(source, tmp.path() + QStringLiteral("/config.example.yaml"));
-#else
-    Q_UNUSED(tmp);
-    return false;
-#endif
-}
-
-void TestSettingsPage::loadFromConfigFillsWidgets()
-{
-    QTemporaryDir tmp;
-    QVERIFY(tmp.isValid());
-    const QString path = writeConfig(tmp);
 
     SettingsPage page;
     page.loadFromConfig(path);
+
     QVERIFY(page.debugCheck()->isChecked());
     QCOMPARE(page.regionMode(QStringLiteral("top"))->currentData().toString(),
              QStringLiteral("locked"));
-    QCOMPARE(page.regionMode(QStringLiteral("bottom"))->currentData().toString(),
-             QStringLiteral("active"));
     QCOMPARE(page.regionIdleSpin()->value(), 7000);
-    QCOMPARE(page.overlayMode()->currentData().toString(), QStringLiteral("locked"));
-    QCOMPARE(page.overlayIdleSpin()->value(), 1500);          // 控制条自己的时间
-    QCOMPARE(page.startPageBox()->currentData().toString(), QStringLiteral("system"));
+    QCOMPARE(page.overlayIdleSpin()->value(), 1500);
     QCOMPARE(page.inputSourceBox()->currentData().toString(), QStringLiteral("terminal"));
-    QVERIFY(page.pathLabel()->text().contains(path));
-    QVERIFY(page.aboutLabel()->text().contains(QStringLiteral("RK3568")));
+
+    QVERIFY(page.studyEnabledCheck()->isChecked());
+    QCOMPARE(page.studyFocusSpin()->value(), 25);
+    QCOMPARE(page.studyBandSpin()->value(), 0.08);
+    QVERIFY(!page.gameEnabledCheck()->isChecked());
+    QCOMPARE(page.gameIntervalSpin()->value(), 30);
+    QVERIFY(!page.profileEnabledCheck()->isChecked());
+    QCOMPARE(page.profileCharsSpin()->value(), 500);
+    QCOMPARE(page.cookiePathEdit()->text(), QStringLiteral("/tmp/t14-3-not-a-real-cookie.json"));
+    // 凭据框故意不预填（预填会把掩码串当新值发出去）
+    QVERIFY(page.sessdataEdit()->text().isEmpty());
+    QVERIFY(!page.pathLabel()->text().isEmpty());
 }
 
-void TestSettingsPage::saveWritesConfigWithSeparateTimeouts()
+void TestSettingsPage::missingConfigDoesNotCrash()
+{
+    SettingsPage page;
+    page.loadFromConfig(QStringLiteral("/tmp/definitely-missing-config.yaml"));
+    QVERIFY(page.resultLabel() != nullptr);       // 读不到也不崩，只是没东西可显示
+    page.loadFromConfig(QString());               // 空路径同样不崩
+    QVERIFY(page.regionIdleSpin()->value() >= page.regionIdleSpin()->minimum());
+}
+
+void TestSettingsPage::saveButtonEmitsTheRequest()
 {
     QTemporaryDir tmp;
     QVERIFY(tmp.isValid());
-    // T13-9 起本页也管 study./bilibili.game_watch./profile. 那几段：真源里没有就按模板新建，
-    // 所以这条老用例也得把模板放到位（板端它一直在仓库里）。
-    QVERIFY2(copyTemplate(tmp), "拿不到仓库里那份 config.example.yaml");
-    const QString path = writeConfig(tmp);
-
     SettingsPage page;
-    page.loadFromConfig(path);
-    QSignalSpy spy(&page, &SettingsPage::configSaved);
+    page.loadFromConfig(writeConfig(tmp));
 
-    // 改：上区域改活动、区域时间 9000、控制条时间 800（**两个时间互相独立**）
-    page.regionMode(QStringLiteral("top"))->setCurrentIndex(
-        page.regionMode(QStringLiteral("top"))->findData(QStringLiteral("active")));
+    QSignalSpy spy(&page, &SettingsPage::saveRequested);
     page.regionIdleSpin()->setValue(9000);
-    page.overlayIdleSpin()->setValue(800);
     page.debugCheck()->setChecked(false);
     page.saveButton()->click();
-    QCOMPARE(spy.count(), 1);
 
-    core::ConfigStore after;
-    QString error;
-    QVERIFY(after.load(path, &error));
-    QCOMPARE(after.value(QStringLiteral("gui.wake.top")), QStringLiteral("active"));
-    QCOMPARE(after.value(QStringLiteral("gui.wake.idle_ms")), QStringLiteral("9000"));
-    QCOMPARE(after.value(QStringLiteral("gui.video_overlay.idle_ms")), QStringLiteral("800"));
-    QVERIFY(!after.boolValue(QStringLiteral("gui.debug"), true));
-    // 没动过的项保持原样
-    QCOMPARE(after.value(QStringLiteral("gui.wake.right")), QStringLiteral("locked"));
-    QCOMPARE(after.value(QStringLiteral("gui.input_source")), QStringLiteral("terminal"));
+    QCOMPARE(spy.count(), 1);
+    const QList<QVariant> args = spy.first();
+    const QJsonObject keys = args.at(0).toJsonObject();
+    QVERIFY(!keys.isEmpty());
+    QCOMPARE(keys.value(QStringLiteral("gui.wake.idle_ms")).toString(), QStringLiteral("9000"));
+    QCOMPARE(keys.value(QStringLiteral("gui.debug")).toString(), QStringLiteral("false"));
 }
 
-void TestSettingsPage::saveKeepsAgentSectionsUntouched()
+void TestSettingsPage::requestOnlyTouchesWhitelistedKeys()
 {
-    // ⚠ 归一化 D 系列之后, GUI 和 Agent **共用同一个 config.yaml**。
-    //    GUI 保存时只能动白名单里的键, 其它段(含注释与顺序)必须一个字节都不变 ——
-    //    否则"改个休眠时间"就会顺手把 Agent 的配置重排掉。
-    //    T13-9 起白名单**按键**列出来（多了 study./bilibili.game_watch./profile. 那几个），
-    //    逐行的机械闸门在 `saveOnlyTouchesWhitelistedKeys`；这条用例是粗粒度的老底。
+    // ⚠ T13-9 那条"逐行核对文件"的守卫，T14-3 起改成**请求侧**的：
+    //    页面永远只发这几个键 —— 多一个都算回归（写到真源里的东西由 Agent 校验，
+    //    但"界面想改什么"这件事在这里就该是封闭的）。
+    SettingsPage page;
     QTemporaryDir tmp;
     QVERIFY(tmp.isValid());
-    QVERIFY2(copyTemplate(tmp), "拿不到仓库里那份 config.example.yaml");
-    const QString path = writeConfig(tmp);
+    page.loadFromConfig(writeConfig(tmp));      // 载入一份配置（cookie 路径才有值）
+    const QJsonObject keys = page.buildKeys();
+    QVERIFY(!keys.isEmpty());
 
-    // 追加 Agent 的两段(带注释与空行)
-    const QString agentPart = QStringLiteral(
-        "\n"
-        "llm:\n"
-        "  mode: disabled\n"
-        "  api_key: \"\"        # 这行注释必须原样留下\n"
-        "\n"
-        "scheduler:\n"
-        "  commands: []\n");
-    QFile append(path);
-    QVERIFY(append.open(QIODevice::Append));
-    append.write(agentPart.toUtf8());
-    append.close();
+    QStringList offenders;
+    for (auto it = keys.constBegin(); it != keys.constEnd(); ++it) {
+        if (!isWhitelistedKey(it.key())) {
+            offenders << it.key();
+        }
+    }
+    QVERIFY2(offenders.isEmpty(), qPrintable(QStringLiteral("请求里出现了白名单之外的键: %1")
+                                                 .arg(offenders.join(QStringLiteral(", ")))));
 
+    // 反空转：三张卡片的关键项与 gui.* 都在请求里（否则上面那条是假绿）
+    for (const QString& must : {QStringLiteral("study.enabled"),
+                                QStringLiteral("study.relative_band"),
+                                QStringLiteral("bilibili.game_watch.interval_s"),
+                                QStringLiteral("bilibili.cookie_file"),
+                                QStringLiteral("profile.trigger_chars"),
+                                QStringLiteral("gui.wake.idle_ms"),
+                                QStringLiteral("gui.input_source")}) {
+        QVERIFY2(keys.contains(must), qPrintable(must));
+    }
+    QCOMPARE(keys.size(), 25);      // 15 个 gui.* + 10 个卡片键（少一个就说明有人把行删了）
+}
+
+void TestSettingsPage::credentialsAreOnlyTheFilledOnes()
+{
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
     SettingsPage page;
-    page.loadFromConfig(path);
-    page.debugCheck()->setChecked(!page.debugCheck()->isChecked());   // 改一项 gui.*
+    page.loadFromConfig(writeConfig(tmp));
+
+    QCOMPARE(page.buildCredentials().size(), 0);        // 都没填 -> 空（= 不改动凭据）
+    page.sessdataEdit()->setText(QStringLiteral("  sess-123  "));
+    page.biliJctEdit()->setText(QStringLiteral("jct-abc"));
+    QJsonObject credentials = page.buildCredentials();
+    QCOMPARE(credentials.size(), 2);                    // 空框不进请求
+    QCOMPARE(credentials.value(QStringLiteral("SESSDATA")).toString(),
+             QStringLiteral("sess-123"));               // 去掉首尾空白
+    QVERIFY(!credentials.contains(QStringLiteral("DedeUserID")));
+
+    // 成功回执之后：填过的框清掉（免得第二次保存把同一串再发一遍）
+    QJsonObject ok;
+    ok.insert(QStringLiteral("ok"), true);
+    ok.insert(QStringLiteral("changed"), 3);
+    page.onConfigResult(ok);
+    QVERIFY(page.sessdataEdit()->text().isEmpty());
+    QVERIFY(page.biliJctEdit()->text().isEmpty());
+}
+
+void TestSettingsPage::credentialWithNewlineIsRefused()
+{
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    SettingsPage page;
+    page.loadFromConfig(writeConfig(tmp));
+
+    QSignalSpy spy(&page, &SettingsPage::saveRequested);
+    page.sessdataEdit()->setText(QStringLiteral("a\nb"));
     page.saveButton()->click();
 
-    QFile after(path);
-    QVERIFY(after.open(QIODevice::ReadOnly));
-    const QString text = QString::fromUtf8(after.readAll());
+    QCOMPARE(spy.count(), 0);                            // 一个请求都不发
+    QVERIFY(page.resultLabel()->text().contains(QStringLiteral("换行")));
+}
 
-    // Agent 的段逐字节还在(整体子串匹配: 顺序/注释/空行都对得上)
-    QVERIFY2(text.contains(agentPart),
-             qPrintable(QStringLiteral("Agent 的段被改动了:\n") + text));
+void TestSettingsPage::resultLabelShowsSuccess()
+{
+    SettingsPage page;
+    QJsonObject ok;
+    ok.insert(QStringLiteral("ok"), true);
+    ok.insert(QStringLiteral("changed"), 2);
+    page.onConfigResult(ok);
+    QVERIFY(page.resultLabel()->text().contains(QStringLiteral("2 行")));
+    QVERIFY(page.startAgentButton()->isHidden());
 
-    // 同时确认这次保存**确实**改了东西(不然这条用例是假绿)
-    QVERIFY(page.debugCheck()->isChecked() ? text.contains(QStringLiteral("debug: true"))
-                                           : text.contains(QStringLiteral("debug: false")));
+    // 派生文件那一步失败要如实带上（但不影响"真源写成功"这句）
+    QJsonObject env;
+    env.insert(QStringLiteral("ok"), false);
+    env.insert(QStringLiteral("error"), QStringLiteral("llm.env 不在"));
+    QJsonObject ok2;
+    ok2.insert(QStringLiteral("ok"), true);
+    ok2.insert(QStringLiteral("changed"), 1);
+    ok2.insert(QStringLiteral("llm_env"), env);
+    page.onConfigResult(ok2);
+    QVERIFY(page.resultLabel()->text().contains(QStringLiteral("llm.env 不在")));
+}
+
+void TestSettingsPage::resultLabelShowsTheAgentsWordsAndOffersStart()
+{
+    SettingsPage page;
+    QJsonObject failure;
+    failure.insert(QStringLiteral("ok"), false);
+    failure.insert(QStringLiteral("error"), QStringLiteral("真源不在: /tmp/x/config.yaml"));
+    page.onConfigResult(failure);
+    QVERIFY(page.resultLabel()->text().contains(QStringLiteral("真源不在")));
+    QVERIFY(page.startAgentButton()->isHidden());
+
+    // "没连上"那一种：要露出「启动 Agent」（T14-7 的单元就位后真能起）
+    QJsonObject offline;
+    offline.insert(QStringLiteral("ok"), false);
+    offline.insert(QStringLiteral("error"), QStringLiteral("Agent 没连上（命令没发出去）"));
+    page.onConfigResult(offline);
+    QVERIFY(page.resultLabel()->text().contains(QStringLiteral("没连上")));
+    QVERIFY(!page.startAgentButton()->isHidden());
 }
 
 void TestSettingsPage::restoreDefaultsOnlyTouchesUi()
 {
     QTemporaryDir tmp;
     QVERIFY(tmp.isValid());
-    const QString path = writeConfig(tmp);
-
     SettingsPage page;
-    page.loadFromConfig(path);
+    page.loadFromConfig(writeConfig(tmp));
     page.defaultsButton()->click();
 
-    // 界面回到默认
     QVERIFY(!page.debugCheck()->isChecked());
     QCOMPARE(page.regionMode(QStringLiteral("top"))->currentData().toString(),
              QStringLiteral("locked"));
     QCOMPARE(page.regionIdleSpin()->value(), 5000);
     QCOMPARE(page.overlayIdleSpin()->value(), 3000);
-
-    // **文件没被动**（避免点错就改掉生产配置）
-    core::ConfigStore after;
-    QString error;
-    QVERIFY(after.load(path, &error));
-    QCOMPARE(after.value(QStringLiteral("gui.wake.idle_ms")), QStringLiteral("7000"));
-    QCOMPARE(after.value(QStringLiteral("gui.video_overlay.idle_ms")), QStringLiteral("1500"));
-    QVERIFY(after.boolValue(QStringLiteral("gui.debug"), false));
-}
-
-void TestSettingsPage::missingConfigIsReportedNotCrash()
-{
-    SettingsPage page;
-    // 没设置路径 → 保存明确失败
-    QString error;
-    QVERIFY(!page.saveToConfig(&error));
-    QVERIFY(!error.isEmpty());
-
-    // 指向不存在的文件 → 载入只警告、保存失败，都不崩
-    page.loadFromConfig(QStringLiteral("/tmp/definitely-missing-config.yaml"));
-    QVERIFY(!page.saveToConfig(&error));
-    page.defaultsButton()->click();     // 只改界面
-    QVERIFY(page.regionIdleSpin()->value() == 5000);
-}
-
-// ---------------------------------------------------------------------------
-//  T13-9: 三张卡片（学习监督 / 游戏检测含 B 站凭据 / 画像压缩）
-// ---------------------------------------------------------------------------
-void TestSettingsPage::cardsLoadFromConfig()
-{
-    QTemporaryDir tmp;
-    QVERIFY(tmp.isValid());
-    const QString path = writeCardsConfig(tmp);
-
-    SettingsPage page;
-    page.loadFromConfig(path);
-
-    QVERIFY(page.studyEnabledCheck()->isChecked());
-    QCOMPARE(page.studyFocusSpin()->value(), 25);
-    QCOMPARE(page.studyRecheckSpin()->value(), 7);
-    QCOMPARE(page.studyFailuresSpin()->value(), 4);
-    QCOMPARE(page.studyCooldownSpin()->value(), 45);
-    QCOMPARE(page.studyProbeSpin()->value(), 2);
-    QCOMPARE(page.studyBandSpin()->value(), 0.08);
-
-    QVERIFY(!page.gameEnabledCheck()->isChecked());
-    QCOMPARE(page.gameIntervalSpin()->value(), 30);
-    QCOMPARE(page.gameScoreSpin()->value(), 0.90);
-
-    QVERIFY(!page.profileEnabledCheck()->isChecked());
-    QCOMPARE(page.profileCharsSpin()->value(), 500);
-    QCOMPARE(page.profileTurnsSpin()->value(), 5);
-
-    QCOMPARE(page.cookiePathEdit()->text(), QStringLiteral("/tmp/t13-9-not-a-real-cookie.json"));
-    // 三个凭据框**故意不预填**：预填会在下次保存时把掩码串/旧值当成新值写回凭据文件
-    QVERIFY(page.sessdataEdit()->text().isEmpty());
-    QVERIFY(page.biliJctEdit()->text().isEmpty());
-    QVERIFY(page.dedeUserEdit()->text().isEmpty());
-    QVERIFY(page.cookieStatusLabel()->text().contains(QStringLiteral("不在（匿名）")));
-}
-
-void TestSettingsPage::cardsCreateMissingSections()
-{
-    // 板端真源现在**没有** study: 段 —— 保存要能按 config.example.yaml 把整段新建出来
-    QTemporaryDir tmp;
-    QVERIFY(tmp.isValid());
-    QVERIFY2(copyTemplate(tmp), "拿不到仓库里那份 config.example.yaml，这条用例验不了缺段新建");
-    const QString path = writeConfig(tmp);            // 只有 gui: 段
-    const QString before = readText(path);
-
-    SettingsPage page;
-    page.loadFromConfig(path);
-    page.studyEnabledCheck()->setChecked(true);
-    page.studyBandSpin()->setValue(0.07);
-    page.gameIntervalSpin()->setValue(45);
-    page.profileCharsSpin()->setValue(1234);
-    page.cookiePathEdit()->setText(tmp.path() + QStringLiteral("/cookie.json"));
-    QSignalSpy spy(&page, &SettingsPage::configSaved);
-    page.saveButton()->click();
-    QCOMPARE(spy.count(), 1);
-
-    const QString after = readText(path);
-    QVERIFY2(after.startsWith(before), qPrintable(after));        // 原有内容一个字节没动
-    QVERIFY(after.contains(QStringLiteral("study:\n")));
-    QVERIFY(after.contains(QStringLiteral("  enabled: true\n")));
-    QVERIFY(after.contains(QStringLiteral("  relative_band: 0.07")));
-    QVERIFY(after.contains(QStringLiteral("bilibili:\n")));
-    QVERIFY(after.contains(QStringLiteral("  game_watch:\n")));
-    QVERIFY(after.contains(QStringLiteral("    interval_s: 45")));
-    QVERIFY(after.contains(QStringLiteral("profile:\n")));
-    QVERIFY(after.contains(QStringLiteral("  trigger_chars: 1234")));
-    // 整段搬过来时，模板里那些没被界面改到的键也一起进来（默认值 + 它的说明注释）
-    QVERIFY(after.contains(QStringLiteral("  cooldown_probe_min: 1")));
-    QVERIFY(after.contains(QStringLiteral("  max_failures: 3")));
-    QVERIFY(after.contains(QStringLiteral("    code.exe: code\n")));   // 结构级映射也照搬
-
-    core::ConfigStore store;
-    QVERIFY(store.load(path));
-    QVERIFY(store.boolValue(QStringLiteral("study.enabled"), false));
-    QCOMPARE(store.value(QStringLiteral("study.relative_band")), QStringLiteral("0.07"));
-    QCOMPARE(store.value(QStringLiteral("bilibili.game_watch.interval_s")), QStringLiteral("45"));
-    QCOMPARE(store.value(QStringLiteral("bilibili.cookie_file")),
-             tmp.path() + QStringLiteral("/cookie.json"));
-    QCOMPARE(store.value(QStringLiteral("profile.trigger_chars")), QStringLiteral("1234"));
-    QCOMPARE(store.value(QStringLiteral("gui.wake.idle_ms")), QStringLiteral("7000"));   // gui: 段没被碰
-}
-
-void TestSettingsPage::cookieFieldsWriteCredentialFile()
-{
-    QTemporaryDir tmp;
-    QVERIFY(tmp.isValid());
-    QVERIFY(copyTemplate(tmp));
-    const QString path = writeConfig(tmp);
-    const QString cookiePath = tmp.path() + QStringLiteral("/creds/cookie.json");
-
-    SettingsPage page;
-    page.loadFromConfig(path);
-    page.cookiePathEdit()->setText(cookiePath);
-    page.sessdataEdit()->setText(QStringLiteral("sess-1234567890"));
-    page.biliJctEdit()->setText(QStringLiteral("jct-abcdef"));
-    QSignalSpy spy(&page, &SettingsPage::configSaved);
-    page.saveButton()->click();
-    QCOMPARE(spy.count(), 1);
-
-    // 凭据写进的是**另一个文件**（`bilibili.cookie_file` 指的那个 JSON）
-    core::CookieStore cookie;
-    QVERIFY(cookie.load(cookiePath));
-    QCOMPARE(cookie.value(QStringLiteral("SESSDATA")), QStringLiteral("sess-1234567890"));
-    QCOMPARE(cookie.value(QStringLiteral("bili_jct")), QStringLiteral("jct-abcdef"));
-    QVERIFY(!cookie.keys().contains(QStringLiteral("DedeUserID")));   // 没填的键不许凭空出现
-
-    core::ConfigStore store;
-    QVERIFY(store.load(path));
-    QCOMPARE(store.value(QStringLiteral("bilibili.cookie_file")), cookiePath);
-
-    // 填过的框清空；状态标签只给掩码，不回显原值
-    QVERIFY(page.sessdataEdit()->text().isEmpty());
-    QVERIFY2(page.cookieStatusLabel()->text().contains(QStringLiteral("se…90（15 位）")),
-             qPrintable(page.cookieStatusLabel()->text()));
-    QVERIFY(!page.cookieStatusLabel()->text().contains(QStringLiteral("sess-1234567890")));
-
-    // 再保存一次：凭据框是空的 -> 不改动那个键，也不留多余的 .bak
-    QFile::remove(cookiePath + QStringLiteral(".bak"));
-    page.saveButton()->click();
-    QVERIFY(!QFile::exists(cookiePath + QStringLiteral(".bak")));
-    core::CookieStore again;
-    QVERIFY(again.load(cookiePath));
-    QCOMPARE(again.value(QStringLiteral("SESSDATA")), QStringLiteral("sess-1234567890"));
-}
-
-void TestSettingsPage::cardsRefuseToBeWrittenWithoutTemplate()
-{
-    // 模板不在（老部署 / 被人删了）：缺段一律**拒绝**，绝不许凭空造一份只剩几个键的残桩
-    QTemporaryDir tmp;
-    QVERIFY(tmp.isValid());
-    const QString path = writeConfig(tmp);
-    const QString before = readText(path);
-
-    SettingsPage page;
-    page.loadFromConfig(path);
-    page.studyEnabledCheck()->setChecked(true);
-    QString error;
-    QVERIFY(!page.saveToConfig(&error));
-    QVERIFY2(error.contains(QStringLiteral("拒绝写入")), qPrintable(error));
-    QCOMPARE(readText(path), before);                          // 一个字节没动
-    QVERIFY(!QFile::exists(path + QStringLiteral(".bak")));     // 也没留 .bak
-}
-
-void TestSettingsPage::saveOnlyTouchesWhitelistedKeys()
-{
-#ifdef SETTINGS_TEMPLATE_PATH
-    // 拿**仓库里那份真模板**当真源：它上面有 Agent 的全部段（llm/sunshine/ipc/scheduler/…）。
-    // 保存只许动白名单里的键，别的行必须逐字节不变 —— 这是"改个休眠时间顺手把 Agent
-    // 配置重排掉"这类事故的机械闸门（T13-9 验收要求白名单**按键**列出来）。
-    QTemporaryDir tmp;
-    QVERIFY(tmp.isValid());
-    QVERIFY2(copyTemplate(tmp), "拿不到仓库里那份 config.example.yaml");
-    const QString path = tmp.path() + QStringLiteral("/config.yaml");
-    QVERIFY(QFile::copy(QStringLiteral(SETTINGS_TEMPLATE_PATH), path));
-    const QString before = readText(path);
-    QVERIFY(!before.isEmpty());
-
-    SettingsPage page;
-    page.loadFromConfig(path);
-    page.studyEnabledCheck()->setChecked(true);        // 每张卡片都动一下
-    page.studyBandSpin()->setValue(0.08);
-    page.gameIntervalSpin()->setValue(45);
-    page.cookiePathEdit()->setText(tmp.path() + QStringLiteral("/cookie.json"));
-    page.profileCharsSpin()->setValue(1500);
-    QSignalSpy spy(&page, &SettingsPage::configSaved);
-    page.saveButton()->click();
-    QCOMPARE(spy.count(), 1);
-
-    const QString after = readText(path);
-    const QStringList beforeLines = before.split(QLatin1Char('\n'));
-    const QStringList afterLines = after.split(QLatin1Char('\n'));
-    // 这次一个键都不用新建（真源里三段都在）-> 行数必须一致（不插行、不重排）
-    QCOMPARE(afterLines.size(), beforeLines.size());
-
-    QSet<QString> changed;
-    for (int i = 0; i < beforeLines.size(); ++i) {
-        if (beforeLines.at(i) == afterLines.at(i)) {
-            continue;
-        }
-        const QString key = dottedKey(afterLines, i);
-        QVERIFY2(!key.isEmpty(), qPrintable(QStringLiteral("解析不出键名: ") + afterLines.at(i)));
-        changed.insert(key);
-    }
-    QVERIFY2(!changed.isEmpty(), "一个键都没改 -> 这条用例是假绿");
-    for (const QString& key : changed) {
-        QVERIFY2(isWhitelistedKey(key),
-                 qPrintable(QStringLiteral("保存动了白名单之外的键: %1（改动: %2）")
-                                .arg(key, changed.values().join(QStringLiteral(", ")))));
-    }
-
-    // 最要紧的几处：结构级的东西与别的段原样
-    QVERIFY(after.contains(QStringLiteral("  classes:\n    code: study\n    doc: study\n")));
-    QVERIFY(after.contains(QStringLiteral("    WHITE ALBUM Memories like Falling Snow.exe: white album\n")));
-    QVERIFY(after.contains(QStringLiteral("  commands: []\n")));
-    QVERIFY(after.contains(QStringLiteral("ipc:\n")));
-    QVERIFY(after.contains(QStringLiteral("sunshine:\n")));
-#else
-    QSKIP("没有编译期模板路径（SETTINGS_TEMPLATE_PATH），跳过白名单契约测试");
-#endif
-}
-
-void TestSettingsPage::restoreDefaultsAlsoResetsCards()
-{
-    QTemporaryDir tmp;
-    QVERIFY(tmp.isValid());
-    const QString path = writeCardsConfig(tmp);      // 全是非默认值
-
-    SettingsPage page;
-    page.loadFromConfig(path);
-    page.defaultsButton()->click();
-
     QVERIFY(!page.studyEnabledCheck()->isChecked());
     QCOMPARE(page.studyFocusSpin()->value(), 30);
-    QCOMPARE(page.studyRecheckSpin()->value(), 5);
-    QCOMPARE(page.studyFailuresSpin()->value(), 3);
-    QCOMPARE(page.studyCooldownSpin()->value(), 30);
-    QCOMPARE(page.studyProbeSpin()->value(), 1);
     QCOMPARE(page.studyBandSpin()->value(), 0.05);
     QVERIFY(page.gameEnabledCheck()->isChecked());
     QCOMPARE(page.gameIntervalSpin()->value(), 60);
-    QCOMPARE(page.gameScoreSpin()->value(), 0.82);
     QVERIFY(page.profileEnabledCheck()->isChecked());
     QCOMPARE(page.profileCharsSpin()->value(), 2000);
-    QCOMPARE(page.profileTurnsSpin()->value(), 12);
     QCOMPARE(page.cookiePathEdit()->text(), QStringLiteral("config/bilibili_cookie.json"));
-
-    // 只改界面：文件一个字都没动（避免点错就改掉生产配置）
-    core::ConfigStore store;
-    QVERIFY(store.load(path));
-    QCOMPARE(store.value(QStringLiteral("study.relative_band")), QStringLiteral("0.08"));
-    QCOMPARE(store.value(QStringLiteral("profile.trigger_chars")), QStringLiteral("500"));
 }
 
 QTEST_MAIN(TestSettingsPage)

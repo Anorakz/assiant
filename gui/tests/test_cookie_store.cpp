@@ -1,9 +1,8 @@
 // ============================================================================
-//  gui/tests/test_cookie_store.cpp — B 站凭据文件单测（T13-9）
+//  gui/tests/test_cookie_store.cpp — B 站凭据文件**只读**单测（T14-3）
 //
-//  验：只认三个键（笔误拒绝）、合并写、空值不改、`.bak` + 原子写、JSON 形状
-//  （两空格缩进 + 结尾换行，与 Python 侧同一份文件对得上）、路径解析按仓库根。
-//  全部用临时目录，不碰仓库里那份真凭据。
+//  ⚠ T14-3 起 GUI 不写凭据文件：写它的是 Agent（`agent/core/settings_credentials.py`，
+//    走 IPC 的 `set_config.credentials`）。这里只验"读得对、掩码不泄密、路径按仓库根"。
 // ============================================================================
 #include <QDir>
 #include <QFile>
@@ -26,148 +25,63 @@ bool writeFile(const QString& path, const QString& content)
     return file.write(bytes) == bytes.size();
 }
 
-QString readFile(const QString& path)
-{
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        return QString();
-    }
-    return QString::fromUtf8(file.readAll());
-}
-
 } // namespace
 
 class TestCookieStore : public QObject {
     Q_OBJECT
 
 private slots:
-    void typoKeyIsRefused();
-    void mergesAndKeepsOtherKeys();
-    void jsonShapeMatchesPython();
-    void emptyValueDoesNotTouchTheKey();
-    void backupsTheOriginal();
-    void brokenFileReadsAsAnonymous();
+    void allowedKeysAreTheThreeWeAccept();
+    void readsTheThreeKeysAndIgnoresTheRest();
+    void missingOrBrokenFileIsAnonymousNotAnError();
     void masksForDisplay();
     void resolvesRelativePathAgainstRepoRoot();
-    void refusesNewlines();
 };
 
-void TestCookieStore::typoKeyIsRefused()
+void TestCookieStore::allowedKeysAreTheThreeWeAccept()
 {
-    QTemporaryDir dir;
-    QVERIFY(dir.isValid());
-    const QString path = dir.filePath(QStringLiteral("bilibili_cookie.json"));
-
-    CookieStore cookie;
-    QString error;
-    // ⚠ 实测踩过：写成 SEESSDATA（多一个 E）B 站不认（nav 回 -101）→ 这里直接拒绝
-    QVERIFY(!cookie.set(QStringLiteral("SEESSDATA"), QStringLiteral("x"), &error));
-    QVERIFY(error.contains(QStringLiteral("SESSDATA")));
-    // 被拒之后什么都没记下：保存不该写出文件
-    bool wrote = true;
-    QVERIFY(cookie.save(path, &error, &wrote));
-    QVERIFY(!wrote);
-    QVERIFY(!QFile::exists(path));
+    // ⚠ 大小写敏感（`SEESSDATA` 那种笔误 B 站会当没登录）—— 只认这三个，顺序也钉住
+    QCOMPARE(CookieStore::allowedKeys(),
+             QStringList({QStringLiteral("SESSDATA"), QStringLiteral("bili_jct"),
+                          QStringLiteral("DedeUserID")}));
+    QCOMPARE(CookieStore::defaultRelativePath(), QStringLiteral("config/bilibili_cookie.json"));
 }
 
-void TestCookieStore::mergesAndKeepsOtherKeys()
+void TestCookieStore::readsTheThreeKeysAndIgnoresTheRest()
 {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
-    const QString path = dir.filePath(QStringLiteral("bilibili_cookie.json"));
+    const QString path = dir.filePath(QStringLiteral("cookie.json"));
     QVERIFY(writeFile(path, QStringLiteral(
-        "{\n"
-        "  \"SESSDATA\": \"sess-old\",\n"
-        "  \"bili_jct\": \"jct-old\",\n"
-        "  \"DedeUserID\": \"42\"\n"
-        "}\n")));
+        "{\n  \"SESSDATA\": \"sess-1\",\n  \"bili_jct\": \"jct-2\",\n"
+        "  \"DedeUserID\": \"42\",\n  \"别的键\": \"x\",\n  \"SESSDATA2\": \"y\"\n}\n")));
 
-    // 只改一个键：别的键必须原样留着（"合并写"）
     CookieStore cookie;
-    QVERIFY(cookie.set(QStringLiteral("SESSDATA"), QStringLiteral("sess-new")));
-    QString error;
-    bool wrote = false;
-    QVERIFY2(cookie.save(path, &error, &wrote), qPrintable(error));
-    QVERIFY(wrote);
-
-    CookieStore after;
-    QVERIFY(after.load(path));
-    QCOMPARE(after.value(QStringLiteral("SESSDATA")), QStringLiteral("sess-new"));
-    QCOMPARE(after.value(QStringLiteral("bili_jct")), QStringLiteral("jct-old"));
-    QCOMPARE(after.value(QStringLiteral("DedeUserID")), QStringLiteral("42"));
+    QVERIFY(cookie.load(path));
+    QVERIFY(!cookie.isEmpty());
+    QCOMPARE(cookie.value(QStringLiteral("SESSDATA")), QStringLiteral("sess-1"));
+    QCOMPARE(cookie.value(QStringLiteral("bili_jct")), QStringLiteral("jct-2"));
+    QCOMPARE(cookie.value(QStringLiteral("DedeUserID")), QStringLiteral("42"));
+    QVERIFY(!cookie.keys().contains(QStringLiteral("别的键")));
+    QVERIFY(!cookie.keys().contains(QStringLiteral("SESSDATA2")));
+    QCOMPARE(cookie.keys().size(), 3);
 }
 
-void TestCookieStore::jsonShapeMatchesPython()
+void TestCookieStore::missingOrBrokenFileIsAnonymousNotAnError()
 {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
-    const QString path = dir.filePath(QStringLiteral("bilibili_cookie.json"));
 
-    CookieStore cookie;
-    QVERIFY(cookie.set(QStringLiteral("DedeUserID"), QStringLiteral("42")));
-    QVERIFY(cookie.set(QStringLiteral("SESSDATA"), QStringLiteral("a\"b\\c")));
-    QString error;
-    QVERIFY2(cookie.save(path, &error), qPrintable(error));
+    CookieStore missing;
+    QVERIFY(!missing.load(dir.filePath(QStringLiteral("nope.json"))));
+    QVERIFY(missing.isEmpty());
 
-    // 两空格缩进 + 结尾换行 + 键按 ALLOWED_KEYS 顺序（与 settings_credentials.py 一致）
-    QCOMPARE(readFile(path),
-             QStringLiteral("{\n"
-                            "  \"SESSDATA\": \"a\\\"b\\\\c\",\n"
-                            "  \"DedeUserID\": \"42\"\n"
-                            "}\n"));
-}
-
-void TestCookieStore::emptyValueDoesNotTouchTheKey()
-{
-    QTemporaryDir dir;
-    QVERIFY(dir.isValid());
-    const QString path = dir.filePath(QStringLiteral("bilibili_cookie.json"));
-    const QString original = QStringLiteral("{\n  \"SESSDATA\": \"keep-me\"\n}\n");
-    QVERIFY(writeFile(path, original));
-
-    CookieStore cookie;
-    QVERIFY(cookie.set(QStringLiteral("SESSDATA"), QString()));   // 界面留空 = 不改动
-    QString error;
-    bool wrote = true;
-    QVERIFY2(cookie.save(path, &error, &wrote), qPrintable(error));
-    QVERIFY(!wrote);                                  // 没有待写值 → 不写文件、不留 .bak
-    QCOMPARE(readFile(path), original);
-    QVERIFY(!QFile::exists(path + QStringLiteral(".bak")));
-}
-
-void TestCookieStore::backupsTheOriginal()
-{
-    QTemporaryDir dir;
-    QVERIFY(dir.isValid());
-    const QString path = dir.filePath(QStringLiteral("bilibili_cookie.json"));
-    const QString original = QStringLiteral("{\n  \"SESSDATA\": \"old\"\n}\n");
-    QVERIFY(writeFile(path, original));
-
-    CookieStore cookie;
-    QVERIFY(cookie.set(QStringLiteral("SESSDATA"), QStringLiteral("new")));
-    QVERIFY(cookie.save(path));
-    QCOMPARE(readFile(path + QStringLiteral(".bak")), original);   // 备份是改动前的原文
-    QVERIFY(!QFile::exists(path + QStringLiteral(".tmp")));        // 临时文件不能留下
-}
-
-void TestCookieStore::brokenFileReadsAsAnonymous()
-{
-    QTemporaryDir dir;
-    QVERIFY(dir.isValid());
-    const QString path = dir.filePath(QStringLiteral("bilibili_cookie.json"));
-    QVERIFY(writeFile(path, QStringLiteral("这不是 JSON\n")));
-
-    CookieStore cookie;
-    QVERIFY(!cookie.load(path));          // 坏文件 = 没读到（匿名是合法状态，不是错误）
-    QVERIFY(cookie.isEmpty());
-
-    // 坏文件照样能覆盖写（写之前留 .bak）
-    QVERIFY(cookie.set(QStringLiteral("SESSDATA"), QStringLiteral("fresh")));
-    QString error;
-    QVERIFY2(cookie.save(path, &error), qPrintable(error));
-    CookieStore after;
-    QVERIFY(after.load(path));
-    QCOMPARE(after.value(QStringLiteral("SESSDATA")), QStringLiteral("fresh"));
+    const QString broken = dir.filePath(QStringLiteral("broken.json"));
+    QVERIFY(writeFile(broken, QStringLiteral("这不是 JSON\n")));
+    CookieStore bad;
+    QVERIFY(!bad.load(broken));          // 坏文件 = 没读到（匿名是合法状态）
+    QVERIFY(bad.isEmpty());
+    QVERIFY(bad.value(QStringLiteral("SESSDATA")).isEmpty());
 }
 
 void TestCookieStore::masksForDisplay()
@@ -180,23 +94,14 @@ void TestCookieStore::masksForDisplay()
 
 void TestCookieStore::resolvesRelativePathAgainstRepoRoot()
 {
-    // 相对路径按**仓库根**解析（与 agent/core/settings_credentials.py 同一个文件）
+    // 相对路径按**仓库根**解析 —— 与 Agent 读的是同一个文件
     QCOMPARE(CookieStore::resolvePath(QStringLiteral("config/bilibili_cookie.json"),
                                       QStringLiteral("/home/kickpi/myproject/assitant")),
              QStringLiteral("/home/kickpi/myproject/assitant/config/bilibili_cookie.json"));
     QCOMPARE(CookieStore::resolvePath(QStringLiteral("/tmp/x.json"), QStringLiteral("/repo")),
              QStringLiteral("/tmp/x.json"));
-    // 空 = 用默认位置
     QCOMPARE(CookieStore::resolvePath(QString(), QStringLiteral("/repo")),
              QStringLiteral("/repo/") + CookieStore::defaultRelativePath());
-}
-
-void TestCookieStore::refusesNewlines()
-{
-    CookieStore cookie;
-    QString error;
-    QVERIFY(!cookie.set(QStringLiteral("SESSDATA"), QStringLiteral("a\nb"), &error));
-    QVERIFY(!error.isEmpty());
 }
 
 QTEST_APPLESS_MAIN(TestCookieStore)

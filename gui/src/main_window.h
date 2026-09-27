@@ -182,4 +182,17 @@ private:
     /// T11-7：B 站封面的取图器（预览栏与下区域封面**共用**一份内存缓存）
     CoverLoader* coverLoader_ = nullptr;
     TopBar::LinkState lastLinkState_ = TopBar::LinkState::Disconnected;
+    /// T14-3：`set_config` 的请求 id 计数器（界面靠 id 认领回执）
+    int configRequestSeq_ = 0;
+
+    /// T14-3：把"要改哪些键"发给 Agent（GUI 不写文件，见 docs/adr/0005）。
+    /// @param prefix 回执路由前缀（`settings` / `model` / `input-source`）
+    void sendConfigRequest(const QString& prefix, const QJsonObject& keys,
+                           const QJsonObject& credentials);
+    /// 生成下一个请求 id：`<prefix>-<n>`
+    QString nextConfigRequestId(const QString& prefix);
+    /// 请 Agent 跑 `llm/scripts/<action>.sh`
+    void sendLlmServiceRequest(const QString& action);
+    /// 「启动 Agent」：`systemctl start agent.service`（T14-7 的单元就位后真能起）
+    void startAgentService();
 };

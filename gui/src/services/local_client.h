@@ -70,6 +70,21 @@ public:
     ///       写入后立即 flush(), 不等事件循环。
     void sendCommand(const QString& action, const QJsonObject& payload = {});
 
+    /// 让 **Agent** 改配置真源（T14-3；线格式见 docs/ipc-protocol.md §4 的 `set_config`）。
+    ///
+    /// GUI **不写** config.yaml —— 唯一的写入者是 Agent（docs/adr/0005）。
+    /// 回执走 `configResultReceived`（带同一个 requestId）。
+    ///
+    /// @param requestId    调用方给的回执 id（非空；界面靠它把回执对回这次请求）
+    /// @param keys         `{点号路径: 新值}`（就是 `ConfigStore::pendingValues()`）
+    /// @param credentials  可选：B 站凭据 `{SESSDATA/…}`（写进 `bilibili.cookie_file`）
+    /// @return false = **没连上**（命令被丢弃），调用方要如实报"Agent 没在跑"
+    bool sendSetConfig(const QString& requestId, const QJsonObject& keys,
+                       const QJsonObject& credentials = {});
+
+    /// 与 Agent 的连接状态（界面在"保存"前可以先问一句）—— T14-3 起给设置页用。
+    bool connected() const { return isConnected(); }
+
     /// 停止: 不再重连, 并断开/释放 socket。可被再次 start() 唤醒。
     void stop();
 
@@ -82,6 +97,13 @@ signals:
     /// 字段表见 docs/ipc-protocol.md §3）。负载里带数组，所以不像其它 topic
     /// 那样进 ViewState，而由视频区/封面区直接消化。
     void bilibiliReceived(QJsonObject data);
+
+    /// `set_config` 的回执（T14-3）：`{id, ok, changed, backup, path, error, llm_env{…}}`。
+    /// 界面按 `id` 认领自己那一次请求。
+    void configResultReceived(QJsonObject data);
+
+    /// `llm_service` 的回执（T14-3）：`{id, ok, action, message}` —— 模型页的启停日志。
+    void serviceResultReceived(QJsonObject data);
 
     /// 与 Agent 的连接状态发生变化（只报变化，不重复报）。T4 起给顶栏用。
     void connectionChanged(bool connected);

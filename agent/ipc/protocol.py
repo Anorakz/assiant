@@ -44,6 +44,7 @@ __all__ = [
     "TOPIC_SCHEDULE",
     "TOPIC_BILIBILI",
     "TOPIC_CONFIG_RESULT",
+    "TOPIC_SERVICE_RESULT",
     "TOPICS",
     # command (GUI -> Agent)
     "COMMAND_SWITCH_MODE",
@@ -60,6 +61,7 @@ __all__ = [
     "COMMAND_MUSIC_PREV",
     "COMMAND_MUSIC_STOP",
     "COMMAND_SET_CONFIG",
+    "COMMAND_LLM_SERVICE",
     "COMMANDS",
     # 命令方向的信封字段名 (GUI 实际实现为准)
     "ACTION_FIELD",
@@ -137,9 +139,15 @@ TOPIC_BILIBILI = "bilibili"
 #:   原样塞回这条推送。
 TOPIC_CONFIG_RESULT = "config_result"
 
+#: 一次 `llm_service` 的**回执**（T14-3）。data:
+#:     {"id": "…", "ok": bool, "action": "start"|"stop", "message": "…"}
+#: `message` 是脚本最后一行输出（或"脚本不存在/退出码 N"这类原话）—— 直接可以
+#: 显示在模型页的日志里。与 `config_result` 同一条路子：id 放在 payload 里带回来。
+TOPIC_SERVICE_RESULT = "service_result"
+
 #: 全部 topic (Agent -> GUI)
 TOPICS = (TOPIC_STATUS, TOPIC_LLM, TOPIC_WALLPAPER, TOPIC_MUSIC, TOPIC_SCHEDULE,
-          TOPIC_BILIBILI, TOPIC_CONFIG_RESULT)
+          TOPIC_BILIBILI, TOPIC_CONFIG_RESULT, TOPIC_SERVICE_RESULT)
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +224,15 @@ COMMAND_MUSIC_STOP = "music_stop"
 COMMAND_SET_CONFIG = "set_config"
 
 
+# ---- 本机 llama-server 的启停（T14-3）----
+#: 让 **Agent** 去跑 `llm/scripts/start.sh` / `stop.sh`（GUI 的模型页那两颗按钮）。
+#: payload: `{"id": "…", "action": "start"|"stop"}`
+#: 应答**就是**随后那条 `topic=service_result` 的推送（带同一个 id）。
+#: ⚠ 为什么要绕这一道: T14 起 GUI **不做系统动作**（不自己跑脚本、不写文件）——
+#:   它只发命令, 由 Agent（板端 root 服务）去执行（docs/adr/0005 的同一条思路）。
+COMMAND_LLM_SERVICE = "llm_service"
+
+
 #: 全部 command (GUI -> Agent)
 COMMANDS = (
     COMMAND_SWITCH_MODE,
@@ -232,6 +249,7 @@ COMMANDS = (
     COMMAND_MUSIC_PREV,
     COMMAND_MUSIC_STOP,
     COMMAND_SET_CONFIG,
+    COMMAND_LLM_SERVICE,
 )
 
 # 命令方向的信封字段名。**以 GUI 的实际实现为准** (Phase 6 决策 1):

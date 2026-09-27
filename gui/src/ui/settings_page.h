@@ -28,6 +28,7 @@
 // ============================================================================
 #pragma once
 
+#include <QJsonObject>
 #include <QString>
 #include <QWidget>
 
@@ -52,8 +53,15 @@ public:
 
     /// 从 config.yaml 载入界面（configPath 为空则只显示不可用）
     void loadFromConfig(const QString& configPath);
-    /// 写回 config.yaml（gui: 段 + 三张卡片那几段）；返回是否成功
-    bool saveToConfig(QString* error = nullptr);
+    /// **把"想改成什么"交给 Agent**（T14-3）：本页只发请求，不写任何文件。
+    /// @return 请求内容 —— `{点号路径: 新值}`；调用方（MainWindow）负责发 IPC。
+    QJsonObject buildKeys() const;
+    /// 凭据三个框里**真填了**的键（空框 = 不改动那个键）。
+    QJsonObject buildCredentials() const;
+    /// Agent 的回执（MainWindow 收到 `config_result` 后调它）。
+    /// ok=true -> 提示"已写入"并重新读一遍配置；false -> 把 Agent 的原话显示出来。
+    void onConfigResult(const QJsonObject& result);
+
     /// 把界面恢复成本页的默认值（不写文件，等用户点保存）
     void restoreDefaults();
 
@@ -71,6 +79,10 @@ public:
     QLabel* aboutLabel() const { return about_; }
     QScrollArea* scrollArea() const { return scroll_; }
     QLabel* pathLabel() const { return path_; }
+    /// 保存结果那行字（T14-3：成功/失败都写在这里；失败时里面是 Agent 的原话）
+    QLabel* resultLabel() const { return result_; }
+    /// 「启动 Agent」按钮（只在"没连上"时显示；T14-7 的 systemd 单元就位后真能起）
+    QPushButton* startAgentButton() const { return startAgent_; }
 
     // ---- T13-9：三张卡片 ----
     QCheckBox* studyEnabledCheck() const { return studyEnabled_; }
@@ -93,8 +105,11 @@ public:
     QSpinBox* profileTurnsSpin() const { return profileTurns_; }
 
 signals:
-    /// 保存成功后发出（MainWindow 据此重新 applyConfig 让设置立即生效）
-    void configSaved();
+    /// 用户点了「保存」：把"要改哪些键 / 哪些凭据"交给 MainWindow 发 IPC（T14-3）。
+    /// ⚠ 本页**不写文件**：落盘由 Agent 做（docs/adr/0005）。
+    void saveRequested(QJsonObject keys, QJsonObject credentials);
+    /// 用户点了「启动 Agent」（只在"没连上"时出现）。MainWindow 去 systemctl start。
+    void startAgentRequested();
 
 protected:
     /// 每次显示都把滚动拉回顶部：焦点落在第一个控件上会被 QScrollArea 滚进视野，
@@ -106,9 +121,8 @@ private:
 
     /// 载入 / 写出三张卡片（`study.*` / `bilibili.game_watch.*` + 凭据 / `profile.*`）。
     void loadCards(core::ConfigStore* store);
-    bool saveCards(core::ConfigStore* store, QString* error);
-    /// 配置同目录的模板（缺段新建与类型校验都以它为准；没有就退化成"拒绝新建"）。
-    static QString templatePathFor(const QString& configPath);
+    /// 把三张卡片的当前值塞进 `store` 的待改列表（**不落盘**；就是发给 Agent 的 keys）。
+    void fillCardChanges(core::ConfigStore* store) const;
     /// 仓库根 = `config/` 的上一级（相对 cookie_file 按它解析，与 Agent 一致）。
     static QString repoRootFor(const QString& configPath);
     /// 凭据文件的绝对路径（页面上的路径框 + 仓库根）。
@@ -157,5 +171,7 @@ private:
     QPushButton* defaults_ = nullptr;
     QLabel* about_ = nullptr;
     QLabel* path_ = nullptr;
+    QLabel* result_ = nullptr;        ///< 保存结果/失败原话（T14-3）
+    QPushButton* startAgent_ = nullptr;   ///< 只在"没连上 Agent"时出现
     QScrollArea* scroll_ = nullptr;
 };

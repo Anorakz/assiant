@@ -38,6 +38,12 @@ const char kTopicLlm[]       = "llm";
 const char kTopicWallpaper[] = "wallpaper";
 const char kTopicMusic[]     = "music";
 const char kTopicBilibili[]  = "bilibili";   // T11-7: B 站队列/当前条/缓冲状态
+const char kTopicConfigResult[] = "config_result";   // T14-3: set_config 的回执
+const char kTopicServiceResult[] = "service_result"; // T14-3: llm_service 的回执
+//: 命令名（GUI -> Agent）—— 只列这里真的会发的那些；全量表在
+//: `agent/ipc/protocol.py::COMMANDS` / docs/ipc-protocol.md §8。
+const char kActionSetConfig[] = "set_config";        // T14-3: 让 Agent 改配置真源
+const char kActionLlmService[] = "llm_service";      // T14-3: 让 Agent 跑 llm/scripts/*.sh
 
 //: 断线后固定 1 秒重连 (按任务约定: 不做指数退避)
 constexpr int kReconnectDelayMs = 1000;
@@ -157,6 +163,31 @@ void LocalClient::sendCommand(const QString& action, const QJsonObject& payload)
     qInfo().noquote() << "[ipc] 发送:" << preview(line);
 }
 
+bool LocalClient::sendSetConfig(const QString& requestId, const QJsonObject& keys,
+                                const QJsonObject& credentials)
+{
+    if (!isConnected()) {
+        // ⚠ **这里不退回"GUI 自己写"**（你定的：唯一写入者是 Agent）。
+        //   界面必须如实说"Agent 没在跑"，而不是偷偷改一份文件了事。
+        qWarning().noquote() << "[ipc] 未连接到 Agent, 拒绝 set_config（配置未改）";
+        return false;
+    }
+    if (requestId.trimmed().isEmpty()) {
+        qWarning().noquote() << "[ipc] set_config 缺 id, 拒绝（界面靠它认领回执）";
+        return false;
+    }
+
+    QJsonObject payload;
+    payload.insert(QStringLiteral("id"), requestId);
+    payload.insert(QStringLiteral("keys"), keys);
+    if (!credentials.isEmpty()) {
+        // 只写这次真填了的键（空 = 不改动那个键，与 Agent 侧 clean_values 同口径）
+        payload.insert(QStringLiteral("credentials"), credentials);
+    }
+    sendCommand(QLatin1String(kActionSetConfig), payload);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 //  收数据: 累积 -> 按 '\n' 切行 -> 逐行解析
 // ---------------------------------------------------------------------------
@@ -247,6 +278,12 @@ void LocalClient::processLine(const QByteArray& line)
         emit musicReceived(data);
     } else if (topic == QLatin1String(kTopicBilibili)) {
         emit bilibiliReceived(data);
+    } else if (topic == QLatin1String(kTopicConfigResult)) {
+        // T14-3: set_config 的回执（界面按 data.id 认领自己那一次请求）
+        emit configResultReceived(data);
+    } else if (topic == QLatin1String(kTopicServiceResult)) {
+        // T14-3: llm_service 的回执（模型页把它写进日志）
+        emit serviceResultReceived(data);
     } else {
         // 协议 §6: 不认识的 topic 是"忽略", 不是错误 —— 可能对端版本更新了
         qDebug().noquote() << "[ipc] 忽略未知 topic:" << topic;

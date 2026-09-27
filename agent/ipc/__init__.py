@@ -46,6 +46,7 @@ from .protocol import (
     COMMAND_BILIBILI_PICK,
     COMMAND_BILIBILI_VIEWPORT,
     COMMAND_CHAT_INPUT,
+    COMMAND_LLM_SERVICE,
     COMMAND_MUSIC_NEXT,
     COMMAND_MUSIC_PLAY_PAUSE,
     COMMAND_MUSIC_PREV,
@@ -73,6 +74,7 @@ from .protocol import (
     TOPIC_LLM,
     TOPIC_MUSIC,
     TOPIC_SCHEDULE,
+    TOPIC_SERVICE_RESULT,
     TOPIC_STATUS,
     TOPIC_WALLPAPER,
     TOPICS,
@@ -100,6 +102,7 @@ __all__ = [
     "TOPIC_SCHEDULE",
     "TOPIC_BILIBILI",
     "TOPIC_CONFIG_RESULT",
+    "TOPIC_SERVICE_RESULT",
     "TOPICS",
     # command (GUI -> Agent)
     "COMMAND_SWITCH_MODE",
@@ -112,6 +115,7 @@ __all__ = [
     "COMMAND_VIDEO_CONTROL",
     "COMMAND_QUERY_SCHEDULE",
     "COMMAND_SET_CONFIG",
+    "COMMAND_LLM_SERVICE",
     "COMMANDS",
     "UNWIRED_COMMAND_NOTES",
     "NO_SCHEDULER_NOTE",
@@ -420,6 +424,54 @@ SCHEDULE_KIND_FIRED = "fired"    #: 刚刚真的触发了一条
 NO_SCHEDULER_NOTE = "现在还没有可查的日程触发记录：Agent 的调度器没起来（或没接进来）。"
 
 
+def _handle_llm_service(runtime: Any, payload: dict, push: Any) -> None:
+    """`llm_service`：让 **Agent** 跑 `llm/scripts/start.sh` / `stop.sh`（T14-3）。
+
+    模型页那两颗按钮原来自己 `QProcess` 跑脚本；T14 起 GUI 不做系统动作
+    （不跑脚本、不写文件），只发命令 —— Agent 是板端那个有权限的进程。
+
+    ⚠ 与 `LlamaService.from_config()` 的取舍**不同**: 那个方法只在
+      `mode=edge 且 manage_service=true` 时返回对象（"Agent 该不该自己管别人的进程"）。
+      这里是**用户明确点了按钮**，所以照做；只在"没有 edge 那套脚本"时如实报失败。
+    """
+    from agent.llm.service import LlamaService       # 局部导入: 避免 ipc 层与 llm 层互相牵
+
+    request_id = payload.get("id")
+    if not isinstance(request_id, str):
+        request_id = ""
+    action = payload.get("action")
+
+    reply: Dict[str, Any] = {"id": request_id, "ok": False, "action": action, "message": ""}
+
+    def _finish() -> None:
+        if push is not None:
+            push(TOPIC_SERVICE_RESULT, reply)
+
+    if action not in ("start", "stop", "status"):
+        reply["message"] = "action 只能是 start / stop / status（收到 %r）" % (action,)
+        _log.warning("ipc: llm_service 载荷不合法: %r", action)
+        _finish()
+        return
+
+    service = getattr(runtime, "llm_service", None) if runtime is not None else None
+    if service is None:
+        # 没接服务对象（manage_service 没开 / 测试替身）就现建一个 —— 只是跑脚本，
+        # 端口/密钥只影响探活，不影响启停。
+        try:
+            service = LlamaService(log=_log)
+        except Exception as exc:                     # noqa: BLE001
+            reply["message"] = "起不了 LlamaService: %s" % exc
+            _log.warning("ipc: llm_service 建不出 LlamaService: %s", exc)
+            _finish()
+            return
+
+    ok, message = service.start() if action == "start" else service.stop()
+    reply["ok"] = bool(ok)
+    reply["message"] = str(message)
+    _log.info("ipc: llm_service %s -> %s (%s)", action, "ok" if ok else "失败", message)
+    _finish()
+
+
 def _handle_set_config(runtime: Any, payload: dict, push: Any) -> None:
     """`set_config`：**Agent 是配置真源唯一的写入者**（T14-2，见 docs/adr/0005）。
 
@@ -591,6 +643,10 @@ def _make_command_handler(bus: Any, runtime: Any = None, push: Any = None):
 
         if action == COMMAND_SET_CONFIG:
             _handle_set_config(runtime, payload, push)
+            return
+
+        if action == COMMAND_LLM_SERVICE:
+            _handle_llm_service(runtime, payload, push)
             return
 
         if action in _MUSIC_ACTIONS:

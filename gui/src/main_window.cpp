@@ -40,6 +40,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPainter>
+#include <QProcess>
 #include <QPushButton>
 #include <QShowEvent>
 #include <QStackedWidget>
@@ -338,6 +339,28 @@ MainWindow::MainWindow(QWidget* parent)
             [this](const QJsonObject& d) { onMessage(QStringLiteral("music"), d); });
     connect(client_, &LocalClient::bilibiliReceived, this,
             [this](const QJsonObject& d) { onMessage(QStringLiteral("bilibili"), d); });
+    // T14-3：两条回执按请求 id 的路由（`<prefix>-<n>`）—— 页面自己不认识就忽略
+    connect(client_, &LocalClient::configResultReceived, this, [this](const QJsonObject& d) {
+        const QString id = d.value(QStringLiteral("id")).toString();
+        if (id.startsWith(QLatin1String("settings")) && settingsPage_ != nullptr) {
+            settingsPage_->onConfigResult(d);
+        } else if (id.startsWith(QLatin1String("model")) && modelPage_ != nullptr) {
+            modelPage_->onConfigResult(d);
+        } else if (id.startsWith(QLatin1String("input-source"))) {
+            // 输入源那一次：写就写了，失败只记日志（界面已经切过去了）
+            if (!d.value(QStringLiteral("ok")).toBool(false)) {
+                qWarning().noquote() << "[ui] 输入源没能写进配置:"
+                                     << d.value(QStringLiteral("error")).toString();
+            }
+        } else {
+            qDebug().noquote() << "[ipc] 收到不认识来源的 config_result:" << id;
+        }
+    });
+    connect(client_, &LocalClient::serviceResultReceived, this, [this](const QJsonObject& d) {
+        if (modelPage_ != nullptr) {
+            modelPage_->onServiceResult(d);
+        }
+    });
 
     // ---- T5：主页面右区域的交互接线 ----
     if (mainPage_ != nullptr && mainPage_->modePanel() != nullptr) {
@@ -756,6 +779,77 @@ void MainWindow::onChatInputFocused(bool focused)
     }
 }
 
+QString MainWindow::nextConfigRequestId(const QString& prefix)
+{
+    ++configRequestSeq_;
+    return QStringLiteral("%1-%2").arg(prefix).arg(configRequestSeq_);
+}
+
+void MainWindow::sendConfigRequest(const QString& prefix, const QJsonObject& keys,
+                                   const QJsonObject& credentials)
+{
+    const QString requestId = nextConfigRequestId(prefix);
+    const bool sent = client_ != nullptr && client_->sendSetConfig(requestId, keys, credentials);
+    if (sent) {
+        qInfo().noquote() << QStringLiteral("[ui] 已请 Agent 写配置（%1 个键，id=%2）")
+                                 .arg(keys.size())
+                                 .arg(requestId);
+        return;
+    }
+    // ⚠ **不退回"GUI 自己写"**（你定的：唯一写入者是 Agent）——如实报"没连上"。
+    QJsonObject failure;
+    failure.insert(QStringLiteral("id"), requestId);
+    failure.insert(QStringLiteral("ok"), false);
+    failure.insert(QStringLiteral("error"),
+                   QStringLiteral("Agent 没连上（命令没发出去）：设置改不了，"
+                                  "先把 Agent 起起来再保存。"));
+    if (prefix == QLatin1String("settings") && settingsPage_ != nullptr) {
+        settingsPage_->onConfigResult(failure);
+    } else if (prefix == QLatin1String("model") && modelPage_ != nullptr) {
+        modelPage_->onConfigResult(failure);
+    }
+}
+
+void MainWindow::sendLlmServiceRequest(const QString& action)
+{
+    if (client_ == nullptr || !client_->connected()) {
+        QJsonObject failure;
+        failure.insert(QStringLiteral("action"), action);
+        failure.insert(QStringLiteral("ok"), false);
+        failure.insert(QStringLiteral("message"),
+                       QStringLiteral("Agent 没连上（命令没发出去）：起停服务要 Agent 在跑。"));
+        if (modelPage_ != nullptr) {
+            modelPage_->onServiceResult(failure);
+        }
+        return;
+    }
+    QJsonObject payload;
+    payload.insert(QStringLiteral("id"), nextConfigRequestId(QStringLiteral("service")));
+    payload.insert(QStringLiteral("action"), action);
+    client_->sendCommand(QStringLiteral("llm_service"), payload);
+}
+
+void MainWindow::startAgentService()
+{
+    // T14-7 的 `systemd/agent.service` 就位后这条就真能把它拉起来。
+    // 现在（还没有单元）会失败 —— 如实把 systemctl 的原话显示出来，不假装起了。
+    QProcess process(this);
+    process.start(QStringLiteral("systemctl"),
+                  {QStringLiteral("start"), QStringLiteral("agent.service")});
+    if (!process.waitForFinished(10000)) {
+        qWarning().noquote() << "[ui] 启动 Agent 超时（systemctl start agent.service）";
+        return;
+    }
+    const QString output = QString::fromLocal8Bit(process.readAllStandardError()).trimmed()
+                           + QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
+    if (process.exitCode() == 0) {
+        qInfo().noquote() << "[ui] 已请求启动 Agent（等它自己连上来）";
+    } else {
+        qWarning().noquote() << "[ui] 启动 Agent 失败:" << output
+                             << "(T14-7 的 systemd 单元就位前，这一步注定失败)";
+    }
+}
+
 void MainWindow::applyInputType(const QString& type)
 {
     inputSource_ = type;
@@ -779,24 +873,17 @@ void MainWindow::applyInputType(const QString& type)
         }
     }
 
-    // 2) 写回 config.yaml 的 gui: 段（值没变就不写，免得每次启动都重写一遍）
-    if (configPath_.isEmpty()) {
+    // 2) 让 **Agent** 把它写进 config.yaml 的 gui: 段（T14-3：GUI 不写文件）
+    if (configPath_.isEmpty() || client_ == nullptr) {
         return;
     }
-    core::ConfigStore store;
-    QString error;
-    if (!store.load(configPath_, &error)) {
-        qWarning().noquote() << "[ui] 读配置失败，输入源未保存:" << error;
-        return;
-    }
-    if (store.value(QStringLiteral("gui.input_source")) == type) {
-        return;
-    }
-    store.set(QStringLiteral("gui.input_source"), type);
-    if (store.save(&error)) {
-        qInfo().noquote() << "[ui] 输入源已保存到" << configPath_ << ":" << type;
+    QJsonObject keys;
+    keys.insert(QStringLiteral("gui.input_source"), type);
+    const QString requestId = nextConfigRequestId(QStringLiteral("input-source"));
+    if (client_->sendSetConfig(requestId, keys)) {
+        qInfo().noquote() << "[ui] 已请 Agent 保存输入源:" << type;
     } else {
-        qWarning().noquote() << "[ui] 保存输入源失败:" << error;
+        qWarning().noquote() << "[ui] 输入源没能保存：Agent 没连上（界面已切，配置未动）";
     }
 }
 
@@ -1003,15 +1090,21 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
 
     if (settingsPage_ != nullptr) {
         settingsPage_->loadFromConfig(configPath_);
-        // 保存后立刻让配置生效（四区域折叠策略/休眠时间/输入源）
-        connect(settingsPage_, &SettingsPage::configSaved, this, [this]() {
-            core::ConfigStore fresh;
-            QString error;
-            if (!configPath_.isEmpty() && fresh.load(configPath_, &error)) {
-                applyConfig(fresh);
-                qInfo().noquote() << "[settings] 已按新配置重新应用";
-            }
-        }, Qt::UniqueConnection);
+        // T14-3：页面只发"要改哪些键"，落盘交给 Agent（唯一写入者，见 docs/adr/0005）。
+        connect(settingsPage_, &SettingsPage::saveRequested, this,
+                [this](QJsonObject keys, QJsonObject credentials) {
+                    sendConfigRequest(QStringLiteral("settings"), keys, credentials);
+                }, Qt::UniqueConnection);
+        connect(settingsPage_, &SettingsPage::startAgentRequested, this,
+                [this]() { startAgentService(); }, Qt::UniqueConnection);
+    }
+    if (modelPage_ != nullptr) {
+        connect(modelPage_, &ModelPage::configSaveRequested, this,
+                [this](QJsonObject keys, QJsonObject credentials) {
+                    sendConfigRequest(QStringLiteral("model"), keys, credentials);
+                }, Qt::UniqueConnection);
+        connect(modelPage_, &ModelPage::serviceRequested, this,
+                [this](QString action) { sendLlmServiceRequest(action); }, Qt::UniqueConnection);
     }
 
     const auto isActive = [&gui](const QString& key, bool fallback) {

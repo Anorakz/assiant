@@ -103,6 +103,7 @@ int modeDemoMs = 3000;          ///< 上面那一下在启动后多久点（默�
     bool settingsSaveDemo = false;  ///< 启动后改两个时间并保存（验收用）
     bool settingsCardsDemo = false; ///< 启动后把三张卡片设成"有区分度"的值并保存（T13-10 验收用）
     bool settingsFinalDemo = false; ///< 启动后把三张卡片设成约定值并保存（T13-10 收尾用）
+    bool settingsOneKeyDemo = false; ///< 启动后改一个键并保存（T14-3 端到端验收用）
     int settingsScrollDemo = -1;    ///< >=0 = 启动后把设置页滚到该像素再截图（T13-10 取证用）
     bool settingsDumpCards = false; ///< 打印三张卡片**当前读到的值**并退出（T13-10 取证用）
     bool dumpSchedule = false;      ///< 打印日程区**真实渲染出来的行**并退出（S8 取证用）
@@ -149,6 +150,7 @@ void printUsage()
         "  --settings-save-demo 启动后改两个休眠时间并保存（验收用）\n"
         "  --settings-cards-demo    启动后把三张卡片设成有区分度的值并保存（T13-10 验收用）\n"
         "  --settings-final-demo    启动后把三张卡片设成约定值并保存（T13-10 收尾用）\n"
+        "  --settings-one-key-demo  启动后改一个键并保存（T14-3 端到端验收：走 IPC 让 Agent 写）\n"
         "  --settings-scroll-demo <px>  启动后把设置页滚到该像素再截图（T13-10 取证用）\n"
         "  --settings-dump-cards    打印三张卡片当前读到的值并退出（T13-10 取证用）\n"
         "  --dump-schedule      打印日程区真实渲染出来的行并退出（取证用）\n"
@@ -291,6 +293,8 @@ Options parseArgs(int argc, char** argv)
             opt.settingsCardsDemo = true;
         } else if (arg == QLatin1String("--settings-final-demo")) {
             opt.settingsFinalDemo = true;
+        } else if (arg == QLatin1String("--settings-one-key-demo")) {
+            opt.settingsOneKeyDemo = true;
         } else if (arg == QLatin1String("--settings-dump-cards")) {
             opt.settingsDumpCards = true;
         } else if (arg == QLatin1String("--settings-scroll-demo")
@@ -791,6 +795,17 @@ int runGuiMode(const Options& opt, int argc, char** argv)
             page->profileEnabledCheck()->setChecked(true);
             page->profileCharsSpin()->setValue(2000);
             page->profileTurnsSpin()->setValue(12);
+            page->saveButton()->click();
+        });
+    }
+    // T14-3 验收：改**一个**键再点保存 —— 走 IPC 让真 Agent 落盘（端到端取证用）
+    if (opt.settingsOneKeyDemo) {
+        QTimer::singleShot(1800, &window, [&window]() {
+            SettingsPage* page = window.settingsPage();
+            if (page == nullptr) {
+                return;
+            }
+            page->studyBandSpin()->setValue(0.077);
             page->saveButton()->click();
         });
     }

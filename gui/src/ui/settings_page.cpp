@@ -23,6 +23,8 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -318,6 +320,17 @@ void SettingsPage::build()
     }
     buttons->addStretch(1);
     cfgBox->addLayout(buttons);
+    // T14-3：保存结果 / 失败原话写在这一行；"没连上"时旁边出现「启动 Agent」。
+    result_ = new QLabel(cfg);
+    result_->setObjectName(QStringLiteral("ChatSystem"));
+    result_->setWordWrap(true);
+    cfgBox->addWidget(result_);
+    startAgent_ = new QPushButton(QStringLiteral("启动 Agent"), cfg);
+    startAgent_->setObjectName(QStringLiteral("VideoCtl"));
+    startAgent_->setCursor(Qt::PointingHandCursor);
+    startAgent_->setMinimumHeight(36);
+    startAgent_->setVisible(false);          // 只在需要时出现
+    cfgBox->addWidget(startAgent_);
     root->addWidget(cfg);
 
     QVBoxLayout* aboutBox = nullptr;
@@ -333,13 +346,23 @@ void SettingsPage::build()
     root->addStretch(1);
 
     connect(save_, &QPushButton::clicked, this, [this]() {
-        QString error;
-        if (saveToConfig(&error)) {
-            qInfo().noquote() << "[settings] 配置已保存";
-            emit configSaved();
-        } else {
-            qWarning().noquote() << "[settings] 保存失败:" << error;
+        // T14-3：本页**不写文件** —— 把"要改哪些键"交给 MainWindow 发 IPC，
+        // 回执到了再由 onConfigResult() 显示结果（docs/adr/0005）。
+        for (const QLineEdit* edit : {sessdata_, biliJct_, dedeUser_}) {
+            if (edit != nullptr && (edit->text().contains(QLatin1Char('\n'))
+                                    || edit->text().contains(QLatin1Char('\r')))) {
+                result_->setText(QStringLiteral("凭据不能换行（一行一个键）"));
+                startAgent_->setVisible(false);
+                return;
+            }
         }
+        result_->setText(QStringLiteral("已发给 Agent，等回执…"));
+        startAgent_->setVisible(false);
+        emit saveRequested(buildKeys(), buildCredentials());
+    });
+    connect(startAgent_, &QPushButton::clicked, this, [this]() {
+        result_->setText(QStringLiteral("正在请求启动 Agent…"));
+        emit startAgentRequested();
     });
     connect(defaults_, &QPushButton::clicked, this, [this]() { restoreDefaults(); });
 }
@@ -385,11 +408,6 @@ QString SettingsPage::repoRootFor(const QString& configPath)
     // 与 main.cpp 的 `setRepoRoot` 同一算法：config/ 的上一级就是仓库根
     const QString root = QFileInfo(configPath).absolutePath() + QStringLiteral("/..");
     return QDir(root).absolutePath();
-}
-
-QString SettingsPage::templatePathFor(const QString& configPath)
-{
-    return core::ConfigStore::siblingTemplatePath(configPath);
 }
 
 QString SettingsPage::cookieFilePath() const
@@ -486,11 +504,11 @@ void SettingsPage::loadFromConfig(const QString& configPath)
     }
 }
 
-bool SettingsPage::saveCards(core::ConfigStore* store, QString* error)
+void SettingsPage::fillCardChanges(core::ConfigStore* store) const
 {
-    // ⚠ 这一段就是"页面能写哪些键"的**白名单**（T13-9 验收要求按**键**列出来）。
-    //    `tests/test_settings_page.cpp::saveOnlyTouchesWhitelistedKeys` 拿真模板逐行核对：
-    //    除了 gui.* 与本函数列的这些键，别的行一个字节都不许变。
+    // ⚠ 这一段就是"页面能改哪些键"的**白名单**（T13-9 定、T14-3 改成请求侧契约）。
+    //    `tests/test_settings_page.cpp::requestOnlyTouchesWhitelistedKeys` 逐键核对接
+    //    下来的 `buildKeys()`：除了 gui.* 与本函数列的这些键，别的一律不许出现在请求里。
     store->setBool(QStringLiteral("study.enabled"), studyEnabled_->isChecked());
     store->set(QStringLiteral("study.focus_interval_min"), QString::number(studyFocus_->value()));
     store->set(QStringLiteral("study.recheck_interval_min"), QString::number(studyRecheck_->value()));
@@ -513,42 +531,13 @@ bool SettingsPage::saveCards(core::ConfigStore* store, QString* error)
     store->setBool(QStringLiteral("profile.enabled"), profileEnabled_->isChecked());
     store->set(QStringLiteral("profile.trigger_chars"), QString::number(profileChars_->value()));
     store->set(QStringLiteral("profile.trigger_turns"), QString::number(profileTurns_->value()));
-
-    // 凭据是**另一个文件**（config/bilibili_cookie.json），不在这里写；这里只挡类型/键名错误
-    for (const QLineEdit* edit : {sessdata_, biliJct_, dedeUser_}) {
-        if (edit == nullptr) {
-            continue;
-        }
-        const QString text = edit->text().trimmed();
-        if (text.contains(QLatin1Char('\n')) || text.contains(QLatin1Char('\r'))) {
-            if (error != nullptr) {
-                *error = QStringLiteral("凭据不能换行（一行一个键）");
-            }
-            return false;
-        }
-    }
-    return true;
 }
 
-bool SettingsPage::saveToConfig(QString* error)
+QJsonObject SettingsPage::buildKeys() const
 {
-    if (configPath_.isEmpty()) {
-        if (error != nullptr) {
-            *error = QStringLiteral("没有配置路径");
-        }
-        return false;
-    }
+    // 界面上的每一项都过一遍 `set()`（"想改成什么"），再整体交给 Agent。
+    // ⚠ 这里**不读也不写文件**：键清单与界面无关，值是控件现值。
     core::ConfigStore store;
-    if (!store.load(configPath_, error)) {
-        return false;
-    }
-    // 缺段新建与"值类型跟着模板走"都靠这份模板（板端就是 config/config.example.yaml）。
-    // 读不到只是**退化成 T13-9 之前的行为**（父块不存在就拒绝写入），不是致命错误。
-    QString templateError;
-    if (!store.loadTemplate(templatePathFor(configPath_), &templateError)) {
-        qWarning().noquote() << "[settings] 模板读不到（缺段将拒绝新建）:" << templateError;
-    }
-
     store.setBool(QStringLiteral("gui.debug"), debug_->isChecked());
     for (const QString& region : {QStringLiteral("top"), QStringLiteral("bottom"),
                                   QStringLiteral("left"), QStringLiteral("right")}) {
@@ -562,45 +551,72 @@ bool SettingsPage::saveToConfig(QString* error)
     store.setBool(QStringLiteral("gui.fullscreen"), fullscreen_->currentIndex() == 0);
     store.set(QStringLiteral("gui.start_page"), startPage_->currentData().toString());
     store.set(QStringLiteral("gui.input_source"), inputSource_->currentData().toString());
-    if (!saveCards(&store, error)) {
-        return false;
-    }
-    if (!store.save(error)) {
-        return false;
-    }
+    fillCardChanges(&store);
 
-    // ---- B 站凭据（另一个文件；只写这次真填了的键，合并写 + .bak + 原子写）----
-    core::CookieStore cookie;
-    const auto put = [&cookie, error](const QLineEdit* edit, const char* key) {
+    QJsonObject out;
+    const QStringList keys = store.pendingKeys();     // 顺序 = 加入顺序（便于日志比对）
+    const QHash<QString, QString> values = store.pendingValues();
+    for (const QString& key : keys) {
+        out.insert(key, values.value(key));
+    }
+    return out;
+}
+
+QJsonObject SettingsPage::buildCredentials() const
+{
+    QJsonObject out;
+    const auto put = [&out](const QLineEdit* edit, const char* key) {
         if (edit == nullptr) {
-            return true;
+            return;
         }
         const QString text = edit->text().trimmed();
-        if (text.isEmpty()) {
-            return true;             // 空 = 不改动这个键
+        if (!text.isEmpty()) {                 // 空框 = 不改动那个键（Agent 侧同口径）
+            out.insert(QString::fromLatin1(key), text);
         }
-        return cookie.set(QString::fromLatin1(key), text, error);
     };
-    if (!put(sessdata_, "SESSDATA") || !put(biliJct_, "bili_jct")
-        || !put(dedeUser_, "DedeUserID")) {
-        return false;
-    }
-    bool wrote = false;
-    if (!cookie.save(cookieFilePath(), error, &wrote)) {
-        if (error != nullptr) {
-            *error = QStringLiteral("配置已保存，但凭据写入失败: %1").arg(*error);
+    put(sessdata_, "SESSDATA");
+    put(biliJct_, "bili_jct");
+    put(dedeUser_, "DedeUserID");
+    return out;
+}
+
+void SettingsPage::onConfigResult(const QJsonObject& result)
+{
+    const bool ok = result.value(QStringLiteral("ok")).toBool(false);
+    if (ok) {
+        const int changed = result.value(QStringLiteral("changed")).toInt(0);
+        const QJsonObject env = result.value(QStringLiteral("llm_env")).toObject();
+        QString text = changed > 0
+                           ? QStringLiteral("Agent 已写入 config.yaml（改了 %1 行，旁留 .bak）")
+                                 .arg(changed)
+                           : QStringLiteral("Agent 说：没有要改的行（值本来就一样）");
+        if (!env.isEmpty() && !env.value(QStringLiteral("ok")).toBool(true)) {
+            text += QStringLiteral("；但派生 llm.env 失败：%1")
+                        .arg(env.value(QStringLiteral("error")).toString());
         }
-        return false;
+        result_->setText(text);
+        startAgent_->setVisible(false);
+        qInfo().noquote() << "[settings]" << text;
+        // 填过的凭据框清掉 + 状态标签刷新（凭据是 Agent 写的，重新读一遍才有新掩码）
+        sessdata_->clear();
+        biliJct_->clear();
+        dedeUser_->clear();
+        if (!configPath_.isEmpty()) {
+            loadFromConfig(configPath_);       // 回读：界面以真源为准
+        }
+        return;
     }
-    if (wrote) {
-        qInfo().noquote() << "[settings] B 站凭据已写入" << cookieFilePath();
-    }
-    // 填过的框清掉（避免第二次保存把同一串再写一遍）+ 刷新状态标签
-    sessdata_->clear();
-    biliJct_->clear();
-    dedeUser_->clear();
-    refreshCookieStatus();
-    return true;
+
+    const QString error = result.value(QStringLiteral("error")).toString();
+    result_->setText(QStringLiteral("没能写入：%1").arg(error.isEmpty()
+                                                       ? QStringLiteral("（Agent 没给原因）")
+                                                       : error));
+    qWarning().noquote() << "[settings] 保存失败:" << error;
+    // "没连上"时把「启动 Agent」露出来（T14-7 的 systemd 单元就位后真能起）
+    const bool offline = error.contains(QStringLiteral("没连上"))
+                         || error.contains(QStringLiteral("未连接"))
+                         || error.contains(QStringLiteral("连不上"));
+    startAgent_->setVisible(offline);
 }
 
 void SettingsPage::restoreDefaults()

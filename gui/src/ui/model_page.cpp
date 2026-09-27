@@ -87,7 +87,7 @@ ModelPage::~ModelPage()
         }
     };
     stopProcess(bench_);
-    stopProcess(script_);
+    // ⚠ T14-3 起起停脚本由 Agent 跑（本页不再持有 script_ 那个 QProcess）
 }
 
 void ModelPage::build()
@@ -384,13 +384,9 @@ bool ModelPage::saveAndSync()
         appendLog(QStringLiteral("没设置 config.yaml 路径，无法保存"));
         return false;
     }
+    // T14-3：本页**不写文件**。把 llm.* 的现值交给 MainWindow 发 IPC（`set_config`），
+    // 落盘 + 派生 llm.env 都由 Agent 做（`docs/adr/0005`），回执到了再写日志。
     core::ConfigStore store;
-    QString error;
-    if (!store.load(configPath_, &error)) {
-        appendLog(QStringLiteral("读配置失败：%1").arg(error));
-        return false;
-    }
-
     store.set(QStringLiteral("llm.mode"), mode_);
     store.set(QStringLiteral("llm.model_path"), modelBox_->currentText());
     store.set(QStringLiteral("llm.ctx_size"), QString::number(ctxSpin_->value()));
@@ -403,58 +399,61 @@ bool ModelPage::saveAndSync()
     store.set(QStringLiteral("llm.model"), cloudModel_->text());
     store.set(QStringLiteral("llm.api_key"), cloudKey_->text());
 
-    if (!store.save(&error)) {
-        appendLog(QStringLiteral("写 config.yaml 失败：%1").arg(error));
-        return false;
+    QJsonObject keys;
+    const QHash<QString, QString> values = store.pendingValues();
+    for (const QString& key : store.pendingKeys()) {
+        keys.insert(key, values.value(key));
     }
-    appendLog(QStringLiteral("config.yaml 已更新（mode=%1）").arg(mode_));
-
-    if (repoRoot_.isEmpty()) {
-        appendLog(QStringLiteral("没设置仓库根，跳过派生 llm.env"));
-        return true;
-    }
-    // config.yaml 已经由上面的 store.save() 落盘; 这里只派生 llm.env
-    core::ConfigSyncer syncer(repoRoot_ + QStringLiteral("/llm/config/llm.env"));
-    QString diff;
-    if (!syncer.apply(store, &error, &diff)) {
-        appendLog(QStringLiteral("派生 llm.env 失败：%1").arg(error));
-        return false;
-    }
-    appendLog(QStringLiteral("已派生 llm.env：\n%1").arg(diff.trimmed()));
+    appendLog(QStringLiteral("已把 llm.* 交给 Agent（等回执；llm.env 也由它派生）"));
+    emit configSaveRequested(keys, QJsonObject());
     return true;
+}
+
+void ModelPage::onConfigResult(const QJsonObject& result)
+{
+    if (result.value(QStringLiteral("ok")).toBool(false)) {
+        const int changed = result.value(QStringLiteral("changed")).toInt(0);
+        const QJsonObject env = result.value(QStringLiteral("llm_env")).toObject();
+        appendLog(QStringLiteral("Agent 已写入 config.yaml（改了 %1 行，mode=%2）")
+                      .arg(changed)
+                      .arg(mode_));
+        if (!env.isEmpty()) {
+            if (env.value(QStringLiteral("ok")).toBool(true)) {
+                appendLog(QStringLiteral("已由 Agent 派生 llm.env（改了 %1 行）")
+                              .arg(env.value(QStringLiteral("changed")).toInt(0)));
+            } else {
+                appendLog(QStringLiteral("派生 llm.env 失败：%1")
+                              .arg(env.value(QStringLiteral("error")).toString()));
+            }
+        }
+        return;
+    }
+    appendLog(QStringLiteral("保存失败：%1")
+                  .arg(result.value(QStringLiteral("error")).toString()));
 }
 
 void ModelPage::runScript(const QString& script)
 {
-    if (repoRoot_.isEmpty()) {
-        appendLog(QStringLiteral("没设置仓库根，无法运行 %1").arg(script));
+    // T14-3：起停脚本改由 **Agent** 跑（GUI 不做系统动作，见 docs/adr/0005）。
+    // ⚠ 只认这三个名字 —— 它们是 `llm/scripts/` 下的三个入口。
+    const QString action = script.section(QLatin1Char('.'), 0, 0);   // start.sh -> start
+    if (action != QLatin1String("start") && action != QLatin1String("stop")
+        && action != QLatin1String("status")) {
+        appendLog(QStringLiteral("不认识的脚本：%1（只支持 start/stop/status）").arg(script));
         return;
     }
-    const QString path = repoRoot_ + QStringLiteral("/llm/scripts/") + script;
-    if (!QFileInfo::exists(path)) {
-        appendLog(QStringLiteral("脚本不存在：%1").arg(path));
-        return;
-    }
-    // 同一个 QProcess 复用：正在跑就先收掉，避免叠起来
-    if (script_ != nullptr && script_->state() != QProcess::NotRunning) {
-        appendLog(QStringLiteral("上一个脚本还在跑，先等它结束"));
-        return;
-    }
-    if (script_ == nullptr) {
-        script_ = new QProcess(this);
-        script_->setProcessChannelMode(QProcess::MergedChannels);
-        connect(script_, &QProcess::readyReadStandardOutput, this, [this]() {
-            appendLog(QString::fromLocal8Bit(script_->readAllStandardOutput()).trimmed());
-        });
-        connect(script_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-                [this, path](int code, QProcess::ExitStatus) {
-                    appendLog(QStringLiteral("[%1] 退出码 %2")
-                                  .arg(QFileInfo(path).fileName())
-                                  .arg(code));
-                });
-    }
-    appendLog(QStringLiteral("--- 运行 %1").arg(script));
-    script_->start(QStringLiteral("/bin/bash"), {path});
+    appendLog(QStringLiteral("--- 请 Agent 跑 %1").arg(script));
+    emit serviceRequested(action);
+}
+
+void ModelPage::onServiceResult(const QJsonObject& result)
+{
+    const QString action = result.value(QStringLiteral("action")).toString();
+    const bool ok = result.value(QStringLiteral("ok")).toBool(false);
+    const QString message = result.value(QStringLiteral("message")).toString();
+    appendLog(QStringLiteral("[llm/scripts/%1.sh] %2%3")
+                  .arg(action, ok ? QStringLiteral("成功：") : QStringLiteral("失败："),
+                       message));
 }
 
 void ModelPage::appendLog(const QString& text)

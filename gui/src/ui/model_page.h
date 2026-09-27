@@ -14,6 +14,7 @@
 // ============================================================================
 #pragma once
 
+#include <QJsonObject>
 #include <QString>
 #include <QWidget>
 
@@ -42,8 +43,12 @@ public:
     /// 按配置把界面刷成当前配置
     void loadFromConfig();
 
-    /// 落盘 + 同步（返回是否全部成功；错误写进日志区与状态行）
+    /// 保存：把 llm.* 的现值交给 Agent（T14-3；本页**不写文件**，等回执）。
     bool saveAndSync();
+    /// Agent 的 `config_result`（MainWindow 转过来）：结果写进日志区。
+    void onConfigResult(const QJsonObject& result);
+    /// Agent 的 `service_result`（启停 `llm/scripts/*.sh` 的结果）：写进日志区。
+    void onServiceResult(const QJsonObject& result);
 
     // 供单测/验收
     QRadioButton* modeButton(const QString& mode) const;
@@ -81,6 +86,7 @@ private:
     void build();
     void applyModeToUi(const QString& mode);
     void scanModels();
+    /// 请 Agent 跑 `llm/scripts/<script>`（T14-3；本页不再自己 QProcess 跑脚本）
     void runScript(const QString& script);
     void appendLog(const QString& text);
 
@@ -112,7 +118,6 @@ private:
     QPushButton* status_ = nullptr;
     QPlainTextEdit* log_ = nullptr;
     QLabel* state_ = nullptr;
-    QProcess* script_ = nullptr;
 
     // T12
     QPushButton* qwenPrecheck_ = nullptr;
@@ -124,4 +129,10 @@ private:
     QProcess* bench_ = nullptr;
     QTimer* benchTimer_ = nullptr;
     qint64 benchStartedMs_ = 0;
+
+signals:
+    /// 请 MainWindow 把 llm.* 交给 Agent（T14-3；本页不写文件）
+    void configSaveRequested(QJsonObject keys, QJsonObject credentials);
+    /// 请 MainWindow 让 Agent 跑 `llm/scripts/<action>.sh`（start / stop / status）
+    void serviceRequested(QString action);
 };

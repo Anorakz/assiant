@@ -12,7 +12,7 @@
 #      src/main_window.* Widgets 主窗口框架
 #      src/main.cpp    入口 (GUI 默认 / --stdio 保留终端行为)
 #      tests/          QTest 单测 (Python local_server.py 当真对端)
-#      tools/          假 Agent (fake_agent.py) + 配置同步 CLI (gui_config_sync.cpp)
+#      tools/          假 Agent (fake_agent.py) —— 本地联调用
 # ============================================================================
 cmake_minimum_required(VERSION 3.16)
 
@@ -62,10 +62,9 @@ add_library(gui_services STATIC
     src/core/config_store.cpp
     # T13-9: B 站凭据文件（config/bilibili_cookie.json）的读写。与 ConfigStore 分开:
     # 它写的不是配置真源, 是凭据（整份 JSON + .bak + 原子写 + 只认三个键）。
+    # ⚠ T14-3 起 GUI 也不写它了（凭据走 IPC 让 Agent 写）—— 这里只剩"读 + 掩码"。
     src/core/cookie_store.h
     src/core/cookie_store.cpp
-    src/core/config_sync.h
-    src/core/config_sync.cpp
     src/core/view_state.h
     src/core/view_state.cpp
     src/core/bilibili_format.h
@@ -136,12 +135,10 @@ add_executable(agent_gui
 )
 target_link_libraries(agent_gui PRIVATE gui_services gui_widgets)
 
-# ------------------------------------------------------- 配置同步 CLI ---
-# T2 的证据链（dry-run 打印 diff）+ T11 模型页复用同一套 ConfigSyncer。
-add_executable(gui_config_sync
-    tools/gui_config_sync.cpp
-)
-target_link_libraries(gui_config_sync PRIVATE gui_services)
+# ⚠ T14-3 删掉了 `gui_config_sync`（配置同步 CLI）与 `core/config_sync.*`：
+#   llm.env 的派生实现搬到了 Python（agent/core/llm_env.py），
+#   而 config.yaml 的唯一写入者是 Agent（docs/adr/0005）。
+#   要预览/真写派生文件：`assistant doctor`（只看）或让 Agent 走 set_config。
 
 # ------------------------------------------------------------------ 单测 ---
 # QTest 单测 (gui/tests/): 用 Python 的 local_server.py 当真对端, 不需要 mock。
@@ -155,7 +152,7 @@ endif()
 
 # ------------------------------------------------------------------ 告警 ---
 # 两个 target 用同一套告警级别, 避免以后加 target 时漏掉。
-foreach(gui_target gui_services gui_widgets agent_gui gui_config_sync)
+foreach(gui_target gui_services gui_widgets agent_gui)
     if(MSVC)
         target_compile_options(${gui_target} PRIVATE /W4)
     else()
