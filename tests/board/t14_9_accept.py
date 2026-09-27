@@ -296,21 +296,27 @@ def check_guard(before_guard):
 # ---------------------------------------------------------------------------
 def outage_test():
     print("\n== D. 真断链路的主动恢复（--outage-test）")
-    watchdog = ("for i in $(seq 1 12); do nmcli connection up %s >/dev/null 2>&1; "
+    # ⚠ 兜底放到 240 秒才动手：守护要"连续 3 次 × 30 秒 ≈ 90 秒"才开始修，
+    #   兜底提前跑会把守护的机会抢掉（第一次实测就是这么被误判的）。
+    watchdog = ("for i in $(seq 1 9); do nmcli connection up %s >/dev/null 2>&1; "
                 "sleep 20; done" % LIVE_PROFILE)
-    subprocess.Popen(["setsid", "sh", "-c", "sleep 60; " + watchdog],
+    subprocess.Popen(["setsid", "sh", "-c", "sleep 240; " + watchdog],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print("  兜底已挂：60 秒后每 20 秒把 %s 拉回来一次（试 12 次）" % LIVE_PROFILE, flush=True)
+    print("  兜底已挂：240 秒后每 20 秒把 %s 拉回来一次（试 9 次，约 3 分钟）" % LIVE_PROFILE,
+          flush=True)
 
+    # ⚠ 必须同时关掉**设备级** autoconnect：第一次实测只关了 connection.autoconnect，
+    #   结果 `device disconnect` 之后 NM 5 秒就把链路接回来了（守护压根没机会看到失败）。
     nmcli("connection", "modify", LIVE_PROFILE, "connection.autoconnect", "no")
-    print("  已关掉 autoconnect（不让 NM 自己抢修），现在断开设备…", flush=True)
+    nmcli("device", "set", "wlan0", "autoconnect", "no")
+    print("  已关掉 connection/device 两级 autoconnect，现在断开设备…", flush=True)
     started = time.time()
     subprocess.Popen(["setsid", "sh", "-c", "sleep 2; nmcli device disconnect wlan0"],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # 等链路自己回来（守护：连续 3 次 × 30s ≈ 90s 后动手）
+    # 等守护自己把链路救回来（约 90 秒后动手）
     healthy = False
-    for _ in range(40):                      # 最多 ~200 秒
+    for _ in range(50):                      # 最多 ~250 秒
         time.sleep(5)
         rc, out, _err = nmcli("-t", "-f", "GENERAL.STATE", "device", "show", "wlan0")
         if rc == 0 and "connected" in out:
@@ -318,17 +324,24 @@ def outage_test():
             break
     elapsed = time.time() - started
     check("D1 断掉之后链路自己回来了", healthy, "用了 %.0f 秒" % elapsed)
+    check("D1 是**守护**修的（不是 NM 自己秒接：>60 秒）", elapsed > 60,
+          "%.0f 秒（若几十秒内就回来，说明模拟没真断住）" % elapsed)
 
     nmcli("connection", "modify", LIVE_PROFILE, "connection.autoconnect", "yes")
+    nmcli("device", "set", "wlan0", "autoconnect", "yes")
     rc, out, _err = nmcli("-t", "-f", "connection.autoconnect", "connection", "show",
                           LIVE_PROFILE)
-    check("D2 autoconnect 已恢复成 yes", "connection.autoconnect:yes" in out, out)
+    check("D2 autoconnect 已恢复成 yes（connection 级）",
+          "connection.autoconnect:yes" in out, out)
+    rc, out, _err = nmcli("-t", "-f", "GENERAL.NM-MANAGED", "device", "show", "wlan0")
+    check("D2 设备级 autoconnect 已恢复",
+          rc == 0, out or "（设备仍在管理下）")
 
     log = "/home/kickpi/myproject/assitant/logs/agent.log"
     tail = ""
     if os.path.exists(log):
         with open(log, encoding="utf-8", errors="replace") as handle:
-            tail = handle.read()[-20000:]
+            tail = handle.read()[-40000:]
     check("D3 Agent 日志里有'链路不通'", "链路不通" in tail)
     check("D3 Agent 日志里有'开始主动重连'", "开始主动重连" in tail)
     check("D3 Agent 日志里有'重连成功'", "重连成功" in tail)
