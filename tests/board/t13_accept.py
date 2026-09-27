@@ -283,23 +283,34 @@ async def part_a(runtime, frames, no_stream):
     if runtime._game_watch is not None:
         runtime._game_watch.ensure_model("STUDY")
     real_frame = None
+    black_frames = 0
     if no_stream:
         skip("真串流帧", "--no-stream")
     else:
         ok = await wait_for(lambda: runtime.image_reader is not None, 10, "image_reader 就位")
         if ok:
-            for _ in range(40):                          # 最多等 20 s 来一帧
-                real_frame = await runtime.image_reader.read_latest()
-                if real_frame is not None:
-                    break
+            # ⚠ 刚起来那一帧常常是**全黑**的（解码器/编码器还没吐真画面）—— 所以要
+            #   一直等到"有内容"的一帧（最多 30 s）; 全都黑就是环境问题, 如实说。
+            for _ in range(60):
+                frame = await runtime.image_reader.read_latest()
+                if frame is not None:
+                    if float(np.asarray(frame).max()) > 8:
+                        real_frame = frame
+                        break
+                    black_frames += 1
                 await asyncio.sleep(0.5)
-    if real_frame is None:
-        skip("真串流帧", "还没来帧（串流没起来？）")
-    else:
+    if real_frame is None and not no_stream and black_frames:
+        skip("真串流帧有内容", "拿到 %d 帧但**全是黑的** —— PC 那边多半锁屏/显示器休眠了；"
+                            "这一条要 PC 醒着才能量" % black_frames)
+    if real_frame is None and not no_stream and not black_frames:
+        skip("真串流帧", "一帧都没来（串流没起来？）")
+    if real_frame is not None:
         arr = np.asarray(real_frame)
-        check("真串流帧到手: (256, 256, 3) uint8",
+        check("真串流帧到手: (256, 256, 3) uint8 且有内容",
               arr.shape == (256, 256, 3) and arr.dtype == np.uint8,
-              "shape=%s dtype=%s 均值=%.1f" % (arr.shape, arr.dtype, arr.mean()))
+              "shape=%s dtype=%s 均值=%.1f 最大=%d%s"
+              % (arr.shape, arr.dtype, arr.mean(), arr.max(),
+                 "（前面丢掉了 %d 帧全黑的）" % black_frames if black_frames else ""))
         resolution = host_display()
         if resolution:
             numbers = [line.strip() for line in resolution.splitlines() if line.strip()]
@@ -317,6 +328,13 @@ async def part_a(runtime, frames, no_stream):
         inside = bars["top"] + bars["bottom"] + bars["left"] + bars["right"]
         check("真帧**没有大片黑边**（不是 letterbox 出来的画面）", inside < 40,
               "黑边合计 %d 行/列" % inside)
+        if bars["top"] + bars["bottom"] > 20:
+            note("几何: 上下有黑边 -> 内容比 16:9 矮, 是**等比缩放 + letterbox**")
+        elif bars["left"] + bars["right"] > 20:
+            note("几何: 左右有黑边 -> 内容比 16:9 窄, 两侧补黑")
+        else:
+            note("几何: 四边都没有黑边 -> 画面铺满 16:9（要么主机已经切成 1280×720, "
+                 "要么就是拉伸铺满）—— 所以标定里 h1 那条「先缩到流分辨率」是对的")
         decision = watcher.verdict(real_frame)
         note("真帧判定: %s（来源 %s，相对分 %s，band %.2f）%s"
              % (decision["verdict"], decision["source"] or "-", decision["relative"],

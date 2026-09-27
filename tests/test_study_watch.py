@@ -62,6 +62,23 @@ class FakeFrame(object):
         return self.payload
 
 
+class ArrayLike(object):
+    """只有 `max()` 的假数组。
+
+    ⚠ 开发机上**没有 numpy**, 而 `_is_blank()` 只用到 `frame.max()` —— 所以用这个替身
+      就能在两边都测到"全黑帧 = 跳过"这条, 不必等板端。
+    """
+
+    def __init__(self, peak):
+        self.peak = peak
+
+    def max(self):
+        return self.peak
+
+    def tobytes(self):
+        return b"fake-array"
+
+
 class FakeModel(object):
     """假 SigLIP: 想给什么向量就给什么（`fail=True` 模拟编码炸了）。"""
 
@@ -480,6 +497,37 @@ class TestUnknownIsNeutral(WatchCase):
         out = watcher.tick(FakeFrame())
         self.assertIn("编码失败", out["skipped"])
         self.assertEqual(self.stats.counter("verdicts"), 0)
+
+    def test_an_all_black_frame_is_a_skip_not_a_verdict(self):
+        """T13-6 验收实测: 串流刚起来会给一帧全黑图, 它会被判成"学习"（相对分 +0.068）。
+
+        那不是内容, 是"没看到" —— 所以当跳过（既不推进升级链, 也不污染统计）。
+        """
+        watcher = self.make_watcher(model=FakeModel(STUDY_VEC))
+        self.seed_both()
+        out = watcher.tick(ArrayLike(0))                    # 全黑（max=0）
+        self.assertIn("全是黑的", out["skipped"])
+        self.assertEqual(self.stats.counter("frames"), 0)
+        self.assertEqual(self.stats.counter("reminded"), 0)
+
+    def test_a_dark_but_real_frame_is_still_judged(self):
+        """深色主题/暗画面的**真实内容**不该被当成黑帧（阈值取得很窄: ≤ 8）。"""
+        watcher = self.make_watcher(model=FakeModel(STUDY_VEC))
+        self.seed_both()
+        out = watcher.tick(ArrayLike(200))                  # 暗但有内容
+        self.assertEqual(out["skipped"], "")
+        self.assertEqual(self.stats.counter("frames"), 1)
+
+    def test_the_decision_carries_the_relative_score(self):
+        """⚠ T13-6 验收抓到的漏项: `tick()` 的返回里原来**没有** `relative` ——
+        循环那行日志（"相对分 %s"）一直在打 None。"""
+        watcher = self.make_watcher(model=FakeModel(STUDY_VEC))
+        self.seed_both()
+        out = watcher.tick(FakeFrame())
+        self.assertAlmostEqual(out["relative"], 1.0, places=3)
+        self.assertEqual(out["band"], 0.05)
+        self.assertEqual(out["picture"], sw.VERDICT_STUDY)
+        self.assertAlmostEqual(out["study_cos"], 1.0, places=3)
 
 
 # ===========================================================================

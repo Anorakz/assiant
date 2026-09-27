@@ -490,6 +490,22 @@ class StudyWatcher(object):
         return out
 
     @staticmethod
+    def _is_blank(frame: Any, *, ceiling: int = 8) -> bool:
+        """这一帧是不是**整幅全黑**（= 没看到画面, 不是"看到一片黑"）。
+
+        @param ceiling 亮度的上限（默认 8/255）—— 取得很窄: 只抓"纯黑"这一种,
+                       深色主题的编辑器/全黑壁纸**不该**被误伤（它们有内容, 只是暗）。
+        @note 用鸭子类型（`max()`）判断, 这样假帧（只有 `tobytes()` 的替身）不受影响。
+        """
+        getter = getattr(frame, "max", None)
+        if not callable(getter):
+            return False
+        try:
+            return float(getter()) <= float(ceiling)
+        except Exception:                                   # noqa: BLE001 - 判不了就当有内容
+            return False
+
+    @staticmethod
     def _show(relative: Any) -> str:
         """相对分印出来（None = 算不出来）。"""
         return "?" if relative is None else "%+.3f" % float(relative)
@@ -531,6 +547,14 @@ class StudyWatcher(object):
                                   % (out["cooldown_left_s"] / 60.0)
             return out
 
+        # ⚠ **全黑的一帧不是画面**: T13-6 验收实测 —— 串流刚起来/屏幕休眠/锁屏时,
+        #   `read_latest()` 会给一帧全黑图, 它居然被判成"学习"（相对分 +0.068）。
+        #   那不是内容, 是"没看到"; 所以这里当**跳过**（与"没帧"同一条口径）,
+        #   既不推进升级链、也不污染统计。
+        if frame is not None and self._is_blank(frame):
+            out["skipped"] = "这一帧全是黑的（串流没起来 / 屏幕休眠 / 锁屏）—— 跳过"
+            return out
+
         # ⚠ 先拿到向量再判: "没画面 / 模型没在 / 编码失败"是**跳过**, 不是 unknown ——
         #   把它算成 unknown 会白白抬高"判不出来的比例", 然后把门槛放松掉。
         image = list(vector) if vector is not None else self.encode(frame)
@@ -543,7 +567,9 @@ class StudyWatcher(object):
         out.update({"verdict": result["verdict"], "source": result["source"],
                     "cls": result["cls"], "category": result["category"],
                     "score": result["score"], "margin": result["margin"],
-                    "note": result["note"]})
+                    "relative": result["relative"], "study_cos": result["study_cos"],
+                    "not_study_cos": result["not_study_cos"], "band": result["band"],
+                    "picture": result["picture"], "note": result["note"]})
         learned = self._learn_from(result, frame=frame, vector=image, now=moment)
         out["learned"] = learned
         self._count(result)
