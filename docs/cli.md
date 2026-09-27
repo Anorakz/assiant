@@ -62,7 +62,10 @@ python3 -m agent.cli status          # ⚠ 用 -m，不要在 agent/ 里直接 p
 
 ---
 
-## 4. 十条命令
+## 4. 十二条命令
+
+> 原先那十条走 IPC（要 Agent 在跑）；T13-8 加的两条（`set` / `study`）**不经过 Agent** ——
+> 它们直接改文件（配置真源 / 派生数据），所以 Agent 没起也能用。
 
 ### `status` —— 看一眼当前模式与串流连接
 
@@ -410,11 +413,61 @@ $ assistant tag --apply
 
 ---
 
+### `set` —— 改设置项（文本级；默认只看）
+
+```bash
+$ assistant set study --show                      # 这一组能改什么、现在是什么
+$ assistant set study --relative-band 0.07        # 只看：会说改哪一行、旧值 -> 新值
+$ assistant set study --relative-band 0.07 --apply # 真写（旁边留 config.yaml.bak）
+$ assistant set game-watch --interval-s 60 --apply
+$ assistant set profile --trigger-chars 2000 --trigger-turns 12 --apply
+$ assistant set study --disabled --apply           # 开关类：--enabled/--disabled / --remind/--no-remind …
+$ assistant set study --set study.relative_band=0.07 --apply   # 也可以直接给点号路径
+$ assistant set cookie --sessdata '<值>' --apply --verify      # B 站凭据（写 JSON, 只回显掩码）
+```
+
+三组 + cookie：`study` / `game-watch` / `profile` / `cookie`。
+
+规矩（承诺与 GUI 的 ConfigStore **同一套**，实现见 `agent/core/settings_config.py`）：
+
+- **只动目标那一行**：注释、顺序、空行、**CRLF** 逐字节保留；写完在旁边留一份 `.bak`
+  （值本来就是这样 -> **一个字节都不写**，也不留 `.bak`）。
+- **能改的键 = `config.example.yaml` 里有的标量键**（模板是键清单的唯一真源）：
+  不在模板里的键、结构级的键（映射/序列，例如 `study.classes`）一律拒绝并说清为什么。
+- **值的类型跟着模板走**：模板里是 `false` 就只能给布尔、是 `0.05` 就只能给数字 ——
+  类型写错在 YAML 里不报错（`"0.05"` 是字符串），只会让 Agent 读出来变成另一个东西。
+- **缺键** -> 按模板把带注释的那一行插进段尾；**缺段** -> 把模板那一整段（含说明横幅）
+  追加到文件末尾（板端真配置**没有** `study:` 段，第一次 `set study …` 就是这么长出来的）。
+- `cookie` 写的是 `config/bilibili_cookie.json`（**凭据**，不是真源）：只认 `SESSDATA` /
+  `bili_jct` / `DedeUserID` 三个键（`SEESSDATA` 那种笔误会被拒 —— 实测 B 站把它当没登录），
+  终端**只回显掩码**；`--verify` 顺手问一次 B 站看这份 cookie 好不好使。
+
+### `study` —— 学习内容监督的日常操作（不用起 Agent）
+
+```bash
+$ assistant study status                  # 锚点/阈值/时间参数/自适应开关/最近一次判定
+$ assistant study status --json
+$ assistant study check  --image shot.png # 判一张截图（按真管线还原成板子看到的那一帧）
+$ assistant study label  --image shot.png --class code --apply   # 学成锚点（默认只看）
+$ assistant study freeze                  # = set study.adapt false（判定照旧, 只是不再自己挪带）
+$ assistant study unfreeze
+$ assistant study reset --class anime --apply          # 清掉这一类的锚点
+$ assistant study reset --thresholds --apply           # 连阈值/EWMA 一起回到配置初值
+```
+
+- `status` / `reset` 只读那两份**派生数据**（`config/study_anchors.jsonl` /
+  `config/study_stats.json`），**不需要 NPU、也不需要 Agent**。
+- `check` / `label` 要**板端的 SigLIP**（过 NPU）；开发机上会明确说缺什么。
+  "看真串流帧"不是 CLI 的事 —— 那是 Agent 在 STUDY 里的循环（见 [`study.md`](study.md)）。
+- `freeze` / `unfreeze` 改的是配置真源里那一行（走 `set` 那套文本级写入器）。
+
+---
+
 ## 5. 它**不**做什么（边界）
 
 | 不做 | 为什么 |
 | --- | --- |
-| 不写配置、不改日程、不重启 Agent | **默认只读**。显式例外有两个，都要你亲手敲：`cleanup --apply`（写 `config.yaml`）与 `tag --apply`（写派生数据 `config/wall_data.jsonl`，不是真源）。写日程本身仍然是人在 PC 上做的事，配置是真源 |
+| 不写配置、不改日程、不重启 Agent | **默认只读**。需要你亲手敲 `--apply` 的例外现在有四个：`cleanup --apply`（删已触发的一次性日程）、`tag --apply`（写派生数据 `wall_data.jsonl`）、`set … --apply`（写**配置真源**里那一行 + `.bak`）、`study label/reset --apply`（写派生数据）。写日程本身仍然是人在 PC 上做的事，配置是真源 |
 | 不手动换壁纸 | 换壁纸**只走对话**（对 Agent 说"换一张安静的深色风景"）。CLI 没有换壁纸命令，GUI 也没有「下一张」按钮 —— 见 [`tagging.md`](tagging.md) |
 | 不 `--json` | 输出给人看；要机器读，用 `watch --count` + 原始行，或直接 `LocalClient` |
 | 不 import Agent 去读内存 | 那会拿到"另一份状态"。所有跨进程信息都走 IPC 协议 |
@@ -443,3 +496,5 @@ $ assistant tag --apply
 - 日程语义与去重、触发窗口：[`architecture.md`](architecture.md) §6.1 与 `agent/core/scheduler.py` 模块头
 - GUI 那一端： [`gui.md`](gui.md)、[`gui-agent-integration.md`](gui-agent-integration.md)
 - 部署与双机同步： [`deploy.md`](deploy.md)
+- 学习监督（`assistant study` 背后的功能、判定口径与边界）： [`study.md`](study.md)
+- 设置写入的承诺（只动一行 / `.bak` / 缺段新建 / 哪些键能改）： [`config-sources.md`](config-sources.md) §3.2

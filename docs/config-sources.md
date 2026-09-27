@@ -244,12 +244,32 @@ Agent 里唯一会碰 `config.yaml` 的地方是 `agent/core/schedule_config.py`
 > 这是"程序自动改真源"的行为，该由人显式决定。
 > （T12-6 起还有第三条路：对话工具 `set_schedule` 的 add/remove —— 见上面"谁在用（二）"。）
 > **守卫**：`tests/test_config_source_guard.py::TestWhoWritesTheConfig` —— `agent/` 里出现写入原语的
-> 只能是这六个，且**每个都必须是"派生数据/本地数据"，不能是真源**：
-> `agent/config.py`（唯一的原子写实现）、`agent/core/schedule_config.py`（唯一允许改真源的调用方）、
+> 只能是这**十个**，且每个都必须是"唯一的原子写实现 / 派生数据 / 本地数据 / 凭据"：
+> `agent/config.py`（唯一的原子写实现）、`agent/core/schedule_config.py` 与
+> `agent/core/settings_config.py`（**唯二**允许改真源的调用方）、
 > `agent/vision/wall_data.py`、`agent/media/music_library.py`、`agent/core/user_profile.py`、
-> `agent/core/game_anchors.py`（T11-4 的锚点库，**追加写**）。
+> `agent/core/game_anchors.py`、`agent/core/study_anchors.py`、`agent/core/study_stats.py`
+> （T13 的学习锚点与统计）、`agent/core/settings_credentials.py`（T13-8 的 B 站凭据）。
 > ⚠ **T11-8 补的漏项**：这条守卫原来只认"整篇重写"那几种原语，**追加写（`open(path, "a")`）扫不到** ——
-> 于是 `game_anchors.py` 明明在写 `config/` 却不在名单上。现在追加写也算，六个写入者都在名单里。
+> 于是 `game_anchors.py` 明明在写 `config/` 却不在名单上。现在追加写也算，十个写入者都在名单里。
+
+### 3.2 设置项的**文本级**写入（T13-8）
+
+`assistant set`（以及 `assistant study freeze/unfreeze`）会改真源里**那一行**。承诺与 GUI 的
+ConfigStore **同一套**（两边语言不同、进程不同，没法共用代码，所以约定必须一致）：
+
+| 规矩 | 说明 |
+| --- | --- |
+| 只动目标那一行 | 注释、顺序、空行、**CRLF** 逐字节保留（`tests/test_settings_config.py` 用 difflib 精确比） |
+| 旁边留 `.bak` | 改之前那份的**逐字节**副本；值没变 -> **不写文件也不留 `.bak`** |
+| 原子写 | 走 `agent/config.py::write_text_atomic`（唯一的原子写实现） |
+| 能改哪些键 | **`config.example.yaml` 里有的标量键** —— 模板是键清单的唯一真源；不在模板里的键、结构级（映射/序列）的键一律拒绝 |
+| 值的类型 | 跟着模板走（`false`/`0.05`/字符串）；类型写错在 YAML 里**不报错**，所以这里当场拦住 |
+| 缺键 / 缺段 | 缺键 -> 按模板把带注释的那一行插进段尾；**缺段 -> 把模板那一整段（含说明横幅）追加到末尾** |
+| 实现 | `agent/core/settings_config.py`（文本手术）、`agent/core/settings_credentials.py`（凭据文件，JSON） |
+
+⚠ 凭据那条走另一份文件（`config/bilibili_cookie.json`，**凭据不是真源**）：只认 `SESSDATA` /
+`bili_jct` / `DedeUserID`，终端只回显掩码。
 
 ## 4. Agent 只认一份配置
 

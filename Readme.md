@@ -28,7 +28,7 @@ agent/
 │   ├── __init__.py
 │   ├── main.py                  # 进程入口: 装配全部组件 + asyncio 主循环
 │   ├── config.py                # YAML 配置加载/保存/点号路径读取
-│   ├── cli.py                   # 板端控制 CLI (assistant): status/chat/mode/watch/schedule/doctor/cleanup
+│   ├── cli.py                   # 板端控制 CLI (assistant): status/chat/mode/watch/schedule/doctor/cleanup/set/study
 │   ├── core/                    # 状态层、工具路由、调度层、壁纸游标
 │   │   ├── state_machine.py     # SLEEP ⇄ IDLE ⇄ STUDY/GAME 状态机
 │   │   ├── tool_router.py       # 工具注册 / 权限控制 / 执行调度
@@ -77,7 +77,7 @@ agent/
 │                                 #   GAME 主区: 视频区 + 预览栏 + 只读地址栏 (T9/T11-7)
 │                                 #   下区域 GAME=封面 / 其它=音乐条
 ├── config/                      # 配置模板 (真实配置不入 git)
-│   ├── config.example.yaml      # 唯一真源模板: llm.* / bilibili.* / wallpaper.* / gui.* / sunshine.* / ipc.*
+│   ├── config.example.yaml      # 唯一真源模板: llm.* / bilibili.* / study.* / wallpaper.* / gui.* / sunshine.* / ipc.*
 │   ├── user_profile.example.yaml# 用户画像
 ├── scripts/                     # 构建 / 部署 / 测试 / 配对工具
 │   ├── build.ps1                # aarch64 交叉编译
@@ -119,6 +119,7 @@ agent/
 │   ├── test_game_watch.py       # 游戏观察器: 画面锚点 vs PC 进程双路 / 自学习纠错 / 常驻策略 (T11-4)
 │   ├── test_study_anchors.py    # 学习锚点库(五类/大类映射/每类上限丢最旧) + 运行统计(有界/坏文件容错) (T13-2)
 │   ├── test_study_watch.py      # 学习监督: 提醒不算数/unknown 中性/冲突不猜/阈值 0.01 护栏/误判停学 (T13-3)
+│   ├── test_settings_config.py  # 设置项的文本级写入(只动一行/.bak/缺段按模板新建) + B 站凭据文件 (T13-8)
 │   ├── test_music_library.py    # 本地音乐库: 读写 / 合并 / 打标 / 挑选 (T8-3)
 │   ├── test_music_player.py     # 播放内核: 环形队列 / 30 秒计一次 / 曲终自动下一首 / 补歌两段式 (T8-4/T10-4)
 │   ├── test_label_spec.py       # 统一标签语法: 拆键 / 拆值 / 多轴 / 壁纸那边只用这一份 (T8-5b)
@@ -536,6 +537,9 @@ decision = watcher.tick(frame, state="study")
   这里的代价是**打扰人**或**监督静默失效**。
 - 两条数据文件（`config/study_anchors.jsonl` / `config/study_stats.json`）都是**派生数据**、
   已进 `.gitignore`，与**游戏锚点库分开**（一个认作品、一个认大类）。
+- **能改的设置**：`assistant set study|game-watch|profile|cookie`（文本级: 只动那一行 + `.bak`，
+  默认只看、`--apply` 才写）；日常操作 `assistant study status|check|label|freeze|reset`
+  （**不用起 Agent**）。细节 [`docs/cli.md`](docs/cli.md)。
 - 细节（升级链的每条规矩、自适应护栏、实测数字、**已知边界**）：[`docs/study.md`](docs/study.md)。
 
 ---

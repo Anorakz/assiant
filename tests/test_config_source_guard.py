@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 tests/test_config_source_guard.py — 配置真源守卫（归一化 D 系列）
@@ -216,7 +216,7 @@ class TestNoGuiConfigLeftovers(unittest.TestCase):
 WRITE_PRIMITIVES = (r"(os\.replace|mkstemp|\.write_text\(|write_text_atomic\("
                     r"|open\([^)]*,\s*[\"']a)")
 
-#: 允许出现写入原语的文件（**只有**这八个）。
+#: 允许出现写入原语的文件（**只有**这十个）。
 ALLOWED_WRITERS = {
     "agent/config.py",               # write_text_atomic: 全仓唯一的"原子写文本"实现
     "agent/core/schedule_config.py", # 唯一被允许的调用方: 删掉已触发的一次性日程 (R3) +
@@ -252,6 +252,18 @@ ALLOWED_WRITERS = {
     #   （直方图固定 20 档、明细/备注都是定长环形、计数器与阈值项也封了上限）——
     #   它是"阈值能在运行期自己修正"（你定的）的**唯一依据**，也是诊断材料，不是配置真源。
     "agent/core/study_stats.py",
+    # T13-8 新增的第九个写入者: **设置项的文本级写入**（`config/config.yaml` 里的那一行）。
+    # ⚠ 这是**第二个能写真源**的 Agent 侧代码（第一个是 `schedule_config.py` 删日程）。
+    #   入口只有一条: `assistant set`（默认只看，`--apply` 才写）。承诺与 GUI 的 ConfigStore
+    #   一致: 只动目标那一行、注释/顺序/换行逐字节保留、旁边留 `.bak`、**缺段按模板新建**。
+    #   能改的键 = `config.example.yaml` 里有的**标量**键（模板是键清单的唯一真源）；
+    #   结构级的键（映射/序列）与不在模板里的键一律拒绝。
+    "agent/core/settings_config.py",
+    # T13-8 新增的第十个写入者: **B 站凭据文件**（config/bilibili_cookie.json）。
+    # ⚠ 写的是**凭据**（`SESSDATA` = 账号），不是配置真源: 整份 JSON 原子重写 + `.bak`，
+    #   只认三个键（`SEESSDATA` 那种笔误会被拒 —— 实测 B 站会把它当没登录）。
+    #   入口: `assistant set cookie --apply`。
+    "agent/core/settings_credentials.py",
 }
 
 
@@ -278,7 +290,7 @@ class TestWhoWritesTheConfig(unittest.TestCase):
                       % (", ".join(sorted(ALLOWED_WRITERS)), "\n  ".join(offenders)))
 
     def test_the_writer_scan_is_not_vacuous(self):
-        """反空转：白名单里那八个文件**真的**命中了写入原语，否则这条守卫什么都没查。
+        """反空转：白名单里那十个文件**真的**命中了写入原语，否则这条守卫什么都没查。
 
         ⚠ T11-8：这条断言正是"补上追加写"的理由 —— 只把 `game_anchors.py` 加进白名单
         而正则不认 `open(path, "a")`，这里就会红（那份白名单是假的）。

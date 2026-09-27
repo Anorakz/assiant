@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -1628,6 +1629,466 @@ async def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+#  设置写入（T13-8）: `assistant set` 与 `assistant study`
+# ---------------------------------------------------------------------------
+#: 三组设置项 + B 站 cookie。**表驱动**: 加一个设置项 = 表里加一行（键必须存在于
+#: `config.example.yaml`，否则会被 `settings_config` 拒掉）。
+#: 值的类型跟着模板走, 所以这里只写"命令行开关 -> 点号路径"。
+SET_GROUPS: Dict[str, Dict[str, Dict[str, str]]] = {
+    "study": {
+        "numbers": {
+            "--relative-band": "study.relative_band",
+            "--focus-interval-min": "study.focus_interval_min",
+            "--recheck-interval-min": "study.recheck_interval_min",
+            "--max-failures": "study.max_failures",
+            "--cooldown-min": "study.cooldown_min",
+            "--cooldown-probe-min": "study.cooldown_probe_min",
+            "--target-unknown-rate": "study.target_unknown_rate",
+            "--min-labeled": "study.min_labeled",
+            "--max-anchors-per-class": "study.max_anchors_per_class",
+        },
+        "switches": {
+            "--enabled": ("study.enabled", True),
+            "--disabled": ("study.enabled", False),
+            "--remind": ("study.remind", True),
+            "--no-remind": ("study.remind", False),
+            "--back-to-desktop": ("study.back_to_desktop", True),
+            "--no-back-to-desktop": ("study.back_to_desktop", False),
+            "--learn": ("study.learn", True),
+            "--no-learn": ("study.learn", False),
+            "--adapt": ("study.adapt", True),
+            "--no-adapt": ("study.adapt", False),
+            "--skip-on-keyword": ("study.skip_on_keyword", True),
+            "--no-skip-on-keyword": ("study.skip_on_keyword", False),
+        },
+    },
+    # 认游戏那条（含 B 站 cookie 是另一个组）
+    "game-watch": {
+        "numbers": {
+            "--interval-s": "bilibili.game_watch.interval_s",
+            "--confident-score": "bilibili.game_watch.confident_score",
+            "--confident-margin": "bilibili.game_watch.confident_margin",
+            "--mem-watermark-mb": "bilibili.game_watch.mem_watermark_mb",
+        },
+        "switches": {
+            "--enabled": ("bilibili.game_watch.enabled", True),
+            "--disabled": ("bilibili.game_watch.enabled", False),
+        },
+    },
+    # 画像压缩（你定的: 这两个阈值也要能在界面上改）
+    "profile": {
+        "numbers": {
+            "--trigger-chars": "profile.trigger_chars",
+            "--trigger-turns": "profile.trigger_turns",
+        },
+        "switches": {
+            "--enabled": ("profile.enabled", True),
+            "--disabled": ("profile.enabled", False),
+        },
+    },
+}
+
+#: cookie 那条不算"设置项"（它写的是凭据文件, 不是 config.yaml）。
+COOKIE_KEYS = ("SESSDATA", "bili_jct", "DedeUserID")
+COOKIE_FLAGS = {"--sessdata": "SESSDATA", "--bili-jct": "bili_jct",
+                "--dede-user-id": "DedeUserID"}
+
+
+def _mask(value: str) -> str:
+    """凭据不原样打印（只给长度与头尾各两位）。"""
+    text = str(value or "")
+    if len(text) <= 8:
+        return "*" * len(text)
+    return "%s…%s（%d 位）" % (text[:2], text[-2:], len(text))
+
+
+def _config_target(args: argparse.Namespace) -> str:
+    """`--config` 指向的真源路径（**并拦住"名字不对"的坑**）。
+
+    ⚠ `--config` 给的是**路径**，但加载与文本级写入都按**目录**定位真源
+      （`<目录>/config.yaml`）—— 所以传一个叫别的名字的文件（例如 `lean.yaml`）会
+      **悄悄写到同目录的 config.yaml 上**。写设置这种事不能"悄悄写错文件",
+      这里直接拒绝并说清怎么改（T13-8 本地冒烟踩到的）。
+    """
+    explicit = getattr(args, "config", None)
+    if explicit:
+        name = os.path.basename(str(explicit))
+        if name != "config.yaml":
+            raise ValueError(
+                "--config 指向的是 %s，但设置写入按**目录**定位真源（%s）——\n"
+                "  改下去的会是那个 config.yaml。把目标文件叫 config.yaml，"
+                "或者不带 --config 用默认路径。" % (name, os.path.join(
+                    os.path.dirname(os.path.abspath(str(explicit))), "config.yaml")))
+    return config_path("config")
+
+
+async def cmd_set(args: argparse.Namespace) -> int:
+    """改设置项（**文本级**，默认只看；`--apply` 才写）。
+
+    写的是 `config/config.yaml` 的**那一行**（注释/顺序/换行都不动, 并在旁边留一份
+    `.bak`）—— 与 GUI 的 ConfigStore 同一套语义, 实现见 `agent/core/settings_config.py`。
+
+    @note 能改的键 = `config.example.yaml` 里有的键; 模板里没有这一**段**时,
+          按模板那一整段（含说明注释）新建 —— 板端真配置就是这样长出 `study:` 段的。
+    @note `cookie` 那一组写的是 `config/bilibili_cookie.json`（凭据文件, 不是配置真源）,
+          打印时**只给掩码**, 绝不回显 SESSDATA 原文。
+    """
+    from agent.core import settings_config as sc
+
+    group = args.group
+    if group == "cookie":
+        return await _set_cookie(args)
+    if group not in SET_GROUPS:
+        print("不认识的组 %r（有 %s / cookie）" % (group, " / ".join(SET_GROUPS)),
+              file=sys.stderr)
+        return EXIT_USAGE
+
+    table = SET_GROUPS[group]
+    changes: Dict[str, Any] = {}
+    for flag, path in table["numbers"].items():
+        value = getattr(args, flag.lstrip("-").replace("-", "_"), None)
+        if value is not None:
+            changes[path] = value
+    for flag, (path, value) in table["switches"].items():
+        if getattr(args, flag.lstrip("-").replace("-", "_"), False):
+            changes[path] = value
+    if args.set:
+        for item in args.set:
+            if "=" not in item:
+                print("--set 要写成 键=值（例如 --set study.relative_band=0.05）", file=sys.stderr)
+                return EXIT_USAGE
+            key, value = item.split("=", 1)
+            changes[key.strip()] = value.strip()
+
+    target = config_path("config")
+    # `--config` 已经把 AGENT_CONFIG_DIR 指过去了（见 load_plane_config）; 这里再读一次
+    # 只是为了拿 cookie 路径与"配置读不读得出来"的提示。
+    config, why = load_plane_config(args.config)
+
+    # ⚠ 先把 `--config` 交给 load_plane_config（它会设 AGENT_CONFIG_DIR）——
+    #   否则 `config_path()` 拿到的是**默认**配置目录, 测试/多份配置就会写错文件。
+    config, why = load_plane_config(args.config)
+    if why:
+        print("读不到配置（%s）—— 但写的是文件本身, 继续。" % why, file=sys.stderr)
+    try:
+        target = _config_target(args)
+    except ValueError as exc:
+        print("不写：%s" % exc, file=sys.stderr)
+        return EXIT_USAGE
+
+    if not changes and not args.show:
+        print("没给任何设置项。看这一组能改什么: `assistant set %s --show`" % group)
+        return EXIT_OK
+    if args.show or not changes:
+        paths = {path: None for path in
+                 list(SET_GROUPS[group]["numbers"].values())
+                 + [item[0] for item in SET_GROUPS[group]["switches"].values()]}
+        print("%s 组能改的设置项（当前值 ← 点号路径）:" % group)
+        for path in sorted(set(paths)):
+            print("  %-38s %s" % (path, sc.read_value(path, target=str(target)) or "（文件里没有）"))
+        return EXIT_OK
+
+    try:
+        plans = sc.plan_changes(changes, target=str(target))
+    except sc.SettingsConfigError as exc:
+        print("改不了：%s" % exc, file=sys.stderr)
+        return EXIT_ERROR
+
+    print("要改的设置（%s）:" % target)
+    for plan in plans:
+        action = {"set": "改", "add-key": "加键", "add-segment": "**新建整段**"}[plan["action"]]
+        print("  %-6s %-38s %s -> %s" % (action, plan["path"], plan["old"], plan["new"]))
+    if not args.apply:
+        print("（还没写。加 --apply 才真写；会在旁边留一份 %s.bak）" % target.name)
+        return EXIT_OK
+
+    try:
+        result = sc.apply_changes(changes, target=str(target))
+    except sc.SettingsConfigError as exc:
+        print("写不进去：%s" % exc, file=sys.stderr)
+        return EXIT_ERROR
+    if not result["changed"]:
+        print("值本来就是这些，一个字节都没动（也没留 .bak）。")
+        return EXIT_OK
+    print("已写 %d 项 -> %s（备份 %s）" % (result["changed"], result["path"],
+                                        os.path.basename(result["backup"])))
+    return EXIT_OK
+
+
+async def _set_cookie(args: argparse.Namespace) -> int:
+    """B 站 cookie: 写 `config/bilibili_cookie.json`（凭据文件）+ 可选 `--verify`。"""
+    from agent.core import settings_credentials as creds
+
+    config, why = load_plane_config(args.config)
+    if why:
+        print("读不到配置（%s）—— cookie 文件路径取默认值。" % why, file=sys.stderr)
+    path = creds.cookie_path(config)
+
+    values = {}
+    for flag, key in COOKIE_FLAGS.items():
+        value = getattr(args, flag.lstrip("-").replace("-", "_"), None)
+        if value:
+            values[key] = value.strip()
+
+    if not values and not args.verify:
+        current = creds.read_cookie(config)
+        if not current:
+            print("现在没有 cookie（%s 不在或为空 = 匿名, 清晰度按 B 站给多少算多少）。"
+                  % path)
+        else:
+            print("现在有一份 cookie（%s）:" % path)
+            for key in COOKIE_KEYS:
+                if current.get(key):
+                    print("  %-12s %s" % (key, _mask(current[key])))
+        print("\n写一份: assistant set cookie --sessdata <值> [--bili-jct <值>] "
+              "[--dede-user-id <值>] --apply")
+        return EXIT_OK
+
+    if values:
+        print("要写进 %s 的字段:" % path)
+        for key, value in values.items():
+            print("  %-12s %s" % (key, _mask(value)))
+        if not args.apply:
+            print("（还没写。加 --apply 才真写；会在旁边留一份 .bak）")
+            return EXIT_OK
+        try:
+            saved = creds.write_cookie(config, values)
+        except creds.CredentialsError as exc:
+            print("写不进去：%s" % exc, file=sys.stderr)
+            return EXIT_ERROR
+        print("已写 %s（备份 .bak；这个文件是**凭据**, 已进 .gitignore）" % saved)
+
+    if args.verify:
+        return _verify_cookie(config)
+    return EXIT_OK
+
+
+def _verify_cookie(config: Dict[str, Any]) -> int:
+    """问一次 B 站: 这份 cookie 到底好不好使（复用 Agent 起播前那条同一个实现）。"""
+    from agent.net.bilibili_api import BilibiliApi
+
+    section = (config or {}).get("bilibili") or {}
+    api = BilibiliApi.from_config(section, log=logging.getLogger("agent.cli"))
+    if api is None:
+        print("bilibili 没开（config 的 bilibili.enabled）—— 没什么可验的。")
+        return EXIT_OK
+    if not api.cookie_present:
+        print("没有 cookie（匿名）—— 单文件清晰度按 B 站给多少算多少。")
+        return EXIT_OK
+    try:
+        info = api.login(refresh=True)
+    except Exception as exc:                              # noqa: BLE001 - 问不到要如实说
+        print("问不到 B 站（%s）—— cookie 好不好使这次没验出来。" % exc, file=sys.stderr)
+        return EXIT_ERROR
+    if info.get("logged_in"):
+        who = info.get("uname") or info.get("mid") or "（已登录）"
+        print("cookie 有效：%s —— DASH 能到 1080P。" % who)
+        return EXIT_OK
+    print("cookie **不好使**：%s（B 站不报错, 只是把你当匿名, 清晰度会掉）"
+          % (info.get("why") or "未登录"))
+    return EXIT_ERROR
+
+
+def _study_plane(args: argparse.Namespace):
+    """读锚点库 + 统计 + 判定器（**不起 Agent**）—— `assistant study` 的公共入口。"""
+    from agent.core.study_anchors import StudyAnchors
+    from agent.core.study_stats import StudyStats
+    from agent.core.study_watch import StudyWatcher
+
+    config, why = load_plane_config(args.config)
+    if why:
+        print("读不到配置（%s）—— 用默认路径。" % why, file=sys.stderr)
+    section = dict((config or {}).get("study") or {})
+    anchors = StudyAnchors(section.get("anchor_file"), classes=section.get("classes"),
+                           max_per_class=int(section.get("max_anchors_per_class", 200) or 200),
+                           keep_shots=False, log=logging.getLogger("agent.cli"))
+    try:
+        anchors.load()
+    except Exception as exc:                              # noqa: BLE001 - 库坏了要如实说
+        print("锚点库读不出来：%s" % exc, file=sys.stderr)
+    stats = StudyStats(section.get("stats_file"), log=logging.getLogger("agent.cli"))
+    stats.load()
+    watcher = StudyWatcher(
+        anchors, stats=stats,
+        relative_band=float(section.get("relative_band", 0.05) or 0.05),
+        learn_score=float(section.get("learn_score", 0.90) or 0.90),
+        focus_interval_min=float(section.get("focus_interval_min", 30) or 30),
+        recheck_interval_min=float(section.get("recheck_interval_min", 5) or 5),
+        max_failures=int(section.get("max_failures", 3) or 3),
+        cooldown_min=float(section.get("cooldown_min", 30) or 30),
+        adapt=bool(section.get("adapt", True)), learn=bool(section.get("learn", True)))
+    watcher.seed_thresholds()
+    return config, section, anchors, stats, watcher
+
+
+async def cmd_study(args: argparse.Namespace) -> int:
+    """学习内容监督的日常操作: `status` / `check` / `label` / `freeze` / `unfreeze` / `reset`。
+
+    @note **不用起 Agent**: `status` 直接读两份派生数据; `check`/`label` 在板端加载
+      SigLIP 判一张**截图**（走 `frame_pipeline` 还原成板子看到的那一帧）。
+      "看真串流帧"是 Agent 自己的循环（`_study_watch_loop`）。
+    @note `freeze`/`unfreeze` 改的是配置里的 `study.adapt`（走 `assistant set` 那条
+      同一个文本级写入器）; `reset` 改的是派生数据（锚点/统计）。
+    """
+    action = args.action
+    if action in ("freeze", "unfreeze"):
+        # 这两个是**直接动作**（不是"看设置项"），所以马上就写；写的是配置真源里那一行。
+        from agent.core import settings_config as sc
+
+        load_plane_config(args.config)                    # 先让 --config 生效（设 AGENT_CONFIG_DIR）
+        try:
+            target = _config_target(args)
+        except ValueError as exc:
+            print("不写：%s" % exc, file=sys.stderr)
+            return EXIT_USAGE
+        wanted = action == "unfreeze"
+        try:
+            result = sc.apply_changes({"study.adapt": wanted}, target=str(target))
+        except sc.SettingsConfigError as exc:
+            print("改不了：%s" % exc, file=sys.stderr)
+            return EXIT_ERROR
+        if not result["changed"]:
+            print("study.adapt 本来就是 %s，一个字节都没动。" % ("true" if wanted else "false"))
+            return EXIT_OK
+        print("已把 study.adapt 设成 %s -> %s（备份 %s；判定照旧, 只是%s自己挪阈值）"
+              % ("true" if wanted else "false", result["path"],
+                 os.path.basename(result["backup"]), "" if wanted else "不再"))
+        return EXIT_OK
+
+    config, section, anchors, stats, watcher = _study_plane(args)
+    if action == "status":
+        return _study_status(args, section, anchors, stats, watcher)
+    if action == "reset":
+        return _study_reset(args, anchors, stats, watcher)
+    if action in ("check", "label"):
+        return _study_check(args, action, watcher)
+    print("不认识的动作 %r" % action, file=sys.stderr)
+    return EXIT_USAGE
+
+
+def _study_status(args, section, anchors, stats, watcher) -> int:
+    """一眼看清: 库里有什么、阈值多少、最近判成什么。"""
+    import json as _json
+
+    snap = watcher.snapshot()
+    if args.json:
+        print(_json.dumps({"snapshot": snap, "stats": stats.snapshot()},
+                          ensure_ascii=False, indent=2))
+        return EXIT_OK
+    print("学习内容监督: %s" % ("开（config 的 study.enabled=true）" if section.get("enabled")
+                              else "**关**（config 里 study.enabled=false）"))
+    print("锚点库: %d 条 %s" % (len(anchors), snap["counts"] or "{}"))
+    print("  大类: %s" % snap["categories"])
+    print("判定阈值: 没把握带 %.3f（界 %s）" % (snap["thresholds"]["relative_band"],
+                                              snap["thresholds"]["band_bounds"]))
+    print("  标定记录（**不参与判定**）: confident_score %.2f / confident_margin %.2f"
+          % (snap["thresholds"]["confident_score"], snap["thresholds"]["confident_margin"]))
+    print("时间参数: 学习后 %g 分钟 / 复查 %g 分钟 / %d 次不通过 / 冷却 %g 分钟"
+          % (snap["intervals_min"]["focus"], snap["intervals_min"]["recheck"],
+             snap["max_failures"], snap["intervals_min"]["cooldown"]))
+    print("自适应: %s；自学习: %s；停学的类: %s"
+          % ("开" if snap["adapt"] else "**冻结**", "开" if snap["learn"] else "关",
+             snap["paused"] or "无"))
+    if snap["last"]:
+        last = snap["last"]
+        print("最近一次: %s（来源 %s，相对分 %s）%s"
+              % (last.get("verdict"), last.get("source") or "-", last.get("relative"),
+                 (last.get("note") or "")[:60]))
+    counters = stats.counters()
+    if counters:
+        print("统计: " + "、".join("%s=%s" % (key, value)
+                                  for key, value in sorted(counters.items())))
+    return EXIT_OK
+
+
+def _study_reset(args, anchors, stats, watcher) -> int:
+    """清掉锚点（可选一类）与/或学到的阈值 —— 默认只看。"""
+    cls = args.klass
+    target = "全部" if cls is None else "「%s」这一类" % cls
+    print("要清掉: %s的锚点%s" % (target, "，并把阈值/EWMA 回到配置初值" if args.thresholds else ""))
+    if not args.apply:
+        print("（还没动。加 --apply 才真清；锚点文件会留一份 .bak）")
+        return EXIT_OK
+    try:
+        removed = anchors.reset(cls)
+    except Exception as exc:                              # noqa: BLE001
+        print("清不掉：%s" % exc, file=sys.stderr)
+        return EXIT_ERROR
+    print("清掉 %d 条锚点；现在 %d 条 %s" % (removed, len(anchors), anchors.counts()))
+    if args.thresholds:
+        stats.reset(keep_thresholds=False)
+        watcher.seed_thresholds()
+        stats.note("CLI `assistant study reset --thresholds`: 阈值与 EWMA 清回配置初值")
+        stats.save()
+        print("阈值回到配置初值（没把握带 %.3f）" % watcher.relative_band)
+    return EXIT_OK
+
+
+def _study_check(args, action, watcher) -> int:
+    """判一张**截图**（`--image`），可选把它学成锚点（`label --class X --apply`）。"""
+    import json as _json
+
+    from agent.config import load_config
+    from agent.vision import frame_pipeline as fp
+
+    if not args.image:
+        print("%s 需要 --image <截图路径>（板子看到的是串流帧, 这里用截图按真管线还原）"
+              % action, file=sys.stderr)
+        return EXIT_USAGE
+    stream = (1280, 720)
+    if args.stream:
+        try:
+            parts = str(args.stream).lower().split("x")
+            stream = (int(parts[0]), int(parts[1]))
+        except (ValueError, IndexError):
+            print("--stream 要写成 1280x720", file=sys.stderr)
+            return EXIT_USAGE
+    try:
+        frame = fp.from_screenshot(args.image, stream=stream, mode=args.mode)
+    except fp.FramePipelineError as exc:
+        print("这一张读不出来：%s" % exc, file=sys.stderr)
+        return EXIT_ERROR
+
+    watcher._encoder = None                              # 用真模型（延迟到编码那一步才加载）
+    try:
+        from agent.vision.siglip import SiglipModel
+    except ImportError as exc:
+        print("判这一张要板端的 SigLIP（%s）—— 开发机上跑不了。" % exc, file=sys.stderr)
+        return EXIT_ERROR
+    config, _why = load_plane_config(args.config)
+    model = SiglipModel.from_config((config or {}).get("vision"))
+    try:
+        vector = [float(item) for item in list(model.encode_image(frame))]
+    except Exception as exc:                              # noqa: BLE001 - 缺 NPU 要如实说
+        print("编码失败（%s）—— 板端才有 NPU。" % exc, file=sys.stderr)
+        return EXIT_ERROR
+    outcome = watcher.verdict(frame, vector=vector)
+    if args.json:
+        print(_json.dumps(outcome, ensure_ascii=False, indent=2))
+    else:
+        print("%s -> %s（来源 %s）" % (args.image, outcome["verdict"], outcome["source"] or "-"))
+        print("  相对分 %+.4f（study %+.4f / not_study %+.4f，带 %.3f）"
+              % (outcome["relative"] or 0.0, outcome["study_cos"] or 0.0,
+                 outcome["not_study_cos"] or 0.0, outcome["band"]))
+        print("  最像的子标签: %s；%s" % (outcome["cls"] or "?", outcome["note"]))
+    if action == "check":
+        return EXIT_OK
+    if not args.klass:
+        print("label 要给 --class（%s）" % " / ".join(sorted(watcher.anchors.classes)),
+              file=sys.stderr)
+        return EXIT_USAGE
+    if not args.apply:
+        print("（还没学。加 --apply 才把这一帧学成「%s」的锚点）" % args.klass)
+        return EXIT_OK
+    result = watcher.label(args.klass, vector=vector)
+    if result["learned"]:
+        print("已学成「%s」的锚点（现在 %d 条）" % (args.klass, result["anchors"]))
+        return EXIT_OK
+    print("没学进去：%s" % result["note"], file=sys.stderr)
+    return EXIT_ERROR
+
+
+# ---------------------------------------------------------------------------
 #  命令行
 # ---------------------------------------------------------------------------
 def _common_options(*, suppress_defaults: bool,
@@ -1759,6 +2220,57 @@ def build_parser() -> argparse.ArgumentParser:
     p_tag.add_argument("--prune", action="store_true",
                        help="顺手清掉「图已经不在了」的行（与 --apply 一起才真写）")
     p_tag.set_defaults(func=cmd_tag)
+
+    p_set = sub.add_parser(
+        "set",
+        help="改设置项（文本级: 只动那一行 + .bak；默认只看, --apply 才写）",
+        parents=[_common_options(suppress_defaults=True, with_timeout=False)])
+    p_set.add_argument("group", choices=sorted(SET_GROUPS) + ["cookie"],
+                       help="哪一组设置: %s / cookie（B 站凭据）" % " / ".join(sorted(SET_GROUPS)))
+    p_set.add_argument("--apply", action="store_true",
+                       help="真写（config.yaml 旁边留 .bak；cookie 写 config/bilibili_cookie.json）")
+    p_set.add_argument("--show", action="store_true", help="只列出这一组能改的设置项与当前值")
+    p_set.add_argument("--set", action="append", metavar="键=值",
+                       help="按点号路径直接设（可以给多次；键必须是模板里有的）")
+    # 数值项与开关（表驱动：加一行 = 多一个开关）。
+    # ⚠ 同一个开关可能出现在**多组**里（`--enabled` 三组都有）—— argparse 不许重复注册,
+    #   所以这里去重, 帮助文本里把"它属于哪几组"写全（处理时仍按**当前组**的表取值）。
+    numbers: Dict[str, List[str]] = {}
+    switches: Dict[str, List[str]] = {}
+    for group, table in SET_GROUPS.items():
+        for flag, path in table["numbers"].items():
+            numbers.setdefault(flag, []).append("%s -> %s" % (group, path))
+        for flag, (path, _value) in table["switches"].items():
+            switches.setdefault(flag, []).append("%s -> %s" % (group, path))
+    for flag, notes in numbers.items():
+        p_set.add_argument(flag, type=float, default=None, help="；".join(notes))
+    for flag, notes in switches.items():
+        p_set.add_argument(flag, action="store_true", help="；".join(notes))
+    # cookie 那一组
+    p_set.add_argument("--sessdata", default=None, help="[cookie] B 站 SESSDATA（凭据, 不会回显）")
+    p_set.add_argument("--bili-jct", default=None, help="[cookie] B 站 bili_jct（可选）")
+    p_set.add_argument("--dede-user-id", default=None, help="[cookie] B 站 DedeUserID（可选）")
+    p_set.add_argument("--verify", action="store_true",
+                       help="[cookie] 顺手问一次 B 站, 看这份 cookie 好不好使")
+    p_set.set_defaults(func=cmd_set)
+
+    p_study = sub.add_parser(
+        "study",
+        help="学习内容监督: status / check / label / freeze / unfreeze / reset（不用起 Agent）",
+        parents=[_common_options(suppress_defaults=True, with_timeout=False)])
+    p_study.add_argument("action",
+                         choices=["status", "check", "label", "freeze", "unfreeze", "reset"])
+    p_study.add_argument("--image", default=None, help="check/label: 一张截图（按真管线还原）")
+    p_study.add_argument("--mode", default="native", choices=["native", "area", "direct"],
+                         help="check/label: 用哪条还原管线（默认 native = 板子真走的那条）")
+    p_study.add_argument("--stream", default=None, help="check/label: 流分辨率, 默认 1280x720")
+    p_study.add_argument("--class", dest="klass", default=None,
+                         help="label/reset: 子标签（code/doc/real/anime/game）")
+    p_study.add_argument("--thresholds", action="store_true",
+                         help="reset: 连阈值与 EWMA 一起清回配置初值")
+    p_study.add_argument("--apply", action="store_true", help="label/reset: 真写（默认只看）")
+    p_study.add_argument("--json", action="store_true", help="status/check: 输出 JSON")
+    p_study.set_defaults(func=cmd_study)
 
     return parser
 

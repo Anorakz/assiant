@@ -68,6 +68,7 @@ tests/test_docs.py
 tests/test_config_source_guard.py
 tests/test_schedule_parity.py
 tests/test_schedule_config.py
+tests/test_settings_config.py
 tests/test_cli.py
 tests/test_tools.py
 tests/test_tool_permissions.py
