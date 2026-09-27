@@ -523,8 +523,8 @@ async def main():
         await runtime._start_study()
         await runtime._start_state_and_tools()
         await runtime._start_ipc()
-        if runtime._native_task is not None:
-            await wait_for(lambda: runtime.image_reader is not None, 20, "native 就位")
+        if not args.no_stream:
+            await wait_for(lambda: runtime.image_reader is not None, 20, "io 层就位")
         frames = load_frames()
         await part_a(runtime, frames, args.no_stream)
         await part_b(runtime, sock, frames, args.no_stream)
