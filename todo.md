@@ -2002,20 +2002,68 @@ T13-10 ☑ **板端 GUI 验收 + 文档收口**:
         ② 重跑验收时真配置**已经是**约定值 -> "md5 必须变化"不成立 —— 现在分两支: 写了才要求
         `.bak == 保存前`，没写就断言"`.bak` 没被动"（这才是幂等的正确判据）
 
-Phase 8 — 固化与优化
-□ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
-□ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档
-□ docs/ipc-protocol.md：Unix socket 协议（Phase 4 同步写）
-□ docs/deploy.md：部署、回滚、版本对齐
-□ docs/adr/0001-ipc-unix-socket.md：为什么用 Unix socket 而非 ZMQ
-□ docs/adr/0002-gui-on-board.md：为什么 GUI 在板端而非 PC
-□ docs/adr/0003-ringbuffer-readonly.md：RingBuffer 只在读取侧
-□ docs/adr/0004-pybind11-gil-release.md：pybind11 释放 GIL
-□ scripts/bench.sh：NPU 推理延迟、解码延迟、端到端延迟
-□ docs/bench.md：性能基线记录
-□ systemd/agent.service：Agent 开机自启
-□ systemd/agent-gui.service：GUI 开机自启（After=agent.service）
-□ 崩溃日志落盘 logs/crash/
-□ Restart=on-failure 重启策略
-□ scripts/monitor.sh：CPU/RAM/NPU 占用快照
-□ 检查 Agent + GUI 同跑时是否打架
+T14 — Phase 8「固化与优化」+ T13 之后的两处架构改动（你 2026-09-27 定的顺序）
+==========================================================================
+T14-1 ☑ **ADR 0001–0004 + 索引 + 守卫**: `docs/adr/`（IPC 为什么用 Unix socket / GUI 为什么
+      在板端 / RingBuffer 为什么只读 / 跨语言为什么放 GIL）—— 每篇六节（状态/背景/决定/理由/
+      替代方案与代价/后果与边界），**能指出出处的都标了路径与行号**（`binding.cpp:129` 这种），
+      指不出的写成"当时的判断"; `docs/adr/README.md` 索引 + `tests/test_adr.py`（9 项:
+      命名 NNNN-kebab / 编号连号 / 必需小节 / 索引与文件一一对应）
+      配套: `tests/test_docs.py` 的**过时声明黑名单对 ADR 免检**（ADR 的工作就是讨论被否决的
+      方案，里面必然有 ZMQ / PySide6）—— 判据用**路径**而不是给每条加免检正则，
+      另加一项四步反空转测试（黑名单还有牙 / 只放行 docs/adr/ / ADR 里确实有那些词 /
+      ADR 确实在扫描范围内）
+      ☑ 本地套件全绿; 板端 `python tests OK (46 files)`
+
+T14-2 ☑ **单一写入者（Agent 侧 + 协议）+ llm.env 搬 Python**（ADR 0005）:
+      · 协议: 新命令 `set_config`（payload `{id, keys, credentials?}`）+ 新 topic `config_result`
+        （回执 `{id, ok, changed, backup, path, error, llm_env{…}}`）—— 关联字段放 **payload 里**
+        （协议没有版本号/关联字段），老 GUI 按"未知 topic 忽略"处理
+      · `agent/ipc/__init__.py::_handle_set_config`: **先全部校验、再动第一份文件** ——
+        载荷形状 → 凭据纯校验（`settings_credentials.clean_values`，新抽的纯函数）→
+        配置算计划（不写）→ 写配置 → 写凭据 → 派生 `llm.env`; 前两步失败 = **一个字节都不写**;
+        **每条路径都回执**（GUI 靠它，不然只能等超时）
+      · `agent/core/llm_env.py`（新）: 派生文件改由 Python 写，映射表逐条照
+        `config_sync.cpp::buildEnv`（8 键，含 `LLM_API_KEY <- llm.local_api_key`）;
+        只动目标行（注释/顺序/行尾含"没有尾换行"都保留）; 值没变不写不留 `.bak`; 缺键才追加;
+        与 C++ 老实现**刻意不同**的一处: 行尾注释保留（老版把 `=` 之后整段重写）
+      · `assistant doctor` 的派生一致性改用它（**不再依赖板端构建过 gui/**）
+      · 守卫: `ALLOWED_WRITERS` 第 11 个 + `llm.env` 边界改成"只有写入者能读写，
+        别处只许提名字（注释/日志），同一行有文件操作就红" + 两条反空转测试
+      ☑ 测试: `test_llm_env.py`（新 18 项）/ `TestSetConfigCommand`（10 项）/
+        `clean_values`（2 项）/ 协议常量表 21 = 7 topic + 14 command /
+        `test_cli.py` 的派生检查改成造四种局面
+      ☑ 板端实测: `tests/board/t14_2_accept.py` **28 项全 ✔**（真 Agent + 真 socket）:
+        改 `llm.port` → 回执 ok + 同一回执里 `llm.env` 派生到 9317 + 只动那一行;
+        改 `study.relative_band` → 只动那一行 + `.bak` == 改动前原文 + 第二轮 llm.env changed=0;
+        非法键 → ok=false 且真源/派生 md5 全未变; 凭据写进**副本** cookie 文件、
+        笔误时连配置那一行也不落盘; `doctor` 用 Python 实现判"板端真实那一对: OK";
+        真实 `config.yaml`/`llm.env`/`bilibili_cookie.json` md5 全未变 + `git status` 干净 +
+        socket 收掉 + 没留进程; 板端套件 `python tests OK (47 files)`
+      ⚠ 踩坑: ① 验收脚本自己那段文本手术把 YAML 写坏（`port 9317` 少个冒号）—— 改成
+        **用被测的 `set_config` 本身**去改 `llm.port`，不再手工动文本;
+        ② `LocalClient` 要在 Agent 起完 IPC 之后再连（反了就是 FileNotFoundError）;
+        ③ 给运行器加一行时用了 `Get-Content | Set-Content -NoNewline`，把两个脚本的行尾
+        整片吃掉（仓库老坑）—— `git checkout` 恢复 + 改用 edit 工具，最终 diff 是 +1 行
+
+□ T14-3 单一写入者 · GUI 侧改道: `ConfigStore` 退化成只读 + diff 预览（删 `save()`、
+      删缺段新建那套、`cookie_store` 缩成只读+掩码）; 三个写入点（设置页卡片 / 模型页 `llm.*` /
+      切输入源）改发 `set_config` 并处理回执; 凭据走 `credentials`; 模型页「启动服务」
+      （`llm/scripts/*.sh`）也交 Agent; C++ `ConfigSyncer` / `gui_config_sync` 退役;
+      白名单契约测试改成"**发出去的 keys** 只许是这些"
+□ T14-4 CI · `host-ci.yml`（host C++ 单测 + `test-python.sh` + ruff 窄口径 `E9,F63,F7,F82`
+      + `native/*.cpp` 的 `-fsyntax-only`）
+□ T14-5 CI · `release.yml`（源码包 + **自托管 runner** 跑 `build.ps1` 出 `.so`）
+□ T14-6 `scripts/bench.sh`（NPU 推理 / MPP 解码 / 端到端）+ 入库基线 + `docs/bench.md`
+□ T14-7 自启: **Agent 与 GUI 都走 root systemd**（`agent-gui.service` 带 `DISPLAY=:0`，
+      `After=display-manager.service xrandr-startup.service agent.service`）+ `Restart=on-failure`
+□ T14-8 崩溃落盘 `logs/crash/`（`faulthandler` + `excepthook` + GUI 的 Qt 消息处理器）
+□ T14-9 WiFi: 后端用板端**已有的 NetworkManager/nmcli** + 设置页第 4 张卡片（扫描/连接/
+      记住并自动接入/忘记）+ **主动链路健康检查**（本次掉线板端零日志 = autoconnect 救不了）
+□ T14-10 `scripts/monitor.sh`（CPU/RAM/NPU/温度/RSS/帧计数；先读 `health_check.sh` 能扩就扩）
+□ T14-11 同跑验收 `tests/board/p8_coexist.py`（含"保存设置时写入者是 Agent"）
+□ T14-12 文档收口（`docs/ci.md` / `docs/bench.md` / `docs/net.md` / deploy 自启那节）+ todo 记录
+
+Phase 8 里**已经做完**的老条目（留档）: `docs/ipc-protocol.md`、`docs/deploy.md`、
+`docs/adr/0001…0004`（T14-1）、CI 的两条在 T14-4/T14-5、systemd 与崩溃落盘在 T14-7/T14-8、
+bench 在 T14-6、monitor 与同跑在 T14-10/T14-11。
