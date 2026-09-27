@@ -2035,6 +2035,54 @@ class TestLocalServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server.client_count, 0)
 
 
+class TestSocketCleanupDoesNotStealThePath(unittest.IsolatedAsyncioTestCase):
+    """收尾只删**自己 bind 的那个** socket（T14-9 现网故障的回归测试）。
+
+    板端实测：systemd `restart` 时旧实例还在优雅退出（音乐那边要几十秒），新实例已经
+    bind 好同一个路径；旧实例随后 unlink 掉的是**新实例的目录项** ——
+    `ss -lx` 里 socket 还在监听，而 `/tmp/agent.sock` 这个名字没了，CLI/GUI 全连不上。
+    所以 `_unlink_socket()` 必须核对 inode。
+    """
+
+    async def test_normal_stop_removes_its_own_socket(self):
+        if not UNIX_SOCKET_SUPPORTED:
+            self.skipTest("需要 AF_UNIX")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "own.sock")
+            server = LocalServer(path)
+            await server.start()
+            self.assertTrue(os.path.exists(path))
+            await server.stop()
+            self.assertFalse(os.path.exists(path), "自己 bind 的该删掉")
+
+    async def test_a_dying_server_does_not_delete_the_new_one_s_socket(self):
+        if not UNIX_SOCKET_SUPPORTED:
+            self.skipTest("需要 AF_UNIX")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "raced.sock")
+            old = LocalServer(path)
+            await old.start()
+            old_inode = os.lstat(path).st_ino
+
+            # 模拟"新实例接管了这个路径"：把旧的名字摘掉（旧实例还在监听，这是 unlink
+            # 之后内核里的状态），再让新实例 bind 同一个路径
+            os.unlink(path)
+            new = LocalServer(path)
+            await new.start()
+            self.assertNotEqual(os.lstat(path).st_ino, old_inode, "应该是新的 inode")
+
+            # 旧实例现在才收尾 —— 它**不许**碰新实例的名字
+            await old.stop()
+            self.assertTrue(os.path.exists(path),
+                            "旧实例的收尾把新实例的 socket 名字删了（现网故障复现）")
+            # 而且新实例还能正常服务
+            reader, writer = await asyncio.open_unix_connection(path)
+            writer.close()
+            await _close_writer(writer)
+            await new.stop()
+            self.assertFalse(os.path.exists(path), "新实例自己收尾时该删掉")
+
+
 async def _close_writer(writer):
     writer.close()
     try:

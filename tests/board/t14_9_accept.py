@@ -52,6 +52,33 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SOCKET_PATH = "/tmp/agent.sock"
+
+
+def configured_socket_path():
+    """从 board 的真配置里读 `ipc.socket_path`（不硬编码：配置改了这个门禁要跟着走）。"""
+    config = os.path.join(REPO, "config", "config.yaml")
+    if not os.path.exists(config):
+        return SOCKET_PATH
+    try:
+        import yaml
+        with open(config, encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+        return str((data.get("ipc") or {}).get("socket_path") or SOCKET_PATH)
+    except Exception:                                     # noqa: BLE001
+        return SOCKET_PATH
+
+
+def ensure_agent_socket(path):
+    """确保真 Agent 的 socket 在（板端实测过一种现网故障：socket 的文件名被删掉、
+    内核里还在监听 —— 那时 CLI/GUI 全连不上）。这里重启一次服务把它重建出来。"""
+    if os.path.exists(path):
+        return True
+    subprocess.run(["systemctl", "restart", "agent.service"], stdout=subprocess.DEVNULL)
+    for _ in range(20):
+        time.sleep(1)
+        if os.path.exists(path):
+            return True
+    return False
 REAL_FILES = ["config/config.yaml"]
 LIVE_PROFILE = "Anorak_host"
 TEST_PROFILE = "T14-TEST"
@@ -334,9 +361,16 @@ def check_invariants(real_before):
 
 
 def main():
+    global SOCKET_PATH
     outage = "--outage-test" in sys.argv
+    SOCKET_PATH = configured_socket_path()
     print("== T14-9 WiFi 门禁（真 Agent / 真 nmcli / 真 IPC）%s"
           % ("+ 真断链路" if outage else ""))
+    print("  socket: %s（来自 config.yaml 的 ipc.socket_path）" % SOCKET_PATH)
+    if not ensure_agent_socket(SOCKET_PATH):
+        print("  ✘ Agent 的 socket 不在（%s）—— 先看 systemctl status agent.service"
+              % SOCKET_PATH)
+        return 1
     real_before = {name: md5(os.path.join(REPO, name)) for name in REAL_FILES
                    if os.path.exists(os.path.join(REPO, name))}
     for name, digest in real_before.items():

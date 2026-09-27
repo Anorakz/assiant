@@ -85,6 +85,10 @@ EXPECTED_ORDER = [
     # 它在 llm_provider 之后 —— 判心情那一步要问模型; 步骤本身只读配置。
     "profile",
     "scheduler",
+    # T14-9: WiFi 链路守护（`net.enabled=false` 或没有 nmcli 时，这一步什么都不做，
+    # 但组件照旧注册 —— 与上面 music/bilibili/study 同一条规矩）。
+    # ⚠ 放在 ipc **之前**：界面一打开就该能看到真实状态。
+    "net",
     "ipc",
     "terminal_input",
 ]

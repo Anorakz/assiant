@@ -512,6 +512,8 @@ class LocalServer:
         self._server: Optional["asyncio.AbstractServer"] = None
         self._sessions: List[_ClientSession] = []
         self._callbacks: List[Callable[[str, dict], Any]] = []
+        #: 自己 bind 出来的那个 socket 文件的 inode（收尾时只删它，不删别人接管的路径）
+        self._bound_inode: Optional[int] = None
 
         #: 累计计数 (日志与排障用; 也方便测试断言)
         self.received = 0        # 解出来的合法消息条数
@@ -590,6 +592,11 @@ class LocalServer:
             raise IpcServerError("绑定 %s 失败: %s" % (self.path, exc)) from exc
 
         self._chmod_socket()
+        # 记下自己 bind 出来的 inode（收尾时只删它 —— 见 _unlink_socket 的说明）
+        try:
+            self._bound_inode = os.lstat(self.path).st_ino
+        except OSError:
+            self._bound_inode = None
         self.log.info(
             "IPC server 就绪: %s (权限 %s, 单条上限 %d 字节, 等 GUI 连接)",
             self.path,
@@ -826,9 +833,29 @@ class LocalServer:
             )
 
     def _unlink_socket(self) -> None:
+        """删除自己 bind 的那个 socket 文件。
+
+        ⚠ 必须核对 inode（`self._bound_inode`）：板端实测过一种很难查的现网故障 ——
+          systemd `restart` 时旧实例还在优雅退出（音乐/网易云那边要几十秒），新实例已经
+          bind 好了同一个路径；旧实例随后 unlink 掉的是**新实例的目录项**，
+          于是 `ss -lx` 里 socket 还在监听、而 `/tmp/agent.sock` 这个名字没了
+          （CLI/GUI 全连不上，直到再重启一次）。有了 inode 核对，只有"路径还是我 bind 的
+          那个 inode"才删，别人的名字一个都不会碰。
+        """
         try:
-            if os.path.exists(self.path) and stat.S_ISSOCK(os.lstat(self.path).st_mode):
-                os.unlink(self.path)
+            if not os.path.exists(self.path):
+                return
+            st = os.lstat(self.path)
+            if not stat.S_ISSOCK(st.st_mode):
+                return
+            if self._bound_inode is not None and st.st_ino != self._bound_inode:
+                self.log.warning(
+                    "ipc: %s 已经不是我 bind 的那个 socket（inode %s != %s），不删 "
+                    "—— 说明有别的实例接管了这个路径",
+                    self.path, st.st_ino, self._bound_inode,
+                )
+                return
+            os.unlink(self.path)
         except OSError as exc:
             self.log.debug("ipc: 删除 socket 文件 %s 失败: %r", self.path, exc)
 
