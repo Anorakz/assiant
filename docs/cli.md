@@ -442,6 +442,15 @@ $ assistant set cookie --sessdata '<值>' --apply --verify      # B 站凭据（
   `bili_jct` / `DedeUserID` 三个键（`SEESSDATA` 那种笔误会被拒 —— 实测 B 站把它当没登录），
   终端**只回显掩码**；`--verify` 顺手问一次 B 站看这份 cookie 好不好使。
 
+> **GUI 也改同一批键**（板端设置页三张卡片，T13-9）：学习监督的时间参数与起始阈值、
+> 游戏检测的开关/间隔/"有把握"分数 + B 站凭据、画像压缩的开关与两个触发阈值。
+> 两边**同一套约定**（只动一行 + `.bak` + 缺段按模板新建 + 类型跟着模板走），
+> 但 GUI **只写白名单**里那些键；下面这些仍然只有 CLI/真源能改：
+> `study.remind`、`study.back_to_desktop`、`study.skip_on_keyword`、`study.learn`、
+> `study.adapt`、`study.target_unknown_rate`、`study.min_labeled`、`study.anchor_file` /
+> `study.stats_file` / `study.max_anchors_per_class` / `study.keep_shots`。
+> 键清单与白名单守卫见 [`study.md`](study.md) §8.1、[`config-sources.md`](config-sources.md) §3.3。
+
 ### `study` —— 学习内容监督的日常操作（不用起 Agent）
 
 ```bash
@@ -468,6 +477,7 @@ $ assistant study reset --thresholds --apply           # 连阈值/EWMA 一起�
 | 不做 | 为什么 |
 | --- | --- |
 | 不写配置、不改日程、不重启 Agent | **默认只读**。需要你亲手敲 `--apply` 的例外现在有四个：`cleanup --apply`（删已触发的一次性日程）、`tag --apply`（写派生数据 `wall_data.jsonl`）、`set … --apply`（写**配置真源**里那一行 + `.bak`）、`study label/reset --apply`（写派生数据）。写日程本身仍然是人在 PC 上做的事，配置是真源 |
+| 不是唯一能改设置的地方 | 板端**设置页**的三张卡片改的是同一批键（T13-9，见 `set` 那节末尾的清单）。GUI 只写白名单里的键；动作开关/自学习开关/数据文件路径仍然只有 CLI 这条路 |
 | 不手动换壁纸 | 换壁纸**只走对话**（对 Agent 说"换一张安静的深色风景"）。CLI 没有换壁纸命令，GUI 也没有「下一张」按钮 —— 见 [`tagging.md`](tagging.md) |
 | 不 `--json` | 输出给人看；要机器读，用 `watch --count` + 原始行，或直接 `LocalClient` |
 | 不 import Agent 去读内存 | 那会拿到"另一份状态"。所有跨进程信息都走 IPC 协议 |
@@ -497,4 +507,4 @@ $ assistant study reset --thresholds --apply           # 连阈值/EWMA 一起�
 - GUI 那一端： [`gui.md`](gui.md)、[`gui-agent-integration.md`](gui-agent-integration.md)
 - 部署与双机同步： [`deploy.md`](deploy.md)
 - 学习监督（`assistant study` 背后的功能、判定口径与边界）： [`study.md`](study.md)
-- 设置写入的承诺（只动一行 / `.bak` / 缺段新建 / 哪些键能改）： [`config-sources.md`](config-sources.md) §3.2
+- 设置写入的承诺（只动一行 / `.bak` / 缺段新建 / 哪些键能改）： [`config-sources.md`](config-sources.md) §3.2（CLI）与 §3.3（GUI 设置页）

@@ -35,8 +35,14 @@
 #include <QJsonObject>
 #include <QLineEdit>
 #include <cstdio>
+#include <QCheckBox>          // T13-10: --settings-*-demo / --settings-dump-cards 要读勾选框
+#include <QDoubleSpinBox>
+#include <QLabel>
+#include <QLineEdit>
 #include <QMouseEvent>
 #include <QObject>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSocketNotifier>
 #include <QString>
 #include <QDir>
@@ -95,6 +101,10 @@ int modeDemoMs = 3000;          ///< 上面那一下在启动后多久点（默�
     bool benchStopDemo = false;     ///< 启动后点"停止测试"（验收用）
     bool reportDemo = false;        ///< 启动后点"查看最新报告"（验收用）
     bool settingsSaveDemo = false;  ///< 启动后改两个时间并保存（验收用）
+    bool settingsCardsDemo = false; ///< 启动后把三张卡片设成"有区分度"的值并保存（T13-10 验收用）
+    bool settingsFinalDemo = false; ///< 启动后把三张卡片设成约定值并保存（T13-10 收尾用）
+    int settingsScrollDemo = -1;    ///< >=0 = 启动后把设置页滚到该像素再截图（T13-10 取证用）
+    bool settingsDumpCards = false; ///< 打印三张卡片**当前读到的值**并退出（T13-10 取证用）
     bool dumpSchedule = false;      ///< 打印日程区**真实渲染出来的行**并退出（S8 取证用）
     bool focusInputDemo = false;    ///< 启动后把焦点给对话输入框（S10 取证：软键盘应这时才弹）
     QString videoNoteDemo;         ///< 非空 = 触发视频区占位说明（验收用）
@@ -137,6 +147,10 @@ void printUsage()
         "  --bench-stop-demo   启动后点「停止测试」（验收用）\n"
         "  --report-demo       启动后点「查看最新报告」（验收用）\n"
         "  --settings-save-demo 启动后改两个休眠时间并保存（验收用）\n"
+        "  --settings-cards-demo    启动后把三张卡片设成有区分度的值并保存（T13-10 验收用）\n"
+        "  --settings-final-demo    启动后把三张卡片设成约定值并保存（T13-10 收尾用）\n"
+        "  --settings-scroll-demo <px>  启动后把设置页滚到该像素再截图（T13-10 取证用）\n"
+        "  --settings-dump-cards    打印三张卡片当前读到的值并退出（T13-10 取证用）\n"
         "  --dump-schedule      打印日程区真实渲染出来的行并退出（取证用）\n"
         "  --focus-input-demo   启动后把焦点给对话输入框（取证：软键盘应这时才弹）\n"        "  --config <path>      指定 config/config.yaml（默认自动在仓库里找）\n"
         "  --socket <path>      Agent 的 unix socket 路径（默认 /tmp/agent.sock）\n"
@@ -273,6 +287,23 @@ Options parseArgs(int argc, char** argv)
             opt.reportDemo = true;
         } else if (arg == QLatin1String("--settings-save-demo")) {
             opt.settingsSaveDemo = true;
+        } else if (arg == QLatin1String("--settings-cards-demo")) {
+            opt.settingsCardsDemo = true;
+        } else if (arg == QLatin1String("--settings-final-demo")) {
+            opt.settingsFinalDemo = true;
+        } else if (arg == QLatin1String("--settings-dump-cards")) {
+            opt.settingsDumpCards = true;
+        } else if (arg == QLatin1String("--settings-scroll-demo")
+                   || arg.startsWith(QLatin1String("--settings-scroll-demo="))) {
+            const QString value =
+                optionValue(arg, QStringLiteral("--settings-scroll-demo"), i, argc, argv, opt);
+            bool ok = false;
+            const int px = value.toInt(&ok);
+            if (!ok || px < 0) {
+                opt.error = QStringLiteral("--settings-scroll-demo 需要非负整数（像素）");
+            } else {
+                opt.settingsScrollDemo = px;
+            }
         } else if (arg == QLatin1String("--dump-schedule")) {
             opt.dumpSchedule = true;
         } else if (arg == QLatin1String("--focus-input-demo")) {
@@ -549,6 +580,46 @@ int runGuiMode(const Options& opt, int argc, char** argv)
         return 0;
     }
 
+    // T13-10 取证：把设置页三张卡片**当前读到的值**打出来（stdout）。截图只能证明"渲染出来了"，
+    // 字段值一律以这条文本为准 —— 人眼从 1280×800 的图上读小字不算证据。
+    if (opt.settingsDumpCards) {
+        SettingsPage* page = window.settingsPage();
+        if (page == nullptr) {
+            qWarning().noquote() << "[dump] 没有设置页";
+            return 2;
+        }
+        const auto boolText = [](bool value) {
+            return value ? QStringLiteral("true") : QStringLiteral("false");
+        };
+        const QStringList lines = {
+            QStringLiteral("study.enabled=%1").arg(boolText(page->studyEnabledCheck()->isChecked())),
+            QStringLiteral("study.focus_interval_min=%1").arg(page->studyFocusSpin()->value()),
+            QStringLiteral("study.recheck_interval_min=%1").arg(page->studyRecheckSpin()->value()),
+            QStringLiteral("study.max_failures=%1").arg(page->studyFailuresSpin()->value()),
+            QStringLiteral("study.cooldown_min=%1").arg(page->studyCooldownSpin()->value()),
+            QStringLiteral("study.cooldown_probe_min=%1").arg(page->studyProbeSpin()->value()),
+            QStringLiteral("study.relative_band=%1")
+                .arg(page->studyBandSpin()->value(), 0, 'f', 2),
+            QStringLiteral("bilibili.game_watch.enabled=%1")
+                .arg(boolText(page->gameEnabledCheck()->isChecked())),
+            QStringLiteral("bilibili.game_watch.interval_s=%1").arg(page->gameIntervalSpin()->value()),
+            QStringLiteral("bilibili.game_watch.confident_score=%1")
+                .arg(page->gameScoreSpin()->value(), 0, 'f', 2),
+            QStringLiteral("bilibili.cookie_file=%1").arg(page->cookiePathEdit()->text()),
+            QStringLiteral("profile.enabled=%1").arg(boolText(page->profileEnabledCheck()->isChecked())),
+            QStringLiteral("profile.trigger_chars=%1").arg(page->profileCharsSpin()->value()),
+            QStringLiteral("profile.trigger_turns=%1").arg(page->profileTurnsSpin()->value()),
+        };
+        for (const QString& line : lines) {
+            std::printf("CARD\t%s\n", qPrintable(line));
+        }
+        // 凭据单独一行（只给掩码：原值不回显）
+        std::printf("CARD\tbilibili.credentials=%s\n",
+                    qPrintable(QString(page->cookieStatusLabel()->text())
+                                   .replace(QLatin1Char('\n'), QLatin1String(" | "))));
+        return 0;
+    }
+
     if (opt.idleMs >= 0) {
         window.idleWatcher()->setIdleMs(opt.idleMs);   // 验收时把 5s 缩短
     }
@@ -672,6 +743,67 @@ int runGuiMode(const Options& opt, int argc, char** argv)
             window.settingsPage()->regionIdleSpin()->setValue(9000);
             window.settingsPage()->overlayIdleSpin()->setValue(800);
             window.settingsPage()->saveButton()->click();
+        });
+    }
+    // T13-10 验收：三张卡片设成**有区分度**的值（不是模板默认值）再走真实"保存"按钮 ——
+    // 这样"控件 -> 文件"这条路才真的被验到，而不是把模板默认值抄一遍。
+    if (opt.settingsCardsDemo) {
+        QTimer::singleShot(1800, &window, [&window]() {
+            SettingsPage* page = window.settingsPage();
+            if (page == nullptr) {
+                return;
+            }
+            page->studyEnabledCheck()->setChecked(true);
+            page->studyFocusSpin()->setValue(25);
+            page->studyRecheckSpin()->setValue(6);
+            page->studyFailuresSpin()->setValue(4);
+            page->studyCooldownSpin()->setValue(20);
+            page->studyProbeSpin()->setValue(2);
+            page->studyBandSpin()->setValue(0.06);
+            page->gameEnabledCheck()->setChecked(false);
+            page->gameIntervalSpin()->setValue(50);
+            page->gameScoreSpin()->setValue(0.88);
+            page->profileEnabledCheck()->setChecked(false);
+            page->profileCharsSpin()->setValue(1500);
+            page->profileTurnsSpin()->setValue(8);
+            page->saveButton()->click();
+        });
+    }
+    // T13-10 收尾：把你定的最终状态写进真配置 —— 三段都落在**模板默认值**上、
+    // 学习监督**打开**（其余界面项保持配置里的原值）。
+    // ⚠ 这里**不调** restoreDefaults()：那会把 gui.* 也拉回页面默认值 = 顺手改掉你的界面设置。
+    if (opt.settingsFinalDemo) {
+        QTimer::singleShot(1800, &window, [&window]() {
+            SettingsPage* page = window.settingsPage();
+            if (page == nullptr) {
+                return;
+            }
+            page->studyEnabledCheck()->setChecked(true);
+            page->studyFocusSpin()->setValue(30);
+            page->studyRecheckSpin()->setValue(5);
+            page->studyFailuresSpin()->setValue(3);
+            page->studyCooldownSpin()->setValue(30);
+            page->studyProbeSpin()->setValue(1);
+            page->studyBandSpin()->setValue(0.05);
+            page->gameEnabledCheck()->setChecked(true);
+            page->gameIntervalSpin()->setValue(60);
+            page->gameScoreSpin()->setValue(0.82);
+            page->profileEnabledCheck()->setChecked(true);
+            page->profileCharsSpin()->setValue(2000);
+            page->profileTurnsSpin()->setValue(12);
+            page->saveButton()->click();
+        });
+    }
+    // T13-10 取证：滚到设置页下面几张卡片再截图（页面比窗口高，不滚拍不到）
+    if (opt.settingsScrollDemo >= 0) {
+        const int px = opt.settingsScrollDemo;
+        QTimer::singleShot(1200, &window, [&window, px]() {
+            SettingsPage* page = window.settingsPage();
+            if (page == nullptr || page->scrollArea() == nullptr
+                || page->scrollArea()->verticalScrollBar() == nullptr) {
+                return;
+            }
+            page->scrollArea()->verticalScrollBar()->setValue(px);
         });
     }
     if (opt.reportDemo) {

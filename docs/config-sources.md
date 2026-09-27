@@ -39,12 +39,12 @@ GUI 读它的 `gui:` 段、读写它的 `llm:` 段、**只读**它的 `scheduler
 
 | 文件 | 角色 | 进 git？ | 谁写 | 谁读 |
 |---|---|---|---|---|
-| `config/config.yaml` | **唯一真源** | 否（只提交 `config.example.yaml`） | 人 / GUI（设置页、模型测试页）/ **Agent（只在"删掉已触发的一次性日程"这一件事上，见 §3.1）** | Agent、GUI |
+| `config/config.yaml` | **唯一真源** | 否（只提交 `config.example.yaml`） | 人 / GUI（设置页、模型测试页；T13-9 起设置页还写 `study.`/`bilibili.game_watch.`/`profile.` 的标量键，见 §3.3）/ **Agent（只在"删掉已触发的一次性日程"与"`assistant set` 改设置项"这两件事上，见 §3.1 / §3.2）** | Agent、GUI |
 | `config/wall_data.jsonl` | **派生数据**（第一行 = 标签向量缓存，其后一行一张图: 标签 + 图像向量 + 使用次数，Phase 7 T7-2 / T8-6） | 否（`.gitignore` 里单列一行） | `agent/vision/wall_data.py`（唯一写者）: `assistant tag --apply` 打标签，以及**运行期换壁纸时给那一张 `used` +1** | Agent（挑图/检索/按用量挑）、`assistant tag` 自己（算增量 + 复用词表向量） |
 | `config/music_library.jsonl` | **本地数据**（一行一首歌: id + tags + 播放次数，Phase 7 T8-3） | 否（`.gitignore` 里单列一行） | `agent/media/music_library.py`（唯一写者）: `assistant music` 导入/打标、运行期"听满 30 秒计一次"、以及**T10-4 自动补歌把搜到的歌登记进库**（库会因此长大，见 [`music.md`](music.md) §4.4） | Agent（挑歌/**补歌**）、`assistant music` |
 | `config/user_profile.jsonl` | **本地数据**（一次构建一行: IP/歌手**权重** + 心情 + 清零记录，Phase 7 T9-2） | 否（`.gitignore` 里单列一行） | `agent/core/user_profile.py`（唯一写者）: Agent 在"纯对话攒到 2000 字"时构建（T9-3） | Agent 自己（**T10 起真在消费**: 挑下一个壁纸 / 补歌 / 判负反馈 / 心情变了重置队列，见 [`profile.md`](profile.md) §8）；**模型看不到**（不是工具） |
 | `config/netease_cookie.json` | **T8-1 的保险条目**（板端**不放** cookie；登录态住在 PC 上 neteasecli 自己的 store） | 否（`.gitignore` 里单列一行） | 谁都不写（T8-7 核对过: 代码里没有任何地方读它） | — |
-| `config/bilibili_cookie.json` | **凭据**（B 站 `SESSDATA`，Phase 7 T11）：有它 DASH 才能到 **1080P**，没有就只有单文件的 360P~720P | 否（`.gitignore` 里单列一行） | **人**（手写；键名 `SESSDATA`，`SEESSDATA` 这种笔误代码会认下来并提醒） | `agent/net/bilibili_api.py`（**只读**，空/缺 = 匿名） |
+| `config/bilibili_cookie.json` | **凭据**（B 站 `SESSDATA`，Phase 7 T11）：有它 DASH 才能到 **1080P**，没有就只有单文件的 360P~720P | 否（`.gitignore` 里单列一行） | **人**（手写）/ **GUI 设置页的"游戏检测"卡片**（T13-9，只认三个键、合并写、留 `.bak`）/ `assistant set cookie --apply`（T13-8） | `agent/net/bilibili_api.py`（**只读**，空/缺 = 匿名） |
 | `config/game_anchors.jsonl` | **派生数据**（一行一锚点: 游戏名 + 768 维 float16 向量 + 截图路径 + 来源 + 时间，T11-4） | 否（`.gitignore` 里单列一行；截图目录 `config/game_anchors/` 一并忽略） | `agent/core/game_anchors.py`（唯一写者）: 画面与 PC 进程**不一致时把那一帧登记成该游戏的锚点**（自纠错） | `agent/core/game_watch.py`（识别时算余弦） |
 | `config/study_anchors.jsonl` | **派生数据**（一行一锚点: 子标签 + 768 维 float16 向量 + 截图路径 + 来源 + 时间，T13-2；与**游戏锚点分开**） | 否（`.gitignore` 里单列一行；截图目录 `config/study_anchors/` 一并忽略） | `agent/core/study_anchors.py`（唯一写者）: T13-4 标定播种（`--apply`）、运行期"画面与标签不一致时学一帧"、以及**超每类上限丢最旧 / 清空**时的整篇原子重写 | `agent/core/study_watch.py`（判定时算大类原型与相对分） |
 | `config/study_stats.json` | **派生数据**（阈值 + EWMA + 计数 + 分数分布 + 最近明细/备注，T13-2；**全程有界**） | 否（`.gitignore` 里单列一行） | `agent/core/study_stats.py`（唯一写者）: 每次判定后落盘、带自适应挪完阈值落盘 | `agent/core/study_watch.py`（阈值与自适应的唯一依据） |
@@ -271,6 +271,23 @@ ConfigStore **同一套**（两边语言不同、进程不同，没法共用代�
 ⚠ 凭据那条走另一份文件（`config/bilibili_cookie.json`，**凭据不是真源**）：只认 `SESSDATA` /
 `bili_jct` / `DedeUserID`，终端只回显掩码。
 
+### 3.3 GUI 设置页的三张卡片（T13-9）
+
+GUI 那份 C++ 写入器（`gui/src/core/config_store.{h,cpp}`）与 §3.2 是**同一套约定**：语言不同、
+进程不同、没法共用代码，所以只能两边同口径 + 各有一组测试钉住。
+
+| 规矩 | GUI 侧的实现 |
+| --- | --- |
+| 只动目标那一行 | 复用 T2 起的做法：按缩进栈建索引，只重写冒号之后那一段（连**行尾注释的对齐空白**一起留） |
+| 旁边留 `.bak` + 原子写 | `save()`：`.bak` -> 写 `.tmp` -> `rename`；值没变就**不写文件也不留 `.bak`** |
+| 缺段 / 缺块新建 | `loadTemplate(<config 同目录>/config.example.yaml)` 之后，把模板里缺的那**一整块**（含说明注释与块内其它键的默认值）搬过来、缩进按目标位置对齐；**没载入模板时拒绝新建**（与 T13-9 之前完全一致） |
+| 能改哪些键 | 模板里的标量键；**页面自己又收了一道**：只写 `gui.*`/`llm.*` 与 [`study.md`](study.md) §8.1 那张表里的键 —— `gui/tests/test_settings_page.cpp::saveOnlyTouchesWhitelistedKeys` 拿真模板逐行 diff 钉住 |
+| 值的类型 | 跟着模板走（`false` / `0.05` / 字符串），与 §3.2 同一个口径 |
+| 凭据 | `gui/src/core/cookie_store.{h,cpp}`：整份 JSON 原子写 + `.bak`、只认三个键、**合并写**（留空 = 不改动那个键）、界面只回显掩码；格式（两空格缩进 + 结尾换行）与 Python 侧写出来的一致 |
+
+⚠ 两处**刻意的**不同：GUI **不预填**凭据输入框（预填会把掩码串当成新值写回去）；
+GUI 不改 §8.1 里列出的那些"只在 CLI 改"的键（动作开关、自学习开关、数据文件路径）。
+
 ## 4. Agent 只认一份配置
 
 `agent/config.py` 加载的就是 `config/config.yaml`（`--config` 可覆盖路径），
@@ -342,10 +359,14 @@ gui/build/gui_config_sync --apply
 
 # 指定别的路径（验收用临时仓库）
 gui/build/gui_config_sync --config /tmp/g/config.yaml --env /tmp/g/llm.env --apply
+
+# 设置页那三张卡片：板端点「保存」就是这条路的 GUI 版（缺段会按模板新建）
+python3 tests/board/t13_gui_accept.py            # 先在副本上跑一遍，看它要改哪些键
+python3 tests/board/t13_gui_accept.py --apply-live   # 真在 config/config.yaml 上保存
 ```
 
 GUI 保存配置时会写 `config/config.yaml`，并在它旁边留一份 `.bak`
-（`*.bak` 已被 `.gitignore` 覆盖，不会污染 `git status`）。
+（`*.bak` 已被 `.gitignore` 覆盖，不会污染 `git status`）。回滚 = 把 `.bak` 拷回去。
 
 **`config/config.yaml` 是板端本地文件**：`deploy.ps1` 只送已提交的内容，
 `git archive` 里没有它，所以重新部署**不会**覆盖板端正在用的配置。

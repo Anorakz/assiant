@@ -406,16 +406,17 @@ GUI **不是** PC 上的 Python 程序：它是 `gui/` 下的 Qt5 C++ 程序，*
 ```
 gui/src/
 ├── main.cpp / main_window.*     入口与主窗口（--socket / --windowed / --config / --page …）
-├── core/    config_store / config_sync / view_state / idle_watcher /
-│            image_fit / system_stats / lyrics / schedule_model
+├── core/    config_store / config_sync / cookie_store（B 站凭据 JSON，T13-9）/
+│            view_state / idle_watcher / image_fit / system_stats / lyrics / schedule_model
 ├── services/ local_client（Unix socket 客户端）/ onboard_ctl（屏幕键盘）
 └── ui/       top_bar / bottom_bar / mode_panel / chat_panel / schedule_panel /
              music_bar / video_panel / sys_page / model_page / settings_page / region_host
 ```
 
-- **配置**：真源只有一份 `config/config.yaml`（GUI 读写 `gui:` 与 `llm:` 段，
-  另外**只读** `scheduler:` 段画日程区）。谁写谁读、以及"日程语义只在夹具覆盖范围内
-  保证两边等价"这条边界，见 [`config-sources.md`](config-sources.md)。
+- **配置**：真源只有一份 `config/config.yaml`（GUI 读写 `gui:` 与 `llm:` 段，T13-9 起设置页
+  还写 `study:` / `bilibili.game_watch.` 那一截 / `profile:` 的**标量键** —— 缺段就按
+  `config.example.yaml` 新建；另外**只读** `scheduler:` 段画日程区）。谁写谁读、以及
+  "日程语义只在夹具覆盖范围内保证两边等价"这条边界，见 [`config-sources.md`](config-sources.md)。
 - **依赖**：板端除 Qt 5.12 外还要 `libyaml-cpp-dev`（日程区只读解析用；写回仍然只有
   `ConfigStore` 的文本级替换，因为它保注释）。
 - **测试**：`gui/tests/`（Qt Test），只能**在板端**跑（`sync-gui.ps1 -Test` 会顺手

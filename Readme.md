@@ -76,6 +76,9 @@ agent/
 ├── gui/                         # Qt5 C++ GUI (在板端编译: src/ tests/ tools/)
 │                                 #   GAME 主区: 视频区 + 预览栏 + 只读地址栏 (T9/T11-7)
 │                                 #   下区域 GAME=封面 / 其它=音乐条
+│                                 #   设置页三张卡片: 学习监督 / 游戏检测(含 B 站凭据) / 画像压缩 (T13-9)
+│                                 #   core/config_store.cpp 与 Agent 侧 settings_config.py 同口径:
+│                                 #   只动目标那一行 + 缺段按模板新建; core/cookie_store.cpp 写凭据 JSON
 ├── config/                      # 配置模板 (真实配置不入 git)
 │   ├── config.example.yaml      # 唯一真源模板: llm.* / bilibili.* / study.* / wallpaper.* / gui.* / sunshine.* / ipc.*
 │   ├── user_profile.example.yaml# 用户画像
@@ -540,6 +543,11 @@ decision = watcher.tick(frame, state="study")
 - **能改的设置**：`assistant set study|game-watch|profile|cookie`（文本级: 只动那一行 + `.bak`，
   默认只看、`--apply` 才写）；日常操作 `assistant study status|check|label|freeze|reset`
   （**不用起 Agent**）。细节 [`docs/cli.md`](docs/cli.md)。
+- **GUI 也能改**（板端设置页三张卡片: 学习监督 / 游戏检测含 B 站凭据 / 画像压缩，T13-9）：
+  写的是同一批键、走**同一套**文本级约定（只动那一行、缺段按 `config.example.yaml` 新建、
+  值的类型跟着模板走），并有一条**按键盘点**的白名单契约测试钉住"GUI 只许动这些键"；
+  动作开关（`remind` / `back_to_desktop`）、`learn` / `adapt` 等仍然只在 CLI/真源里改 ——
+  键清单见 [`docs/study.md`](docs/study.md) §8.1。
 - 细节（升级链的每条规矩、自适应护栏、实测数字、**已知边界**）：[`docs/study.md`](docs/study.md)。
 
 ---

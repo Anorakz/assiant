@@ -177,7 +177,7 @@ native 那步是**点采样不是面积平均**
 
 | 键 | 默认 | 含义 |
 | --- | --- | --- |
-| `enabled` | `false`（模板）/ 板端真配置里由你打开 | 关掉 = 什么都不做（组件照旧注册） |
+| `enabled` | `false`（模板）；**板端真配置 T13-10 起 = `true`** | 关掉 = 什么都不做（组件照旧注册） |
 | `relative_band` | `0.05` | **判定的阈值**：没把握带（运行期会自己挪） |
 | `target_unknown_rate` | `0.30` | 判不出来的比例超过它就把带收窄 |
 | `min_labeled` | `20` | 两类各攒够多少带标签样本才允许挪带 |
@@ -195,6 +195,33 @@ native 那步是**点采样不是面积平均**
 | `classes` | 五类映射 | 子标签 -> 大类（`code`/`doc`/`real` = study，`anime`/`game` = not_study） |
 | `process_names` | 31 条 | 进程名 -> **子标签**（辅助证据；复用 `music:` 的 ssh 配置） |
 | `confident_score` / `confident_margin` | 标定记录 | ⚠ **不参与判定**（见 §2） |
+
+### 8.1 GUI 设置页的三张卡片（T13-9 / T13-10）
+
+板端设置页把"最常改的那几项"做成了三张卡片。它们写的是**同一批键**、走**同一套约定**
+（与 `assistant set` 那份 `agent/core/settings_config.py` 一致：只动目标那一行、注释/顺序
+逐字节保留、旁边留 `.bak`、**缺段按 `config.example.yaml` 整块新建**、值的类型跟着模板走）——
+GUI 是 C++、跑在板端，与 Agent 侧的 Python 没法共用代码，所以只能靠**同口径 + 测试**对齐。
+
+| 卡片 | 写哪些键（**白名单就是这些**） |
+| --- | --- |
+| **学习监督** | `study.enabled`、`study.focus_interval_min`、`study.recheck_interval_min`、`study.max_failures`、`study.cooldown_min`、`study.cooldown_probe_min`、`study.relative_band`（起始值；运行期仍会自己挪） |
+| **游戏检测** | `bilibili.game_watch.enabled`、`bilibili.game_watch.interval_s`、`bilibili.game_watch.confident_score` |
+| ↳ 卡里的 **B 站凭据** | `bilibili.cookie_file`（配置里那一行）+ `SESSDATA` / `bili_jct` / `DedeUserID`（写进**凭据文件**，不是真源） |
+| **画像压缩** | `profile.enabled`、`profile.trigger_chars`、`profile.trigger_turns` |
+| 原有卡片 | `gui.debug`、`gui.wake.*`、`gui.video_overlay.*`、`gui.fullscreen`、`gui.start_page`、`gui.input_source` |
+
+- **GUI 不碰的键**（只能在 CLI / 真源里改）：`study.remind`、`study.back_to_desktop`、
+  `study.skip_on_keyword`、`study.learn`、`study.adapt`、`study.target_unknown_rate`、
+  `study.min_labeled`、`study.anchor_file` / `stats_file` / `max_anchors_per_class` / `keep_shots`
+  —— 用 `assistant set study --set study.remind=false --apply` 这类写法。
+- **凭据框故意不预填**：里面存的是账号，状态标签只给掩码（`se…90（15 位）`）；
+  三个框**留空 = 不改动那个键**（合并写），填了才写，写完就清空。
+- `config_store.cpp` 的实现细节：载入模板后才有"缺段新建 + 类型校验"；**没载入模板时行为与
+  T13-9 之前完全一致**（父块不存在就拒绝写入）—— 老部署不会因为少一份模板就写出残桩配置。
+- 守卫：`gui/tests/test_settings_page.cpp::saveOnlyTouchesWhitelistedKeys` 拿仓库里那份
+  `config.example.yaml` 当真源，保存后**逐行 diff** 出被动过的键，断言全部落在上表范围内
+  （`study.classes` / `process_names` 这些结构级内容必须逐字节不变）。
 
 ---
 
@@ -214,6 +241,15 @@ python3 tests/board/t13_study_calib.py --apply         # 把锚点与起始阈�
 
 # 3) 板端端到端验收（要 PC 开着 Sunshine; --no-stream 可只跑 B/C/D）
 python3 tests/board/t13_accept.py
+
+# 4) 板端 GUI 验收（T13-10: 真配置上保存 + 截图取证; 不碰派生数据与凭据）
+python3 tests/board/t13_gui_accept.py                 # 只在副本上跑 + 打印计划
+python3 tests/board/t13_gui_accept.py --apply-live     # 真在 config/config.yaml 上点保存
+
+# 手动取证（GUI 自己的读取路径，不靠截图读字）:
+python3 tests/board/t13_gui_accept.py --dump-cards     # = agent_gui --settings-dump-cards
+QT_QPA_PLATFORM=offscreen ./gui/build/agent_gui --windowed --page settings \
+    --screenshot /tmp/cards.png --settings-scroll-demo 1500   # 滚到卡片位置再截图
 ```
 
 `t13_accept.py` 验的 26 项里，值得记住的几条：
@@ -234,6 +270,7 @@ python3 tests/board/t13_accept.py
 | 峰值 RSS | 962–1021 MB（SigLIP 常驻 923 MB，**与认游戏共用一份**） |
 | 39 张自匹配（T13-6） | 学习帧 22/22 判成 study；非学习帧 15/17 判成 not_study、2 张落带内；**0 次误打扰** |
 | 留一法（T13-4） | 大类原型 + 相对分 **2 类 95–97%**；band 0.05 下 误打扰 0 / 失效 1 / 判不出 8% |
+| GUI 验收（T13-9 / T13-10） | 板端 `ctest` **23/23**；真 GUI 在真配置上一次保存，`study:`/`bilibili:`/`profile:` 三段**与模板逐字节相同**地长出来；行尾注释的对齐也留在原地 |
 
 ---
 
@@ -252,3 +289,10 @@ python3 tests/board/t13_accept.py
 5. **只判大类**：256×256 看不清文字，判不出"在学哪一科 / 有没有走神"。
 6. **共用一份 SigLIP 是刻意的**（不是边界，是设计）：谁先到谁负责把它加载起来
    （`GameWatcher.encoder()`）。923 MB × 2 会把 3.9 GB 的板子撑死，而且"一个能力只有一条实现"。
+7. **GUI 只能改白名单里那些键**：气泡原话、两个动作开关（`remind` / `back_to_desktop`）、
+   `learn` / `adapt`、自适应那几个参数、数据文件路径，都只在 CLI 或真源里改（见 §8.1）。
+   想"临时别弹桌面"就 `assistant set study --disabled --apply`，别去点卡片的开关再改回来。
+8. **验收怎么算数**：截图只证明"渲染出来了"，字段值一律以 **GUI 自己读回来的文本**为准
+   （`agent_gui --settings-dump-cards`，或 `t13_gui_accept.py --dump-cards`）——
+   人眼从 1280×800 的图上读小字不算证据。真配置上的保存由
+   `t13_gui_accept.py --apply-live` 驱动（保存前留 `.bak`，回滚就把它拷回来）。
