@@ -342,10 +342,10 @@ def check_invariants(real_before):
     for name, digest in real_before.items():
         check("真实文件 %s 未变" % name, md5(os.path.join(REPO, name)) == digest,
               md5(os.path.join(REPO, name)))
-    rc, out, _err = nmcli("-t", "-e", "yes", "-f", "NAME,TYPE,connection.autoconnect",
+    rc, out, _err = nmcli("-t", "-e", "yes", "-f", "connection.autoconnect",
                           "connection", "show", LIVE_PROFILE)
     check("E 当前链路档案仍在且 autoconnect=yes",
-          rc == 0 and "connection.autoconnect:yes" in out, out)
+          rc == 0 and "connection.autoconnect:yes" in out, "rc=%s out=%r" % (rc, out))
     rc = subprocess.run(["git", "status", "--porcelain"], cwd=REPO,
                         stdout=subprocess.PIPE, universal_newlines=True)
     check("板端 git status 干净", not rc.stdout.strip(), rc.stdout.strip()[:80])
