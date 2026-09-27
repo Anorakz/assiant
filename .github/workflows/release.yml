@@ -1,0 +1,111 @@
+# ============================================================================
+#  .github/workflows/release.yml — 打 tag 发版（T14-5）
+#
+#  两条 job（分工写清楚，因为它们的"能跑在哪"完全不同）
+#  ---------------------------------------------------------------------------
+#    1. **source**（ubuntu-latest，任何仓库都能跑）：
+#         产出**源码包** —— `git archive` 的 tar.gz + `SUBMODULES.txt`
+#         （三个子模块的 commit SHA；tar 里**不含**子模块内容，拿到包的人照
+#         SUBMODULES.txt 初始化即可）+ sha256 校验和。附到 Release 上。
+#    2. **cross**（**自托管 runner**，`vars.CROSS_BUILD == '1'` 时才跑）：
+#         真交叉编译 —— 只有你的机器才有 Arm GNU 工具链（`E:/rk3568/arm`）与
+#         板端 sysroot（含 RKNN/MPP 私有库），GitHub 托管 runner 上**不可能**跑。
+#         跑 `scripts/build.ps1`，把 `agent_native*.so` 与 `libmoonlight-common-c.so`
+#         附到同一个 Release。
+#         ⚠ 默认**关着**：仓库变量 `CROSS_BUILD=1` 才开（见 docs/ci.md §4 的
+#           runner 注册步骤）。
+#
+#  为什么用 `gh` 而不是第三方 action
+#  ---------------------------------------------------------------------------
+#    自托管那台是 Windows，`gh` 你已经装了；托管 runner 自带 `gh` 与 `GH_TOKEN`。
+#    少一个 action 依赖，也少一处"谁来维护它"的问题。
+# ============================================================================
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:          # 手动跑一次（用于验证 source 那半条）
+
+permissions:
+  contents: write             # 建 Release / 上传资产
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive        # 只为了拿到子模块的 SHA（tar 里不含它们）
+          fetch-depth: 0
+
+      - name: 定 tag 名
+        id: meta
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=manual-$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 打源码包 + 记子模块 SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.meta.outputs.tag }}"
+          git submodule status --recursive > SUBMODULES.txt
+          cat SUBMODULES.txt
+          # ⚠ git archive 不含子模块内容：这一点写在包里的 SUBMODULES.txt 与 Release 说明里
+          git archive --format=tar.gz --prefix="assiant-${tag}/" -o "assiant-src-${tag}.tar.gz" HEAD
+          sha256sum "assiant-src-${tag}.tar.gz" > "assiant-src-${tag}.tar.gz.sha256"
+          ls -la "assiant-src-${tag}.tar.gz" "assiant-src-${tag}.tar.gz.sha256"
+
+      - name: 建 Release（重复跑不报错）
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.meta.outputs.tag }}"
+          notes="源码包：assiant-src-${tag}.tar.gz
+          ⚠ **不含子模块内容** —— 解包后照 SUBMODULES.txt 里的 SHA 拉三个子模块：
+             git submodule update --init --recursive
+          校验：sha256sum -c assiant-src-${tag}.tar.gz.sha256"
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "assiant ${tag}" --notes "$notes"
+          gh release upload "$tag" "assiant-src-${tag}.tar.gz" \
+              "assiant-src-${tag}.tar.gz.sha256" SUBMODULES.txt --clobber
+
+  cross:
+    # ⚠ 只有你注册了自托管 runner 并把仓库变量 CROSS_BUILD 设成 1，这一步才会跑。
+    #    托管 runner 上没有 Arm 工具链与板端 sysroot，跑到这里必然失败 —— 所以是"开关"不是"尽力"。
+    if: vars.CROSS_BUILD == '1'
+    needs: source
+    runs-on: [self-hosted, rk3568-cross]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: 真交叉编译（scripts/build.ps1）
+        shell: pwsh
+        run: ./scripts/build.ps1
+
+      - name: 把两个 .so 附到 Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ needs.source.outputs.tag }}"
+          $sos = Get-ChildItem -Path build-rk3568 -Recurse -Filter *.so |
+                 Where-Object { $_.Name -match 'agent_native|moonlight-common-c' }
+          if (-not $sos) { throw "build-rk3568 下没找到 agent_native*.so / libmoonlight-common-c.so" }
+          $sos | ForEach-Object { Write-Host "附带: $($_.FullName)" }
+          # Windows 上的 gh 与托管 runner 同一个用法
+          gh release upload $tag @($sos.FullName) --clobber

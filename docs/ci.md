@@ -8,7 +8,7 @@
 | workflow | 触发 | 干什么 |
 | --- | --- | --- |
 | [`host-ci.yml`](../.github/workflows/host-ci.yml) | push 到 main / PR / 手动 | host C++ 单测（真编译 + ctest）、Python 套件、ruff 窄口径 |
-| `release.yml`（T14-5 加） | tag `v*` | 源码包 +（自托管 runner 上）真交叉编译出 `.so` |
+| [`release.yml`](../.github/workflows/release.yml) | tag `v*` / 手动 | **源码包**（+ 子模块 SHA + sha256）；`CROSS_BUILD=1` 时在**自托管 runner** 上真交叉编译并附 `.so` |
 
 ## 2. `host-ci` 到底验了什么（**以及没验什么**）
 
