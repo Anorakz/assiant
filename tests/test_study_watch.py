@@ -8,9 +8,11 @@
 
   · 提醒**不算**一次不通过（3 次不通过不含提醒）; 提醒后 5 分钟一查;
   · `unknown` **完全中性** —— 不提醒、不计数、不推进也不重置那条升级链;
-  · **没画面/没模型是"跳过"**，不是 unknown（否则会白白把门槛放松掉）;
+  · **没画面/没模型是"跳过"**，不是 unknown（否则会白白把判不出来的比例抬高）;
   · 画面与进程名**对不上 -> unknown**（不硬猜、也不学锚点）;
-  · 阈值一次只动 0.01、样本不够不动、到界就停、每次调整都有理由;
+  · 判定吃的是**相对分**（两个大类原型的余弦之差）与**没把握带**: 带内 -> unknown
+    （T13-4 板端标定定的口径; 绝对余弦的两个大类会重叠, 不能用）;
+  · 没把握带一次只动 0.01、样本不够不动、到界就停、每次调整都有理由;
   · 弹回桌面后 5 分钟内又判成学习 -> 记"可能误判" + 那个类停学。
 """
 import json
@@ -31,6 +33,8 @@ MIN = 60.0
 STUDY_VEC = [1.0, 0.0, 0.0] + [0.0] * (DIM - 3)
 NOT_STUDY_VEC = [0.0, 1.0, 0.0] + [0.0] * (DIM - 3)
 FAR_VEC = [0.0, 0.0, 1.0] + [0.0] * (DIM - 3)
+#: 相对分 ≈ +0.036 —— **在 0.05 的没把握带以内**（用来验"带内 -> unknown"）。
+INSIDE_BAND_VEC = [1.0, 0.95, 0.0] + [0.0] * (DIM - 3)
 
 
 def vector(*values):
@@ -116,6 +120,16 @@ class WatchCase(unittest.TestCase):
     def add(self, cls, vec):
         return self.anchors.add(cls=cls, vector=list(vec), when=self.clock.now)
 
+    def seed_both(self):
+        """两个大类各放一条锚点。
+
+        ⚠ 判定要用**两个大类原型**的相对分, 所以**两边都得有锚点**才算得出来
+          （只有一边时 `relative is None` -> 画面没把握 -> 走进程名辅助或 unknown）。
+          标定给的那 39 条本来两边都有; 这是单测里的最小起点。
+        """
+        self.add("code", STUDY_VEC)
+        self.add("anime", NOT_STUDY_VEC)
+
 
 # ===========================================================================
 #  判定: 锚点 / 进程 / 冲突 / 中性
@@ -128,47 +142,75 @@ class TestVerdict(WatchCase):
         self.assertEqual(out["source"], "none")
         self.assertIn("锚点库是空的", out["note"])
 
-    def test_confident_anchor_decides_alone(self):
+    def test_confident_picture_decides_alone(self):
+        """两个大类都有锚点 -> 相对分说得很清楚 -> 画面自己就能定。"""
         watcher = self.make_watcher(model=FakeModel(STUDY_VEC))
-        self.add("code", STUDY_VEC)
+        self.seed_both()
         out = watcher.verdict(FakeFrame())
         self.assertEqual(out["verdict"], sw.VERDICT_STUDY)
         self.assertEqual(out["source"], "anchor")
         self.assertEqual(out["cls"], "code")
         self.assertTrue(out["confident"])
-        self.assertGreater(out["score"], 0.99)
+        self.assertAlmostEqual(out["relative"], 1.0, places=3)
 
     def test_not_study_comes_from_the_not_study_classes(self):
         watcher = self.make_watcher(model=FakeModel(NOT_STUDY_VEC))
-        self.add("anime", NOT_STUDY_VEC)
+        self.seed_both()
         out = watcher.verdict(FakeFrame())
         self.assertEqual(out["verdict"], sw.VERDICT_NOT_STUDY)
+        self.assertEqual(out["cls"], "anime")
         self.assertEqual(out["category"], "not_study")
+        self.assertAlmostEqual(out["relative"], -1.0, places=3)
+
+    def test_a_frame_inside_the_band_is_unknown(self):
+        """**带内 -> unknown**（中性）: 画面像 study 但只多 0.036 —— 不到 0.05 不算数。"""
+        watcher = self.make_watcher(model=FakeModel(INSIDE_BAND_VEC))
+        self.seed_both()
+        out = watcher.verdict(FakeFrame())
+        self.assertEqual(out["verdict"], sw.VERDICT_UNKNOWN)
+        self.assertEqual(out["source"], "none")
+        self.assertFalse(out["confident"])
+        self.assertGreater(out["relative"], 0.0)
+        self.assertLess(out["relative"], 0.05)
+
+    def test_a_wider_band_makes_the_same_frame_unknown(self):
+        """带是可配的: 同一帧在 0.01 的带下能判, 在 0.05 的带下判不出来。"""
+        tight = self.make_watcher(model=FakeModel(INSIDE_BAND_VEC), relative_band=0.01)
+        self.seed_both()
+        self.assertEqual(tight.verdict(FakeFrame())["verdict"], sw.VERDICT_STUDY)
+
+    def test_only_one_category_seeded_means_the_picture_cannot_decide(self):
+        """只有一边的锚点 -> 相对分算不出来（不硬猜成"更像自己"）。"""
+        watcher = self.make_watcher(model=FakeModel(STUDY_VEC))
+        self.add("code", STUDY_VEC)
+        out = watcher.verdict(FakeFrame())
+        self.assertIsNone(out["relative"])
+        self.assertEqual(out["verdict"], sw.VERDICT_UNKNOWN)
+        self.assertIn("缺一个大类", out["note"])
 
     def test_process_is_used_only_when_the_picture_is_unsure(self):
         watcher = self.make_watcher(model=FakeModel(FAR_VEC),
                                     probe=FakeProbe({"code": ["pycharm64"]}))
-        self.add("code", STUDY_VEC)
-        self.add("anime", NOT_STUDY_VEC)
+        self.seed_both()
         out = watcher.verdict(FakeFrame())
         self.assertEqual(out["verdict"], sw.VERDICT_STUDY)
         self.assertEqual(out["source"], "process")
         self.assertIn("辅助", out["note"])
 
-    def test_confident_anchor_with_agreeing_process_stays_anchor(self):
+    def test_confident_picture_with_agreeing_process_stays_anchor(self):
         watcher = self.make_watcher(model=FakeModel(STUDY_VEC),
                                     probe=FakeProbe({"code": ["pycharm64"]}))
-        self.add("code", STUDY_VEC)
+        self.seed_both()
         out = watcher.verdict(FakeFrame())
         self.assertEqual(out["verdict"], sw.VERDICT_STUDY)
         self.assertEqual(out["source"], "anchor")
         self.assertIn("一致", out["note"])
 
     def test_conflict_is_unknown_not_a_guess(self):
-        """画面有把握说"学习"，进程名说"游戏" —— 不硬猜，判不出来。"""
+        """画面说"学习"，进程名说"游戏" —— 不硬猜，判不出来。"""
         watcher = self.make_watcher(model=FakeModel(STUDY_VEC),
                                     probe=FakeProbe({"game": ["steam"]}))
-        self.add("code", STUDY_VEC)
+        self.seed_both()
         out = watcher.verdict(FakeFrame())
         self.assertEqual(out["verdict"], sw.VERDICT_UNKNOWN)
         self.assertEqual(out["source"], "conflict")
@@ -218,7 +260,7 @@ class TestVerdict(WatchCase):
             return model
 
         watcher = self.make_watcher(model=getter)
-        self.add("code", STUDY_VEC)
+        self.seed_both()
         self.assertEqual(watcher.verdict(FakeFrame())["verdict"], sw.VERDICT_STUDY)
         self.assertEqual(len(calls), 1)
 
@@ -238,7 +280,7 @@ class TestVerdict(WatchCase):
 class TestEscalation(WatchCase):
     def make_not_study(self, **kwargs):
         watcher = self.make_watcher(model=FakeModel(NOT_STUDY_VEC), **kwargs)
-        self.add("anime", NOT_STUDY_VEC)
+        self.seed_both()                                    # 判定要两边都有锚点
         return watcher
 
     def test_first_time_only_reminds_and_does_not_count(self):
@@ -465,21 +507,21 @@ class TestLearning(WatchCase):
     def test_agreement_does_not_grow_the_library(self):
         watcher = self.make_watcher(model=FakeModel(STUDY_VEC),
                                     probe=FakeProbe({"code": ["pycharm64"]}))
-        self.add("code", STUDY_VEC)
+        self.seed_both()                                    # 画面有把握 + 进程名一致
         out = watcher.tick(FakeFrame())
         self.assertEqual(out["source"], "anchor")
         self.assertFalse(out["learned"])
-        self.assertEqual(self.anchors.counts(), {"code": 1})
+        self.assertEqual(self.anchors.counts(), {"anime": 1, "code": 1})
 
     def test_conflict_learns_nothing(self):
         """冲突 = unknown = 完全中性: 连锚点也不学（两边都不信）。"""
         watcher = self.make_watcher(model=FakeModel(STUDY_VEC),
                                     probe=FakeProbe({"game": ["steam"]}))
-        self.add("code", STUDY_VEC)
+        self.seed_both()                                    # 画面说学习, 进程名说游戏
         out = watcher.tick(FakeFrame())
         self.assertEqual(out["verdict"], sw.VERDICT_UNKNOWN)
         self.assertFalse(out["learned"])
-        self.assertEqual(self.anchors.counts(), {"code": 1})
+        self.assertEqual(self.anchors.counts(), {"anime": 1, "code": 1})
 
     def test_learning_respects_the_per_class_cap(self):
         watcher = self.make_watcher(model=FakeModel(NOT_STUDY_VEC),
@@ -596,132 +638,154 @@ class TestMisjudgement(WatchCase):
 
 
 # ===========================================================================
-#  阈值自适应（护栏）
+#  没把握带的自适应（护栏）
 # ===========================================================================
 class TestAdaptation(WatchCase):
-    def feed(self, watcher, *, label, score, times):
+    def feed(self, watcher, *, label, relative, times):
+        """喂带标签样本: 相对分 `relative`（正 = 像学习）。"""
         for _ in range(times):
-            watcher.learn_score(score, label=label, margin=0.10)
+            watcher.learn_score(relative, label=label, margin=0.10)
 
     def test_nothing_moves_before_both_classes_have_enough_samples(self):
         watcher = self.make_watcher(with_stats=True, min_labeled=20)
-        self.feed(watcher, label="study", score=0.9, times=19)
-        self.feed(watcher, label="not_study", score=0.6, times=19)
+        self.feed(watcher, label="study", relative=0.20, times=19)
+        self.feed(watcher, label="not_study", relative=-0.20, times=19)
         self.assertFalse(watcher.adapt()["moved"])
-        self.assertAlmostEqual(watcher.confident_score, 0.80, places=6)
+        self.assertAlmostEqual(watcher.relative_band, 0.05, places=6)
 
-    def test_it_moves_toward_the_midpoint_one_step_at_a_time(self):
+    def test_it_moves_toward_the_overlap_midpoint_one_step_at_a_time(self):
         watcher = self.make_watcher(min_labeled=20)
-        self.feed(watcher, label="study", score=0.9, times=20)
-        self.feed(watcher, label="not_study", score=0.6, times=20)
-        out = watcher.adapt()
-        self.assertTrue(out["moved"])
-        # 中点 0.75 < 0.80 -> 往下降**正好一步**
-        self.assertAlmostEqual(watcher.confident_score, 0.79, places=6)
+        self.feed(watcher, label="study", relative=0.10, times=20)
+        self.feed(watcher, label="not_study", relative=-0.10, times=20)
+        # 两类的中点 = 0 -> 带该往**窄**里挪一步（起点 0.05 -> 0.04）
+        self.assertTrue(watcher.adapt()["moved"])
+        self.assertAlmostEqual(watcher.relative_band, 0.04, places=6)
+
+    def test_a_wider_overlap_widens_the_band(self):
+        """两类重叠得多（study 只 +0.10、not_study 也 +0.10）-> 带该放宽。"""
+        watcher = self.make_watcher(min_labeled=20)
+        self.feed(watcher, label="study", relative=0.20, times=20)
+        self.feed(watcher, label="not_study", relative=0.10, times=20)
+        watcher.adapt()
+        self.assertAlmostEqual(watcher.relative_band, 0.06, places=6)
 
     def test_reasons_are_written_down(self):
         watcher = self.make_watcher(min_labeled=20)
-        self.feed(watcher, label="study", score=0.9, times=20)
-        self.feed(watcher, label="not_study", score=0.6, times=20)
+        self.feed(watcher, label="study", relative=0.10, times=20)
+        self.feed(watcher, label="not_study", relative=-0.10, times=20)
         watcher.adapt()
         notes = [item["text"] for item in self.stats.notes()]
-        self.assertTrue(any("分类门槛 从 0.800 挪到 0.790" in text for text in notes),
-                        notes)
+        self.assertTrue(any("没把握带从 0.050 挪到 0.040" in text for text in notes), notes)
         self.assertTrue(any("一次只动 0.01" in text for text in notes), notes)
 
     def test_the_bound_is_respected(self):
-        watcher = self.make_watcher(min_labeled=20, score_bounds=(0.55, 0.95))
-        watcher.stats.set_threshold("confident_score", 0.555)
-        self.feed(watcher, label="study", score=0.90, times=20)
-        self.feed(watcher, label="not_study", score=0.20, times=20)
+        watcher = self.make_watcher(min_labeled=20, band_bounds=(0.03, 0.20))
+        self.feed(watcher, label="study", relative=0.0, times=20)
+        self.feed(watcher, label="not_study", relative=0.0, times=20)
         for _ in range(5):
             watcher.adapt()
-        self.assertGreaterEqual(watcher.confident_score, 0.55)
-        self.assertAlmostEqual(watcher.confident_score, 0.55, places=6)
+        self.assertAlmostEqual(watcher.relative_band, 0.03, places=6)
 
-    def test_a_high_unknown_rate_relaxes_the_thresholds(self):
-        """判不出来的比例超过目标 -> 门槛太严, 放松 0.01（两侧都放）。"""
+    def test_a_high_unknown_rate_narrows_the_band(self):
+        """判不出来的比例超过目标 -> 带太宽, 收窄 0.01。"""
         watcher = self.make_watcher(model=FakeModel(FAR_VEC), min_labeled=2,
                                     target_unknown_rate=0.3)
-        self.add("code", STUDY_VEC)
-        self.add("anime", NOT_STUDY_VEC)
+        self.seed_both()
         for _ in range(4):
             self.clock.advance(31 * MIN)
             watcher.tick(FakeFrame())
-        self.assertLess(watcher.confident_score, 0.80)
-        self.assertLess(watcher.confident_margin, 0.03)
+        self.assertLess(watcher.relative_band, 0.05)
+        self.assertGreaterEqual(watcher.relative_band, 0.01)
         self.assertTrue(any("判不出来的比例太高" in item["text"]
                             for item in self.stats.notes()))
 
-    def test_relaxing_stops_at_the_bound(self):
+    def test_narrowing_stops_at_the_bound(self):
         watcher = self.make_watcher(model=FakeModel(FAR_VEC), min_labeled=2,
                                     target_unknown_rate=0.0,
-                                    score_bounds=(0.79, 0.95))
-        self.add("code", STUDY_VEC)
-        self.add("anime", NOT_STUDY_VEC)
+                                    band_bounds=(0.03, 0.20))
+        self.seed_both()
         for _ in range(6):
             self.clock.advance(31 * MIN)
             watcher.tick(FakeFrame())
-        self.assertAlmostEqual(watcher.confident_score, 0.79, places=6)
+        self.assertAlmostEqual(watcher.relative_band, 0.03, places=6)
+
+    def test_a_reversed_label_widens_the_band(self):
+        """带标签样本里出现"画面判反了" -> 宁可判不出来, 把带放宽一步。
+
+        这里走的是**真路径**: 画面说 study、进程名说 not_study（冲突 -> unknown）——
+        冲突虽然不动作, 但那条样本记着"真值 not_study / 画面 study", 正是判反。
+        """
+        watcher = self.make_watcher(model=FakeModel(STUDY_VEC), min_labeled=2,
+                                    probe=FakeProbe({"anime": ["potplayer"]}))
+        self.seed_both()
+        self.clock.advance(MIN)
+        out = watcher.tick(FakeFrame())
+        self.assertEqual(out["verdict"], sw.VERDICT_UNKNOWN)        # 冲突 -> 中性
+        sample = self.stats.last_sample()
+        self.assertEqual(sample["labeled"], sw.VERDICT_NOT_STUDY)   # 真值（大类）
+        self.assertEqual(sample["picture"], sw.VERDICT_STUDY)       # 画面判反了
+        watcher.adapt()
+        self.assertGreater(watcher.relative_band, 0.05)
+        self.assertTrue(any("反向错误" in item["text"] for item in self.stats.notes()))
 
     def test_freeze_stops_everything_and_unfreeze_resumes(self):
         watcher = self.make_watcher(min_labeled=20)
-        self.feed(watcher, label="study", score=0.9, times=20)
-        self.feed(watcher, label="not_study", score=0.6, times=20)
+        self.feed(watcher, label="study", relative=0.10, times=20)
+        self.feed(watcher, label="not_study", relative=-0.10, times=20)
         watcher.freeze()
         self.assertFalse(watcher.adapt()["moved"])
-        self.assertAlmostEqual(watcher.confident_score, 0.80, places=6)
+        self.assertAlmostEqual(watcher.relative_band, 0.05, places=6)
         watcher.unfreeze()
         self.assertTrue(watcher.adapt()["moved"])
 
     def test_reset_learning_goes_back_to_the_configured_starting_point(self):
         watcher = self.make_watcher(min_labeled=20)
-        self.feed(watcher, label="study", score=0.9, times=20)
-        self.feed(watcher, label="not_study", score=0.6, times=20)
+        self.feed(watcher, label="study", relative=0.10, times=20)
+        self.feed(watcher, label="not_study", relative=-0.10, times=20)
         watcher.adapt()
-        self.assertAlmostEqual(watcher.confident_score, 0.79, places=6)
+        self.assertAlmostEqual(watcher.relative_band, 0.04, places=6)
         watcher.reset_learning()
-        self.assertAlmostEqual(watcher.confident_score, 0.80, places=6)
-        self.assertIsNone(self.stats.ewma("score_study"))
+        self.assertAlmostEqual(watcher.relative_band, 0.05, places=6)
+        self.assertIsNone(self.stats.ewma("relative_study"))
 
-    def test_thresholds_and_ewma_survive_a_restart(self):
+    def test_the_band_and_ewma_survive_a_restart(self):
         watcher = self.make_watcher(min_labeled=20)
-        self.feed(watcher, label="study", score=0.9, times=20)
-        self.feed(watcher, label="not_study", score=0.6, times=20)
+        self.feed(watcher, label="study", relative=0.10, times=20)
+        self.feed(watcher, label="not_study", relative=-0.10, times=20)
         watcher.adapt()
         watcher.stats.save()
 
         restarted = self.make_stats()
         restarted.load()
         again = self.make_watcher(stats=restarted)
-        self.assertAlmostEqual(again.confident_score, 0.79, places=6)
-        self.assertIsNotNone(restarted.ewma("score_study"))
+        self.assertAlmostEqual(again.relative_band, 0.04, places=6)
+        self.assertIsNotNone(restarted.ewma("relative_study"))
 
     def test_unknown_labels_are_refused(self):
         watcher = self.make_watcher()
         out = watcher.learn_score(0.5, label="unknown")
         self.assertFalse(out["learned"])
-        self.assertIsNone(self.stats.ewma("score_unknown"))
+        self.assertIsNone(self.stats.ewma("relative_unknown"))
 
     def test_without_stats_everything_still_works(self):
         watcher = self.make_watcher(with_stats=False, model=FakeModel(NOT_STUDY_VEC))
-        self.add("anime", NOT_STUDY_VEC)
+        self.seed_both()
         out = watcher.tick(FakeFrame())
         self.assertEqual(out["action"], sw.ACTION_REMIND)
         self.assertFalse(watcher.adapt()["moved"])
-        self.assertAlmostEqual(watcher.confident_score, 0.80, places=6)
+        self.assertAlmostEqual(watcher.relative_band, 0.05, places=6)
 
     def test_a_stats_file_that_cannot_be_written_does_not_break_supervision(self):
         stats = StudyStats(self.tmp)                    # 目录当文件 -> 写不下去
         watcher = self.make_watcher(stats=stats, model=FakeModel(NOT_STUDY_VEC))
-        self.add("anime", NOT_STUDY_VEC)
+        self.seed_both()
         out = watcher.tick(FakeFrame())
         self.assertEqual(out["action"], sw.ACTION_REMIND)
         self.assertTrue(any("统计没写下去" in note for note in watcher.notes()))
 
     def test_bounds_that_are_written_backwards_are_refused(self):
         with self.assertRaises(sw.StudyWatchError):
-            self.make_watcher(score_bounds=(0.95, 0.55))
+            self.make_watcher(band_bounds=(0.20, 0.01))
 
 
 # ===========================================================================
@@ -730,7 +794,7 @@ class TestAdaptation(WatchCase):
 class TestStats(WatchCase):
     def test_counters_and_samples_are_recorded(self):
         watcher = self.make_watcher(model=FakeModel(NOT_STUDY_VEC))
-        self.add("anime", NOT_STUDY_VEC)
+        self.seed_both()
         watcher.tick(FakeFrame())
         self.assertEqual(self.stats.counter("frames"), 1)
         self.assertEqual(self.stats.counter("verdicts"), 1)
@@ -739,24 +803,29 @@ class TestStats(WatchCase):
         sample = self.stats.last_sample()
         self.assertEqual(sample["action"], sw.ACTION_REMIND)
         self.assertEqual(sample["cls"], "anime")
+        self.assertAlmostEqual(sample["relative"], -1.0, places=3)
+        self.assertEqual(sample["picture"], sw.VERDICT_NOT_STUDY)
 
     def test_process_labels_feed_the_distribution(self):
         watcher = self.make_watcher(model=FakeModel(FAR_VEC),
                                     probe=FakeProbe({"code": ["pycharm64"]}))
-        self.add("code", STUDY_VEC)
+        self.seed_both()                                    # 相对分算得出来才算"带标签样本"
         watcher.tick(FakeFrame())
         self.assertEqual(self.stats.counter("labeled_study"), 1)
-        self.assertEqual(sum(self.stats.histogram()["study"]), 1)
+        self.assertEqual(sum(self.stats.histogram()["study"]), 2,
+                         "相对分与绝对余量各记一份分布")
 
     def test_snapshot_carries_what_status_needs(self):
         watcher = self.make_watcher(model=FakeModel(STUDY_VEC),
                                     probe=FakeProbe({"code": ["pycharm64"]}))
-        self.add("code", STUDY_VEC)
+        self.seed_both()
         watcher.tick(FakeFrame())
         snap = watcher.snapshot()
-        self.assertEqual(snap["anchors"], 1)
-        self.assertEqual(snap["counts"], {"code": 1})
-        self.assertEqual(snap["categories"]["study"], 1)
+        self.assertEqual(snap["anchors"], 2)
+        self.assertEqual(snap["counts"], {"anime": 1, "code": 1})
+        self.assertEqual(snap["categories"], {"study": 1, "not_study": 1})
+        self.assertEqual(snap["thresholds"]["relative_band"], 0.05)
+        self.assertEqual(snap["thresholds"]["band_bounds"], [0.01, 0.20])
         self.assertEqual(snap["intervals_min"], {"focus": 30.0, "recheck": 5.0, "cooldown": 30.0,
                                                  "cooldown_probe": 1.0})
         self.assertEqual(snap["max_failures"], 3)

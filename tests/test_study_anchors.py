@@ -285,6 +285,83 @@ class TestAdd(TempDirCase):
                          ["anime", "code", "doc", "game", "real"])
 
 
+class TestCategoryPrototypes(TempDirCase):
+    """大类原型 + 相对分（T13-4 之后**判定就吃这个**）。"""
+
+    def test_relative_needs_both_categories(self):
+        anchors = self.make_anchors()
+        self.assertIsNone(anchors.relative(vector(1)))
+        anchors.add(cls="code", vector=vector(1))
+        self.assertIsNone(anchors.relative(vector(1)), "只有学习类的锚点 -> 算不出来")
+        anchors.add(cls="anime", vector=vector(0, 1))
+        self.assertIsNotNone(anchors.relative(vector(1)))
+
+    def test_relative_is_the_difference_of_the_two_prototypes(self):
+        anchors = self.make_anchors()
+        anchors.add(cls="code", vector=vector(1, 0))
+        anchors.add(cls="anime", vector=vector(0, 1))
+        study_frame = anchors.relative(vector(1, 0))
+        self.assertAlmostEqual(study_frame["study"], 1.0, places=3)
+        self.assertAlmostEqual(study_frame["not_study"], 0.0, places=3)
+        self.assertAlmostEqual(study_frame["relative"], 1.0, places=3)
+        self.assertAlmostEqual(anchors.relative(vector(0, 1))["relative"], -1.0, places=3)
+        self.assertAlmostEqual(anchors.relative(vector(1, 1))["relative"], 0.0, places=3)
+
+    def test_the_category_prototype_is_the_mean_direction_of_the_category(self):
+        anchors = self.make_anchors()
+        anchors.add(cls="code", vector=vector(1, 0, 0))
+        anchors.add(cls="doc", vector=vector(0, 1, 0))      # 同一个大类
+        anchors.add(cls="anime", vector=vector(0, 0, 1))
+        prototypes = anchors.category_prototypes()
+        self.assertEqual(sorted(prototypes), ["not_study", "study"])
+        self.assertAlmostEqual(prototypes["study"][0], 0.7071, places=3)
+        self.assertAlmostEqual(prototypes["study"][1], 0.7071, places=3)
+        self.assertAlmostEqual(prototypes["not_study"][2], 1.0, places=3)
+
+    def test_the_cache_is_invalidated_by_add(self):
+        anchors = self.make_anchors()
+        anchors.add(cls="code", vector=vector(1, 0))
+        anchors.add(cls="anime", vector=vector(0, 1))
+        first = anchors.category_prototypes()["study"]
+        anchors.add(cls="doc", vector=vector(0, 0, 1))      # study 里多了一条
+        second = anchors.category_prototypes()["study"]
+        self.assertAlmostEqual(first[0], 1.0, places=3)
+        self.assertAlmostEqual(second[0], 0.7071, places=3)
+
+    def test_category_prototypes_are_copies(self):
+        anchors = self.make_anchors()
+        anchors.add(cls="code", vector=vector(1))
+        got = anchors.category_prototypes()
+        got["study"][0] = 999.0
+        self.assertAlmostEqual(anchors.category_prototypes()["study"][0], 1.0, places=3)
+
+    def test_match_carries_relative_and_both_cosines(self):
+        anchors = self.make_anchors()
+        anchors.add(cls="code", vector=vector(1, 0))
+        anchors.add(cls="anime", vector=vector(0, 1))
+        hit = anchors.match(vector(1, 0))
+        self.assertAlmostEqual(hit["relative"], 1.0, places=3)
+        self.assertAlmostEqual(hit["study_cos"], 1.0, places=3)
+        self.assertAlmostEqual(hit["not_study_cos"], 0.0, places=3)
+        self.assertIn("category_score", hit)                # 绝对的那几个数还在（诊断用）
+        self.assertIn("category_margin", hit)
+
+    def test_match_relative_is_none_when_one_category_is_empty(self):
+        anchors = self.make_anchors()
+        anchors.add(cls="code", vector=vector(1, 0))
+        hit = anchors.match(vector(1, 0))
+        self.assertIsNone(hit["relative"])
+        self.assertIsNone(hit["study_cos"])
+        self.assertEqual(hit["cls"], "code")
+
+    def test_a_zero_vector_has_no_relative(self):
+        anchors = self.make_anchors()
+        anchors.add(cls="code", vector=vector(1))
+        anchors.add(cls="anime", vector=vector(0, 1))
+        self.assertIsNone(anchors.relative([]))
+        self.assertEqual(anchors.relative(vector(0))["relative"], 0.0)
+
+
 class TestCap(TempDirCase):
     """每类上限（你定的"别长成无限大"）—— 内存和**文件**都得丢。"""
 

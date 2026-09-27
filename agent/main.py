@@ -406,6 +406,17 @@ class Runtime:
         #: bilibili 推送钩子（与 on_music 同款"有就接"）—— IPC 层把它接到 topic `bilibili`
         self.on_bilibili: Optional[Callable[[Dict[str, Any]], Any]] = None
 
+        #: 学习内容监督（T13-5）。`_study_watch` 是判定内核（`StudyWatcher`）,
+        #: `_study_task` 是 STUDY 里的观察循环 —— 与认游戏那条**互不干扰**:
+        #: 判据用**学习锚点库**（另一份数据）、模型**共用**认游戏那份常驻 SigLIP。
+        self._study_anchors: Optional[Any] = None
+        self._study_stats: Optional[Any] = None
+        self._study_watch: Optional[Any] = None
+        self._study_task: Optional[asyncio.Task] = None
+        self._study_cfg: Dict[str, Any] = {}
+        #: 上一次"弹回桌面"是什么时候（T13-3 的"可能误判"判据在 watcher 里, 这里只记日志用）
+        self._last_study_action: str = ""
+
         self._components: List[_Component] = []
         self._terminal_task: Optional[asyncio.Task] = None
         self.failures: List[Tuple[str, str]] = []
@@ -438,6 +449,8 @@ class Runtime:
         # ⚠ B 站也在工具**之前**: `bilibili_search` 那条入口要建工具时就位
         #   （没开就整个不装 —— 与音乐同一条口径）。
         "_start_bilibili",
+        # ⚠ 学习监督在 B 站**之后**: 它要借认游戏那份常驻 SigLIP（`_game_watch` 先就位）。
+        "_start_study",
         "_start_state_and_tools",
         "_start_llm_service",
         "_start_llm",
@@ -1250,6 +1263,90 @@ class Runtime:
                 self._game_watch.unload()
 
         await self._guarded(_Component("bilibili", _start, _stop), fatal=False)
+
+    # ---- 3.7b) 学习内容监督 (T13-5) ----
+    async def _start_study(self) -> None:
+        """按配置接上"学习内容监督"（T13-3 的内核 + 本类的观察循环）。
+
+        ⚠ **它不是 LLM 工具**（你定的: 判定不进模型）: 不进 `TOOL_MODULES`、模型看不到
+          也调不到; 动作只有两条路 —— 气泡「现在是学习时间」与 Win+D（都是 Agent 自己发）。
+        @note 模型**共用**认游戏那份常驻 SigLIP（`encoder=lambda: self._game_watch.encoder()`）:
+              再加载一份就是 923 MB × 2, 板子只有 3.9 GB。
+        @note 关掉时什么都不做（`study.enabled=false`）—— 与音乐/B 站同一条口径。
+        """
+        from agent.core.study_anchors import StudyAnchors
+        from agent.core.study_stats import StudyStats
+        from agent.core.study_watch import StudyWatcher
+
+        async def _start() -> None:
+            section = self._cfg("study", default={}) or {}
+            if not bool(section.get("enabled", False)):
+                self.log.info("study: 没开（config 的 study.enabled）—— 不做学习监督")
+                return
+            self._study_cfg = dict(section)
+            anchors = StudyAnchors(section.get("anchor_file"),
+                                   classes=section.get("classes"),
+                                   max_per_class=int(section.get("max_anchors_per_class", 200)
+                                                     or 200),
+                                   keep_shots=bool(section.get("keep_shots", False)),
+                                   log=self.log)
+            try:
+                anchors.load()
+            except Exception as exc:                      # noqa: BLE001 - 库坏了不该拦住启动
+                self.log.warning("study: 锚点库读不了（当成空的）: %s", exc)
+            stats = StudyStats(section.get("stats_file"), log=self.log)
+            stats.load()
+            probe = None
+            probe_map = section.get("process_names")
+            if isinstance(probe_map, dict) and probe_map:
+                from agent.net.pc_probe import PcProbe
+
+                # ⚠ 复用认游戏那份探针实现, 只换一张映射表（进程名 -> **子标签**）
+                probe = PcProbe(mapping=probe_map,
+                                ssh=str(self._cfg("music", "ssh", default="ssh") or "ssh"),
+                                host=str(self._cfg("music", "pc_host", default="") or ""),
+                                user=str(self._cfg("music", "pc_user", default="") or ""),
+                                port=int(self._cfg("music", "pc_port", default=22) or 22),
+                                timeout_s=float(self._cfg("music", "timeout_s", default=15.0)
+                                                or 15.0),
+                                log=self.log)
+            self._study_anchors = anchors
+            self._study_stats = stats
+            self._study_watch = StudyWatcher(
+                anchors, stats=stats, probe=probe,
+                encoder=lambda: (self._game_watch.encoder()
+                                 if self._game_watch is not None else None),
+                focus_interval_min=float(section.get("focus_interval_min", 30) or 30),
+                recheck_interval_min=float(section.get("recheck_interval_min", 5) or 5),
+                max_failures=int(section.get("max_failures", 3) or 3),
+                cooldown_min=float(section.get("cooldown_min", 30) or 30),
+                cooldown_probe_min=float(section.get("cooldown_probe_min", 1) or 1),
+                relative_band=float(section.get("relative_band", 0.05) or 0.05),
+                learn_score=float(section.get("learn_score", 0.90) or 0.90),
+                target_unknown_rate=float(section.get("target_unknown_rate", 0.30) or 0.30),
+                min_labeled=int(section.get("min_labeled", 20) or 20),
+                skip_on_keyword=bool(section.get("skip_on_keyword", True)),
+                learn=bool(section.get("learn", True)),
+                adapt=bool(section.get("adapt", True)),
+                log=self.log)
+            self._study_watch.seed_thresholds()
+            self._study_task = asyncio.ensure_future(self._study_watch_loop())
+            self.log.info(
+                "study: 就绪（锚点 %d 条 %s; 没把握带 %.2f; 进程名 %s; 提醒 %s / 弹桌面 %s）",
+                len(anchors), anchors.counts() or "{}",
+                self._study_watch.relative_band,
+                "开" if probe is not None else "关（只看画面）",
+                "开" if bool(section.get("remind", True)) else "关",
+                "开" if bool(section.get("back_to_desktop", True)) else "关")
+
+        async def _stop() -> None:
+            task, self._study_task = self._study_task, None
+            if task is not None:
+                task.cancel()
+            # ⚠ **不解载 SigLIP**: 那是认游戏的模型（`_release_vision` 按状态统一管）
+            self._study_watch = None
+
+        await self._guarded(_Component("study", _start, _stop), fatal=False)
 
     # ---- 3.8) 用户画像 (T9-3) ----
     async def _start_profile(self) -> None:
@@ -2107,6 +2204,72 @@ class Runtime:
     #: 观察循环的轮询间隔（真正"该不该看"由 GameWatcher 按 60 s 判; 这里只是心跳）
     _GAME_WATCH_TICK_S = 2.0
 
+    async def _study_watch_loop(self) -> None:
+        """**STUDY 模式里的学习监督循环**（T13-5; 内核是 `study_watch.py`）。
+
+        · 只在 **STUDY** 里看（别的状态没有"学习时间"这回事）;
+        · 动作只有两条: 气泡「现在是学习时间」与 **Win+D**（都从这里发出去）;
+        · 模型**共用**认游戏那份常驻 SigLIP —— 谁先到谁负责把它加载起来（`ensure_model`
+          是幂等的）; 拿不到模型时这一轮算"跳过", **不算一次判定**（不污染统计）。
+        """
+        from agent.core.study_watch import ACTION_BACK_TO_DESKTOP, ACTION_REMIND
+
+        while True:
+            try:
+                await asyncio.sleep(self._GAME_WATCH_TICK_S)
+                state = self.state.current().value if self.state is not None else ""
+                watcher = self._study_watch
+                if watcher is None or state != "study":
+                    continue
+                if self._game_watch is not None:
+                    self._game_watch.ensure_model(state)      # STUDY 常驻（共用那一份）
+                has_keyword = (self.bilibili is not None and bool(self.bilibili.keyword)
+                               and self.bilibili.source == "dialogue")
+                frame = None
+                if self.image_reader is not None:
+                    frame = await self.image_reader.read_latest()
+                decision = watcher.tick(frame, state=state, has_keyword=has_keyword)
+                for note in watcher.notes():
+                    self.log.info("study: %s", note)
+                if decision.get("skipped"):
+                    self.log.debug("study: 跳过（%s）", decision["skipped"])
+                    continue
+                self.log.info("study: 判定 -> %s（%s; 相对分 %s，带 %.2f）%s",
+                              decision.get("verdict") or "-", decision.get("source") or "-",
+                              decision.get("relative"), decision.get("band") or 0.0,
+                              ("；" + decision["note"]) if decision.get("note") else "")
+                action = str(decision.get("action") or "")
+                if action == ACTION_REMIND:
+                    if bool(self._study_cfg.get("remind", True)):
+                        self._say(str(decision.get("text") or ""))
+                        self._last_study_action = action
+                elif action == ACTION_BACK_TO_DESKTOP:
+                    self._last_study_action = action
+                    if bool(self._study_cfg.get("back_to_desktop", True)):
+                        await self._study_back_to_desktop(decision)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:                          # noqa: BLE001 - 轮询不能死
+                self.log.warning("study: 监督循环出错（已忽略）: %r", exc)
+                await asyncio.sleep(5.0)
+
+    async def _study_back_to_desktop(self, decision: Dict[str, Any]) -> None:
+        """弹回桌面（Win+D）—— **不再补第二句话**（你定的: 同一件事不吵两次）。
+
+        @note 用**同一个** `InputSender.show_desktop()`, 与工具 `back_to_desktop` 是
+              一条实现（那是个开关动作、没有回执, 这里也只发一次）。
+        """
+        sender = self.input_sender
+        if sender is None or not hasattr(sender, "show_desktop"):
+            self.log.warning("study: 没有 input_sender.show_desktop()（native 没接？）"
+                             "—— 这次不弹桌面（%s）", decision.get("note") or "")
+            return
+        try:
+            await sender.show_desktop()
+            self.log.info("study: 已发 Win+D（返回桌面）；%s", decision.get("note") or "")
+        except Exception as exc:                              # noqa: BLE001 - 发不出去也不能死
+            self.log.warning("study: 发 Win+D 出错（已忽略）: %r", exc)
+
     # ------------------------------------------------------------ 日程（T12-6）---
     #  工具 `set_schedule` 的三条入口。分工: **工具**管"模型说的话算不算一条日程"
     #  （同义动词/中文状态/时间写法 —— 见 agent/tools/schedule.py 的 normalize）,
@@ -2551,6 +2714,17 @@ class Runtime:
             if self.llm_service is not None:
                 self.log.info("llm_service: 进入 SLEEP -> 停 llama-server")
                 self._run_service_op(self.llm_service.stop, "停")
+        elif state is State.STUDY:
+            # T13-5: 每个 STUDY 周期**从头开始**（失败计数/提醒状态/冷却/停学都清掉,
+            # 学到的没把握带与锚点留着）—— 你定的"进学习时间就该知道现状"。
+            watcher = self._study_watch
+            if watcher is not None:
+                try:
+                    watcher.reset_cycle()
+                    for note in watcher.notes():
+                        self.log.info("study: %s", note)
+                except Exception as exc:                       # noqa: BLE001 - 重置失败不该拦住切状态
+                    self.log.warning("study: 进入 STUDY 时重置出错（忽略）: %r", exc)
         else:
             self.log.debug("state: 进入 %s（没有更多「进入」动作）", state.value)
 

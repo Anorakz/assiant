@@ -399,13 +399,24 @@ class StudyStats(object):
     # ------------------------------------------------------------ 明细 ---
     def record(self, *, cls: str = "", category: str = "", score: float = 0.0,
                margin: float = 0.0, verdict: str = "", action: str = "",
-               note: str = "", when: Optional[float] = None) -> Dict[str, Any]:
-        """记一条判定明细（环形，只留最近 `max_samples` 条）。@return 这一条。"""
+               note: str = "", when: Optional[float] = None,
+               relative: Optional[float] = None, labeled: str = "",
+               picture: str = "") -> Dict[str, Any]:
+        """记一条判定明细（环形，只留最近 `max_samples` 条）。@return 这一条。
+
+        @param relative 相对分（两个大类原型余弦之差; T13-4 起判定吃它）
+        @param labeled  这一次的**真值大类**（进程名/人工给的; "" = 没有真值）
+        @param picture  **画面单独**给出的结论（"" = 画面没把握）——
+                        "带标签样本里有没有判反"要看它, 不能看最终结论
+                       （走进程名那条路时最终结论**等于**真值, 看它永远看不出判反）
+        """
         item = {"at": float(when if when is not None else self.clock()),
                 "cls": str(cls or ""), "category": str(category or ""),
                 "score": round(float(score or 0.0), 4), "margin": round(float(margin or 0.0), 4),
                 "verdict": str(verdict or ""), "action": str(action or ""),
-                "note": str(note or "")}
+                "note": str(note or ""), "labeled": str(labeled or ""),
+                "picture": str(picture or ""),
+                "relative": None if relative is None else round(float(relative), 4)}
         self._samples.append(item)
         return dict(item)
 

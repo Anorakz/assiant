@@ -4,7 +4,16 @@
 #  它是什么: 一张**截图** + 它的 SigLIP 图像向量 + 它属于哪个**子标签**
 #            （code / doc / real / anime / game），子标签再经配置映射到**大类**
 #            （study / not_study）—— "现在屏幕上是不是学习内容"这个判定，
-#            第一步就是问它"这一帧最像哪一类、大类是什么"。
+#            第一步就是问它"这一帧更像哪个大类"。
+#
+#  判定口径（T13-4 板端标定定的，别改回去）:
+#      **两个大类各自的原型**（该类锚点的单位向量平均方向）+ **相对分**
+#          relative = cos(帧, study 原型) - cos(帧, not_study 原型)
+#      实测（39 张真截图, 板端 NPU）: 相对分口径 2 类准确率 **95–97%**;
+#      而"子标签最像的那条锚点"的**绝对**余弦在两个大类之间**重叠**
+#      （study 5% 分位 0.796 vs not_study 95% 分位 0.906, 且 study 最小 0.753 <
+#      not_study 最大 0.906）—— 按绝对分位中点定阈值会让 **69%** 的帧判不出来。
+#      所以: 判定用 `relative`（判定带在 `study_watch.py`），绝对的那几个数只做诊断。
 #
 #  为什么用锚点而不是文本提示词（板端实测，别改回去）:
 #      `llm/multimodal_report.md` §7.2/§7.3 实测: 整屏 256×256 + 文本提示词做零样本
@@ -177,8 +186,10 @@ class StudyAnchors(object):
         hit = anchors.match(vector)          # -> {"cls","category","score","margin",...}
         anchors.add(cls="code", vector=vec, shot=jpeg, note="进程说是 pycharm64")
 
-    @note `match()` 给的是**子标签**排序 + **大类**聚合: 判定只吃大类那三个数
-          （`category_score` / `category_margin` / `category_runner_up`）。
+    @note `match()` 给的是**子标签**排序 + **大类**聚合。判定吃的是 **`relative`**
+          （两个大类原型的余弦之差 —— T13-4 板端实测: 绝对余弦的两个大类会重叠,
+          按绝对分位中点定阈值会判出 69% 的"判不出来"; 相对分口径 2 类准确率 95–97%）。
+          绝对的那几个数（`category_score` / `category_margin`）留着**做诊断**。
     """
 
     def __init__(self, path: Optional[str] = None, *, classes: Optional[Mapping[str, Any]] = None,
@@ -202,11 +213,13 @@ class StudyAnchors(object):
         self.log = log or _log
         self._rows: List[Dict[str, Any]] = []
         self._prototypes: Optional[Dict[str, List[float]]] = None
+        self._category_prototypes: Optional[Dict[str, List[float]]] = None
         self._units: Optional[List[Tuple[str, List[float]]]] = None
 
     def _invalidate(self) -> None:
-        """库变了 -> 缓存（解码后的单位向量、类原型）全作废。"""
+        """库变了 -> 缓存（解码后的单位向量、类原型、大类原型）全作废。"""
         self._prototypes = None
+        self._category_prototypes = None
         self._units = None
 
     # ------------------------------------------------------------ 读 ---
@@ -335,6 +348,65 @@ class StudyAnchors(object):
         self._prototypes = out
         return {key: list(value) for key, value in out.items()}
 
+    def category_prototypes(self) -> Dict[str, List[float]]:
+        """每个**大类**的原型（该大类所有锚点的单位向量平均方向）—— 判定的真正依据。
+
+        @note 为什么判定不用"子标签里最像的那一条锚点"的**绝对**余弦（T13-4 板端实测）:
+              39 张真截图上, study 的绝对分 5% 分位 0.796、not_study 的 95% 分位 0.906,
+              而 study 最小 0.753 < not_study 最大 0.906 —— **两个大类的绝对分重叠**,
+              按分位中点定阈值会让 **69%** 的帧"判不出来"。
+              换成"两个大类各自的原型 + 相对分"（`match()["relative"]`）之后:
+              2 类准确率 95–97%, 在 ±0.05 的没把握带下 误打扰 0 / 监督失效 1 / 判不出 8%。
+        @note 算一次就缓存（库变了就作废）。
+        """
+        if self._category_prototypes is not None:
+            return {key: list(value) for key, value in self._category_prototypes.items()}
+        sums: Dict[str, List[float]] = {}
+        counts: Dict[str, int] = {}
+        for cls, vector in self.unit_vectors():
+            category = self.classes.get(cls)
+            if not category:
+                continue                                    # 映射外的子标签不参与大类原型
+            bucket = sums.get(category)
+            if bucket is None:
+                bucket = [0.0] * len(vector)
+                sums[category] = bucket
+            if len(bucket) != len(vector):
+                self.log.warning("study_anchors: %s 有一条锚点维度不对（不参与大类原型）", cls)
+                continue
+            for index, value in enumerate(vector):
+                bucket[index] += value
+            counts[category] = counts.get(category, 0) + 1
+        out: Dict[str, List[float]] = {}
+        for category, bucket in sums.items():
+            count = counts.get(category) or 0
+            if not count:
+                continue
+            out[category] = _unit([value / count for value in bucket])
+        self._category_prototypes = out
+        return {key: list(value) for key, value in out.items()}
+
+    def relative(self, vector: Sequence[float]) -> Optional[Dict[str, Any]]:
+        """**两个大类原型的余弦之差** —— "更像学习还是更像非学习"。
+
+        @return None = 有一边大类**一条锚点都没有**（原型无从谈起）;
+                否则 `{"relative","study","not_study"}`（后两个是各自的余弦）
+        @note 正数 = 更像 study。**两个大类都得有锚点才算得出来** —— 只有一个大类时
+              它必然"更像自己", 那种结论没有信息量, 所以这里如实返回 None,
+              由调用方（`study_watch`）走"进程名辅助"或判 unknown。
+        """
+        if not vector:
+            return None
+        prototypes = self.category_prototypes()
+        study = prototypes.get(CATEGORY_STUDY)
+        not_study = prototypes.get(CATEGORY_NOT_STUDY)
+        if not study or not not_study:
+            return None
+        query = _unit([float(item) for item in vector])
+        left = _dot(query, study)
+        right = _dot(query, not_study)
+        return {"relative": float(left - right), "study": float(left), "not_study": float(right)}
+
     # ------------------------------------------------------------ 比 ---
     def match(self, vector: Sequence[float], *, method: str = "anchor") -> Optional[Dict[str, Any]]:
         """这一帧最像哪个子标签、属于哪个大类。
@@ -346,11 +418,17 @@ class StudyAnchors(object):
                     {"cls","category","score","runner_up_cls","runner_up_score","margin",
                      "anchors",                      # 命中的那一类有几条锚点
                      "category_score","category_runner_up","category_runner_up_score",
-                     "category_margin",              # 大类之间的差距 —— 判定吃的是这三个
+                     "category_margin",              # 绝对口径（**诊断用**; 两个大类重叠, 别拿它判定）
+                     "relative","study_cos","not_study_cos",   # 判定吃这三个（大类原型之差）
                      "counts","method"}
 
         @note `margin` = 第一名与**别的子标签**里最好那个的差（同类其他锚点不算对手）;
               `category_margin` 同理，但只在大类之间比（`study` vs `not_study`）。
+        @note ⚠ `category_score`/`category_margin` 是**绝对**余弦，T13-4 实测两个大类会重叠，
+              **不要**拿它跟绝对值阈值比（那会判出 69% 的"判不出来"）。判定的依据是
+              `relative`（= `study_cos - not_study_cos`，由 `category_prototypes()` 算）。
+              两个大类里只要有一边**一条锚点都没有**，`relative` 就是 None —— 那时
+              调用方该走进程名辅助或判 unknown。
         """
         if not vector:
             return None
@@ -386,6 +464,13 @@ class StudyAnchors(object):
         cat_top, cat_score = cat_ranked[0] if cat_ranked else ("", 0.0)
         cat_runner = cat_ranked[1][1] if len(cat_ranked) > 1 else 0.0
         counts = self.counts()
+        prototypes = self.category_prototypes()
+        study_cos = not_study_cos = None
+        relative = None
+        if prototypes.get(CATEGORY_STUDY) and prototypes.get(CATEGORY_NOT_STUDY):
+            study_cos = _dot(query, prototypes[CATEGORY_STUDY])
+            not_study_cos = _dot(query, prototypes[CATEGORY_NOT_STUDY])
+            relative = study_cos - not_study_cos
         return {
             "cls": top_cls,
             "category": top_category,
@@ -398,6 +483,9 @@ class StudyAnchors(object):
             "category_runner_up": cat_ranked[1][0] if len(cat_ranked) > 1 else "",
             "category_runner_up_score": round(cat_runner, 4),
             "category_margin": round(cat_score - cat_runner, 4),
+            "relative": None if relative is None else round(relative, 4),
+            "study_cos": None if study_cos is None else round(study_cos, 4),
+            "not_study_cos": None if not_study_cos is None else round(not_study_cos, 4),
             "counts": counts,
             "method": "prototype" if wanted == "prototype" else "anchor",
         }

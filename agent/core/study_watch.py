@@ -5,8 +5,19 @@
 #            判断"现在屏幕上是不是学习内容"。不是 -> 气泡提醒一次; 提醒之后还是不是 ->
 #            每 5 分钟复查, 连续 3 次不通过 -> **返回桌面**(Win+D), 然后冷却 30 分钟。
 #
-#  判定**不进 LLM**（你定的）: 模型不参与判决。判据是**图像锚点余弦**
+#  判定**不进 LLM**（你定的）: 模型不参与判决。判据是**图像锚点**
 #      （`study_anchors.py`，与认游戏同源）; PC 进程名只在画面没把握时当**辅助**。
+#
+#  判定的**口径**（T13-4 板端标定定的, 别改回去）:
+#      两个大类**各自的原型**（该类锚点的单位向量平均方向）+ **相对分**
+#          relative = cos(帧, study 原型) - cos(帧, not_study 原型)
+#      · `relative ≥ +band` -> study; `≤ -band` -> not_study; **带内 -> unknown**;
+#      · 实测（39 张真截图, 板端 NPU）: 相对分口径 2 类准确率 **95–97%**;
+#        带 0.05 时 **误打扰 0 / 监督失效 1 / 判不出 8%**;
+#      · 而"子标签最像的那条锚点"的**绝对**余弦在两个大类之间**重叠** ——
+#        按绝对分位中点定阈值会判出 **69%** 的"判不出来"（等于监督不干活）。
+#        所以 `confident_score`/`confident_margin` 这两个键**只当标定记录**,
+#        判定吃的是 `relative_band`。
 #
 #  三条结论（第三态是一等公民）:
 #      study      像学习（真人场景 / 代码 / 文档）
@@ -32,13 +43,13 @@
 #
 #  阈值**不定死**（你定的"运行过程中不断优化"）—— 护栏全部写死在代码里:
 #      · 输入**只有带标签的样本**: PC 进程名 / 人工 `assistant study label`;
-#      · EWMA `0.9 * 旧 + 0.1 * 新`（score 与 margin 各一类一份）;
+#      · EWMA `0.9 * 旧 + 0.1 * 新`（相对分大小各一份: `relative_study` / `relative_not_study`）;
 #      · **样本不够不动**: 两个大类都攒到 `min_labeled`(默认 20) 个才允许挪;
-#      · **一次只动 0.01**, 方向 = 两类 EWMA 的中点, 再用分布兜一层
-#        （不低于 study 的 5% 分位 - 0.02、不高于 not_study 的 95% 分位 + 0.02）;
-#      · **界**: score ∈ [0.55, 0.95], margin ∈ [0.01, 0.20] —— 到底了就停;
-#      · **无标签**时只看"判不出来的比例": 超过 `target_unknown_rate`(0.30) 就把门槛
-#        放松 0.01（两侧都放），说明当前门槛太严;
+#      · **一次只动 0.01**, 目标 = 两类相对分分布的交界中点
+#        （study 的 5% 分位与 not_study 的 95% 分位的中点）;
+#      · **界**: `relative_band ∈ [0.01, 0.20]` —— 到底了就停;
+#      · **无标签**时只看"判不出来的比例": 超过 `target_unknown_rate`(0.30) 就把带
+#        **收窄** 0.01（判得多一点）; 带标签样本出现**反向错误** -> 把带**放宽** 0.01;
 #      · `unknown` **从不学习**（它连"往哪边挪"都不知道）;
 #      · 每次调整都写一条**人能看懂的**理由进 `study_stats.notes()`（"为什么动了"）;
 #      · `freeze()` / `reset()` 是人的开关（CLI `assistant study freeze/reset`）;
@@ -70,9 +81,10 @@ __all__ = [
     "REMIND_TEXT", "VERDICT_STUDY", "VERDICT_NOT_STUDY", "VERDICT_UNKNOWN",
     "ACTION_REMIND", "ACTION_BACK_TO_DESKTOP",
     "DEFAULT_PROCESS_MAP", "DEFAULT_FOCUS_INTERVAL_MIN", "DEFAULT_RECHECK_INTERVAL_MIN",
-    "DEFAULT_MAX_FAILURES", "DEFAULT_COOLDOWN_MIN", "DEFAULT_CONFIDENT_SCORE",
+    "DEFAULT_MAX_FAILURES", "DEFAULT_COOLDOWN_MIN", "DEFAULT_COOLDOWN_PROBE_MIN",
+    "DEFAULT_RELATIVE_BAND", "DEFAULT_BAND_BOUNDS", "DEFAULT_CONFIDENT_SCORE",
     "DEFAULT_CONFIDENT_MARGIN", "DEFAULT_LEARN_SCORE", "DEFAULT_TARGET_UNKNOWN_RATE",
-    "DEFAULT_MIN_LABELED", "DEFAULT_STEP", "DEFAULT_SCORE_BOUNDS", "DEFAULT_MARGIN_BOUNDS",
+    "DEFAULT_MIN_LABELED", "DEFAULT_STEP",
     "DEFAULT_REAPPEAR_WINDOW_MIN", "DEFAULT_PAUSE_MIN", "DEFAULT_EWMA_ALPHA", "STUDY_STATE",
 ]
 
@@ -102,19 +114,24 @@ DEFAULT_COOLDOWN_MIN = 30.0              # 弹回桌面之后, 多久不再管�
 #: 这条**永远发现不了**: 5 分钟才看一次, 刚好卡在窗口边界上）。
 DEFAULT_COOLDOWN_PROBE_MIN = 1.0
 
-#: 画面采信门槛的**初值**（T13-4 板端标定会给真值; 这里只是没标定时的兜底,
-#: 而且运行期会被"带标签样本"慢慢修正 —— 见模块头的护栏）。
-DEFAULT_CONFIDENT_SCORE = 0.80
-DEFAULT_CONFIDENT_MARGIN = 0.03
+#: **判定的阈值**: 相对分的"没把握带"。`|relative| < band` -> unknown（中性）。
+#: 初值 0.05 来自 T13-4 板端标定（h1..h4 四条管线都是 0.05 满足"误打扰 0 且失效 ≤1
+#: 且判不出 ≤10%"里最小的那个）。运行期由带标签样本自己挪（见模块头护栏）。
+DEFAULT_RELATIVE_BAND = 0.05
+#: 带的界（到底了就停）: 太窄 = 老在边界上晃, 太宽 = 老是判不出来。
+DEFAULT_BAND_BOUNDS = (0.01, 0.20)
+
+#: ⚠ 这两个是**标定记录**（T13-4 用绝对余弦分位中点算出来的）, **不参与判定** ——
+#:   留着是为了诊断时能对回标定报告; 改成别的值不会改变结论（别被它们误导）。
+DEFAULT_CONFIDENT_SCORE = 0.85
+DEFAULT_CONFIDENT_MARGIN = 0.16
 #: 学锚点的门槛: 只学"画面与标签不一致"的那些帧（一致就不必再攒）。
 DEFAULT_LEARN_SCORE = 0.90
 
 #: 自适应（你定的"不定死"）。
-DEFAULT_TARGET_UNKNOWN_RATE = 0.30       # 判不出来的比例超过它就放松门槛
+DEFAULT_TARGET_UNKNOWN_RATE = 0.30       # 判不出来的比例超过它就把带收窄
 DEFAULT_MIN_LABELED = 20                 # 两个大类各攒够多少个带标签样本才允许挪
 DEFAULT_STEP = 0.01                      # 一次只动这么多
-DEFAULT_SCORE_BOUNDS = (0.55, 0.95)
-DEFAULT_MARGIN_BOUNDS = (0.01, 0.20)
 DEFAULT_EWMA_ALPHA = 0.1                 # 0.9 * 旧 + 0.1 * 新
 
 #: 弹回桌面之后多久内又判成学习 = "可能误判"; 那个类停学多久。
@@ -168,14 +185,14 @@ class StudyWatcher(object):
                  max_failures: int = DEFAULT_MAX_FAILURES,
                  cooldown_min: float = DEFAULT_COOLDOWN_MIN,
                  cooldown_probe_min: float = DEFAULT_COOLDOWN_PROBE_MIN,
+                 relative_band: float = DEFAULT_RELATIVE_BAND,
+                 band_bounds: Sequence[float] = DEFAULT_BAND_BOUNDS,
                  confident_score: float = DEFAULT_CONFIDENT_SCORE,
                  confident_margin: float = DEFAULT_CONFIDENT_MARGIN,
                  learn_score: float = DEFAULT_LEARN_SCORE,
                  target_unknown_rate: float = DEFAULT_TARGET_UNKNOWN_RATE,
                  min_labeled: int = DEFAULT_MIN_LABELED,
                  step: float = DEFAULT_STEP,
-                 score_bounds: Sequence[float] = DEFAULT_SCORE_BOUNDS,
-                 margin_bounds: Sequence[float] = DEFAULT_MARGIN_BOUNDS,
                  ewma_alpha: float = DEFAULT_EWMA_ALPHA,
                  reappear_window_min: float = DEFAULT_REAPPEAR_WINDOW_MIN,
                  pause_min: float = DEFAULT_PAUSE_MIN,
@@ -191,6 +208,8 @@ class StudyWatcher(object):
                            **零参可调用**（每次现取 —— Runtime 用它把认游戏那份常驻模型
                            接过来, "一个能力只有一条实现"）
         @param process_map {进程名: 子标签}（None = `DEFAULT_PROCESS_MAP`）
+        @param relative_band 判定的**没把握带**（|相对分| < band -> unknown）; 初值来自标定
+        @param confident_score/confident_margin ⚠ **只当标定记录, 不参与判定**（见模块头）
         @param skip_on_keyword 队列是对话指定的关键词时不抓帧（沿用认游戏那条规矩）
         @param adapt       允许阈值在运行期自己修正（`freeze()` 关掉）
         @param learn       允许把"判错的帧"学成锚点
@@ -208,14 +227,14 @@ class StudyWatcher(object):
         self.max_failures = max(1, int(max_failures or DEFAULT_MAX_FAILURES))
         self.cooldown_s = max(0.0, float(cooldown_min or 0) * 60.0)
         self.cooldown_probe_s = max(10.0, float(cooldown_probe_min or 0) * 60.0)
-        self._confident_score0 = float(confident_score)
-        self._confident_margin0 = float(confident_margin)
+        self._relative_band0 = abs(float(relative_band or DEFAULT_RELATIVE_BAND))
+        self.band_bounds = self._bounds(band_bounds, DEFAULT_BAND_BOUNDS, "band_bounds")
+        self._confident_score0 = float(confident_score)      # 标定记录, 不参与判定
+        self._confident_margin0 = float(confident_margin)    # 同上
         self.learn_threshold = float(learn_score or DEFAULT_LEARN_SCORE)
         self.target_unknown_rate = float(target_unknown_rate or 0.0)
         self.min_labeled = max(1, int(min_labeled or DEFAULT_MIN_LABELED))
         self.step = abs(float(step or DEFAULT_STEP))
-        self.score_bounds = self._bounds(score_bounds, DEFAULT_SCORE_BOUNDS, "score_bounds")
-        self.margin_bounds = self._bounds(margin_bounds, DEFAULT_MARGIN_BOUNDS, "margin_bounds")
         self.ewma_alpha = min(1.0, max(0.0, float(ewma_alpha or DEFAULT_EWMA_ALPHA)))
         self.reappear_window_s = max(0.0, float(reappear_window_min or 0) * 60.0)
         self.pause_s = max(0.0, float(pause_min or 0) * 60.0)
@@ -246,12 +265,18 @@ class StudyWatcher(object):
         return (low, high)
 
     @property
+    def relative_band(self) -> float:
+        """当前的**没把握带** —— 这才是判定用的阈值（stats 里有就用学到的那个）。"""
+        return self._threshold("relative_band", self._relative_band0)
+
+    @property
     def confident_score(self) -> float:
-        """当前分类门槛（stats 里有就用学到的那个 —— 它才是"运行期不断优化"的结果）。"""
+        """⚠ **标定记录**, 不参与判定（读它是为了诊断/对齐标定报告）。"""
         return self._threshold("confident_score", self._confident_score0)
 
     @property
     def confident_margin(self) -> float:
+        """⚠ **标定记录**, 不参与判定。"""
         return self._threshold("confident_margin", self._confident_margin0)
 
     def _threshold(self, name: str, default: float) -> float:
@@ -269,7 +294,8 @@ class StudyWatcher(object):
         """
         if self.stats is None:
             return {}
-        for name, value in (("confident_score", self._confident_score0),
+        for name, value in (("relative_band", self._relative_band0),
+                            ("confident_score", self._confident_score0),
                             ("confident_margin", self._confident_margin0),
                             ("learn_score", self.learn_threshold)):
             if self.stats.threshold(name) is None:
@@ -372,64 +398,101 @@ class StudyWatcher(object):
         """**只看这一帧**（不管间隔/状态/升级链）: 得出 study / not_study / unknown。
 
         @return `{"verdict","source","confident","cls","category","score","margin",
-                  "labeled","process","anchors","note","at"}`
+                  "relative","study_cos","not_study_cos","band","labeled","process",
+                  "anchors","note","at"}`
+
+        @note 判定的依据是 `relative`（两个大类原型的余弦之差）与**没把握带**:
+              `relative ≥ +band` -> study, `≤ -band` -> not_study, 带内 -> unknown。
+              `score`/`margin` 是**绝对**余弦（诊断用, T13-4 实测两个大类会重叠）。
         """
         moment = float(self.clock() if now is None else now)
+        band = self.relative_band
         out: Dict[str, Any] = {"verdict": VERDICT_UNKNOWN, "source": "", "confident": False,
                                "cls": "", "category": "", "score": 0.0, "margin": 0.0,
-                               "labeled": "", "process": {}, "anchors": len(self.anchors),
-                               "note": "", "at": moment}
+                               "relative": None, "study_cos": None, "not_study_cos": None,
+                               "band": band, "labeled": "", "labeled_category": "",
+                               "process": {}, "picture": "",
+                               "anchors": len(self.anchors), "note": "", "at": moment}
         image = list(vector) if vector is not None else self.encode(frame)
         hit = self.anchors.match(image) if image else None
-        confident = bool(hit and float(hit.get("category_score") or 0.0) >= self.confident_score
-                         and float(hit.get("category_margin") or 0.0) >= self.confident_margin)
-        out["confident"] = confident
+        picture = ""                                        # 画面给出的大类（"" = 没把握）
         if hit:
             out.update({"cls": str(hit.get("cls") or ""),
                         "category": str(hit.get("category") or ""),
                         "score": float(hit.get("category_score") or 0.0),
-                        "margin": float(hit.get("category_margin") or 0.0)})
+                        "margin": float(hit.get("category_margin") or 0.0),
+                        "relative": hit.get("relative"),
+                        "study_cos": hit.get("study_cos"),
+                        "not_study_cos": hit.get("not_study_cos")})
+            relative = hit.get("relative")
+            if relative is None:
+                picture = ""
+            elif float(relative) >= band:
+                picture = VERDICT_STUDY
+            elif float(relative) <= -band:
+                picture = VERDICT_NOT_STUDY
+            else:
+                picture = ""
+        out["confident"] = bool(picture)
+        out["picture"] = picture                            # 画面**单独**的结论（"" = 没把握）
 
         evidence = self.process_evidence()
         out["process"] = {"ok": evidence["ok"], "why": evidence["why"],
                           "labels": evidence["labels"], "category": evidence["category"]}
         out["labeled"] = evidence["labeled"]
+        # 真值**大类**（进程名给的是子标签 -> 翻成大类; 只有大类就照用）——
+        # 明细里存这个, "有没有判反"才比得起来（子标签和大类不是一个层级）。
+        out["labeled_category"] = (self.anchors.classes.get(evidence["labeled"])
+                                   or evidence["category"] or "")
 
-        if confident and evidence["category"]:
-            if evidence["category"] == out["category"]:
-                out.update({"verdict": out["category"], "source": "anchor",
-                            "note": "画面有把握，进程名也一致（%s）"
-                                    % "、".join(sorted(evidence["labels"]) or
-                                                [evidence["category"]])})
+        if picture and evidence["category"]:
+            if evidence["category"] == picture:
+                out.update({"verdict": picture, "source": "anchor",
+                            "note": "画面有把握（相对分 %s，带 %.2f），进程名也一致（%s）"
+                                    % (self._show(out["relative"]), band,
+                                       "、".join(sorted(evidence["labels"]) or
+                                                 [evidence["category"]]))})
             else:
                 out.update({"verdict": VERDICT_UNKNOWN, "source": "conflict",
-                            "note": "画面说是「%s」（%.3f/余量 %.3f），进程名说是「%s」—— "
-                                    "两路对不上，判不出来（中性，不打扰你）"
-                                    % (out["category"], out["score"], out["margin"],
+                            "note": "画面说是「%s」（相对分 %s，带 %.2f），进程名说是「%s」"
+                                    "—— 两路对不上，判不出来（中性，不打扰你）"
+                                    % (picture, self._show(out["relative"]), band,
                                        evidence["category"])})
             return out
-        if confident:
-            out.update({"verdict": out["category"], "source": "anchor",
-                        "note": "画面有把握（%s %.3f/余量 %.3f）%s"
-                                % (out["category"], out["score"], out["margin"],
+        if picture:
+            out.update({"verdict": picture, "source": "anchor",
+                        "note": "画面有把握（相对分 %s，带 %.2f；最像「%s」）%s"
+                                % (self._show(out["relative"]), band, out["cls"] or "?",
                                    "；" + evidence["why"] if evidence["why"] else "")})
             return out
         if evidence["category"]:
+            why = ("库里还缺一个大类的锚点" if out["relative"] is None
+                   else "两边的相对分只差 %s（带 %.2f 以内）" % (self._show(out["relative"]), band))
             out.update({"verdict": evidence["category"], "source": "process",
-                        "note": "画面没把握（%s %.3f/余量 %.3f），按进程名算 —— 它只是辅助"
-                                "（没有前台信息）" % (out["cls"] or "?", out["score"],
-                                                     out["margin"])})
+                        "note": "画面没把握（%s），按进程名算 —— 它只是辅助"
+                                "（没有前台信息）" % why})
             return out
         if not len(self.anchors):
             out["note"] = ("锚点库是空的，进程名也没有认识的 —— 判不出来（中性）; "
                            "先跑标定或 `assistant study label`")
+        elif out["relative"] is None:
+            out["note"] = ("判不出来：库里还缺一个大类的锚点（现在 %s），进程名那条路也没有"
+                           "结论%s"
+                           % ("、".join("%s %d 条" % (key, value) for key, value
+                                        in sorted(self.anchors.counts().items())) or "一条都没有",
+                              "（%s）" % evidence["why"] if evidence["why"] else ""))
         else:
-            out["note"] = ("判不出来：画面最像「%s」（%s %.3f/余量 %.3f），进程名那条路也没有"
-                           "结论%s" % (out["cls"] or "?", out["category"] or "?", out["score"],
-                                       out["margin"],
-                                       "（%s）" % evidence["why"] if evidence["why"] else ""))
+            out["note"] = ("判不出来：两边相对分只差 %s（带 %.2f 以内），画面最像「%s」，"
+                           "进程名那条路也没有结论%s"
+                           % (self._show(out["relative"]), band, out["cls"] or "?",
+                              "（%s）" % evidence["why"] if evidence["why"] else ""))
         out["source"] = "none"
         return out
+
+    @staticmethod
+    def _show(relative: Any) -> str:
+        """相对分印出来（None = 算不出来）。"""
+        return "?" if relative is None else "%+.3f" % float(relative)
 
     # ------------------------------------------------------------ 升级链 ---
     def tick(self, frame: Any = None, *, vector: Optional[Sequence[float]] = None,
@@ -484,9 +547,10 @@ class StudyWatcher(object):
         learned = self._learn_from(result, frame=frame, vector=image, now=moment)
         out["learned"] = learned
         self._count(result)
-        if result["source"] == "process":
-            # 进程名给的**是标签也是分数**（唯一能自动喂自适应的真值来源）
-            self.learn_score(result["score"], label=result["verdict"],
+        if result["source"] == "process" and result.get("relative") is not None:
+            # 进程名给的是**标签**; 喂给自适应的是**画面算出来的相对分**
+            # （"这一类到底落在哪儿"要靠画面那一侧的数字, 不能拿真值当分数）。
+            self.learn_score(float(result["relative"]), label=result["verdict"],
                              margin=result["margin"], when=moment)
 
         verdict = result["verdict"]
@@ -592,106 +656,116 @@ class StudyWatcher(object):
                 "learned": True, "anchors": len(self.anchors), "row": row,
                 "note": "学成「%s」的锚点了" % name}
 
-    def learn_score(self, score: float, *, label: str,
+    def learn_score(self, relative: float, *, label: str,
                     margin: Optional[float] = None,
                     when: Optional[float] = None) -> Dict[str, Any]:
-        """喂一个**带标签**样本（阈值自适应的唯一输入）。
+        """喂一个**带标签**样本（带自适应的唯一输入）。
 
+        @param relative 这一帧的**相对分**（`match()["relative"]`）; 进程名那条路给的标签
+                        配上画面算出来的相对分，就是"这一类到底落在哪儿"的观测
         @param label 大类（`study` / `not_study`）; `unknown` **从不学习**（你定的）
+        @param margin 兼容旧调用（原来的绝对余弦; 现在只记进分布, 不参与挪带）
         """
         key = str(label or "").strip()
         if key not in (VERDICT_STUDY, VERDICT_NOT_STUDY):
             return {"learned": False, "why": "unknown 从不学习（你定的）"}
         if self.stats is None:
             return {"learned": False, "why": "没有 stats（自适应无处可存）"}
-        self.stats.push_ewma("score_" + key, float(score), alpha=self.ewma_alpha)
-        self.stats.observe(key, float(score))
+        value = float(relative)
+        self.stats.push_ewma("relative_" + key, value, alpha=self.ewma_alpha)
+        # 分布按**绝对值**记一份（"离边界多远"）, 符号单独看 EWMA
+        self.stats.observe(key, abs(value))
         if margin is not None:
-            self.stats.push_ewma("margin_" + key, float(margin), alpha=self.ewma_alpha)
+            self.stats.observe(key, abs(float(margin)))
         self.stats.bump("labeled_" + key)
         self.stats.bump("labeled")
-        return {"learned": True, "label": key,
-                "ewma": self.stats.ewma("score_" + key)}
+        return {"learned": True, "label": key, "relative": value,
+                "ewma": self.stats.ewma("relative_" + key)}
 
     def adapt(self, *, now: Optional[float] = None) -> Dict[str, Any]:
-        """按护栏挪一次阈值（**能不动就不动**）。@return `{"moved","why"}`。"""
+        """按护栏挪一次**没把握带**（**能不动就不动**）。@return `{"moved","why"}`。
+
+        两条输入（都是"带标签/统计"逼出来的, 不是拍脑袋）:
+          ① 带标签样本够（两类各 `min_labeled` 个）-> 目标 = 两类相对分分布的交界中点,
+             朝它挪**一步 0.01**;
+          ② 判不出来的比例太高 -> 把带**收窄**一步（判得多一点）;
+          ③ 带标签样本里出现**反向错误**（标着 study 却判成 not_study 或反过来）-> 把带
+             **放宽**一步（宁可判不出来, 也别把学习判成非学习）。
+        """
         out: Dict[str, Any] = {"moved": False, "why": []}
         if not self.adapt_enabled or self.stats is None:
             return out
         moved = False
-        for name, bounds, ewma_key in (("confident_score", self.score_bounds, "score"),
-                                       ("confident_margin", self.margin_bounds, "margin")):
-            current = self._threshold(name, self._confident_score0 if name == "confident_score"
-                                      else self._confident_margin0)
-            target = self._target(name, ewma_key)
-            if target is None:
-                continue
+        bounds = self.band_bounds
+        current = self.relative_band
+        target = self._band_target()
+        if target is not None:
             new_value = self._step_toward(current, target, bounds)
-            if abs(new_value - current) < 1e-9:
-                continue
-            self.stats.set_threshold(name, new_value)
-            reason = ("把 %s 从 %.3f 挪到 %.3f：%s（带标签样本 study %d / not_study %d，"
-                      "一次只动 %.2f，界 [%.2f, %.2f]）"
-                      % (self._name_cn(name), current, new_value, self._target_why(name),
-                         self.stats.counter("labeled_study"),
-                         self.stats.counter("labeled_not_study"), self.step,
-                         bounds[0], bounds[1]))
-            self.stats.note(reason)
-            self._bump("adapt_up" if new_value > current else "adapt_down")
-            out["why"].append(reason)
-            moved = True
-
-        relax = self._relax_reason()
-        if relax:
-            changes = []
-            for name, bounds in (("confident_score", self.score_bounds),
-                                 ("confident_margin", self.margin_bounds)):
-                current = self._threshold(name, self._confident_score0
-                                          if name == "confident_score"
-                                          else self._confident_margin0)
-                new_value = max(bounds[0], round(current - self.step, 4))
-                if abs(new_value - current) >= 1e-9:
-                    self.stats.set_threshold(name, new_value)
-                    changes.append("%s %.3f -> %.3f" % (self._name_cn(name), current, new_value))
-            if changes:
-                reason = "判不出来的比例太高（%s），放松门槛：%s" % (relax, "；".join(changes))
+            if abs(new_value - current) >= 1e-9:
+                self.stats.set_threshold("relative_band", new_value)
+                reason = ("把没把握带从 %.3f 挪到 %.3f：%s（带标签样本 study %d / not_study %d，"
+                          "一次只动 %.2f，界 [%.2f, %.2f]）"
+                          % (current, new_value, self._band_target_why(),
+                             self.stats.counter("labeled_study"),
+                             self.stats.counter("labeled_not_study"), self.step,
+                             bounds[0], bounds[1]))
                 self.stats.note(reason)
                 out["why"].append(reason)
-                self._bump("adapt_relax")
+                self._bump("adapt_target")
                 moved = True
+                current = new_value
+
+        reverse = self._reverse_reason()
+        if reverse and current < bounds[1] - 1e-9:
+            new_value = min(bounds[1], round(current + self.step, 4))
+            self.stats.set_threshold("relative_band", new_value)
+            reason = "带标签样本出现反向错误（%s），把带放宽 %.3f -> %.3f" % (reverse, current,
+                                                                        new_value)
+            self.stats.note(reason)
+            out["why"].append(reason)
+            self._bump("adapt_widen")
+            moved = True
+            current = new_value
+
+        high_unknown = self._unknown_reason()
+        if high_unknown and current > bounds[0] + 1e-9:
+            new_value = max(bounds[0], round(current - self.step, 4))
+            self.stats.set_threshold("relative_band", new_value)
+            reason = "判不出来的比例太高（%s），把带收窄 %.3f -> %.3f" % (high_unknown, current,
+                                                                    new_value)
+            self.stats.note(reason)
+            out["why"].append(reason)
+            self._bump("adapt_narrow")
+            moved = True
         out["moved"] = moved
+        out["band"] = self.relative_band
         return out
 
-    def _name_cn(self, name: str) -> str:
-        return {"confident_score": "分类门槛", "confident_margin": "余量门槛",
-                "learn_score": "学习门槛"}.get(name, name)
-
-    def _target(self, name: str, ewma_key: str) -> Optional[float]:
-        """目标值 = 两类 EWMA 的中点, 再用分布兜一层（返回 None = 样本不够, 别动）。"""
+    def _band_target(self) -> Optional[float]:
+        """目标带 = 两类相对分分布的交界中点（样本不够 -> None, 别动）。"""
         n_study = self.stats.counter("labeled_" + VERDICT_STUDY)
         n_not = self.stats.counter("labeled_" + VERDICT_NOT_STUDY)
         if min(n_study, n_not) < self.min_labeled:
             return None
-        left = self.stats.ewma("%s_%s" % (ewma_key, VERDICT_STUDY))
-        right = self.stats.ewma("%s_%s" % (ewma_key, VERDICT_NOT_STUDY))
+        left = self.stats.ewma("relative_" + VERDICT_STUDY)
+        right = self.stats.ewma("relative_" + VERDICT_NOT_STUDY)
         if left is None or right is None:
             return None
         middle = (float(left) + float(right)) / 2.0
+        # 再用分布兜一层: 不低于 study 那一侧的下沿、不高于 not_study 那一侧的上沿
         low = self.stats.quantile(VERDICT_STUDY, 0.05)
         high = self.stats.quantile(VERDICT_NOT_STUDY, 0.95)
         if low is not None:
-            middle = max(middle, float(low) - 0.02)         # 别把真学习帧误伤
+            middle = max(middle, 0.0)
         if high is not None:
-            middle = min(max(middle, 0.0), float(high) + 0.02)
-        return middle
+            middle = min(max(middle, 0.0), max(high, 0.0))
+        return abs(middle)
 
-    def _target_why(self, name: str) -> str:
-        ewma_key = "margin" if name == "confident_margin" else "score"
-        left = self.stats.ewma("%s_%s" % (ewma_key, VERDICT_STUDY))
-        right = self.stats.ewma("%s_%s" % (ewma_key, VERDICT_NOT_STUDY))
-        return ("两类 %s 的 EWMA 中点是 %.3f（study %.3f / not_study %.3f）"
-                % ("余量" if ewma_key == "margin" else "分数",
-                   ((left or 0.0) + (right or 0.0)) / 2.0, left or 0.0, right or 0.0))
+    def _band_target_why(self) -> str:
+        left = self.stats.ewma("relative_" + VERDICT_STUDY)
+        right = self.stats.ewma("relative_" + VERDICT_NOT_STUDY)
+        return ("两类相对分的 EWMA 中点是 %+.3f（study %+.3f / not_study %+.3f）"
+                % (((left or 0.0) + (right or 0.0)) / 2.0, left or 0.0, right or 0.0))
 
     def _step_toward(self, current: float, target: float, bounds: Tuple[float, float]) -> float:
         """朝 target 挪**最多一步**（你定的 0.01），并夹在界内。"""
@@ -703,8 +777,25 @@ class StudyWatcher(object):
             return current
         return round(min(bounds[1], max(bounds[0], new_value)), 4)
 
-    def _relax_reason(self) -> str:
-        """判不出来的比例是否过高（过高 -> 门槛太严, 放松一点）。@return "" = 不用动。"""
+    def _reverse_reason(self) -> str:
+        """带标签样本里有没有**反向错误**（标着 study 却被判成 not_study 等）。
+
+        @return "" = 没有; 否则一句话（写进备注）
+        @note 只看**最近 `min_labeled` 次**带标签样本 —— 早年的一次错误不该一直把带撑着。
+        """
+        samples = [item for item in self.stats.samples()
+                   if item.get("labeled") and item.get("picture")]
+        recent = [item for item in samples[-self.min_labeled:]
+                  if item.get("labeled") in (VERDICT_STUDY, VERDICT_NOT_STUDY)
+                  and item.get("picture") in (VERDICT_STUDY, VERDICT_NOT_STUDY)]
+        bad = [item for item in recent if item["labeled"] != item["picture"]]
+        if not bad:
+            return ""
+        return "最近 %d 次带标签样本里有 %d 次画面判反了（例如标着 %s、画面判成 %s）" \
+               % (len(recent), len(bad), bad[-1]["labeled"], bad[-1]["picture"])
+
+    def _unknown_reason(self) -> str:
+        """判不出来的比例是否过高（过高 -> 带太宽, 收窄一点）。@return "" = 不用动。"""
         total = self.stats.counter("verdicts")
         unknown = self.stats.counter("verdict_unknown")
         if total < self.min_labeled or not total:
@@ -712,11 +803,8 @@ class StudyWatcher(object):
         rate = unknown / float(total)
         if rate <= self.target_unknown_rate:
             return ""
-        current = self._threshold("confident_score", self._confident_score0)
-        if current <= self.score_bounds[0] + 1e-9:
-            return ""                                       # 已经到底了, 别再放松
-        return ("%d/%d = %.0f%% > 目标 %.0f%%" % (unknown, total, rate * 100,
-                                                  self.target_unknown_rate * 100))
+        return "%d/%d = %.0f%% > 目标 %.0f%%" % (unknown, total, rate * 100,
+                                                  self.target_unknown_rate * 100)
 
     # ------------------------------------------------------- 学锚点 ---
     def _learn_from(self, result: Mapping[str, Any], *, frame: Any = None,
@@ -789,8 +877,8 @@ class StudyWatcher(object):
         self._bump("verdict_" + verdict)
         self._bump("source_" + str(result.get("source") or "none"))
         if verdict == VERDICT_UNKNOWN:
-            # 判不出来的那些帧的分数分布（它**不参与**阈值计算, 只用来回答"卡在哪儿"）
-            self.stats.observe("unknown", float(result.get("score") or 0.0))
+            # 判不出来的那些帧的相对分分布（它**不参与**挪带, 只用来回答"卡在哪儿"）
+            self.stats.observe("unknown", abs(float(result.get("relative") or 0.0)))
 
     def _record_sample(self, result: Mapping[str, Any], out: Mapping[str, Any],
                        moment: float) -> None:
@@ -802,7 +890,10 @@ class StudyWatcher(object):
                           margin=float(result.get("margin") or 0.0),
                           verdict=str(out.get("verdict") or ""),
                           action=str(out.get("action") or ""),
-                          note=str(out.get("note") or ""), when=moment)
+                          note=str(out.get("note") or ""), when=moment,
+                          relative=result.get("relative"),
+                          labeled=str(result.get("labeled_category") or ""),
+                          picture=str(result.get("picture") or ""))
 
     def _bump(self, name: str, n: int = 1) -> None:
         if self.stats is not None:
@@ -855,12 +946,11 @@ class StudyWatcher(object):
         if self.stats is not None:
             self.stats.reset(keep_thresholds=False)
             self.seed_thresholds()
-            self.stats.note("阈值与 EWMA 已清空, 回到配置初值（分类 %.3f / 余量 %.3f）"
-                            % (self._confident_score0, self._confident_margin0))
+            self.stats.note("阈值与 EWMA 已清空, 回到配置初值（没把握带 %.3f）"
+                            % self._relative_band0)
             self._save()
         self.reset_cycle()
-        return {"confident_score": self.confident_score,
-                "confident_margin": self.confident_margin}
+        return {"relative_band": self.relative_band}
 
     def notes(self) -> List[str]:
         """攒下来的"要如实说的话"。取走即清空。"""
@@ -873,11 +963,12 @@ class StudyWatcher(object):
         """给日志 / `assistant study status` 用。"""
         return {"anchors": len(self.anchors), "counts": self.anchors.counts(),
                 "categories": self.anchors.category_counts(),
-                "thresholds": {"confident_score": round(self.confident_score, 4),
-                               "confident_margin": round(self.confident_margin, 4),
+                "thresholds": {"relative_band": round(self.relative_band, 4),
+                               "band_bounds": list(self.band_bounds),
                                "learn_score": self.learn_threshold,
-                               "score_bounds": list(self.score_bounds),
-                               "margin_bounds": list(self.margin_bounds)},
+                               # 下面两个是**标定记录**, 不参与判定
+                               "confident_score": round(self.confident_score, 4),
+                               "confident_margin": round(self.confident_margin, 4)},
                 "intervals_min": {"focus": self.focus_interval_s / 60.0,
                                   "recheck": self.recheck_interval_s / 60.0,
                                   "cooldown": self.cooldown_s / 60.0,

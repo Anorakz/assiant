@@ -102,6 +102,16 @@ class GameWatcher(object):
     def model_loaded(self) -> bool:
         return self._model is not None
 
+    def encoder(self) -> Any:
+        """把**当前这一个** SigLIP **借出去**（T13-5: 学习监督用同一个模型）。
+
+        @return 模型对象（没加载 / 被内存水位拦下 -> None）; 调用方**不许** `close()` 它
+        @note 为什么不各加载一份: SigLIP 常驻 923 MB, 板子一共 3.9 GB —— 两个观察器
+              各持一份就是 1.8 GB, 直接把自己撑死。所以学习监督那边拿到的是
+              `lambda: game_watcher.encoder()`（"一个能力只有一条实现"）。
+        """
+        return self._model
+
     def ensure_model(self, state: Any) -> bool:
         """按状态加载/卸载模型（**STUDY/GAME 常驻, 其它状态卸载**）。
 

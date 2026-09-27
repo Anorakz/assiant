@@ -71,6 +71,10 @@ EXPECTED_ORDER = [
     # ⚠ 也在 tool_router **之前** —— `bilibili_search` 那条工具入口建的时候就要就位
     #   （没开就整个不装, 与音乐同一套）。
     "bilibili",
+    # T13-5: 学习内容监督（`study.enabled=false` 时同样什么都不做, 组件照旧注册）。
+    # ⚠ 在 bilibili **之后**: 它要借认游戏那份常驻 SigLIP（`_game_watch` 先就位）;
+    #   也在 tool_router 之前（**它不是 LLM 工具**, 但顺序上跟着 B 站那一段）。
+    "study",
     "state_machine",
     "tool_router",
     # T7-4: 本机 llama-server 的启停（mode 不是 edge 或开关没开时这一步**什么都不做**,
@@ -1462,6 +1466,158 @@ class TestBilibiliWiring(unittest.IsolatedAsyncioTestCase):
         with contextlib.suppress(asyncio.CancelledError):
             await task
         self.assertEqual(reads, [], "有对话关键词 -> 不抓帧（你定的）")
+
+
+class TestStudyLoop(unittest.IsolatedAsyncioTestCase):
+    """T13-5: STUDY 里的学习监督循环（判定内核在 `study_watch.py`, 这里只管接法）。"""
+
+    def _runtime(self):
+        rt = make_runtime()
+        rt._study_cfg = {}                                # 提醒/弹桌面都开着（默认）
+        return rt
+
+    def _state(self, value):
+        return type("S", (), {"current": lambda self: type("C", (), {"value": value})()})()
+
+    class _Reader(object):
+        def __init__(self):
+            self.reads = 0
+
+        async def read_latest(self):
+            self.reads += 1
+            return "frame"
+
+    class _Sender(object):
+        def __init__(self):
+            self.wins = 0
+
+        async def show_desktop(self):
+            self.wins += 1
+
+    def _watcher(self, decisions):
+        outer = self
+
+        class _Watch(object):
+            def __init__(self):
+                self.calls = []
+                self.index = 0
+
+            def tick(self, frame, **kwargs):
+                self.calls.append((frame, kwargs))
+                decision = decisions[min(self.index, len(decisions) - 1)]
+                self.index += 1
+                return dict(decision)
+
+            def notes(self):
+                return []
+
+            def reset_cycle(self):
+                outer.reset_calls = getattr(outer, "reset_calls", 0) + 1
+
+        return _Watch()
+
+    async def _run(self, rt, ticks=2):
+        task = asyncio.ensure_future(rt._study_watch_loop())
+        await asyncio.sleep(rt._GAME_WATCH_TICK_S * ticks + 0.8)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def test_only_study_is_supervised(self):
+        rt = self._runtime()
+        rt.state = self._state("idle")
+        rt.image_reader = self._Reader()
+        rt._study_watch = self._watcher([{"verdict": "not_study", "action": "remind"}])
+        await self._run(rt)
+        self.assertEqual(rt.image_reader.reads, 0, "IDLE 里不看画面")
+        self.assertEqual(rt._study_watch.calls, [])
+
+    async def test_a_remind_becomes_the_agreed_bubble(self):
+        rt = self._runtime()
+        rt.state = self._state("study")
+        rt.image_reader = self._Reader()
+        said = []
+        rt.on_reply = said.append
+        rt._study_watch = self._watcher([{"verdict": "not_study", "action": "remind",
+                                          "text": "现在是学习时间", "relative": -0.2,
+                                          "band": 0.05, "skipped": ""}])
+        await self._run(rt, ticks=1)
+        self.assertEqual(said, ["现在是学习时间"])
+        self.assertEqual(rt._last_study_action, "remind")
+
+    async def test_back_to_desktop_sends_win_d_and_says_nothing_else(self):
+        rt = self._runtime()
+        rt.state = self._state("study")
+        rt.image_reader = self._Reader()
+        said = []
+        rt.on_reply = said.append
+        rt.input_sender = self._Sender()
+        rt._study_watch = self._watcher([{"verdict": "not_study",
+                                          "action": "back_to_desktop", "text": "x",
+                                          "note": "提醒之后三次都不像学习", "skipped": ""}])
+        await self._run(rt, ticks=1)
+        self.assertEqual(rt.input_sender.wins, 1, "要发一次 Win+D")
+        self.assertEqual(said, [], "返回桌面**不补第二句话**")
+
+    async def test_without_a_sender_it_says_so_instead_of_crashing(self):
+        rt = self._runtime()
+        rt.state = self._state("study")
+        rt.image_reader = self._Reader()
+        rt.input_sender = None
+        rt._study_watch = self._watcher([{"verdict": "not_study",
+                                          "action": "back_to_desktop", "skipped": ""}])
+        await self._run(rt, ticks=1)                      # 不抛就算过
+
+    async def test_the_switches_can_turn_the_actions_off(self):
+        rt = self._runtime()
+        rt._study_cfg = {"remind": False, "back_to_desktop": False}
+        rt.state = self._state("study")
+        rt.image_reader = self._Reader()
+        said = []
+        rt.on_reply = said.append
+        rt.input_sender = self._Sender()
+        rt._study_watch = self._watcher([{"verdict": "not_study", "action": "remind",
+                                          "text": "现在是学习时间", "skipped": ""},
+                                         {"verdict": "not_study",
+                                          "action": "back_to_desktop", "skipped": ""}])
+        await self._run(rt, ticks=3)
+        self.assertEqual(said, [], "关掉提醒就该真的一句都不说")
+        self.assertEqual(rt.input_sender.wins, 0, "关掉弹桌面就不该动键")
+
+    async def test_skipped_decisions_do_not_say_anything(self):
+        rt = self._runtime()
+        rt.state = self._state("study")
+        rt.image_reader = self._Reader()
+        said = []
+        rt.on_reply = said.append
+        rt._study_watch = self._watcher([{"skipped": "还没到点（还有 3 分钟）"}])
+        await self._run(rt, ticks=1)
+        self.assertEqual(said, [])
+
+    async def test_entering_study_resets_this_cycle(self):
+        rt = make_runtime()
+        rt._study_watch = self._watcher([{}])
+        rt._enter_state(State.STUDY)
+        self.assertEqual(getattr(self, "reset_calls", 0), 1)
+
+    async def test_entering_another_state_does_not_touch_it(self):
+        rt = make_runtime()
+        rt._study_watch = self._watcher([{}])
+        self.reset_calls = 0
+        rt._enter_state(State.IDLE)
+        self.assertEqual(self.reset_calls, 0)
+
+    async def test_a_broken_cycle_reset_does_not_break_the_state_change(self):
+        class _Boom(object):
+            def reset_cycle(self):
+                raise RuntimeError("重置炸了")
+
+            def notes(self):
+                return []
+
+        rt = make_runtime()
+        rt._study_watch = _Boom()
+        rt._enter_state(State.STUDY)                      # 不抛就算过
 
 
 if __name__ == "__main__":

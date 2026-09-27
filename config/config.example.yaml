@@ -260,6 +260,101 @@ bilibili:
   #   音乐与认游戏问的是**同一台 PC**, 不另配一套。
 
 # ---------------------------------------------------------------------------
+# 学习内容监督 (Phase 13 T13-5)
+# ---------------------------------------------------------------------------
+# 干什么: 在 STUDY 里每隔一段时间看一眼串流画面, 判断"现在是不是学习内容"。
+#   · 不像学习 -> 气泡「现在是学习时间」(**只提醒一次, 且不算一次不通过**);
+#   · 之后每 5 分钟复查, 连续 3 次不通过 -> **返回桌面 (Win+D)**, 然后冷却 30 分钟;
+#   · 判成学习 -> 计数清零, 下一次 30 分钟后;
+#   · **判不出来 (unknown) 完全中性**: 不提醒、不动计数、不弹桌面。
+# 判据: 学习锚点库的两个**大类原型**之差 (相对分), **不进 LLM**(你定的)。
+#   ⚠ 别用绝对余弦阈值: T13-4 板端标定实测两个大类的绝对分**重叠**, 按绝对分位中点
+#     定阈值会判出 69% 的"判不出来"; 相对分口径 2 类准确率 95–97%。
+study:
+  # 关掉它 = 不做学习监督 (组件照旧注册, 什么都不做): 与音乐/B 站同一条口径。
+  enabled: false
+
+  # ---- 判定的阈值: **没把握带** ----
+  # |相对分| < band -> unknown (中性)。起始 0.05 来自 T13-4 标定
+  # (39 张真截图: 误打扰 0 / 监督失效 1 / 判不出 8%)。
+  # ⚠ 运行期会自己挪 (一次 0.01, 界 [0.01, 0.20]) —— "阈值不定死"是你定的。
+  relative_band: 0.05
+  # 判不出来的比例超过它就收窄 band (判得多一点)
+  target_unknown_rate: 0.30
+  # 两个大类各攒够多少个**带标签样本**(PC 进程名/人工打标签)才允许自己挪 band
+  min_labeled: 20
+
+  # ---- 时间参数 (你定的那几个) ----
+  focus_interval_min: 30       # 判成学习之后, 下次多久再看
+  recheck_interval_min: 5      # 提醒之后, 每 5 分钟复查
+  max_failures: 3              # 连续几次不通过就弹回桌面 (**不含**那次提醒)
+  cooldown_min: 30             # 弹回桌面之后多久不再管 (冷却期**只看不动**)
+  cooldown_probe_min: 1        # 冷却期里多久看一眼 (比复查短: 否则"5 分钟内又变回学习"发现不了)
+
+  # ---- 动作开关 ----
+  remind: true                 # 发不发那句气泡
+  back_to_desktop: true        # 到点发不发 Win+D
+  skip_on_keyword: true        # 队列是对话关键词驱动时不抓帧 (沿用认游戏那条规矩)
+  learn: true                  # 把"画面判错的那一帧"学成锚点 (自纠错)
+  adapt: true                  # 允许 band 在运行期自己挪 (freeze 关掉)
+
+  # ---- 数据 (都是**派生数据**, 已进 .gitignore) ----
+  anchor_file: config/study_anchors.jsonl
+  stats_file: config/study_stats.json
+  # 每个子标签最多留多少条锚点 (超了丢最旧) —— 学习帧会源源不断自学习进来
+  max_anchors_per_class: 200
+  keep_shots: false            # 自学习时存不存截图 (标定播种的那批不存, 省地方)
+
+  # ---- 子标签 -> 大类 ----
+  # 判据是"动漫/游戏 vs 真人/code/语言": real(真人场景)=学习, anime(动漫)=非学习。
+  # ⚠ 改这里等于改判定口径 (T13-4 的准确率是按这套测的); 只认识 study / not_study。
+  classes:
+    code: study
+    doc: study
+    real: study
+    anime: not_study
+    game: not_study
+
+  # ---- 进程名 -> **子标签** (辅助证据; 映射成大类也认, 但那样学不了锚点) ----
+  # 只在"画面没把握"时用, 因为这条路**没有前台信息** (Windows 的 sshd 在 session 0,
+  # 窗口标题恒为空): 开着浏览器查资料 + 挂着游戏, 它照样说"游戏在跑"。
+  # ⚠ 浏览器 (chrome/msedge/firefox) 与我们自己的播放器 (mpv) **故意不映射** ——
+  #   它们既可能在学习也可能不是, 猜错就是一次误提醒。
+  # ⚠ 复用 `music:` 段的 ssh 配置 (同一台 PC), 不另配一套。
+  process_names:
+    code.exe: code
+    pycharm64.exe: code
+    idea64.exe: code
+    clion64.exe: code
+    goland64.exe: code
+    sublime_text.exe: code
+    WindowsTerminal.exe: code
+    devenv.exe: code
+    obsidian.exe: doc
+    typora.exe: doc
+    notion.exe: doc
+    zotero.exe: doc
+    anki.exe: doc
+    SumatraPDF.exe: doc
+    Acrobat.exe: doc
+    WINWORD.EXE: doc
+    POWERPNT.EXE: doc
+    EXCEL.EXE: doc
+    wps.exe: doc
+    steam.exe: game
+    steamwebhelper.exe: game
+    EpicGamesLauncher.exe: game
+    GenshinImpact.exe: game
+    Yuanshen.exe: game
+    hoi4.exe: game
+    stellaris.exe: game
+    hatsuyuki.exe: game
+    PotPlayerMini64.exe: anime
+    vlc.exe: anime
+    douyin.exe: anime
+    bilibili.exe: anime
+
+# ---------------------------------------------------------------------------
 # 壁纸 (Phase 7 T3)
 # ---------------------------------------------------------------------------
 wallpaper:
