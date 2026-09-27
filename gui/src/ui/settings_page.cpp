@@ -1,22 +1,35 @@
 // ============================================================================
-//  gui/src/ui/settings_page.cpp — 设置页实现（T13）
+//  gui/src/ui/settings_page.cpp — 设置页实现（T13 / T13-9）
+//
+//  三张卡片（T13-9）写的是 config.yaml 里**另外几段**的键：
+//    · 学习监督  study.*
+//    · 游戏检测  bilibili.game_watch.*（+ B 站凭据走 config/bilibili_cookie.json）
+//    · 画像压缩  profile.*
+//  这些段在真源里可能整个不存在（板端现在就没有 `study:`），由 ConfigStore 的
+//  "缺段按模板新建"补上 —— 页面自己绝不拼 YAML，只给出"键 + 值"。
 // ============================================================================
 #include "ui/settings_page.h"
 
 #include "core/config_store.h"
+#include "core/cookie_store.h"
 
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDebug>
+#include <QDir>
+#include <QDoubleSpinBox>
+#include <QFile>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
-#include <QTimer>
 #include <QSpinBox>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include "ui/pages.h"
@@ -51,6 +64,31 @@ QFrame* makeCard(QWidget* parent, const QString& title, QVBoxLayout** inner)
     return frame;
 }
 
+/// 卡片里的说明文字（与视频控制条那条提示同一档样式）。
+QLabel* makeNote(QWidget* parent, const QString& text)
+{
+    auto* note = new QLabel(text, parent);
+    note->setObjectName(QStringLiteral("ChatSystem"));
+    note->setWordWrap(true);
+    return note;
+}
+
+/// 卡片里的小标题（同一张卡里再分一组时用）。
+QLabel* makeSubTitle(QWidget* parent, const QString& text)
+{
+    auto* label = new QLabel(text, parent);
+    label->setObjectName(QStringLiteral("AreaTitle"));
+    return label;
+}
+
+QSpinBox* makeMinuteSpin(QWidget* parent, int low, int high)
+{
+    auto* spin = new QSpinBox(parent);
+    spin->setRange(low, high);
+    spin->setSuffix(QStringLiteral(" 分钟"));
+    return spin;
+}
+
 } // namespace
 
 SettingsPage::SettingsPage(QWidget* parent)
@@ -64,7 +102,7 @@ void SettingsPage::build()
     // 本页的输入控件直接挂样式：全局表里 QComboBox 的规则在这条控件树上没吃住
     // （实测下拉框仍是系统浅色主题、字看不清），就近设置最稳。
     setStyleSheet(QStringLiteral(
-        "QComboBox, QSpinBox {"
+        "QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {"
         "  background: #232428; border: 1px solid #3A3D42; border-radius: 6px;"
         "  color: #E6E6E6; padding: 4px 8px; font-size: 15px; min-height: 26px; }"
         "QComboBox::drop-down { border: none; width: 22px; }"
@@ -73,7 +111,7 @@ void SettingsPage::build()
         "  selection-background-color: #3A3D42; }"
         "QCheckBox { color: #E6E6E6; font-size: 16px; spacing: 8px; }"));
 
-    // 内容比窗口高（三张卡 + 滚动）：整页放进 QScrollArea，避免卡片标题被裁掉
+    // 内容比窗口高（多张卡 + 滚动）：整页放进 QScrollArea，避免卡片标题被裁掉
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
     outer->setSpacing(0);
@@ -151,13 +189,115 @@ void SettingsPage::build()
     overlayIdle_->setSingleStep(500);
     overlayIdle_->setSuffix(QStringLiteral(" ms"));
     overlayForm->addRow(QStringLiteral("休眠时间"), overlayIdle_);
-    auto* note = new QLabel(QStringLiteral("与四区域的休眠时间互不影响（分开设置），"
-                                           "写进 config.yaml 的 gui.video_overlay.idle_ms"), overlay);
-    note->setObjectName(QStringLiteral("ChatSystem"));
-    note->setWordWrap(true);
-    overlayBox->addWidget(note);
+    overlayBox->addWidget(makeNote(overlay, QStringLiteral(
+        "与四区域的休眠时间互不影响（分开设置），写进 config.yaml 的 gui.video_overlay.idle_ms")));
     overlayBox->addLayout(overlayForm);
     root->addWidget(overlay);
+
+    // ------------------------------------------------------- 学习监督 (T13-9) ---
+    QVBoxLayout* studyBox = nullptr;
+    QFrame* study = makeCard(this, QStringLiteral("学习监督"), &studyBox);
+    auto* studyForm = new QFormLayout();
+    studyEnabled_ = new QCheckBox(QStringLiteral("开启（在 STUDY 模式里判画面是不是学习内容）"), study);
+    studyEnabled_->setFocusPolicy(Qt::NoFocus);
+    studyForm->addRow(studyEnabled_);
+    studyFocus_ = makeMinuteSpin(study, 1, 600);
+    studyForm->addRow(QStringLiteral("学习时长（判成学习后多久再看）"), studyFocus_);
+    studyRecheck_ = makeMinuteSpin(study, 1, 120);
+    studyForm->addRow(QStringLiteral("复查间隔（提醒之后每多久看一次）"), studyRecheck_);
+    studyFailures_ = new QSpinBox(study);
+    studyFailures_->setRange(1, 20);
+    studyFailures_->setSuffix(QStringLiteral(" 次"));
+    studyForm->addRow(QStringLiteral("连续不通过几次弹回桌面（不含那次提醒）"), studyFailures_);
+    studyCooldown_ = makeMinuteSpin(study, 1, 600);
+    studyForm->addRow(QStringLiteral("弹回桌面后的冷却（冷却期只看不动）"), studyCooldown_);
+    studyProbe_ = makeMinuteSpin(study, 1, 60);
+    studyForm->addRow(QStringLiteral("冷却期里多久看一眼"), studyProbe_);
+    studyBand_ = new QDoubleSpinBox(study);
+    studyBand_->setRange(0.01, 0.20);
+    studyBand_->setSingleStep(0.01);
+    studyBand_->setDecimals(2);
+    studyForm->addRow(QStringLiteral("起始相对阈值（|相对分| < 它 = 判不出来）"), studyBand_);
+    studyBox->addLayout(studyForm);
+    studyBox->addWidget(makeNote(study, QStringLiteral(
+        "判据是学习锚点库的两个大类原型之差（相对分），不进 LLM；判不出来（unknown）"
+        "完全中性：不提醒、不计数、不弹桌面。阈值运行期会自己挪（一次 0.01，界 0.01–0.20，"
+        "只在两类各攒够样本后才动），这里写的是起始值；自适应记录在 config/study_stats.json，"
+        "锚点在 config/study_anchors.jsonl（都是派生数据，已进 .gitignore）。"
+        "气泡原话与两个动作开关（remind / back_to_desktop）用 assistant set study 改。")));
+    root->addWidget(study);
+
+    // ------------------------------------------- 游戏检测 + B 站凭据 (T13-9) ---
+    QVBoxLayout* gameBox = nullptr;
+    QFrame* game = makeCard(this, QStringLiteral("游戏检测"), &gameBox);
+    auto* gameForm = new QFormLayout();
+    gameEnabled_ = new QCheckBox(QStringLiteral("开启（画面锚点 + 问 PC 进程双路识别）"), game);
+    gameEnabled_->setFocusPolicy(Qt::NoFocus);
+    gameForm->addRow(gameEnabled_);
+    gameInterval_ = new QSpinBox(game);
+    gameInterval_->setRange(5, 3600);
+    gameInterval_->setSuffix(QStringLiteral(" 秒"));
+    gameForm->addRow(QStringLiteral("检测间隔（只在 GAME 模式跑）"), gameInterval_);
+    gameScore_ = new QDoubleSpinBox(game);
+    gameScore_->setRange(0.50, 1.00);
+    gameScore_->setSingleStep(0.01);
+    gameScore_->setDecimals(2);
+    gameForm->addRow(QStringLiteral("“有把握”的分数门槛"), gameScore_);
+    gameBox->addLayout(gameForm);
+
+    // B 站凭据放进这张卡（你定的三张卡片里它是"游戏检测(含 B 站 cookie)"）：
+    // 写的**不是 config.yaml**，是 `bilibili.cookie_file` 指的那个 JSON。
+    gameBox->addWidget(makeSubTitle(game, QStringLiteral("B 站凭据（清晰度）")));
+    auto* cookieForm = new QFormLayout();
+    cookiePath_ = new QLineEdit(game);
+    cookiePath_->setPlaceholderText(core::CookieStore::defaultRelativePath());
+    cookieForm->addRow(QStringLiteral("凭据文件"), cookiePath_);
+    sessdata_ = new QLineEdit(game);
+    sessdata_->setEchoMode(QLineEdit::Password);
+    sessdata_->setPlaceholderText(QStringLiteral("留空 = 不改动"));
+    cookieForm->addRow(QStringLiteral("SESSDATA"), sessdata_);
+    biliJct_ = new QLineEdit(game);
+    biliJct_->setEchoMode(QLineEdit::Password);
+    biliJct_->setPlaceholderText(QStringLiteral("留空 = 不改动"));
+    cookieForm->addRow(QStringLiteral("bili_jct"), biliJct_);
+    dedeUser_ = new QLineEdit(game);
+    dedeUser_->setEchoMode(QLineEdit::Password);
+    dedeUser_->setPlaceholderText(QStringLiteral("留空 = 不改动"));
+    cookieForm->addRow(QStringLiteral("DedeUserID"), dedeUser_);
+    gameBox->addLayout(cookieForm);
+    cookieStatus_ = new QLabel(game);
+    cookieStatus_->setObjectName(QStringLiteral("SysValueSmall"));
+    cookieStatus_->setWordWrap(true);
+    cookieStatus_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    gameBox->addWidget(cookieStatus_);
+    gameBox->addWidget(makeNote(game, QStringLiteral(
+        "没有凭据 = 匿名（单文件阶梯，实测 360P~720P 视视频而定）；有 SESSDATA 可以到 1080P。"
+        "上面三个框只写你这次填了的键（合并写，空着的不动），填完就清空；"
+        "键名照 B 站原样、大小写敏感（SEESSDATA 那种笔误会写不进去）。"
+        "凭据文件已进 .gitignore，写之前会在旁边留一份 .bak。")));
+    root->addWidget(game);
+
+    // ------------------------------------------------------- 画像压缩 (T13-9) ---
+    QVBoxLayout* profileBox = nullptr;
+    QFrame* profile = makeCard(this, QStringLiteral("画像压缩"), &profileBox);
+    auto* profileForm = new QFormLayout();
+    profileEnabled_ = new QCheckBox(QStringLiteral("开启（纯对话攒够就归纳一次）"), profile);
+    profileEnabled_->setFocusPolicy(Qt::NoFocus);
+    profileForm->addRow(profileEnabled_);
+    profileChars_ = new QSpinBox(profile);
+    profileChars_->setRange(100, 100000);
+    profileChars_->setSingleStep(100);
+    profileChars_->setSuffix(QStringLiteral(" 字"));
+    profileForm->addRow(QStringLiteral("触发字数（自上次构建以来攒到这么多字）"), profileChars_);
+    profileTurns_ = new QSpinBox(profile);
+    profileTurns_->setRange(1, 200);
+    profileTurns_->setSuffix(QStringLiteral(" 轮"));
+    profileForm->addRow(QStringLiteral("触发轮数（短消息太多的兜底）"), profileTurns_);
+    profileBox->addLayout(profileForm);
+    profileBox->addWidget(makeNote(profile, QStringLiteral(
+        "触发者只有 Agent 一个：纯对话攒到字数（或轮数兜底）才构建一次；"
+        "用户在对话里说什么都触发不了它，模型也看不到它。结果写 config/user_profile.jsonl。")));
+    root->addWidget(profile);
 
     QVBoxLayout* cfgBox = nullptr;
     QFrame* cfg = makeCard(this, QStringLiteral("配置"), &cfgBox);
@@ -237,6 +377,76 @@ void SettingsPage::showEvent(QShowEvent* event)
     QTimer::singleShot(300, this, toTop);
 }
 
+QString SettingsPage::repoRootFor(const QString& configPath)
+{
+    if (configPath.isEmpty()) {
+        return QString();
+    }
+    // 与 main.cpp 的 `setRepoRoot` 同一算法：config/ 的上一级就是仓库根
+    const QString root = QFileInfo(configPath).absolutePath() + QStringLiteral("/..");
+    return QDir(root).absolutePath();
+}
+
+QString SettingsPage::templatePathFor(const QString& configPath)
+{
+    return core::ConfigStore::siblingTemplatePath(configPath);
+}
+
+QString SettingsPage::cookieFilePath() const
+{
+    const QString raw = cookiePath_ != nullptr ? cookiePath_->text() : QString();
+    return core::CookieStore::resolvePath(raw, repoRootFor(configPath_));
+}
+
+void SettingsPage::refreshCookieStatus()
+{
+    if (cookieStatus_ == nullptr) {
+        return;
+    }
+    const QString path = cookieFilePath();
+    core::CookieStore cookie;
+    cookie.load(path);
+    QStringList parts;
+    for (const QString& key : core::CookieStore::allowedKeys()) {
+        const QString value = cookie.value(key);
+        parts << QStringLiteral("%1 %2")
+                     .arg(key, value.isEmpty() ? QStringLiteral("（无）")
+                                               : core::CookieStore::mask(value));
+    }
+    cookieStatus_->setText(QStringLiteral("文件%1：%2\n当前：%3")
+                               .arg(QFile::exists(path) ? QStringLiteral("在") : QStringLiteral("不在（匿名）"),
+                                    path, parts.join(QStringLiteral(" · "))));
+}
+
+void SettingsPage::loadCards(core::ConfigStore* store)
+{
+    studyEnabled_->setChecked(store->boolValue(QStringLiteral("study.enabled"), false));
+    studyFocus_->setValue(store->intValue(QStringLiteral("study.focus_interval_min"), 30));
+    studyRecheck_->setValue(store->intValue(QStringLiteral("study.recheck_interval_min"), 5));
+    studyFailures_->setValue(store->intValue(QStringLiteral("study.max_failures"), 3));
+    studyCooldown_->setValue(store->intValue(QStringLiteral("study.cooldown_min"), 30));
+    studyProbe_->setValue(store->intValue(QStringLiteral("study.cooldown_probe_min"), 1));
+    studyBand_->setValue(store->doubleValue(QStringLiteral("study.relative_band"), 0.05));
+
+    gameEnabled_->setChecked(store->boolValue(QStringLiteral("bilibili.game_watch.enabled"), true));
+    gameInterval_->setValue(store->intValue(QStringLiteral("bilibili.game_watch.interval_s"), 60));
+    gameScore_->setValue(store->doubleValue(QStringLiteral("bilibili.game_watch.confident_score"), 0.82));
+
+    profileEnabled_->setChecked(store->boolValue(QStringLiteral("profile.enabled"), true));
+    profileChars_->setValue(store->intValue(QStringLiteral("profile.trigger_chars"), 2000));
+    profileTurns_->setValue(store->intValue(QStringLiteral("profile.trigger_turns"), 12));
+
+    const QString raw =
+        store->value(QStringLiteral("bilibili.cookie_file"), core::CookieStore::defaultRelativePath());
+    cookiePath_->setText(raw.isEmpty() ? core::CookieStore::defaultRelativePath() : raw);
+    // 三个凭据框**故意不预填**：里面存的是账号，预填就会在下次保存时被当成"新值"写回去
+    // （而且状态标签给的是掩码串，填错了真会把掩码写进凭据文件）。
+    sessdata_->clear();
+    biliJct_->clear();
+    dedeUser_->clear();
+    refreshCookieStatus();
+}
+
 void SettingsPage::loadFromConfig(const QString& configPath)
 {
     configPath_ = configPath;
@@ -269,10 +479,55 @@ void SettingsPage::loadFromConfig(const QString& configPath)
     selectByData(startPage_, store.value(QStringLiteral("gui.start_page"), QStringLiteral("home")));
     selectByData(inputSource_,
                  store.value(QStringLiteral("gui.input_source"), QStringLiteral("keyboard")));
+    loadCards(&store);
     if (scroll_ != nullptr && scroll_->verticalScrollBar() != nullptr) {
         // 焦点落在第一个控件上会把它"滚进视野"，首个卡片标题就被裁了 → 拉回顶部
         scroll_->verticalScrollBar()->setValue(0);
     }
+}
+
+bool SettingsPage::saveCards(core::ConfigStore* store, QString* error)
+{
+    // ⚠ 这一段就是"页面能写哪些键"的**白名单**（T13-9 验收要求按**键**列出来）。
+    //    `tests/test_settings_page.cpp::saveOnlyTouchesWhitelistedKeys` 拿真模板逐行核对：
+    //    除了 gui.* 与本函数列的这些键，别的行一个字节都不许变。
+    store->setBool(QStringLiteral("study.enabled"), studyEnabled_->isChecked());
+    store->set(QStringLiteral("study.focus_interval_min"), QString::number(studyFocus_->value()));
+    store->set(QStringLiteral("study.recheck_interval_min"), QString::number(studyRecheck_->value()));
+    store->set(QStringLiteral("study.max_failures"), QString::number(studyFailures_->value()));
+    store->set(QStringLiteral("study.cooldown_min"), QString::number(studyCooldown_->value()));
+    store->set(QStringLiteral("study.cooldown_probe_min"), QString::number(studyProbe_->value()));
+    store->set(QStringLiteral("study.relative_band"),
+               QString::number(studyBand_->value(), 'f', 2));
+
+    store->setBool(QStringLiteral("bilibili.game_watch.enabled"), gameEnabled_->isChecked());
+    store->set(QStringLiteral("bilibili.game_watch.interval_s"),
+               QString::number(gameInterval_->value()));
+    store->set(QStringLiteral("bilibili.game_watch.confident_score"),
+               QString::number(gameScore_->value(), 'f', 2));
+    const QString cookiePath = cookiePath_->text().trimmed();
+    if (!cookiePath.isEmpty()) {
+        store->set(QStringLiteral("bilibili.cookie_file"), cookiePath);
+    }
+
+    store->setBool(QStringLiteral("profile.enabled"), profileEnabled_->isChecked());
+    store->set(QStringLiteral("profile.trigger_chars"), QString::number(profileChars_->value()));
+    store->set(QStringLiteral("profile.trigger_turns"), QString::number(profileTurns_->value()));
+
+    // 凭据是**另一个文件**（config/bilibili_cookie.json），不在这里写；这里只挡类型/键名错误
+    for (const QLineEdit* edit : {sessdata_, biliJct_, dedeUser_}) {
+        if (edit == nullptr) {
+            continue;
+        }
+        const QString text = edit->text().trimmed();
+        if (text.contains(QLatin1Char('\n')) || text.contains(QLatin1Char('\r'))) {
+            if (error != nullptr) {
+                *error = QStringLiteral("凭据不能换行（一行一个键）");
+            }
+            return false;
+        }
+    }
+    return true;
 }
 
 bool SettingsPage::saveToConfig(QString* error)
@@ -287,6 +542,13 @@ bool SettingsPage::saveToConfig(QString* error)
     if (!store.load(configPath_, error)) {
         return false;
     }
+    // 缺段新建与"值类型跟着模板走"都靠这份模板（板端就是 config/config.example.yaml）。
+    // 读不到只是**退化成 T13-9 之前的行为**（父块不存在就拒绝写入），不是致命错误。
+    QString templateError;
+    if (!store.loadTemplate(templatePathFor(configPath_), &templateError)) {
+        qWarning().noquote() << "[settings] 模板读不到（缺段将拒绝新建）:" << templateError;
+    }
+
     store.setBool(QStringLiteral("gui.debug"), debug_->isChecked());
     for (const QString& region : {QStringLiteral("top"), QStringLiteral("bottom"),
                                   QStringLiteral("left"), QStringLiteral("right")}) {
@@ -300,7 +562,45 @@ bool SettingsPage::saveToConfig(QString* error)
     store.setBool(QStringLiteral("gui.fullscreen"), fullscreen_->currentIndex() == 0);
     store.set(QStringLiteral("gui.start_page"), startPage_->currentData().toString());
     store.set(QStringLiteral("gui.input_source"), inputSource_->currentData().toString());
-    return store.save(error);
+    if (!saveCards(&store, error)) {
+        return false;
+    }
+    if (!store.save(error)) {
+        return false;
+    }
+
+    // ---- B 站凭据（另一个文件；只写这次真填了的键，合并写 + .bak + 原子写）----
+    core::CookieStore cookie;
+    const auto put = [&cookie, error](const QLineEdit* edit, const char* key) {
+        if (edit == nullptr) {
+            return true;
+        }
+        const QString text = edit->text().trimmed();
+        if (text.isEmpty()) {
+            return true;             // 空 = 不改动这个键
+        }
+        return cookie.set(QString::fromLatin1(key), text, error);
+    };
+    if (!put(sessdata_, "SESSDATA") || !put(biliJct_, "bili_jct")
+        || !put(dedeUser_, "DedeUserID")) {
+        return false;
+    }
+    bool wrote = false;
+    if (!cookie.save(cookieFilePath(), error, &wrote)) {
+        if (error != nullptr) {
+            *error = QStringLiteral("配置已保存，但凭据写入失败: %1").arg(*error);
+        }
+        return false;
+    }
+    if (wrote) {
+        qInfo().noquote() << "[settings] B 站凭据已写入" << cookieFilePath();
+    }
+    // 填过的框清掉（避免第二次保存把同一串再写一遍）+ 刷新状态标签
+    sessdata_->clear();
+    biliJct_->clear();
+    dedeUser_->clear();
+    refreshCookieStatus();
+    return true;
 }
 
 void SettingsPage::restoreDefaults()
@@ -321,5 +621,25 @@ void SettingsPage::restoreDefaults()
     fullscreen_->setCurrentIndex(0);
     selectByData(startPage_, QStringLiteral("home"));
     selectByData(inputSource_, QStringLiteral("keyboard"));
+
+    // 三张卡片的默认值（与 config.example.yaml / Agent 的默认值同一口径）
+    studyEnabled_->setChecked(false);
+    studyFocus_->setValue(30);
+    studyRecheck_->setValue(5);
+    studyFailures_->setValue(3);
+    studyCooldown_->setValue(30);
+    studyProbe_->setValue(1);
+    studyBand_->setValue(0.05);
+    gameEnabled_->setChecked(true);
+    gameInterval_->setValue(60);
+    gameScore_->setValue(0.82);
+    profileEnabled_->setChecked(true);
+    profileChars_->setValue(2000);
+    profileTurns_->setValue(12);
+    cookiePath_->setText(core::CookieStore::defaultRelativePath());
+    sessdata_->clear();
+    biliJct_->clear();
+    dedeUser_->clear();
+    refreshCookieStatus();
     qInfo().noquote() << "[settings] 界面已恢复默认值（尚未保存）";
 }

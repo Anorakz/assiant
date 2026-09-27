@@ -60,6 +60,10 @@ add_library(gui_services STATIC
     src/services/onboard_ctl.cpp
     src/core/config_store.h
     src/core/config_store.cpp
+    # T13-9: B 站凭据文件（config/bilibili_cookie.json）的读写。与 ConfigStore 分开:
+    # 它写的不是配置真源, 是凭据（整份 JSON + .bak + 原子写 + 只认三个键）。
+    src/core/cookie_store.h
+    src/core/cookie_store.cpp
     src/core/config_sync.h
     src/core/config_sync.cpp
     src/core/view_state.h

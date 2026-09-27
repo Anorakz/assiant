@@ -39,7 +39,7 @@ add_test(NAME test_local_client COMMAND test_local_client)
 # --------------------------------------------------- T2: core 层单测 ---
 # 配置读写（文本级键路径替换）/ 配置同步（config.yaml → 派生的 llm.env）/
 # 协议→显示状态。都不需要 Widgets，也不碰仓库里的真实配置文件。
-foreach(core_test test_config_store test_config_sync test_view_state test_idle_watcher test_onboard_ctl test_image_fit test_system_stats test_schedule_model test_bilibili_format)
+foreach(core_test test_config_store test_config_sync test_cookie_store test_view_state test_idle_watcher test_onboard_ctl test_image_fit test_system_stats test_schedule_model test_bilibili_format)
     add_executable(${core_test} ${core_test}.cpp)
     target_link_libraries(${core_test} PRIVATE
         gui_services        # ConfigStore / ConfigSyncer / ViewState
@@ -90,6 +90,13 @@ endforeach()
 #   "Cannot specify compile definitions for target ... which is not built by this project"。
 target_compile_definitions(test_icons PRIVATE
     ICONS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../resources/icons")
+
+# T13-9: 设置页的"白名单契约"测试要拿**仓库里那份真模板**当真源 ——
+# 逐行核对"保存只动了准许的那几个键"，缺段新建也要拿它的原文比对。
+# ⚠ 同样必须放在创建 test_settings_page 的 foreach **之后**（同 test_icons 的理由）。
+target_compile_definitions(test_settings_page PRIVATE
+    SETTINGS_TEMPLATE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../config/config.example.yaml"
+)
 
 # ---------------------------------------------------------------- 双向联调 ---
 # 任务4: 起 Python IPC server + C++ GUI (headless), push status 再发 switch_mode。
