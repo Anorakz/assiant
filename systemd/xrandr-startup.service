@@ -1,0 +1,81 @@
+# ============================================================================
+#  systemd/xrandr-startup.service — 修正板端自带单元的坏排序（T14-7）
+#
+#  这是**板端自带的**单元，原文（/etc/systemd/system/xrandr-startup.service，mode 666）：
+#      [Unit]
+#      Description=Start xrandr script on boot
+#      After=graphical.target          <-- 唯一被改的一行
+#      [Service]
+#      Type=oneshot
+#      Environment="DISPLAY=:0"
+#      Environment="XAUTHORITY=/home/kickpi/.Xauthority"
+#      ExecStart=/usr/bin/xrandr --output DSI-1 --rotate left
+#      User=kickpi
+#      [Install]
+#      WantedBy=graphical.target
+#
+#  为什么必须改
+#  ---------------------------------------------------------------------------
+#    `WantedBy=graphical.target` 会让 systemd 给它补一条隐式 `Before=graphical.target`，
+#    而它自己又写 `After=graphical.target` —— 自相矛盾的双向排序。
+#    任何 `After=xrandr-startup.service` 的单元只要和它进同一个开机事务就会被拖进排序环，
+#    而 systemd 破环的手段是**直接删掉环里某个启动作业** —— 2026-09-27 的实测结果就是
+#    `agent-gui.service` 开机"根本没被启动"（journal：Job agent-gui.service/start deleted
+#    to break ordering cycle；详见 agent-gui.service 顶部的取证记录）。
+#
+#    它真正要的语义只是"X 起来之后再转屏"，改成 `After=display-manager.service` 就对了：
+#      · 原来：graphical.target 到了之后才转屏（此时 GUI 已经画过了）；
+#      · 现在：SLiM 起了 X 就转屏，且仍在 graphical.target 之前 ——
+#              于是 `After=xrandr-startup.service` 的 GUI 开机能拿到已经转好的 1280×800。
+#    副作用（好的）：开机后不再有"先竖后横"的那一下。
+#
+#  还有两个必须一起改的地方（2026-09-27 第一次替换后实测踩到的）
+#  ---------------------------------------------------------------------------
+#    1) 只写 `After=display-manager.service` 会**太早**：
+#       slim.service 的 start 作业完成 ≠ Xorg 已经在听 socket（实测差约 1 秒），
+#       于是 journal 里是 `xrandr[765]: Can't open display :0`，单元 failed，
+#       屏幕停在竖屏 800×1280（GUI 窗口被挤到 935×1280）。
+#       所以加了 ExecStartPre 轮询 `xrandr --query`，等 X 真能连上再转（最多 30 秒）。
+#    2) `User=kickpi` + `XAUTHORITY=/home/kickpi/.Xauthority` 是没用的：
+#       板端实测 `/home/kickpi/.Xauthority` **根本不存在**（/var/run/slim.auth 也不存在，
+#       SLiM 的 Xorg 日志里就是 `Failed to open authorization file`），X 实际上不校验；
+#       而 root 进程不带 XAUTHORITY 就能操作 `:0`（`DISPLAY=:0 xrandr` / `xwininfo` 都成功）。
+#       改成 `User=root`，少一个会变的状态。（原来能成功只是因为跑得够晚。）
+#
+#  为什么不用 drop-in 覆盖（试过了，不行）
+#  ---------------------------------------------------------------------------
+#    `/etc/systemd/system/xrandr-startup.service.d/override.conf` 里写
+#        [Unit]
+#        After=
+#        After=display-manager.service
+#    实测在 systemd 245（Ubuntu 20.04）上：**后一行生效、前一行没生效** ——
+#    `systemctl show xrandr-startup.service -p After` 里 `graphical.target` 依然在，
+#    环还在（`slim.service` 倒是因为后一行加进去了）。所以这里是整份替换，不是 drop-in。
+#
+#  安装（覆盖板端原文件）
+#  ---------------------------------------------------------------------------
+#      sudo cp systemd/xrandr-startup.service /etc/systemd/system/
+#      sudo chmod 644 /etc/systemd/system/xrandr-startup.service
+#      sudo systemctl daemon-reload
+#      # 自检 1：After 里不该再有 graphical.target，Before 里应该有
+#      systemctl show xrandr-startup.service -p After -p Before
+#      # 自检 2：开机后不该 failed，屏幕该是 1280x800 left
+#      systemctl is-active xrandr-startup.service; DISPLAY=:0 xrandr --query | grep DSI
+# ============================================================================
+[Unit]
+Description=Start xrandr script on boot
+After=display-manager.service
+
+[Service]
+Type=oneshot
+# root：实测 root 不需要 XAUTHORITY 就能操作 :0（kickpi 的 .Xauthority 压根不存在）
+User=root
+Environment=DISPLAY=:0
+# 等 X 真能连上（slim.service 的 start 完成 ≠ Xorg 已在听，实测差约 1s；
+# 不等就是 "Can't open display :0"）。最多等 30 秒，超时也照样往下走，
+# 免得 X 真起不来时把 graphical.target 卡住 —— 转屏失败会由单元状态暴露出来。
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do xrandr --query >/dev/null 2>&1 && exit 0; sleep 0.5; done; echo "X 一直没就绪（等了 30s），仍然尝试转屏"; exit 0'
+ExecStart=/usr/bin/xrandr --output DSI-1 --rotate left
+
+[Install]
+WantedBy=graphical.target

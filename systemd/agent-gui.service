@@ -1,0 +1,83 @@
+# ============================================================================
+#  systemd/agent-gui.service — 板端 GUI 开机自启（T14-7）
+#
+#  与桌面自启（kickpi 的 autostart）的区别（你 2026-09-27 定的）
+#  ---------------------------------------------------------------------------
+#    桌面自启跑在 kickpi 下，而 IPC socket 是 0600 —— kickpi 连不上 Agent。
+#    改成 root 的 systemd 服务之后：socket 权限不用放宽，GUI 也不再需要任何写权限
+#    （T14-3 起它一行配置都不写，全走 IPC 让 Agent 落盘）。
+#
+#  怎么接上 X（板端实测过，不是猜的）
+#  ---------------------------------------------------------------------------
+#    · X 由 SLiM 起（`display-manager.service` -> slim.service，active），Xorg 以 root 运行；
+#    · 实测：root 进程**不需要 XAUTHORITY** 就能画到 `DISPLAY=:0`
+#      （ssh 里跑 `DISPLAY=:0 xrandr` / `xwininfo -root` 都成功，拿到 1280×800 的根窗口）；
+#    · `After=xrandr-startup.service`：该单元把 DSI 面板转成 1280×800（实测开机把 DSI-1
+#      转成 `left`），GUI 要等它转完再画，否则第一帧是横的。
+#      **它自带的 `After=graphical.target` 是坏的**（见下），所以本仓库同时提供修好的
+#      `systemd/xrandr-startup.service`（整份替换，不是 drop-in —— 原因见该文件顶部）；
+#      两个文件必须一起装，只装服务文件就会成环、开机不启动。
+#
+#  开机起不来（2026-09-27 取证，已修）
+#  ---------------------------------------------------------------------------
+#    症状：`systemctl enable` 成功、`systemctl start` 手动也成功，但重启后
+#          `agent-gui.service` 是 inactive (dead)、MainPID=0、ActiveEnterTimestamp 为空，
+#          journal 里连一条 "Starting ..." 都没有 —— 它**根本没被启动**，不是启动失败。
+#    证据（journalctl -b）：
+#          agent-gui.service:44: Unknown key name 'StartLimitIntervalSec' in section 'Service', ignoring.
+#          graphical.target: Found ordering cycle on agent-gui.service/start
+#          graphical.target: Job agent-gui.service/start deleted to break ordering cycle starting with graphical.target/start
+#    两个原因：
+#      1) 排序成环。systemd 破环的手段就是**删掉启动作业**，所以表现成"没启动"而不是"失败"。
+#         环（用 systemctl show 的 After/Before 复现出来的）：
+#           graphical.target ─Before─> xrandr-startup.service   （xrandr 自己写了 After=graphical.target）
+#           xrandr-startup   ─Before─> agent-gui.service       （本单元写了 After=xrandr-startup）
+#           agent-gui        ─Before─> graphical.target        （WantedBy=graphical.target 的隐式排序）
+#         坏边是 xrandr-startup.service 的 `After=graphical.target`：它同时
+#         `WantedBy=graphical.target`，自相矛盾。本单元的 `After=xrandr-startup.service`
+#         单看没错，但同一个事务里就会被拖进环 —— 所以修法是**改 xrandr 的排序**，不是删这行。
+#         （顺带纠正一个错推：把本单元改成 `WantedBy=multi-user.target` 并不能解环，
+#           multi-user.target ─Before─> graphical.target 依然在环上。）
+#      2) systemd 245 里 `StartLimitIntervalSec` / `StartLimitBurst` 属 `[Unit]`，
+#         写在 `[Service]` 会被静默忽略 —— 以为配了重启限流其实没有。已移到 [Unit]。
+#      3) `PartOf=graphical.target` 一并去掉：GUI 是常驻进程，DM 停/重启时靠
+#         `Requires=display-manager.service` 那条链带它走就够了，PartOf 只多一层成环风险。
+#
+#  安装（两个文件都要）
+#  ---------------------------------------------------------------------------
+#      sudo cp systemd/agent-gui.service systemd/xrandr-startup.service /etc/systemd/system/
+#      sudo chmod 644 /etc/systemd/system/agent-gui.service /etc/systemd/system/xrandr-startup.service
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now agent-gui
+# ============================================================================
+[Unit]
+Description=板端助手 GUI（Qt5 kiosk）
+Documentation=file:///home/kickpi/myproject/assitant/docs/gui.md
+After=display-manager.service xrandr-startup.service agent.service
+Wants=agent.service
+# 有 X 才算"图形起来了"；DM 停了/重启了，GUI 跟着走
+Requires=display-manager.service
+# 不要写 PartOf=graphical.target（见上面第 3 点）
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/kickpi/myproject/assitant
+Environment=DISPLAY=:0
+# T11 实测：板端 souphttpsrc 坏的 -> 压它的 rank，播放器自动改用 curlhttpsrc
+Environment=GST_PLUGIN_FEATURE_RANK=souphttpsrc:0
+# 等 X 的 socket 出现（最多 ~20 秒），免得开机早于 Xorg 就判失败
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 40); do [ -S /tmp/.X11-unix/X0 ] && exit 0; sleep 0.5; done; exit 0'
+ExecStart=/home/kickpi/myproject/assitant/gui/build/agent_gui --config config/config.yaml
+# kiosk：正常退出（窗口被关/被登出带走）也要回来；真起不来由 [Unit] 的 StartLimit 兜底
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+StandardOutput=append:/home/kickpi/myproject/assitant/logs/gui.out
+StandardError=append:/home/kickpi/myproject/assitant/logs/gui.out
+SyslogIdentifier=agent-gui
+
+[Install]
+WantedBy=graphical.target

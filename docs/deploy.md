@@ -162,7 +162,78 @@ tests/board/mpp_decode_smoke
 
 ---
 
-## 9. 相关文档
+## 9. 开机自启（T14-7）
+
+板端开机自动跑的东西**都在仓库里的 [`systemd/`](../systemd) 目录**（三个文件，缺一个就会
+出问题，见下面"为什么要替换 xrandr"）：
+
+| 单元 | 跑什么 | 谁拉起它 | 重启策略 |
+| --- | --- | --- | --- |
+| `agent.service` | `python3 -m agent.main`（**root**） | `multi-user.target` | `Restart=on-failure` |
+| `agent-gui.service` | `gui/build/agent_gui`（**root**，`DISPLAY=:0`） | `graphical.target` | `Restart=always` |
+| `xrandr-startup.service` | 把 DSI 面板转成 **1280×800** | `graphical.target` | —（板端自带，**必须替换**） |
+
+两个都要 root：IPC socket 是 **0600**，桌面自启（kickpi 的 autostart）连不上 Agent；
+而"GUI 也走 root 的 systemd 服务"是 2026-09-27 定的，于是 socket 权限不用放宽。
+
+### 安装
+
+```bash
+sudo cp systemd/agent.service systemd/agent-gui.service systemd/xrandr-startup.service \
+        /etc/systemd/system/
+sudo chmod 644 /etc/systemd/system/agent.service /etc/systemd/system/agent-gui.service \
+               /etc/systemd/system/xrandr-startup.service
+sudo systemctl daemon-reload
+sudo systemctl enable agent.service agent-gui.service
+# 不想重启机器就立刻起：
+sudo systemctl start agent.service agent-gui.service
+```
+
+### 为什么要替换板端自带的 `xrandr-startup.service`
+
+板端那份写的是 `After=graphical.target` **且** `WantedBy=graphical.target` —— 后者会让
+systemd 给它补一条隐式的 `Before=graphical.target`，于是**自相矛盾**。任何
+`After=xrandr-startup.service` 的单元（GUI 就是）只要和它进同一个开机事务就会被拖进
+排序环，而 systemd 破环的手段是**直接删掉环里某个启动作业**：现象就是 GUI"开机没启动"
+（`inactive (dead)`、`MainPID=0`、journal 里连 `Starting ...` 都没有），**不是**启动失败。
+完整取证（journal 原文 + 三条边的环）写在 `systemd/agent-gui.service` 与
+`systemd/xrandr-startup.service` 的文件头。
+
+⚠ 顺带两条板端实测的坑（都写进单元文件注释了）：
+
+- drop-in（`xrandr-startup.service.d/override.conf`）里写 `After=` 想**重置**原列表，
+  在 systemd 245 上**不生效**（后加的 `After=display-manager.service` 生效了，
+  `graphical.target` 却还在）—— 所以这里是**整份替换**，不是 drop-in；
+- `StartLimitIntervalSec` / `StartLimitBurst` 在 systemd 245 属于 **`[Unit]`**：原来写在
+  `[Service]` 里只会得到一条 `Unknown key name ... ignoring`，限流等于没配。
+
+### 装完怎么自证（都在板端跑）
+
+```bash
+systemctl is-active agent.service agent-gui.service      # 两个都 active
+journalctl -b | grep -i 'ordering cycle'                 # 必须**空**（有输出就是还在环里）
+systemctl --failed --no-pager                            # 不该有这三个单元
+systemctl show agent-gui.service -p MainPID -p NRestarts # MainPID 非 0、NRestarts 是 0
+DISPLAY=:0 xrandr --query | grep DSI                     # 1280x800 ... left
+DISPLAY=:0 xwininfo -root -tree | grep agent_gui         # 有 GUI 窗口
+assistant status                                         # 已连上 /tmp/agent.sock
+```
+
+2026-09-27 的实测记录：重启后 60 秒，两个单元都 `active`、`NRestarts=0`、截图是转正后的
+1280×800 首页；分别对两个 `MainPID` 做 `kill -9`，两个单元各自被拉回来（`NRestarts=1`），
+GUI 自己重连上 Agent。守卫测试是 `tests/test_systemd_units.py`（不改板端也能跑：
+单元形状、键写在哪一段、三个单元合起来有没有环、文档有没有点名三个文件）。
+
+### 一处已知的观感问题（不属于 T14-7）
+
+GUI 首页内容的**布局最小高度是 883 px**，而面板逻辑尺寸是 1280×800 —— kiosk 走
+`showFullScreen()`，窗口最后是 `1280×883`，底部约 83 px 被切掉（截图里「日程」卡片最后
+一行贴着屏幕下沿）。这与开机自启无关（`gui/src/main.cpp` 的 kiosk 分支只有
+`showFullScreen()` 一句，是布局的最小尺寸把窗口撑高的），要不要单独开一条任务由你定。
+
+---
+
+## 10. 相关文档
 
 - 架构与拓扑、板端目录布局：[`architecture.md`](architecture.md)
 - GUI 的构建与使用：[`gui.md`](gui.md)

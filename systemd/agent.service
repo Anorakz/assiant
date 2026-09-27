@@ -1,0 +1,45 @@
+# ============================================================================
+#  systemd/agent.service — 板端 Agent 开机自启（T14-7）
+#
+#  为什么是 **root**（而不是 kickpi）
+#  ---------------------------------------------------------------------------
+#    Agent 要：MPP 硬解（/dev/mpp_service）、写 config/config.yaml 与 B 站凭据、
+#    ssh 到 PC（neteasecli 出声 / 问进程）、以后还要跑 nmcli 改 WiFi —— 这些都要 root。
+#    于是 GUI 也走 root（同一个单元风格）：IPC socket 是 0600，两个都 root 就**不用**
+#    放宽 socket 权限，也不再需要 ipc.socket_mode 这个配置键（你 2026-09-27 定的）。
+#
+#  安装
+#  ---------------------------------------------------------------------------
+#      sudo cp systemd/agent.service /etc/systemd/system/
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now agent
+# ============================================================================
+[Unit]
+Description=板端助手 Agent（Python / asyncio）
+Documentation=file:///home/kickpi/myproject/assitant/Readme.md
+After=network-online.target
+Wants=network-online.target
+# systemd 245（Ubuntu 20.04）里 StartLimit* 属 [Unit]；写在 [Service] 会被
+# "Unknown key name ... ignoring" 静默丢掉 —— 2026-09-27 T14-7 取证发现，已改正。
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/kickpi/myproject/assitant
+# 日志目录先建出来（append: 不会自己建目录）
+ExecStartPre=/bin/mkdir -p /home/kickpi/myproject/assitant/logs
+ExecStart=/usr/bin/python3 -m agent.main --config config/config.yaml
+# 崩溃/被杀都拉回来（T14-8 会把崩溃栈落进 logs/crash/）
+Restart=on-failure
+RestartSec=3
+# 给足时间优雅退出（native 线程 / moonlight 收流要几秒）
+TimeoutStopSec=20
+KillSignal=SIGINT
+StandardOutput=append:/home/kickpi/myproject/assitant/logs/agent.out
+StandardError=append:/home/kickpi/myproject/assitant/logs/agent.out
+SyslogIdentifier=agent
+
+[Install]
+WantedBy=multi-user.target

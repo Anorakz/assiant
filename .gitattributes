@@ -1,0 +1,12 @@
+# 行尾纪律
+# ---------------------------------------------------------------------------
+# 仓库里存的永远是 LF，但 PC 侧 `core.autocrlf=true`：默认 checkout 会把文本文件
+# 变成 CRLF（`git status` 那句 "LF will be replaced by CRLF" 就是在说这件事）。
+#
+# systemd 单元**必须**是 LF：systemd 不会替你去掉行尾的 `\r` ——
+# `After=display-manager.service\r` 会被当成一个不认识的目标名，于是排序静默失效。
+# T14-7 的教训正是"单元文件写错一个字，行为与你以为的不一样、还不报错"。
+# 钉死 `eol=lf` 之后，PC 的 working copy 也保持 LF：直接 scp / cp 到板端都不会带 \r
+# （`tests/test_systemd_units.py` 里那条 LF 检查也就不会在 Windows 上假红）。
+.gitattributes text eol=lf
+systemd/*.service text eol=lf
