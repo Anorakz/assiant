@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from ..media import music_library as lib
 from ..net.netease_cli import NeteaseCli, NeteaseCliError, PlayerFailure

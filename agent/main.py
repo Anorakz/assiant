@@ -58,7 +58,7 @@ import threading
 import time
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 # 允许 `python agent/main.py` 直接跑 (此时包根不在 sys.path 上)
 if __package__ in (None, ""):  # pragma: no cover - 只在直接执行时走
@@ -1468,6 +1468,8 @@ class Runtime:
         self._reset_queue_on_mood_change(record, previous)
 
     def _remove_from_playback(self, track_ids: Sequence[str]) -> Optional[Dict[str, Any]]:
+        # ⚠ 与同文件别处同一个风格：music 相关的东西按需在函数里导入
+        from agent.core.music import MusicError
         """从播放队列里去掉这些歌（T10-5 第 5 条）。@return `music.remove()` 的结果。"""
         if self.music is None or not track_ids:
             return None
@@ -1492,6 +1494,8 @@ class Runtime:
 
     def _reset_queue_on_mood_change(self, record: Dict[str, Any],
                                     previous: Optional[Mapping[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        # ⚠ 与同文件别处同一个风格：music 相关的东西按需在函数里导入
+        from agent.core.music import MusicError
         """**只有心情变了才重置队列**（你定的第 6 条）。
 
         @return `{"from","to","cleared","kept"}`；没重置就是 None
