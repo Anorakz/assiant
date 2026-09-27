@@ -272,7 +272,16 @@ async def part_a(runtime, frames, no_stream):
     print("\n== A. 真帧这一路（真 moonlight 帧 / 真 NPU / 真锚点库）")
     import numpy as np
 
+    from agent.core.state_machine import State
+
     watcher = runtime._study_watch
+    # ⚠ 先把状态切到 STUDY: 共用的那份 SigLIP 是**按状态常驻**的（认游戏那个循环每 2 秒
+    #   `ensure_model(state)`）—— 不在 STUDY/GAME 时它会把模型卸掉, 那时编码拿不到向量。
+    if runtime.state.current() is not State.STUDY:
+        runtime.state.transition_to(State.STUDY, "T13-6 验收: 进学习时间")
+        await asyncio.sleep(0.5)
+    if runtime._game_watch is not None:
+        runtime._game_watch.ensure_model("STUDY")
     real_frame = None
     if no_stream:
         skip("真串流帧", "--no-stream")
@@ -316,11 +325,14 @@ async def part_a(runtime, frames, no_stream):
 
     check("数据集五类各一张都能过真管线", len(frames) == 5, "拿到 %s" % sorted(frames))
     if frames:
-        row = frames.get("game") if frames.get("game") is not None else list(frames.values())[0]
-        t = time.time()
-        decision = watcher.verdict(row)
-        check("数据集截图走真 NPU 也有结论", decision["relative"] is not None,
-              "%.2f s/张" % (time.time() - t))
+        row = frames["game"] if frames.get("game") is not None else list(frames.values())[0]
+        if runtime._game_watch is None or runtime._game_watch.encoder() is None:
+            skip("数据集截图走真 NPU", "SigLIP 没在内存里（不在 STUDY/GAME？）")
+        else:
+            t = time.time()
+            decision = watcher.verdict(row)
+            check("数据集截图走真 NPU 也有结论", decision["relative"] is not None,
+                  "%.2f s/张, 相对分 %s" % (time.time() - t, decision["relative"]))
 
 
 # ---------------------------------------------------------------------------
@@ -337,11 +349,12 @@ async def part_b(runtime, sock, frames, no_stream):
     watcher.reset_cycle()
     from agent.core.state_machine import State
 
-    runtime.state.transition_to(State.STUDY, "T13-6 验收")
+    if runtime.state.current() is not State.STUDY:
+        runtime.state.transition_to(State.STUDY, "T13-6 验收")
     await asyncio.sleep(0.2)
 
     study_frame = frames.get("code")
-    naughty_frame = frames.get("game") or frames.get("anime")
+    naughty_frame = frames["game"] if frames.get("game") is not None else frames.get("anime")
     if study_frame is None or naughty_frame is None:
         skip("升级链", "数据集不全（需要 code 与 game/anime 各一张）")
         return
@@ -519,6 +532,7 @@ async def main():
                       log=logging.getLogger("agent.t13"))
     try:
         await runtime._start_bus_and_io()
+        await runtime._start_native()                    # 真串流（moonlight 连 PC）
         await runtime._start_bilibili()
         await runtime._start_study()
         await runtime._start_state_and_tools()
