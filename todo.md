@@ -1970,8 +1970,38 @@ T13-9 ☑ **GUI 三张卡片 + 缺段新建**（与 T13-8 的 Python 写作器**
         读回来变成上一个块的子键（加了"新建块里必须有这个键"的校验才暴露）;
         ② 改值时行尾注释的**对齐空白**被吃成一个空格（Python 写作器是保留的）—— 现在两边同口径
 
-□ T13-10: 板端 GUI 验收（真配置上保存 + 截图取证）+ 文档收口（docs/study.md 的 GUI 一节、
-      docs/config-sources.md 的写入者表、Readme）
+T13-10 ☑ **板端 GUI 验收 + 文档收口**:
+      · `gui/src/main.cpp` 四个**取证/验收**开关（只给验收用）: `--settings-dump-cards`
+        （打印三张卡片**当前读到的值** —— 截图只证明渲染，字段值以这条文本为准）、
+        `--settings-cards-demo`（设成"有区分度"的一组值再走真实保存，证明控件真的驱动文件）、
+        `--settings-final-demo`（三段 = 模板默认值 + 学习监督开启；**不**调 restoreDefaults，
+        免得顺手把 `gui.*` 也拉回页面默认值）、`--settings-scroll-demo <px>`（页面比窗口高，
+        不滚拍不到下面两张卡）
+      · `tests/board/t13_gui_accept.py`（新）: A 前置 + ctest / B 副本 / C 真配置（`--apply-live`）/
+        D 四张截图 / E 不变量。**逐行 opcode 比对**断言: 改动的行只能是白名单里的键、
+        新增的行只能落在"本次新建的那段"里、**一行都不许删**（结构级内容因此逐字节不动）;
+        另查幂等与"凭据不回显"
+      ☑ 板端实测（真 Qt 5.12.8 / RK3568, HEAD `6ea4392`）: `ctest` **23/23**;
+        `t13_gui_accept.py --apply-live` -> **56 项全 ✔**（真配置上点保存: 三段一次长出来、
+        md5 `b5d09542…` -> `5212393a…`、**只新增 88 个键且全在新建的三段里**、一行没删、
+        `.bak` == 保存前原文、再保存一次**幂等**（不写、不覆盖 `.bak`）、
+        `study_anchors.jsonl`/`study_stats.json`/`bilibili_cookie.json` md5 全未变、`git status` 干净、
+        没留 `agent_gui`/moonlight/llama-server、SESSDATA 在界面上只出掩码）
+      ☑ **收尾状态（你定的）**: 板端真配置里 `study:` / `bilibili:` / `profile:` 三段都在，
+        值 = 模板默认（30/5/3/30/1 + 带 0.05、game_watch 60/0.82、profile 2000/12），
+        **`study.enabled: true`（学习监督真的开着）**; 回滚材料 = `config/config.yaml.bak`（= 保存前原文）
+      ☑ **GUI 写 -> Agent 读**串起来: `assistant study status` -> `学习内容监督: 开`、
+        没把握带 0.050、锚点 39 条、时间参数 30/5/3/30
+      ☑ 截图四张（`/tmp/t13_10_shots/`: 01_top / 02_study / 03_game / 04_profile）
+      ☑ 文档收口: `docs/study.md` §8.1（三张卡片能改哪些键 + GUI **不碰**的键 + 缺段新建的边界）
+        + §9 验收怎么跑 + §10 两条新边界（GUI 只写白名单 / 验收以文本为准，人眼读截图不算证据）;
+        `docs/config-sources.md` §3.3（GUI 侧同口径表）+ §2 两行 + §7;
+        `docs/cli.md`（`set` 末尾"GUI 也改同一批键"）+ §5 边界表一行;
+        `docs/architecture.md`（`gui/src` 树 + 配置那一段）; `Readme.md`（GUI 目录 + 学习监督一节）
+      ⚠ 验收脚本自己踩的坑（都修了）: ① 布尔值按 `float()` 比 -> TypeError（`true` 不是数）;
+        ② 重跑验收时真配置**已经是**约定值 -> "md5 必须变化"不成立 —— 现在分两支: 写了才要求
+        `.bak == 保存前`，没写就断言"`.bak` 没被动"（这才是幂等的正确判据）
+
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档
