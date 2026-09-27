@@ -267,26 +267,33 @@ def pick(rows, *, want_study):
 
 
 def host_display():
-    """问 PC: 现在显示分辨率是多少（串流时 Sunshine 可能把主机模式切成客户端的）。
+    """问 PC: 现在**桌面**是多少 —— 用来判"流是怎么来的"（缩放? 换模式? 加黑边?）。
 
-    @note 只读 WMI, **不走交互桌面** —— 所以 sshd 在 session 0 也能问到（窗口标题才拿不到）。
+    @return `(文字, 为什么)`; 文字空 = 没问到
+    @note ⚠ 两条 API 的差别（T13-6 实测踩过）:
+          · `Get-CimInstance Win32_VideoController` 在 sshd 的 **session 0** 里**恒回空**
+            （那里看不到显示设备）—— 一开始就是被它坑的, 还把锅甩给了 ssh;
+          · `[System.Windows.Forms.Screen]::PrimaryScreen.Bounds` **能读到真值**。
     """
     from agent.config import load_config
     from agent.net.netease_cli import NeteaseCli
 
     music = dict((load_config("config") or {}).get("music") or {})
+    if not music.get("pc_host"):
+        return "", "没配 music.pc_host"
     helper = NeteaseCli(host=str(music.get("pc_host") or ""), user=str(music.get("pc_user") or ""),
                         port=int(music.get("pc_port") or 22),
                         ssh=str(music.get("ssh") or "ssh"), timeout_s=20.0)
-    if not music.get("pc_host"):
-        return ""
-    remote = ('powershell -NoProfile -Command "'
-              'Get-CimInstance Win32_VideoController | '
-              'Select-Object -First 1 -ExpandProperty CurrentHorizontalResolution; '
-              'Get-CimInstance Win32_VideoController | '
-              'Select-Object -First 1 -ExpandProperty CurrentVerticalResolution"')
+    remote = ('powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; '
+              '[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width; '
+              '[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height"')
     rc, out = run(helper._ssh_argv(remote), timeout=25)
-    return out.strip() if rc == 0 else ""
+    if rc != 0:
+        return "", "ssh 那条命令退出码 %s: %s" % (rc, out.strip()[:80])
+    numbers = [line.strip() for line in out.splitlines() if line.strip().isdigit()]
+    if len(numbers) < 2:
+        return "", "命令没回两个数（%r）" % out.strip()[:60]
+    return "%s×%s" % (numbers[0], numbers[1]), ""
 
 
 def black_bars(frame):
@@ -328,6 +335,20 @@ async def part_a(runtime, frames, no_stream):
         await asyncio.sleep(0.5)
     if runtime._game_watch is not None:
         runtime._game_watch.ensure_model("STUDY")
+
+    # ---- 几何: 流是怎么从 PC 桌面来的（这一条**不依赖来不来帧**） ----
+    resolution, why = host_display()
+    stream = "1280×720"                                  # 板端配置里的 sunshine.width/height
+    if resolution:
+        check("读到了 PC 桌面分辨率（`Screen.PrimaryScreen`, 不是那条在 session 0 恒空的 WMI）",
+              True, "%s（流是 %s）" % (resolution, stream))
+        note("几何结论: 桌面 %s != 流 %s -> **Sunshine 在缩放**（不是把主机切成流分辨率）; "
+             "两个宽高比不一样时, 真帧里多半有**黑边**（pillarbox）。"
+             "想让标定与真帧完全一致, 最省事的办法是串流时把 PC 桌面设成 %s。"
+             % (resolution, stream, stream))
+    else:
+        skip("读 PC 桌面分辨率", why)
+
     real_frame = None
     black_frames = 0
     if no_stream:
@@ -357,18 +378,9 @@ async def part_a(runtime, frames, no_stream):
               "shape=%s dtype=%s 均值=%.1f 最大=%d%s"
               % (arr.shape, arr.dtype, arr.mean(), arr.max(),
                  "（前面丢掉了 %d 帧全黑的）" % black_frames if black_frames else ""))
-        resolution = host_display()
-        if resolution:
-            numbers = [line.strip() for line in resolution.splitlines() if line.strip()]
-            note("PC 当前显示分辨率: %s" % " × ".join(numbers[:2]))
-            if numbers[:2] == ["1280", "720"]:
-                check("PC 显示分辨率 == 流分辨率（Sunshine 把主机切成 1280×720 了）", True,
-                      "那「整屏截图 → 1280×720」这一步在真机上就是**主机自己**做的")
-            else:
-                note("PC 显示分辨率 %s ≠ 流分辨率 1280×720 —— 说明 Sunshine 是在**缩放**"
-                     % "×".join(numbers[:2]))
-        else:
-            skip("问 PC 显示分辨率", "ssh 不通 / 没配 pc_host")
+        resolution_note = host_display()[0]              # 已经在上面查过, 这里只为日志
+        if resolution_note:
+            note("（PC 桌面分辨率是 %s —— 见上面那条几何结论）" % resolution_note)
         bars = black_bars(real_frame)
         dark_cols = bars["left"] + bars["right"]
         note("真帧黑边（上/下/左/右）: %s（整帧均值 %.1f）" % (bars, arr.mean()))
