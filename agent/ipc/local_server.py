@@ -86,6 +86,12 @@ __all__ = [
 # ---------------------------------------------------------------------------
 #: 当前平台是否支持 AF_UNIX 上的 asyncio server。
 #: Windows 上是 False (socket.AF_UNIX 不存在) —— 上层据此降级, 不要在这里抛错。
+import time
+
+#: 多久以内建出来的 socket 文件**绝不当残留删掉**（T15-0）。
+#: 真·异常退出留下的残留一定比这老；而「刚建出来却两次探不到回应」更像「有实例正在起」。
+SOCKET_STALE_MIN_AGE_S = 30.0
+
 UNIX_SOCKET_SUPPORTED = bool(
     hasattr(socket, "AF_UNIX") and hasattr(asyncio, "start_unix_server")
 )
@@ -789,10 +795,35 @@ class LocalServer:
                 "%s 已存在且不是 socket 文件 (拒绝删除, 请先确认)" % self.path
             )
 
-        if await self._probe_alive():
+        # ⚠ 判"这个 socket 是残留"不能只靠一次探活（T15-0 实测踩到）：
+        #   探活失败有三种可能 —— 真没人听、服务端 backlog 满、服务端正在重启；
+        #   后两种会把**活着的**实例的名字删掉，症状是 `ss -lx` 里还在监听、
+        #   而 `/tmp/agent.sock` 这个名字没了（CLI/GUI 全连不上，只能重启 Agent）。
+        #   所以这里加两道闸：**新鲜度** + **连探两次**。
+        stale_age = float(getattr(self, "stale_min_age_s", SOCKET_STALE_MIN_AGE_S))
+        st = None
+        age = None
+        try:
+            st = os.lstat(self.path)
+            age = time.time() - st.st_mtime
+        except OSError:
+            pass
+
+        alive = await self._probe_alive()
+        if not alive:
+            await asyncio.sleep(0.5)      # 隔一下再探：瞬时 ECONNREFUSED 不算没人听
+            alive = await self._probe_alive()
+        if alive:
             raise IpcServerError(
                 "另一个 agent 实例已经在监听 %s (同一个 socket 只能有一个 server)"
                 % self.path
+            )
+        if age is not None and age < stale_age:
+            raise IpcServerError(
+                "%s 是 %.1f 秒前刚建出来的 socket（阈值 %.0f 秒），两次探活都没回应 —— "
+                "这更像「有实例正在起/正在重启」，所以不敢删。确认没有别的 agent 在跑之后，"
+                "等 %.0f 秒再试，或手动删掉它。"
+                % (self.path, age, stale_age, stale_age)
             )
 
         try:
@@ -800,9 +831,11 @@ class LocalServer:
         except OSError as exc:
             raise IpcServerError("删除残留 socket %s 失败: %s" % (self.path, exc)) from exc
         self.log.warning(
-            "ipc: 发现上次留下的 socket 文件 %s 且无人监听, 已删除重建 "
-            "(上次应该是异常退出)",
+            "ipc: 发现上次留下的 socket 文件 %s（mtime %.1fs 前, inode %s）"
+            "且两次探活都无人应答, 已删除重建 (上次应该是异常退出)",
             self.path,
+            age if age is not None else -1.0,
+            st.st_ino if st is not None else "?",
         )
 
     async def _probe_alive(self) -> bool:
