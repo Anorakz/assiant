@@ -1423,6 +1423,19 @@ class TestVideoAgainstRealServer(unittest.IsolatedAsyncioTestCase):
 
 
 @unittest.skipUnless(UNIX_SOCKET_SUPPORTED, "需要 AF_UNIX (Windows 的 CPython 不支持)")
+def _is_asyncio_debug_noise(line: str) -> bool:
+    """是不是 CPython asyncio debug 模式的噪声（不是这一句 CLI 的输出）。
+
+    ⚠ 只在 asyncio 的 debug 模式（`-X dev` / `PYTHONASYNCIODEBUG=1`）下出现:
+      GC 掉一个 pending task / 慢回调超时就往 stderr 打一行
+      "Executing <Task pending name='Task-137' ...>"。板端套件**随机**踩到它，
+      于是"stderr 必须为空"那条断言会无故变红（实测 2 次红 1 次）。
+    """
+    text = (line or "").strip()
+    return text.startswith("Executing <") or text.startswith("Task was destroyed") \
+        or "pending" in text and text.startswith("Executing")
+
+
 class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="cli-status-")
@@ -1783,7 +1796,13 @@ class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
                       % (start_at.strftime("%H:%M"), fired_at.strftime("%H:%M:%S")), text)
         self.assertIn("来自运行中的 Agent", text, "页脚要说明这份记录的出处")
         self.assertNotIn("不代表", text, "问到了就不该再用「按时间」那套免责话术")
-        self.assertEqual(err.getvalue(), "", "问到了就不该有「问不到」的噪音")
+        # ⚠ stderr 里只许有**我们自己的**噪音。CPython 的 asyncio debug 模式（板端
+        #   PYTHONASYNCIODEBUG / -X dev 打开时）会在 GC 掉一个 pending task 时打
+        #   "Executing <Task pending ...>" —— 那是解释器的噪声，不是这一句的输出；
+        #   不过滤的话这条用例会**随机红**（板端实测 2 次里红 1 次）。
+        noise = [line for line in err.getvalue().splitlines()
+                 if line.strip() and not _is_asyncio_debug_noise(line)]
+        self.assertEqual(noise, [], "问到了就不该有「问不到」的噪音")
 
     async def test_schedule_without_the_agent_still_lists_but_says_why(self):
         """同一个真 server, 但**不**应答查询: 列表照出, 页脚退回"按时间"。"""
