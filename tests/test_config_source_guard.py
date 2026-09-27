@@ -271,7 +271,7 @@ class TestNoGuiConfigLeftovers(unittest.TestCase):
 WRITE_PRIMITIVES = (r"(os\.replace|mkstemp|\.write_text\(|write_text_atomic\("
                     r"|open\([^)]*,\s*[\"']a)")
 
-#: 允许出现写入原语的文件（**只有**这十一个）。
+#: 允许出现写入原语的文件（**只有**这十二个）。
 ALLOWED_WRITERS = {
     "agent/config.py",               # write_text_atomic: 全仓唯一的"原子写文本"实现
     "agent/core/schedule_config.py", # 唯一被允许的调用方: 删掉已触发的一次性日程 (R3) +
@@ -327,6 +327,13 @@ ALLOWED_WRITERS = {
     #   原来的唯一实现是 C++ 的 `gui/src/core/config_sync.cpp`（T14-3 退役）。
     #   它是**唯一**允许碰 llm.env 的 Python 模块（见 DERIVED_ENV_WRITER）。
     "agent/core/llm_env.py",
+    # T14-8 新增的第十二个写入者: **崩溃日志**（logs/crash/*.log）。
+    # ⚠ 它写的连"派生数据"都算不上，是**诊断产物**：一次会话一份（正常退出就删），
+    #   崩了才留下；真源仍然只有 config.yaml。三条写原语都用 `self.path` / `marker`
+    #   这种变量，没有一处硬编码路径。
+    #   边界由 TestCrashLogWritesOnlyItsOwnDirectory 钉住: 这个文件里**不许出现**任何
+    #   配置/凭据/派生文件的名字（config.yaml / llm.env / bilibili_cookie.json …）。
+    "agent/core/crash_log.py",
 }
 
 
@@ -353,7 +360,7 @@ class TestWhoWritesTheConfig(unittest.TestCase):
                       % (", ".join(sorted(ALLOWED_WRITERS)), "\n  ".join(offenders)))
 
     def test_the_writer_scan_is_not_vacuous(self):
-        """反空转：白名单里那十一个文件**真的**命中了写入原语，否则这条守卫什么都没查。
+        """反空转：白名单里那十二个文件**真的**命中了写入原语，否则这条守卫什么都没查。
 
         ⚠ T11-8：这条断言正是"补上追加写"的理由 —— 只把 `game_anchors.py` 加进白名单
         而正则不认 `open(path, "a")`，这里就会红（那份白名单是假的）。
@@ -372,6 +379,52 @@ class TestWhoWritesTheConfig(unittest.TestCase):
         for rel, count in hits.items():
             self.assertGreater(count, 0,
                                "%s 里一个写入原语都没有 —— 正则或路径不对, 守卫是假的" % rel)
+
+
+class TestCrashLogWritesOnlyItsOwnDirectory(unittest.TestCase):
+    """T14-8：崩溃日志进了白名单，但它的边界是"只写 logs/crash/"。
+
+    加白名单不等于"随便写" —— 这里把"它不可能是配置写入者"钉成机械可查的事实：
+      · 写原语那几行里不许出现 config/llm/凭据路径；
+      · 整个文件里不许出现任何配置真源 / 派生文件 / 凭据文件的名字
+        （要写它们就得先过 `llm_env.py` / `settings_config.py` 那套边界，不能顺手来一份）。
+    """
+
+    #: 崩溃日志**不许**提到的那些"别的东西"（真源 / 派生 / 凭据 / 数据文件）
+    FORBIDDEN_NAMES = (
+        "config.yaml", "config.example.yaml", "llm.env", "bilibili_cookie.json",
+        "music_library.jsonl", "user_profile.jsonl", "study_anchors.jsonl",
+        "game_anchors.jsonl", "wall_data.jsonl", "study_stats.json",
+    )
+
+    def _path(self):
+        return _PROJECT_ROOT / "agent" / "core" / "crash_log.py"
+
+    def test_it_never_names_another_writers_file(self):
+        self.assertTrue(self._path().is_file(), "agent/core/crash_log.py 不见了")
+        text = self._path().read_text(encoding="utf-8")
+        named = [name for name in self.FORBIDDEN_NAMES if name in text]
+        self.assertFalse(
+            named,
+            "崩溃日志里提到了别人的文件 %r —— 它只该写 logs/crash/（要碰配置请去那条边界上）"
+            % (named,))
+
+    def test_write_primitives_do_not_name_a_config_path(self):
+        """写原语所在的行只能用变量拼路径，不许出现 config/llm。"""
+        bad = []
+        for lineno, line in enumerate(self._path().read_text(encoding="utf-8").splitlines(), 1):
+            if not re.search(WRITE_PRIMITIVES, line):
+                continue
+            if "config" in line or "llm/" in line:
+                bad.append("%d: %s" % (lineno, line.strip()))
+        self.assertFalse(bad, "崩溃日志的写原语瞄准了配置路径:\n  %s" % "\n  ".join(bad))
+
+    def test_the_boundary_check_has_teeth(self):
+        """反空转：把一句真的配置写入喂进来必须被抓到。"""
+        probe = "handle.write_text(cfg_text)  # config.yaml\n"
+        self.assertTrue(re.search(WRITE_PRIMITIVES, probe))
+        self.assertIn("config.yaml", probe)          # 上面那条检查的判据
+        self.assertNotIn("config.yaml", "self.path.write_text(line)")   # 正常写法不该命中
 
 
 if __name__ == "__main__":
