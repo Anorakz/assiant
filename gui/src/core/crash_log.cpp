@@ -15,9 +15,11 @@
 
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSocketNotifier>
 #include <QtGlobal>
 
 #include <cstdio>
@@ -258,6 +260,46 @@ void installSignalHandlers()
     }
 }
 
+// ---------------------------------------------------------------------------
+//  SIGTERM / SIGINT（systemd stop / Ctrl-C）要走**干净退出**这条路
+//
+//  为什么必须单独处理：`Restart=always` 的服务经常被 stop/restart，而进程收到 SIGTERM
+//  直接死掉的话没人调 closeCrashLoggerCleanly → logs/crash/ 里每隔一会儿就多一份
+//  只有表头的"假崩溃"（板端实测：跑几轮 ctest 就攒了 5 份）。
+//
+//  做法是经典的 self-pipe：信号处理器只 `write()` 一个字节（异步信号安全），
+//  真正的收尾在事件循环里由 QSocketNotifier 触发（那里可以安全地分配内存、调 Qt）。
+// ---------------------------------------------------------------------------
+int g_sigPipe[2] = {-1, -1};
+QSocketNotifier* g_termNotifier = nullptr;
+
+void terminateSignalHandler(int sig)
+{
+    const char byte = static_cast<char>(sig);
+    ssize_t ignored = ::write(g_sigPipe[1], &byte, 1);
+    (void)ignored;
+}
+
+void installTerminateSignals()
+{
+    if (::pipe(g_sigPipe) != 0) {
+        g_sigPipe[0] = g_sigPipe[1] = -1;
+        return;
+    }
+    g_termNotifier = new QSocketNotifier(g_sigPipe[0], QSocketNotifier::Read);
+    QObject::connect(g_termNotifier, &QSocketNotifier::activated, [](int) {
+        char byte = 0;
+        ssize_t ignored = ::read(g_sigPipe[0], &byte, 1);
+        (void)ignored;
+        if (qApp != nullptr) {
+            qInfo().noquote() << "[gui] 收到终止信号，按干净退出处理";
+            qApp->quit();          // → 主循环退出 → atexit → closeCrashLoggerCleanly
+        }
+    });
+    std::signal(SIGTERM, terminateSignalHandler);
+    std::signal(SIGINT, terminateSignalHandler);
+}
+
 } // namespace
 
 QString defaultCrashDir()
@@ -308,6 +350,7 @@ QString installCrashLogger(const QString& dir, const QString& app,
     g_prevHandler = qInstallMessageHandler(messageHandler);
     g_prevTerminate = std::set_terminate(terminateHandler);
     installSignalHandlers();
+    installTerminateSignals();
     g_installed = true;
     return g_path;
 }
@@ -429,6 +472,16 @@ void restoreCrashHandlers()
         std::set_terminate(g_prevTerminate);
         g_prevTerminate = nullptr;
     }
+    if (g_termNotifier != nullptr) {
+        delete g_termNotifier;
+        g_termNotifier = nullptr;
+    }
+    for (int fd : {g_sigPipe[0], g_sigPipe[1]}) {
+        if (fd >= 0) {
+            ::close(fd);
+        }
+    }
+    g_sigPipe[0] = g_sigPipe[1] = -1;
 }
 
 } // namespace core

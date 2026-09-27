@@ -37,7 +37,12 @@
 | **段错误等致命信号** | `faulthandler.enable()` → 全线程 Python 栈 | 自装 SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE 处理器 → 写"最近消息"裸缓冲 |
 | `qFatal` / 断言 | — | Qt 消息处理器（写完报告再 `abort`） |
 | `std::terminate` | — | `std::set_terminate` |
+| **`systemctl stop` / Ctrl-C** | SIGINT → `KeyboardInterrupt` → 正常返回 → 干净退出 | SIGTERM/SIGINT → self-pipe + `QSocketNotifier` → `qApp->quit()` → 干净退出 |
 | **按需抓现场（没崩但卡住）** | `kill -USR1 <pid>` → 全线程栈写进会话文件 | （GUI 侧没装这个） |
+
+⚠ GUI 那条 SIGTERM 不是可有可无的：`Restart=always` 的服务每次 stop/restart 都会收到
+SIGTERM，不处理就是"每次停服多一份只有表头的假崩溃"（板端实测：几轮 ctest 攒了 5 份）。
+信号处理器里只 `write()` 一个字节（异步信号安全），真正的收尾回到事件循环里做。
 
 ⚠ 两条边界，别指望它做更多：
 

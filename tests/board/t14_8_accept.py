@@ -273,6 +273,34 @@ def check_gui(crash_dir):
     check("B5 这次干净退出没在默认目录留下文件", after == before_default,
           "新增=%r" % (sorted(after - before_default),))
 
+    # B6 SIGTERM（systemd stop / ctest 的 terminate）要走干净退出，不能留"假崩溃"
+    #    板端实测过：没有这条时，`Restart=always` 的服务每 stop/restart 一次就多一份
+    #    只有表头的 gui-*.log，跑几轮 ctest 就攒了 5 份。
+    def _gui_count():
+        return len([f for f in os.listdir(want) if f.startswith("gui-")])
+
+    def _systemctl(*args):
+        return subprocess.run(["systemctl"] + list(args), stdout=subprocess.PIPE,
+                              universal_newlines=True).returncode
+
+    os.makedirs(want, exist_ok=True)
+    _systemctl("restart", "agent-gui.service")
+    time.sleep(6)
+    running = _gui_count()
+    stopped_ok = _systemctl("stop", "agent-gui.service") == 0
+    time.sleep(4)
+    after_stop = _gui_count()
+    check("B6 停止 GUI 服务（SIGTERM）后它自己的会话文件被删掉",
+          stopped_ok and running == 1 and after_stop == 0,
+          "运行中=%d 停止后=%d" % (running, after_stop))
+    _systemctl("start", "agent-gui.service")
+    time.sleep(6)
+    check("B6 起回来后服务正常（只有它自己那一份会话文件）",
+          subprocess.run(["systemctl", "is-active", "agent-gui.service"],
+                         stdout=subprocess.PIPE, universal_newlines=True).stdout.strip() == "active"
+          and _gui_count() == 1,
+          "文件数=%d" % _gui_count())
+
 
 # ---------------------------------------------------------------------------
 #  C. 不变量
