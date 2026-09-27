@@ -1882,6 +1882,61 @@ T12-7 — **收口**: 板端端到端验收（真 Agent / 真时钟 / 真 CLI）
 ☑ 文档: `docs/architecture.md`（钩子挂哪儿 + 为什么 + 验收入口）、`docs/config-sources.md`
       §3.1（两种缩进）、`docs/cli.md`（两跳文案为什么可靠）
 
+Phase 7 T13 — **学习内容监督**（你 2026-09-27 的指令: "分辨用户屏幕内容是否为学习内容,
+现在只有空接口"; 判定**不进 LLM**、阈值**不定死**、unknown 完全中性）
+
+T13-1 ☑ **删掉空接口** `agent/vision/siglip_encoder.py::SigLIPEncoder`
+      （确定性伪随机向量、`ready` 恒 False、**从来没有调用方**）—— 学习监督要的
+      "实时帧 → 向量"只有 `agent/vision/siglip/` 一条路（一个能力一条实现）。
+      `Readme.md` / `docs/architecture.md` 的用法与目录树同步改口, `tests/test_vision.py`
+      只留 ROI（439 → 227 行）; `tests/test_docs.py` 加它的过时说法, 并给黑名单加了
+      可选的**免检正则**（"已在 T13-x 删除"这种现状陈述不该被判成漂移）
+T13-2 ☑ **锚点库 + 有界运行统计**: `agent/core/study_anchors.py`（五类子标签 -> study/not_study,
+      每类上限 200 丢最旧、内存与文件一起丢; 复用游戏锚点那份余弦与编解码）+
+      `agent/core/study_stats.py`（阈值/计数/分布/明细/EWMA, 全程有界; 坏文件从默认值起步）
+      + `tests/test_study_anchors.py`（96 项）。两份派生数据进 `.gitignore` 与
+      `ALLOWED_WRITERS`（第 7、8 个写入者）
+      ⚠ 顺手优化: 板端实测满库 1000 条锚点一次 match **0.83 s**（解码 0.31 + 余弦 0.50）
+      -> 解码缓存 + 归一化后退化成点积 = **稳态 0.31 s**（两者数学等价, 有单测钉住）
+T13-3 ☑ **监督内核**: `agent/core/study_watch.py` —— 判定（画面锚点 / 进程名辅助 / 冲突 -> unknown）、
+      升级链（提醒**一次且不计入**那 3 次 -> 5 分钟复查 -> 第 3 次返回桌面 -> 冷却 30 分钟）、
+      `unknown` 完全中性、进 STUDY `reset_cycle()`、可能误判 -> 那个类停学 30 分钟;
+      阈值自适应护栏（EWMA 0.9/0.1、两类各 20 个样本才动、一次 0.01、有界、理由入统计、
+      `unknown` 从不学习、freeze/reset）+ `tests/test_study_watch.py`（70 项）
+      ⚠ 测试逼出来的两处修正: ① 冷却管的是**动作**不是观察（不然"5 分钟内又变回学习"永远发现不了）;
+      ② "没画面/模型没在/编码失败"是**跳过**不是 unknown（不然会白白抬高判不出来的比例）
+T13-4 ☑ **数据管线 + 板端标定**: `agent/vision/frame_pipeline.py`（整屏截图 -> 板子看到的那一帧;
+      native 那步是**点采样不是面积平均**, 公式与 C++ 一致且用纯 Python 单测钉住）+
+      `tests/board/t13_study_calib.py`（四种管线 × 五路方法）
+      ☑ 板端实测（39 张真截图）: 文本提示词 5 类 51–56%（废）、锚点 72–74%、类原型 77–85%、
+      **融合反而更差 62–64%**（判据不用文本）; 点采样 vs 面积平均只差 ±2 个点（**不是瓶颈**）
+      ☑ **关键发现**: 绝对余弦的两个大类**重叠**（study 5% 分位 0.796 vs not_study 95% 分位 0.906,
+      且 study 最小 0.753 < not_study 最大 0.906）-> 按分位中点定阈值会判出 **69% 的"判不出来"**;
+      **大类原型 + 相对分**口径 2 类 **95–97%**, 带 0.05 时 误打扰 0 / 失效 1 / 判不出 8%
+      -> 判定口径据此改（你通过的方案）
+      ⚠ 标定脚本第二次 `--apply` 把锚点播成两份（`reset()` 没 load 过就不清文件）—— 已修 + 单测
+T13-5 ☑ **Runtime 接入**: `GameWatcher.encoder()`（**共用一份** SigLIP —— 923 MB × 2 会把板子撑死）;
+      `Runtime._start_study` + `_study_watch_loop`（只在 STUDY、气泡原话、Win+D 不补第二句话、
+      两个动作各有开关）; `_enter_state(STUDY)` -> `reset_cycle()`; `config.example.yaml` 加
+      `study:` 段（20 个键 + 五类映射 + 31 条"进程名 -> 子标签"，浏览器与 mpv 故意不映射）;
+      `relative_band` 取代绝对阈值（`confident_score/margin` 降级成**标定记录**）
+T13-6 ☑ **板端端到端验收**: `tests/board/t13_accept.py`（26 项全 ✔, 真 Runtime / 真 moonlight 帧 /
+      真 NPU / **真 IPC**）: 升级链三条路径 + "不确定时绝不按键" + 带正好挪 0.01 且重启还在 +
+      真文件 md5 全未变 + 没留进程
+      ☑ **几何定了**: PC 桌面 1024×768、流 1280×720 -> **Sunshine 在缩放**（不是换主机模式）,
+      所以标定里"先缩到流分辨率"是真的; 两个宽高比不同 -> 真帧多半有 pillarbox 黑边
+      （黑边宽度这次没量准: 当时画面很暗, 已如实标注）
+      ⚠ 验收抓到两个**真问题**（都修了）: ① **全黑帧被判成"学习"**（串流刚起来/锁屏时
+      `read_latest()` 会给全黑帧）-> 现在"整幅 ≤8/255"当**跳过**; ② `tick()` 的返回里
+      **没有 `relative`** -> 循环那行日志一直在打 None
+T13-7 ☑ **文档收口**: `docs/study.md`（新的主文档: 判定口径 / 升级链 / 自适应护栏 / 数据文件 /
+      管线与几何 / 配置表 / 怎么验 / **已知边界**）、`Readme.md`（新增"学习内容监督"一节 +
+      `frame_pipeline`）、`docs/architecture.md` §4.3（模块表 + 共用一份模型）、
+      `docs/tagging.md` §10（**边界**: 标签化 ≠ 学习监督, 为什么不合成一份数据）
+
+□ T13-8…T13-10（第二段: 最后统一改 GUI + CLI）待做 —— `assistant set` / `assistant study`
+      + GUI 三张卡片（学习监督 / 游戏检测 / 画像压缩）与"缺段就新建" + 板端 GUI 验收
+
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档

@@ -140,6 +140,7 @@ agent/
 │   ├── music.md                 # 音乐: 板端 ssh 调 PC neteasecli / 本地库 / 工具四件套 / 自动补歌 (T8/T10-4)
 │   ├── profile.md               # 用户画像: 纯对话记忆 / IP·歌手权重 / 负反馈两层清零 / 心情 / **谁在消费它** (T9/T10)
 │   ├── bilibili.md              # B 站视频: 队列滑动窗口 / 缓冲走本机 HTTP 的来龙去脉 / 清晰度与 cookie 真相 / 双路认游戏 / 实测数字 (T11)
+│   ├── study.md                 # 学习内容监督: 相对分口径 / 升级链 / 阈值自适应护栏 / 管线与几何 / 已知边界 (T13)
 │   ├── llm.md                   # LLM 三模式 / edge 接 llama-server / 工具循环 / 降级
 │   ├── ipc-protocol.md          # Agent ⇄ GUI 协议 (线上格式唯一真源)
 │   ├── gui.md                   # GUI 构建与使用
@@ -498,6 +499,44 @@ emb = model.encode_image(frame)                  # frame 必须是 (1,256,256,3)
   早期那个返回确定性伪随机向量的空接口 `SigLIPEncoder` **已在 T13-1 删除**——
   它没有语义、`ready` 恒为 `False`，留着只会让人误以为"实时帧那条路已经能用了"。
 - 视觉层**不做**预处理（native 已做）也**不做** embedding 缓存（失效策略依赖调用场景）。
+
+### 截图 → 板子看到的那一帧（`frame_pipeline.py`）
+
+标定与人工打标签手里只有**整屏截图**，而板子看到的是 `Sunshine 按流分辨率编码 → 板端解码
+→ native/preprocess.cpp → 256×256`。`agent/vision/frame_pipeline.py` 把最后两步**原样复现**
+（`native` 是**点采样**、不是面积平均 —— `rx = (dx * roi.w) / 256`），所以"量出来的准确率"
+与"真机上的表现"是同一条管线。板端实测：PC 桌面 1024×768、流 1280×720 → **Sunshine 在缩放**。
+
+---
+
+## 学习内容监督（Phase 13）
+
+**在 STUDY 里判断"屏幕上是不是学习内容"** —— 判据是**画面锚点**（与认游戏同源），
+**不进 LLM**；不像学习就提醒一次，提醒后仍不像学习、连续 3 次（**不含那次提醒**）→
+**返回桌面**并冷却 30 分钟；**判不出来完全中性**。阈值**不定死**：没把握带（`relative_band`）
+在运行期按带标签样本自己挪（一次 0.01、有界、每次记理由）。
+
+判定口径是「两个**大类原型**的余弦之差」，不是绝对余弦 —— 板端 39 张真截图实测：
+绝对余弦的两个大类**重叠**（按分位中点定阈值会判出 **69% 的"判不出来"**），
+相对分口径 **2 类 95–97%**、带 0.05 时 **误打扰 0 / 监督失效 1 / 判不出 8%**。
+
+```python
+from agent.core.study_anchors import StudyAnchors
+from agent.core.study_watch import StudyWatcher
+
+anchors = StudyAnchors(); anchors.load()
+watcher = StudyWatcher(anchors, stats=stats, probe=study_probe,
+                       encoder=lambda: game_watcher.encoder())   # 共用一份 SigLIP
+decision = watcher.tick(frame, state="study")
+# {"verdict": "study"|"not_study"|"unknown", "action": ""|"remind"|"back_to_desktop", ...}
+```
+
+- **"不像学习"与"判不出来"是两件事**：后者完全中性（不提醒、不计数、不动升级链）。
+- **冲突也判 unknown**（画面与进程名对不上时不硬猜）: 认错游戏的代价是搜错视频,
+  这里的代价是**打扰人**或**监督静默失效**。
+- 两条数据文件（`config/study_anchors.jsonl` / `config/study_stats.json`）都是**派生数据**、
+  已进 `.gitignore`，与**游戏锚点库分开**（一个认作品、一个认大类）。
+- 细节（升级链的每条规矩、自适应护栏、实测数字、**已知边界**）：[`docs/study.md`](docs/study.md)。
 
 ---
 

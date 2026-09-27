@@ -46,11 +46,14 @@ GUI 读它的 `gui:` 段、读写它的 `llm:` 段、**只读**它的 `scheduler
 | `config/netease_cookie.json` | **T8-1 的保险条目**（板端**不放** cookie；登录态住在 PC 上 neteasecli 自己的 store） | 否（`.gitignore` 里单列一行） | 谁都不写（T8-7 核对过: 代码里没有任何地方读它） | — |
 | `config/bilibili_cookie.json` | **凭据**（B 站 `SESSDATA`，Phase 7 T11）：有它 DASH 才能到 **1080P**，没有就只有单文件的 360P~720P | 否（`.gitignore` 里单列一行） | **人**（手写；键名 `SESSDATA`，`SEESSDATA` 这种笔误代码会认下来并提醒） | `agent/net/bilibili_api.py`（**只读**，空/缺 = 匿名） |
 | `config/game_anchors.jsonl` | **派生数据**（一行一锚点: 游戏名 + 768 维 float16 向量 + 截图路径 + 来源 + 时间，T11-4） | 否（`.gitignore` 里单列一行；截图目录 `config/game_anchors/` 一并忽略） | `agent/core/game_anchors.py`（唯一写者）: 画面与 PC 进程**不一致时把那一帧登记成该游戏的锚点**（自纠错） | `agent/core/game_watch.py`（识别时算余弦） |
+| `config/study_anchors.jsonl` | **派生数据**（一行一锚点: 子标签 + 768 维 float16 向量 + 截图路径 + 来源 + 时间，T13-2；与**游戏锚点分开**） | 否（`.gitignore` 里单列一行；截图目录 `config/study_anchors/` 一并忽略） | `agent/core/study_anchors.py`（唯一写者）: T13-4 标定播种（`--apply`）、运行期"画面与标签不一致时学一帧"、以及**超每类上限丢最旧 / 清空**时的整篇原子重写 | `agent/core/study_watch.py`（判定时算大类原型与相对分） |
+| `config/study_stats.json` | **派生数据**（阈值 + EWMA + 计数 + 分数分布 + 最近明细/备注，T13-2；**全程有界**） | 否（`.gitignore` 里单列一行） | `agent/core/study_stats.py`（唯一写者）: 每次判定后落盘、带自适应挪完阈值落盘 | `agent/core/study_watch.py`（阈值与自适应的唯一依据） |
 | `llm/config/llm.env` | **派生**（喂 llama-server） | 否 | `ConfigSyncer`（GUI 保存时、或 `gui_config_sync` CLI） | llama-server 启动脚本 |
 | `config/config.example.yaml` | 模板 | **是** | 人 | 人（`cp` 起步） |
 
 > ⚠ `config/` 下现在有**三类**东西：**真源**（`config.yaml`，人/GUI 写）、**派生/本地数据**
-> （`wall_data.jsonl`、`music_library.jsonl`、`user_profile.jsonl`、`game_anchors.jsonl`，机器写）、
+> （`wall_data.jsonl`、`music_library.jsonl`、`user_profile.jsonl`、`game_anchors.jsonl`、
+> `study_anchors.jsonl`、`study_stats.json`，机器写）、
 > **凭据**（`netease_cookie.json` 那个空保险 + T11 起真的要用的 `bilibili_cookie.json`）。
 > 别因为"都在 config 目录里"就以为都能手改 —— 手改 `wall_data.jsonl` **基本没意义**
 > （下次打标签或换壁纸会覆盖那一行；只有 `used`/`last_used` 是运行期真的会被改的字段，
@@ -59,6 +62,9 @@ GUI 读它的 `gui:` 段、读写它的 `llm:` 段、**只读**它的 `scheduler
 > `game_anchors.jsonl` **可以补**，但别手写：一行里的向量是 **768 维 float16 的 base64**
 > （`game + vector + shot + source + when`），照格式**用脚本**加（T11-0 标定时就是这么填的）；
 > 运行期 Agent 也会自己往里加（画面与进程不一致时），见 [`bilibili.md`](bilibili.md) §3）。
+> `study_anchors.jsonl` / `study_stats.json` 同理**别手改**：用标定脚本播种
+> （`tests/board/t13_study_calib.py --apply`）或 `assistant study label/reset`
+> （T13-8；在那之前手改就得自己维护 base64 向量），见 [`study.md`](study.md) §6。
 
 `llm.env` 里可推导的只有 8 个键：`LLM_MODEL_PATH`、`LLM_MODEL_NAME`、`LLM_PORT`、
 `LLM_CTX_SIZE`、`LLM_BATCH_SIZE`、`LLM_THREADS`、`LLM_THREADS_BATCH`、`LLM_API_KEY`

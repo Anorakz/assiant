@@ -20,7 +20,7 @@
 
     python3 tests/board/t13_study_calib.py --plan            # 只看数据集与管线, 不加载模型
     python3 tests/board/t13_study_calib.py                   # 详细报告（h1 = 真管线假设）
-    python3 tests/board/t13_study_calib.py --all             # 四种管线对照（≈5 分钟）
+    python3 tests/board/t13_study_calib.py --all             # 四种管线对照（实测 ≈10 分钟）
     python3 tests/board/t13_study_calib.py --apply           # 顺手把锚点与起始阈值落到 config/
 
 ⚠ 这是**测量脚本**，不是生产路径。数据集只有 39 张（doc/real/anime 各 4–5 张），

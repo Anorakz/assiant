@@ -132,10 +132,11 @@ agent_native.send_mouse(x, y, action)                # 0..255 参考平面, 越�
 agent/
 ├── main.py            进程入口：装配全部组件、按序起停、asyncio 主循环
 ├── config.py          配置加载（白名单 + 不做 schema 校验）
-├── core/              state_machine.py / tool_router.py / scheduler.py / wallpaper.py
+├── core/              state_machine.py / tool_router.py / scheduler.py / wallpaper.py /
+│                      study_anchors.py / study_stats.py / study_watch.py（学习内容监督，T13）
 ├── io/                chat_bus.py / image_reader.py / input_sender.py / _native.py
 ├── llm/               provider.py（edge / cloud / disabled；细节见 docs/llm.md）/ rule_engine.py
-├── vision/            roi.py / siglip/（真 RKNN 双塔：图像+文本，打标签/检索/零样本）/ tag_index.py / wall_data.py
+├── vision/            roi.py / siglip/（真 RKNN 双塔：图像+文本，打标签/检索/零样本）/ tag_index.py / wall_data.py / frame_pipeline.py
 ├── ipc/               protocol.py / local_server.py / local_client.py
 ├── net/               sunshine_client.py（HTTPS 47984 握手）
 └── tools/             具体工具（Phase 7）：`build_tools(router)` + 每个工具一个模块
@@ -146,6 +147,7 @@ agent/
 | `core/state_machine.py` | 状态机 `SLEEP ⇄ IDLE ⇄ STUDY ⇄ GAME`（内部**小写**；IPC 上用大写，转换只在 ipc 层做）。⚠ **任何切换都必须经过 IDLE**：`transition_to()` 会按这张表算路径（有直边一跳，否则 `当前→IDLE→目标` 两跳）并**逐跳执行** —— 每一跳都触发 `on_change`，所以"离开那个模式要释放的东西"按步发生（T12-1；`transition()` 是单跳原语，语义没变）。⚠ 释放钩子（`Runtime._on_state_change` → `_release_state` / `_enter_state`）在**建状态机那一刻**就挂上（`_start_state_and_tools`）—— 早先是挂在"管 llama-server"那一步里的，于是 `llm.mode=disabled` / `manage_service=false` 时"离开 GAME 停视频/清队列/卸 SigLIP"整条不会发生（T12-7 板端验收 `tests/board/t12_accept.py` 抓到的） |
 | `core/tool_router.py` | 工具注册、权限控制、执行调度（JSON Schema 子集校验） |
 | `core/scheduler.py` | 日程检查、定时触发、触发监听、触发事实（R 系列）与"删掉已触发的一次性日程"（R3，默认关） |
+| `core/study_watch.py` | **学习内容监督**（T13-3）：STUDY 里看一帧判"是不是学习内容"（**不进 LLM**），不像学习就提醒一次 -> 连续 3 次（不含提醒）-> 返回桌面 + 冷却；阈值（没把握带）在运行期按带标签样本自己挪。**不是工具**（模型看不到）；细节与实测数字见 [`study.md`](study.md) |
 | `io/chat_bus.py` | Chat Input Bus：把多个输入源汇成一条 `asyncio.Queue`（单消费者 + `subscribe()` 旁观） |
 | `io/_native.py` | native 解析 + **每个子系统一个专属单线程执行器**（SPSC 要求，见 §11） |
 | `ipc/` | Unix socket server 与协议；接入点是 `ipc/__init__.py` 的 `build_ipc()` |
@@ -358,6 +360,11 @@ edge 挂了**不装作答过**：`chat()` 照抛；`chat_with_tools()` 退回规
 | 模块 | 是什么 | 谁用 |
 | --- | --- | --- |
 | `agent/vision/siglip/` | **真实现**：SigLIP 双塔 RKNN（图像塔 + 文本塔），走 NPU | 图像塔 → 向量：**离线**打标签 / 图像检索（`assistant tag`、`next_wallpaper(action="tags"/"pick")`）、**认游戏**、学习监督；文本塔 → 零样本分类（`tag_vocab` 的固定词表） |
+| `agent/vision/frame_pipeline.py` | "整屏截图 → **板子看到的那一帧**"：缩到流分辨率 + **native 点采样**（原样复现，T13-4） | T13-4 标定、`assistant study label --image`、T13-6 验收 |
+
+> ⚠ **一份 SigLIP 服务两个观察器**：认游戏（`GameWatcher`）与学习监督（`StudyWatcher`）**共用**
+> 同一个模型实例（`GameWatcher.encoder()` 借出去）—— SigLIP 常驻 923 MB，板子一共 3.9 GB，
+> 各持一份直接把自己撑死；这也是"一个能力只有一条实现"。
 
 > ⚠ **T13-1 删掉了那个 mock**：`agent/vision/siglip_encoder.py::SigLIPEncoder` **已经不在了**（原因是
 > 它由图像内容决定一个确定性伪随机向量、`ready` 恒 False、**从来没有调用方**）。"板端实时帧 → 向量"
@@ -383,6 +390,10 @@ edge 挂了**不装作答过**：`chat()` 照抛；`chat_with_tools()` 退回规
 两条查询：按标签（`scene=anime`）与按 **IP 锚点**（`ip=EVA`：锚点图向量取平均当原型）。
 词表向量存在数据文件第一行，所以"没进 top-k 的标签"也能算出真实分数 ——
 细节与实测数字见 [`tagging.md`](tagging.md)。
+
+**学习内容监督（T13）也走图像塔，但那是另一条数据**：判定用 `config/study_anchors.jsonl`
+（五类子标签 + 大类原型 + **相对分带**），与壁纸标签数据、游戏锚点库**三者互不相干** ——
+边界见 [`study.md`](study.md) 与 [`tagging.md`](tagging.md) 末尾那节。
 
 ---
 
