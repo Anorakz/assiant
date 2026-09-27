@@ -43,6 +43,7 @@ __all__ = [
     "TOPIC_MUSIC",
     "TOPIC_SCHEDULE",
     "TOPIC_BILIBILI",
+    "TOPIC_CONFIG_RESULT",
     "TOPICS",
     # command (GUI -> Agent)
     "COMMAND_SWITCH_MODE",
@@ -58,6 +59,7 @@ __all__ = [
     "COMMAND_MUSIC_NEXT",
     "COMMAND_MUSIC_PREV",
     "COMMAND_MUSIC_STOP",
+    "COMMAND_SET_CONFIG",
     "COMMANDS",
     # 命令方向的信封字段名 (GUI 实际实现为准)
     "ACTION_FIELD",
@@ -123,9 +125,21 @@ TOPIC_SCHEDULE = "schedule"
 #: ⚠ 队列**只在 GAME 模式有意义**（视频就是游戏模式主区在放的东西）。
 TOPIC_BILIBILI = "bilibili"
 
+#: 一次 `set_config` 的**回执**（T14-2）。data:
+#:     {"id": "<调用方给的那个 id>", "ok": bool, "changed": n, "backup": "…",
+#:      "path": "…", "error": "…", "llm_env": {"ok": bool, "changed": n, "path": "…",
+#:      "error": "…"}}
+#: ⚠ 为什么需要它: GUI 从 T14 起**不再自己写 config.yaml**（唯一写入者是 Agent，
+#:   见 `docs/adr/0005`）—— "我让你写的那几行到底写进去没有" 必须有个明确回执,
+#:   否则界面只能猜（或假装成功）。
+#: ⚠ 关联字段放在 **payload 里**（`id`），不是新增信封字段：协议从来没有版本号与
+#:   关联字段（见 COMMAND_QUERY_SCHEDULE 的说明），这里照旧 —— Agent 把同一个 id
+#:   原样塞回这条推送。
+TOPIC_CONFIG_RESULT = "config_result"
+
 #: 全部 topic (Agent -> GUI)
 TOPICS = (TOPIC_STATUS, TOPIC_LLM, TOPIC_WALLPAPER, TOPIC_MUSIC, TOPIC_SCHEDULE,
-          TOPIC_BILIBILI)
+          TOPIC_BILIBILI, TOPIC_CONFIG_RESULT)
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +200,22 @@ COMMAND_MUSIC_PREV = "music_prev"
 COMMAND_MUSIC_STOP = "music_stop"
 
 
+# ---- 改配置真源（T14-2）----
+#: 让 **Agent** 改真源里那几行 —— GUI **不再自己写**（唯一写入者，见 docs/adr/0005）。
+#: payload:
+#:     {"id": "任意非空字符串（回执里原样带回）",
+#:      "keys": {"study.relative_band": "0.07", …},      # 点号路径 -> 字符串值
+#:      "credentials": {"SESSDATA": "…"}}                # 可选: B 站凭据（另一个文件）
+#: 应答**就是**随后那条 `topic=config_result` 的推送（带同一个 id）。
+#: 语义约定（实现在 `agent/ipc/__init__.py::_handle_set_config`）:
+#:   · 能改的键 = `config.example.yaml` 里的**标量**键（模板是键清单的唯一真源）；
+#:     不在模板里的键、结构级的键（映射/序列）、类型不对的值 -> **一个字节都不写**，
+#:     回执 ok=false + 原话（第一条错误就返回）；
+#:   · 写成功之后再派生 `llm.env`（同一个回执里报 `llm_env` 那一段的成败）；
+#:   · 值没变 -> 不写文件、不留 `.bak`（回执 changed=0 / ok=true）。
+COMMAND_SET_CONFIG = "set_config"
+
+
 #: 全部 command (GUI -> Agent)
 COMMANDS = (
     COMMAND_SWITCH_MODE,
@@ -201,6 +231,7 @@ COMMANDS = (
     COMMAND_MUSIC_NEXT,
     COMMAND_MUSIC_PREV,
     COMMAND_MUSIC_STOP,
+    COMMAND_SET_CONFIG,
 )
 
 # 命令方向的信封字段名。**以 GUI 的实际实现为准** (Phase 6 决策 1):

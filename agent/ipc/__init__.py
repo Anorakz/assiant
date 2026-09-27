@@ -17,8 +17,12 @@
 
 import asyncio
 import logging
+import os
 from datetime import datetime
 from typing import Any, Dict, Optional
+
+from agent.config import read_config_file
+from agent.core import llm_env, settings_config, settings_credentials
 
 from .local_client import (
     CLIENT_SUPPORTED,
@@ -49,6 +53,7 @@ from .protocol import (
     COMMAND_NEXT_BILIBILI,
     COMMAND_PREV_BILIBILI,
     COMMAND_QUERY_SCHEDULE,
+    COMMAND_SET_CONFIG,
     COMMAND_SWITCH_MODE,
     COMMAND_VIDEO_CONTROL,
     COMMAND_VIDEO_STATE,
@@ -64,6 +69,7 @@ from .protocol import (
     PAYLOAD_FIELD,
     SOCKET_PATH,
     TOPIC_BILIBILI,
+    TOPIC_CONFIG_RESULT,
     TOPIC_LLM,
     TOPIC_MUSIC,
     TOPIC_SCHEDULE,
@@ -93,6 +99,7 @@ __all__ = [
     "TOPIC_MUSIC",
     "TOPIC_SCHEDULE",
     "TOPIC_BILIBILI",
+    "TOPIC_CONFIG_RESULT",
     "TOPICS",
     # command (GUI -> Agent)
     "COMMAND_SWITCH_MODE",
@@ -104,6 +111,7 @@ __all__ = [
     "COMMAND_VIDEO_STATE",
     "COMMAND_VIDEO_CONTROL",
     "COMMAND_QUERY_SCHEDULE",
+    "COMMAND_SET_CONFIG",
     "COMMANDS",
     "UNWIRED_COMMAND_NOTES",
     "NO_SCHEDULER_NOTE",
@@ -412,6 +420,137 @@ SCHEDULE_KIND_FIRED = "fired"    #: 刚刚真的触发了一条
 NO_SCHEDULER_NOTE = "现在还没有可查的日程触发记录：Agent 的调度器没起来（或没接进来）。"
 
 
+def _handle_set_config(runtime: Any, payload: dict, push: Any) -> None:
+    """`set_config`：**Agent 是配置真源唯一的写入者**（T14-2，见 docs/adr/0005）。
+
+    顺序刻意是"先全部校验、再动第一份文件"：
+      ① 载荷形状 -> ② 凭据纯校验（不写）-> ③ 配置**算计划**（不写；不认识的键 /
+      类型错 / 结构级键都在这一步被拒）-> ④ 写配置（`settings_config.apply_changes`：
+      只动目标行 + `.bak` + 原子写）-> ⑤ 写凭据（另一个文件）-> ⑥ 派生 `llm.env`。
+    ①②③ 任何一步失败都**一个字节都不写**，回执 ok=false + 原话。
+
+    回执走 `TOPIC_CONFIG_RESULT`（带 payload 里的 id）—— GUI 靠它知道"写进去没有"，
+    所以**每一条路径都必须 push**（包括失败），否则界面只能等到超时。
+
+    @note 这里做的是**小文件**同步 I/O（几 KB），与其它命令处理器一样同步执行；
+          不搬进 executor：一次几百微秒，换来的是"顺序一眼可见"。
+    """
+    request_id = payload.get("id")
+    if not isinstance(request_id, str):
+        request_id = ""
+
+    reply: Dict[str, Any] = {
+        "id": request_id,
+        "ok": False,
+        "changed": 0,
+        "backup": "",
+        "path": "",
+        "error": "",
+        "llm_env": {"ok": True, "changed": 0, "path": "", "error": ""},
+    }
+
+    def _finish() -> None:
+        if push is not None:
+            push(TOPIC_CONFIG_RESULT, reply)
+
+    keys = payload.get("keys")
+    if keys is None:
+        keys = {}
+    if not isinstance(keys, dict) or any(not isinstance(k, str) or not k.strip()
+                                         or not isinstance(v, str) for k, v in keys.items()):
+        reply["error"] = "keys 必须是 {点号路径: 字符串}（值一律按字符串传，类型由 Agent 校验）"
+        _log.warning("ipc: set_config 载荷不合法（keys）")
+        _finish()
+        return
+
+    credentials = payload.get("credentials")
+    if credentials is None:
+        credentials = {}
+    if not isinstance(credentials, dict):
+        reply["error"] = "credentials 必须是 {键: 字符串}"
+        _log.warning("ipc: set_config 载荷不合法（credentials）")
+        _finish()
+        return
+
+    config_file = getattr(runtime, "config_path_used", None) if runtime is not None else None
+    if not config_file:
+        reply["error"] = ("Agent 不知道自己用的 config.yaml 是哪一份（启动时没带 --config？）"
+                          "—— 为了不改错文件，这次拒绝写入")
+        _log.warning("ipc: set_config 被拒：runtime 没有 config_path_used")
+        _finish()
+        return
+    reply["path"] = str(config_file)
+    if not os.path.isfile(str(config_file)):
+        reply["error"] = "真源不在: %s" % config_file
+        _log.warning("ipc: set_config 被拒：真源不在 %s", config_file)
+        _finish()
+        return
+
+    # ①② 校验（不写任何东西）
+    try:
+        cleaned_credentials = settings_credentials.clean_values(credentials)
+    except settings_credentials.CredentialsError as exc:
+        reply["error"] = "凭据不合法：%s" % exc
+        _log.warning("ipc: set_config 凭据被拒：%s", exc)
+        _finish()
+        return
+
+    if keys:
+        try:
+            settings_config.plan_changes(keys, target=str(config_file))
+        except settings_config.SettingsConfigError as exc:
+            reply["error"] = str(exc)
+            _log.warning("ipc: set_config 被拒（没写任何文件）：%s", exc)
+            _finish()
+            return
+
+    # ③ 写配置真源
+    if keys:
+        try:
+            result = settings_config.apply_changes(keys, target=str(config_file))
+        except settings_config.SettingsConfigError as exc:
+            reply["error"] = "写 config.yaml 失败：%s" % exc
+            _log.warning("ipc: set_config 写入失败：%s", exc)
+            _finish()
+            return
+        reply["changed"] = int(result.get("changed", 0))
+        reply["backup"] = str(result.get("backup", ""))
+    reply["ok"] = True
+
+    # ④ 写凭据（另一个文件；只写这次真给的键）
+    if cleaned_credentials:
+        try:
+            config_data = read_config_file(str(config_file))
+        except Exception as exc:                     # noqa: BLE001 - ConfigError 及 YAML 错
+            reply["ok"] = False
+            reply["error"] = "配置已写，但读不回真源（凭据没写）：%s" % exc
+            _log.warning("ipc: set_config 凭据那步失败：%s", exc)
+            _finish()
+            return
+        try:
+            settings_credentials.write_cookie(config_data, cleaned_credentials)
+        except (settings_credentials.CredentialsError, OSError) as exc:
+            reply["ok"] = False
+            reply["error"] = "配置已写，但凭据写入失败：%s" % exc
+            _log.warning("ipc: set_config 凭据写入失败：%s", exc)
+            _finish()
+            return
+
+    # ⑤ 派生 llm.env（同一个回执里报成败 —— 真源已经写成功了，不让它变 ok=false）
+    try:
+        env_result = llm_env.sync_from_config(config_path=str(config_file))
+        reply["llm_env"] = {"ok": True, "changed": int(env_result.get("changed", 0)),
+                            "path": str(env_result.get("path", "")), "error": ""}
+    except llm_env.LlmEnvError as exc:
+        reply["llm_env"] = {"ok": False, "changed": 0, "path": "", "error": str(exc)}
+        _log.warning("ipc: set_config 派生 llm.env 失败：%s", exc)
+
+    _log.info("ipc: set_config id=%s 改了 %d 行 (llm.env %s)",
+              reply["id"] or "-", reply["changed"],
+              "已同步" if reply["llm_env"]["ok"] else "没同步")
+    _finish()
+
+
 def _schedule_state_data(scheduler: Any) -> Dict[str, Any]:
     """query_schedule 的应答负载 (kind="state", 线格式见 docs §3)。
 
@@ -448,6 +587,10 @@ def _make_command_handler(bus: Any, runtime: Any = None, push: Any = None):
 
         if action == COMMAND_QUERY_SCHEDULE:
             _handle_query_schedule(runtime, push)
+            return
+
+        if action == COMMAND_SET_CONFIG:
+            _handle_set_config(runtime, payload, push)
             return
 
         if action in _MUSIC_ACTIONS:

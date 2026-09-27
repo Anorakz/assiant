@@ -366,6 +366,21 @@ class TestCredentials(TempCase):
         with self.assertRaises(creds.CredentialsError):
             creds.write_cookie(self.config, {"SESSDATA": "  "})
 
+    def test_clean_values_validates_without_writing(self):
+        """T14-2: `clean_values()` 是**纯校验** —— IPC 处理器要"先校验后写"（真源 + 凭据
+        一次写两处时, 不许出现"配置写了、凭据没写"的中间态）。"""
+        cleaned = creds.clean_values({"SESSDATA": "  abc  ", "bili_jct": "", "DedeUserID": None})
+        self.assertEqual(cleaned, {"SESSDATA": "abc"}, "空值 = 不改动那个键")
+        self.assertFalse(os.path.exists(str(self.cookie)), "纯校验不该建文件")
+
+    def test_clean_values_refuses_the_same_things(self):
+        for values in ({"SEESSDATA": "abc"}, {"SESSDATA": "a\nb"}, {"SESSDATA": 42}):
+            with self.subTest(values=values):
+                with self.assertRaises(creds.CredentialsError):
+                    creds.clean_values(values)
+        self.assertEqual(creds.clean_values({}), {}, "一个键都不给 = 没有要写的东西，不是错误")
+        self.assertEqual(creds.clean_values(None), {})
+
     def test_a_missing_or_broken_file_is_anonymous_not_an_error(self):
         self.assertEqual(creds.read_cookie(self.config), {})
         with open(str(self.cookie), "w", encoding="utf-8") as handle:

@@ -48,7 +48,7 @@ GUI 读它的 `gui:` 段、读写它的 `llm:` 段、**只读**它的 `scheduler
 | `config/game_anchors.jsonl` | **派生数据**（一行一锚点: 游戏名 + 768 维 float16 向量 + 截图路径 + 来源 + 时间，T11-4） | 否（`.gitignore` 里单列一行；截图目录 `config/game_anchors/` 一并忽略） | `agent/core/game_anchors.py`（唯一写者）: 画面与 PC 进程**不一致时把那一帧登记成该游戏的锚点**（自纠错） | `agent/core/game_watch.py`（识别时算余弦） |
 | `config/study_anchors.jsonl` | **派生数据**（一行一锚点: 子标签 + 768 维 float16 向量 + 截图路径 + 来源 + 时间，T13-2；与**游戏锚点分开**） | 否（`.gitignore` 里单列一行；截图目录 `config/study_anchors/` 一并忽略） | `agent/core/study_anchors.py`（唯一写者）: T13-4 标定播种（`--apply`）、运行期"画面与标签不一致时学一帧"、以及**超每类上限丢最旧 / 清空**时的整篇原子重写 | `agent/core/study_watch.py`（判定时算大类原型与相对分） |
 | `config/study_stats.json` | **派生数据**（阈值 + EWMA + 计数 + 分数分布 + 最近明细/备注，T13-2；**全程有界**） | 否（`.gitignore` 里单列一行） | `agent/core/study_stats.py`（唯一写者）: 每次判定后落盘、带自适应挪完阈值落盘 | `agent/core/study_watch.py`（阈值与自适应的唯一依据） |
-| `llm/config/llm.env` | **派生**（喂 llama-server） | 否 | `ConfigSyncer`（GUI 保存时、或 `gui_config_sync` CLI） | llama-server 启动脚本 |
+| `llm/config/llm.env` | **派生**（喂 llama-server） | 否 | `agent/core/llm_env.py`（**唯一**写入者；T14-2 从 C++ 搬过来）。入口：GUI 保存经 IPC `set_config`、`assistant set … --apply` | llama-server 启动脚本 |
 | `config/config.example.yaml` | 模板 | **是** | 人 | 人（`cp` 起步） |
 
 > ⚠ `config/` 下现在有**三类**东西：**真源**（`config.yaml`，人/GUI 写）、**派生/本地数据**
@@ -160,10 +160,12 @@ L2 归一化、只能按余弦 —— 全部写死在 `agent/vision/siglip/confi
 
 派生是**单向**的，所以：
 
-- 手改 `llm/config/llm.env` **没用**：下一次「保存并同步」会按 `config.yaml` 把它覆盖回去。要改端口/线程/上下文，
-  改 `config/config.yaml` 的 `llm:` 段。
-- 反向读也不行：Agent **不许**读 `llm.env`。它是给 llama-server 用的进程环境，
-  不是应用配置。
+- 手改 `llm/config/llm.env` **没用**：下一次保存（GUI 保存设置 / `assistant set … --apply`）
+  会按 `config.yaml` 把它覆盖回去。要改端口/线程/上下文，改 `config/config.yaml` 的 `llm:` 段。
+- 反向读也不行：**`llm.env` 永远不是配置来源**。它是给 llama-server 用的进程环境，
+  唯一的"读者"是 llama-server 自己。整个 `agent/` 里只有**一个**模块允许碰它 ——
+  `agent/core/llm_env.py`（它是那个派生文件的**写入者**：读原文 -> 只改目标行 -> 原子写回），
+  别处连读都不许（`tests/test_config_source_guard.py` 机械守着这条边界）。
 - 于是"改了不生效"只剩一种原因：改错了文件。先看真源。
 
 ### 3.1 Agent 被允许的写：日程的**文本级**增删（R3 删除 + T12-5 新增）
@@ -273,6 +275,11 @@ ConfigStore **同一套**（两边语言不同、进程不同，没法共用代�
 
 ### 3.3 GUI 设置页的三张卡片（T13-9）
 
+> ⚠ **T14 改了这条的落点**：GUI **不再自己写** `config.yaml` —— 唯一的写入者是 Agent
+> （见 [`adr/0005`](adr/0005-config-single-writer.md)）。本节下面那张表描述的"页面能改哪些键"
+> 仍然成立（它就是请求侧的白名单），但**保存按钮现在走 IPC**：发 `set_config` →
+> Agent 落盘 → 回 `config_result`。新路径见 §3.4。
+
 GUI 那份 C++ 写入器（`gui/src/core/config_store.{h,cpp}`）与 §3.2 是**同一套约定**：语言不同、
 进程不同、没法共用代码，所以只能两边同口径 + 各有一组测试钉住。
 
@@ -291,8 +298,38 @@ GUI 不改 §8.1 里列出的那些"只在 CLI 改"的键（动作开关、自�
 ## 4. Agent 只认一份配置
 
 `agent/config.py` 加载的就是 `config/config.yaml`（`--config` 可覆盖路径），
-没有第二个入口。`agent/` 里出现 GUI 专用配置名或 `llm.env` 就是回归 ——
-`tests/test_config_source_guard.py` 会直接变红。
+没有第二个入口。`agent/` 里出现 GUI 专用配置名（归一化 D 系列删掉的那份模板）就是回归 ——
+`tests/test_config_source_guard.py` 会直接变红。`llm.env` 是个例外**但有边界**：
+只有它的写入者 `agent/core/llm_env.py` 能读写它，别处只允许"提名字"（日志/注释），
+带文件操作的那一行照样变红。
+
+### 3.4 GUI 的写入走 IPC（T14-2 / T14-3）
+
+**唯一的写入者是 Agent**（[`adr/0005`](adr/0005-config-single-writer.md)）。GUI 只发"要改哪些键"：
+
+```
+GUI ── {"action":"set_config","payload":{"id":"7f2","keys":{…},"credentials":{…}}} ──▶ Agent
+GUI ◀── {"topic":"config_result","data":{"id":"7f2","ok":true,"changed":1,…}} ────── Agent
+```
+
+Agent 那一侧按这个顺序做（任何一步校验失败 -> **一个字节都不写**，回执 `ok=false` + 原话）：
+
+| 步 | 做什么 | 谁实现 |
+| --- | --- | --- |
+| ① | 载荷形状（`keys` 是不是 `{字符串: 字符串}`） | `agent/ipc/__init__.py::_handle_set_config` |
+| ② | **凭据**纯校验（不写） | `settings_credentials.clean_values()` |
+| ③ | 配置**算计划**（不写）：不认识的键 / 结构级键 / 类型错在这里被拒 | `settings_config.plan_changes()` |
+| ④ | 写真源（只动目标行 + `.bak` + 原子写） | `settings_config.apply_changes()` |
+| ⑤ | 写凭据（另一个文件：合并 + `.bak` + 原子写） | `settings_credentials.write_cookie()` |
+| ⑥ | 派生 `llm.env`（成败单独回报，**不影响** `ok`） | `llm_env.sync_from_config()` |
+
+配套的三条边界：
+
+- **Agent 没在跑 = 改不了设置**（刻意不退回直写）：GUI 要如实说"Agent 没连上"并给「启动 Agent」。
+- GUI 侧只剩**读 + 预览**（`ConfigStore` 的写路径退役）：读配置显示、`planChanges`/`renderDiff`
+  仍可用来给用户看"这次会改哪几行"。
+- 键清单仍然是 `config.example.yaml`（模板 = 能改哪些键、值是什么类型）；GUI 的页面白名单
+  变成"**发出去的 `keys` 只许是这些**"的请求侧契约。
 
 ## 5. GUI 也读 `scheduler:` 段（只读，且只保证到夹具覆盖的范围）
 

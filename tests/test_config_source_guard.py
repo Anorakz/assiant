@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 tests/test_config_source_guard.py — 配置真源守卫（归一化 D 系列）
@@ -94,16 +94,26 @@ def _locally_ignored(rel_paths):
     return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
 
 
-#: 唯一允许**提到**派生文件的地方：运维 CLI。
+#: 派生文件 llm.env 的**写入者**（T14-2）。
 #:
-#: 为什么放行：`agent/cli.py` 不是 Agent 运行时，是给人用的操作工具；它的 `doctor`
-#: 要回答"派生文件跟真源一致吗"，做法是把路径交给**那份唯一的 C++ 实现**
-#: （`gui_config_sync` 的 dry-run），自己绝不把 `llm.env` 当配置读。
-#: 为了不让这个例外变成后门，下面另有一条更精确的检查：**可以提名字，不许读它**。
-CLI_EXEMPT = "agent/cli.py"
+#: 为什么它既读又写还是对的：`llm.env` 是**派生文件**（喂 llama-server），
+#: T14 起它的唯一实现搬到了 Python（`docs/adr/0005`：配置真源与派生文件都只由 Agent 写）。
+#: 文本级写入必须"读原文 -> 只改目标行 -> 原子写回"，所以它必然既读又写 ——
+#: 关键在于它**只把 llm.env 当产物**，绝不当配置来源（真源永远只有 config.yaml）。
+#: 这个例外只对这一个路径生效：同一个文件里出现 `gui.yaml` 照样要红，
+#: 别处**读/写** llm.env 也照样要红（见 TestAgentCopiesOnlyOneConfig 的机制测试）。
+DERIVED_ENV_WRITER = "agent/core/llm_env.py"
 
-#: 命中"读派生文件"的写法（在 CLI 里也要拦）
-READS_PATTERN = r"(open|read_text|readlines|read|load|loads)\s*\("
+#: "这一行真的在**操作文件**"的写法。
+#:
+#: 规矩（T14-2 起）：`llm.env` 这个名字**允许出现在注释/日志/协议说明里**
+#: （它是个有名字的产物，日志里说清"派生没成功"是有用的），但**同一行里只要有
+#: 文件读写**，那就只允许 `agent/core/llm_env.py` 干 —— 别的文件一律算回归。
+#: ⚠ 与旧版（只给 `agent/cli.py` 开"可以提名字"的口子）相比, 这条把口径推广到了
+#:   整个 `agent/`, 因为它管的是"有没有把它当配置读"这件事, 与文件叫什么无关。
+FILE_OP_PATTERN = (r"(open\s*\(|read_text\s*\(|readlines\s*\(|write_text\s*\("
+                   r"|write_text_atomic\s*\(|\.read\s*\(|\.write\s*\("
+                   r"|json\.loads?\s*\(|yaml\.safe_load\s*\()")
 
 
 def _agent_python_files():
@@ -111,6 +121,26 @@ def _agent_python_files():
     if not AGENT_DIR.is_dir():
         return []
     return sorted(p for p in AGENT_DIR.rglob("*.py") if "__pycache__" not in p.parts)
+
+
+def _forbidden_hits(rel: str, line: str):
+    """这一行在**这个相对路径**下命中了哪些禁令（抽出来是为了能给判定本身写测试）。
+
+    @return [(pattern, why)] —— 空列表 = 放行
+    """
+    out = []
+    for pattern, why in FORBIDDEN_IN_AGENT:
+        if not re.search(pattern, line, re.IGNORECASE):
+            continue
+        if pattern == r"llm\.env":
+            if rel == DERIVED_ENV_WRITER:
+                continue
+            if not re.search(FILE_OP_PATTERN, line):
+                continue          # 只是提名字（注释/日志/协议说明）—— 放行
+            why = ("只有 agent/core/llm_env.py 能读写派生文件 llm.env（它是那个产物的"
+                   "唯一写入者）；别处连读都不许 —— 真源永远只有 config.yaml")
+        out.append((pattern, why))
+    return out
 
 
 class TestAgentCopiesOnlyOneConfig(unittest.TestCase):
@@ -122,16 +152,7 @@ class TestAgentCopiesOnlyOneConfig(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             rel = path.relative_to(_PROJECT_ROOT).as_posix()
             for lineno, line in enumerate(text.splitlines(), 1):
-                for pattern, why in FORBIDDEN_IN_AGENT:
-                    if not re.search(pattern, line, re.IGNORECASE):
-                        continue
-                    if rel == CLI_EXEMPT and pattern == r"llm\.env":
-                        # 运维 CLI 允许**提到**它（见 CLI_EXEMPT 的说明），
-                        # 但同一行里不许有"读文件"的调用
-                        if not re.search(READS_PATTERN, line):
-                            continue
-                        why = ("运维 CLI 可以提到派生文件、但不许把它当配置**读**；"
-                               "要判一致性请交给 gui_config_sync")
+                for pattern, why in _forbidden_hits(rel, line):
                     found.append("%s:%d  命中 /%s/\n      %s\n      原因: %s"
                                  % (rel, lineno, pattern, line.strip(), why))
 
@@ -140,15 +161,49 @@ class TestAgentCopiesOnlyOneConfig(unittest.TestCase):
                       "(Agent 只读 %s; 如果确实是注释里说明'不读它', 请改写措辞):\n  %s"
                       % (len(found), TRUTH_PATH, "\n  ".join(found)))
 
-    def test_cli_exemption_cannot_hide_a_real_read(self):
-        """反空转：证明"放行 cli.py"没有把"读派生文件"也一起放过去。
+    def test_the_derived_env_writer_exemption_has_teeth(self):
+        """豁免必须是**按路径 + 按模式**的，不能变成"某个文件说什么都行"。
 
-        直接把一段**会读文件**的样本喂给判断逻辑，它必须被拦下。
+        四步：① 那个文件里 llm.env 放行（它本来就是写入者）；
+        ② **别处读/写** llm.env 照样被抓；③ 只是提名字（日志/注释）放行；
+        ④ 同一个文件里出现 `gui.yaml` 照样被抓。
         """
-        sample = 'with open(env_path) as handle:  # llm.env'
-        self.assertTrue(re.search(r"llm\.env", sample, re.IGNORECASE))
-        self.assertTrue(re.search(READS_PATTERN, sample),
-                        "READS_PATTERN 没抓住 open(...) —— 例外就成了后门")
+        self.assertEqual(_forbidden_hits(DERIVED_ENV_WRITER,
+                                         'ENV_NAME = "llm.env"  # 派生文件'), [])
+        self.assertTrue(_forbidden_hits("agent/ipc/__init__.py",
+                                        'open("llm/config/llm.env").read()'),
+                        "别的文件读 llm.env 必须被抓")
+        self.assertTrue(_forbidden_hits("agent/cli.py",
+                                        'env = read_text("llm/env")  # llm.env'),
+                        "写/读原语混在一行里也要被抓")
+        self.assertEqual(_forbidden_hits("agent/ipc/__init__.py",
+                                         'log.info("派生 llm.env 没成功")'), [],
+                         "只是提名字要放行（日志里说清产物名是有用的）")
+        self.assertTrue(_forbidden_hits(DERIVED_ENV_WRITER, 'X = "gui.yaml"'),
+                        "同一个文件里别的字面量不受豁免")
+
+    def test_the_exempt_writer_really_exists_and_mentions_it(self):
+        """反空转：豁免写的那个路径必须真的存在、真的提到 llm.env。
+
+        否则将来文件改名/搬走，豁免就成了一句空话（守卫还以为自己在守着什么）。
+        """
+        path = _PROJECT_ROOT / DERIVED_ENV_WRITER
+        self.assertTrue(path.is_file(), "豁免里的 %s 不存在" % DERIVED_ENV_WRITER)
+        self.assertIn("llm.env", path.read_text(encoding="utf-8"),
+                      "%s 里没提 llm.env —— 那这条豁免该删掉" % DERIVED_ENV_WRITER)
+
+    def test_the_file_op_pattern_catches_a_real_read(self):
+        """反空转：证明那条"同一行有文件操作就拦"的正则真的抓得住读文件。"""
+        for sample in ('with open(env_path) as handle:  # llm.env',
+                       'text = env_path.read_text()  # llm.env',
+                       'data = json.load(handle)  # llm.env',
+                       'Path("llm.env").read_text()'):
+            with self.subTest(sample=sample):
+                self.assertTrue(re.search(r"llm\.env", sample, re.IGNORECASE))
+                self.assertTrue(re.search(FILE_OP_PATTERN, sample),
+                                "FILE_OP_PATTERN 没抓住文件操作 —— 例外就成了后门")
+        self.assertFalse(re.search(FILE_OP_PATTERN, 'print("llm.env")'),
+                         "只是提名字不该被当成文件操作")
 
     def test_the_scan_actually_covers_something(self):
         """防止路径写错导致"零命中"这种假绿灯。"""
@@ -216,7 +271,7 @@ class TestNoGuiConfigLeftovers(unittest.TestCase):
 WRITE_PRIMITIVES = (r"(os\.replace|mkstemp|\.write_text\(|write_text_atomic\("
                     r"|open\([^)]*,\s*[\"']a)")
 
-#: 允许出现写入原语的文件（**只有**这十个）。
+#: 允许出现写入原语的文件（**只有**这十一个）。
 ALLOWED_WRITERS = {
     "agent/config.py",               # write_text_atomic: 全仓唯一的"原子写文本"实现
     "agent/core/schedule_config.py", # 唯一被允许的调用方: 删掉已触发的一次性日程 (R3) +
@@ -262,8 +317,16 @@ ALLOWED_WRITERS = {
     # T13-8 新增的第十个写入者: **B 站凭据文件**（config/bilibili_cookie.json）。
     # ⚠ 写的是**凭据**（`SESSDATA` = 账号），不是配置真源: 整份 JSON 原子重写 + `.bak`，
     #   只认三个键（`SEESSDATA` 那种笔误会被拒 —— 实测 B 站会把它当没登录）。
-    #   入口: `assistant set cookie --apply`。
+    #   入口: `assistant set cookie --apply`，以及 T14-2 起 GUI 走 IPC 让 Agent 写
+    #   （`set_config` 的 `credentials` 字段）。
     "agent/core/settings_credentials.py",
+    # T14-2 新增的第十一个写入者: **派生文件 llm/config/llm.env**（喂 llama-server）。
+    # ⚠ 它不是配置真源（真源永远只有 config.yaml），是**产物**：按真源的 `llm:` 段
+    #   重写那 8 行 `LLM_*=…`（只动目标行 + `.bak` + 原子写）。
+    #   为什么搬到这里: T14 起"配置真源 + 派生文件"都只由 Agent 写（docs/adr/0005），
+    #   原来的唯一实现是 C++ 的 `gui/src/core/config_sync.cpp`（T14-3 退役）。
+    #   它是**唯一**允许碰 llm.env 的 Python 模块（见 DERIVED_ENV_WRITER）。
+    "agent/core/llm_env.py",
 }
 
 
@@ -290,7 +353,7 @@ class TestWhoWritesTheConfig(unittest.TestCase):
                       % (", ".join(sorted(ALLOWED_WRITERS)), "\n  ".join(offenders)))
 
     def test_the_writer_scan_is_not_vacuous(self):
-        """反空转：白名单里那十个文件**真的**命中了写入原语，否则这条守卫什么都没查。
+        """反空转：白名单里那十一个文件**真的**命中了写入原语，否则这条守卫什么都没查。
 
         ⚠ T11-8：这条断言正是"补上追加写"的理由 —— 只把 `game_anchors.py` 加进白名单
         而正则不认 `open(path, "a")`，这里就会红（那份白名单是假的）。

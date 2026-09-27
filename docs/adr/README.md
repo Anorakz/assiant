@@ -20,8 +20,5 @@ ADR 是历史与理由，不是操作手册。
 | [0002](0002-gui-on-board.md) | GUI 是板端的 Qt5 C++ 程序 | 已生效 | 屏与触摸在板子上、板子本就有 Qt 5.12（PC 上没有）；代价是跨语言两份语义，靠夹具守卫钉住 |
 | [0003](0003-ringbuffer-readonly.md) | RingBuffer 的写入侧只在 native，Python 只读 | 已生效 | 严格 SPSC + 覆盖式丢帧；写入口只有解码线程一处，测试注帧走单独的 `agent_native_test` |
 | [0004](0004-pybind11-gil-release.md) | 跨语言调用要放 GIL | 已生效 | 阻塞调用占着 GIL 会把整个 asyncio 按住；帧读要"先放 GIL 读、再持 GIL 建 numpy" |
-
-> 待登记：`0005`（`config.yaml` 只有一个写入者：GUI 经 Agent 写）—— 决定已下（T14 开头），
-> 实现在 T14-2 / T14-3，**代码落地后再写这一篇并在这里登记**（ADR 记的是"已生效"的决定，
-> 不留占位条目）。
+| [0005](0005-config-single-writer.md) | `config.yaml` 只有一个写入者：GUI 经 Agent 写 | 已定（T14-2/T14-3） | GUI 不再自己改配置；写入走 `set_config` → Agent（真源 + 凭据 + `llm.env` 一次做完）再回 `config_result` |
 

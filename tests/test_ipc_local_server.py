@@ -72,10 +72,12 @@ from agent.ipc.protocol import (  # noqa: E402
     COMMAND_MUSIC_STOP,
     COMMAND_NEXT_BILIBILI,
     COMMAND_QUERY_SCHEDULE,
+    COMMAND_SET_CONFIG,
     COMMAND_SWITCH_MODE,
     COMMAND_VIDEO_CONTROL,
     MAX_LINE_BYTES,
     SOCKET_PATH,
+    TOPIC_CONFIG_RESULT,
     TOPIC_LLM,
     TOPIC_SCHEDULE,
     TOPIC_STATUS,
@@ -1174,6 +1176,211 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
                 with contextlib.suppress(Exception):
                     await writer.wait_closed()
             await server.stop()
+
+
+# ===========================================================================
+#  set_config: Agent 是配置真源唯一的写入者 (T14-2)
+# ===========================================================================
+#: 一份最小真源模板（键清单与类型都以它为准；形状与 config/config.example.yaml 同）
+_SET_CONFIG_TEMPLATE = """\
+study:
+  enabled: false
+  relative_band: 0.05
+llm:
+  port: 9000
+  local_api_key: sk-test
+bilibili:
+  cookie_file: config/bilibili_cookie.json
+"""
+
+_SET_CONFIG_CONFIG = """\
+study:
+  enabled: false
+  relative_band: 0.05
+llm:
+  port: 9000
+  local_api_key: sk-test
+bilibili:
+  cookie_file: config/bilibili_cookie.json
+"""
+
+
+class _SetConfigRuntime(object):
+    """只带 `config_path_used` 的替身 —— set_config 需要的全部上下文。"""
+
+    def __init__(self, config_path):
+        self.config_path_used = Path(config_path)
+
+
+class TestSetConfigCommand(unittest.IsolatedAsyncioTestCase):
+    """`set_config`：GUI 不再自己写，改成"让 Agent 写 + 拿回执"（docs/adr/0005）。
+
+    这一组盯四件事:
+      · 写成功 -> 回执 ok/chenged/path 齐 + 真源真变了 + **llm.env 一起派生**;
+      · 任何校验不过 -> 回执 ok=false 且**一个字节都不写**;
+      · 凭据在写配置**之前**就校验（否则会是"配置写了、凭据没写"的中间态）;
+      · 每条路径都必须回执（GUI 靠它, 不然只能等超时）。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="t14-set-config-"))
+        (self.tmp / "config").mkdir()
+        (self.tmp / "llm" / "config").mkdir(parents=True)
+        self.config = self.tmp / "config" / "config.yaml"
+        self.template = self.tmp / "config" / "config.example.yaml"
+        self.env = self.tmp / "llm" / "config" / "llm.env"
+        self.config.write_text(_SET_CONFIG_CONFIG, encoding="utf-8")
+        self.template.write_text(_SET_CONFIG_TEMPLATE, encoding="utf-8")
+        # 派生文件先摆一份（形状与板端那份一致：注释 + 没有结尾换行）
+        with open(str(self.env), "w", encoding="utf-8", newline="") as handle:
+            handle.write("# llm.env\nLLM_PORT=9000\nLLM_API_KEY=sk-test\nLLM_HOST=0.0.0.0")
+
+    def tearDown(self):
+        shutil.rmtree(str(self.tmp), ignore_errors=True)
+
+    def handler(self, runtime=None):
+        from agent.ipc import _make_command_handler
+
+        self.pushed = []
+        return _make_command_handler(
+            None,
+            runtime=runtime if runtime is not None else _SetConfigRuntime(self.config),
+            push=lambda topic, data: self.pushed.append((topic, data)),
+        )
+
+    def config_text(self):
+        return self.config.read_text(encoding="utf-8")
+
+    def env_text(self):
+        with open(str(self.env), "r", encoding="utf-8", newline="") as handle:
+            return handle.read()
+
+    async def test_writes_the_line_and_replies_with_ok(self):
+        handler = self.handler()
+        await handler(COMMAND_SET_CONFIG,
+                      {"id": "req-1", "keys": {"study.relative_band": "0.07"}})
+
+        self.assertEqual(len(self.pushed), 1, "必须恰好回一条")
+        topic, data = self.pushed[0]
+        self.assertEqual(topic, TOPIC_CONFIG_RESULT)
+        self.assertEqual(data["id"], "req-1", "id 要原样带回来（协议没有关联字段）")
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(data["changed"], 1)
+        self.assertEqual(data["path"], str(self.config))
+        self.assertTrue(data["backup"], "写了就要有 .bak 路径")
+        self.assertIn("relative_band: 0.07", self.config_text())
+        self.assertEqual(data["llm_env"]["ok"], True)
+
+    async def test_derives_llm_env_in_the_same_round(self):
+        """配置真源改了端口 -> 同一个回执里 llm.env 也同步了（GUI 不用再跑一个 C++ 工具）。"""
+        self.config.write_text(_SET_CONFIG_CONFIG.replace("port: 9000", "port: 9100"),
+                               encoding="utf-8")
+        self.template.write_text(_SET_CONFIG_TEMPLATE, encoding="utf-8")
+        handler = self.handler()
+        await handler(COMMAND_SET_CONFIG, {"id": "r", "keys": {"study.enabled": "true"}})
+
+        topic, data = self.pushed[0]
+        self.assertTrue(data["llm_env"]["ok"], data["llm_env"])
+        self.assertEqual(data["llm_env"]["changed"], 1)
+        self.assertIn("LLM_PORT=9100", self.env_text())
+        self.assertIn("LLM_HOST=0.0.0.0", self.env_text(), "别的键不许动")
+
+    async def test_unknown_key_is_refused_and_nothing_is_written(self):
+        before = self.config_text()
+        handler = self.handler()
+        await handler(COMMAND_SET_CONFIG, {"id": "r", "keys": {"study.nope": "1"}})
+
+        topic, data = self.pushed[0]
+        self.assertEqual(topic, TOPIC_CONFIG_RESULT)
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["changed"], 0)
+        self.assertIn("不认识的设置项", data["error"])
+        self.assertEqual(self.config_text(), before, "被拒时一个字节都不许写")
+        self.assertFalse((self.config.parent / "config.yaml.bak").exists(), "也不留 .bak")
+
+    async def test_type_mismatch_is_refused(self):
+        before = self.config_text()
+        handler = self.handler()
+        await handler(COMMAND_SET_CONFIG, {"id": "r", "keys": {"study.relative_band": "abc"}})
+
+        _, data = self.pushed[0]
+        self.assertFalse(data["ok"])
+        self.assertIn("数字", data["error"])
+        self.assertEqual(self.config_text(), before)
+
+    async def test_bad_payload_shape_is_refused_with_a_receipt(self):
+        before = self.config_text()
+        handler = self.handler()
+        for payload in ({"id": "r", "keys": []}, {"id": "r", "keys": {"a": 1}},
+                        {"id": "r", "keys": {"": "x"}}, {"id": "r", "credentials": []}):
+            self.pushed = []
+            await handler(COMMAND_SET_CONFIG, payload)
+            self.assertEqual(len(self.pushed), 1, "载荷不合法也要回执")
+            self.assertFalse(self.pushed[0][1]["ok"], payload)
+        self.assertEqual(self.config_text(), before)
+
+    async def test_without_a_config_path_it_refuses_rather_than_guessing(self):
+        class _NoPath(object):
+            config_path_used = None
+
+        before = self.config_text()
+        handler = self.handler(runtime=_NoPath())
+        await handler(COMMAND_SET_CONFIG, {"id": "r", "keys": {"study.enabled": "true"}})
+
+        _, data = self.pushed[0]
+        self.assertFalse(data["ok"])
+        self.assertIn("哪一份", data["error"])
+        self.assertEqual(self.config_text(), before)
+
+    async def test_credentials_are_validated_before_the_config_is_written(self):
+        """先校验后写：凭据键写错时, 配置那一行也不许落盘（不留中间态）。"""
+        before = self.config_text()
+        handler = self.handler()
+        await handler(COMMAND_SET_CONFIG,
+                      {"id": "r", "keys": {"study.relative_band": "0.09"},
+                       "credentials": {"SEESSDATA": "typo"}})
+
+        _, data = self.pushed[0]
+        self.assertFalse(data["ok"])
+        self.assertIn("凭据不合法", data["error"])
+        self.assertEqual(self.config_text(), before, "凭据不合法时配置也不许写")
+        self.assertNotIn("relative_band: 0.09", self.config_text())
+
+    async def test_credentials_go_to_the_cookie_file_of_that_config(self):
+        cookie = self.tmp / "creds" / "cookie.json"
+        self.config.write_text(
+            _SET_CONFIG_CONFIG.replace("config/bilibili_cookie.json", str(cookie)),
+            encoding="utf-8")
+        handler = self.handler()
+        await handler(COMMAND_SET_CONFIG,
+                      {"id": "r", "keys": {}, "credentials": {"SESSDATA": "sess-123"}})
+
+        _, data = self.pushed[0]
+        self.assertTrue(data["ok"], data)
+        self.assertTrue(cookie.is_file(), "凭据要写进 config 里那个 cookie_file")
+        self.assertIn("sess-123", cookie.read_text(encoding="utf-8"))
+
+    async def test_missing_env_file_reports_config_ok_but_env_failed(self):
+        """派生文件不在 -> 真源照写（它是唯一真源）, llm_env 那一段如实报失败。"""
+        self.env.unlink()
+        handler = self.handler()
+        await handler(COMMAND_SET_CONFIG, {"id": "r", "keys": {"study.enabled": "true"}})
+
+        _, data = self.pushed[0]
+        self.assertTrue(data["ok"], "真源写成功就是成功")
+        self.assertEqual(data["changed"], 1)
+        self.assertFalse(data["llm_env"]["ok"])
+        self.assertIn("llm.env 不在", data["llm_env"]["error"])
+
+    async def test_same_value_is_a_no_op_but_still_replies(self):
+        before = self.config_text()
+        handler = self.handler()
+        await handler(COMMAND_SET_CONFIG, {"id": "r", "keys": {"study.relative_band": "0.05"}})
+
+        _, data = self.pushed[0]
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["changed"], 0)
+        self.assertEqual(self.config_text(), before)
 
 
 # ===========================================================================

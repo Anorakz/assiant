@@ -181,6 +181,19 @@ GUI 收到后按 `topic` 分发。**不认识的 topic 忽略**。
 >
 > **不认识 `schedule` 的客户端按未知 topic 忽略即可**（§3 开头就要求如此）——
 > 因此加这条 topic **不需要**老 GUI 改任何代码。
+| `config_result` | `id` | string | **一次 `set_config` 的回执**（T14-2）：把请求里那个 `id` 原样带回来 |
+| | `ok` | bool | 真源写成功没有（**校验没过 = false, 且一个字节都没写**） |
+| | `changed` | number | 真的改了几行（值本来就一样 -> 0） |
+| | `backup` / `path` | string | 改动前的 `.bak` 路径 / 真源路径（没写时 `backup` 是空串） |
+| | `error` | string | 失败原话（成功时空串）—— 直接可以显示给用户 |
+| | `llm_env` | object | **派生文件那一步**的结果：`{ok, changed, path, error}`。⚠ 它**不影响 `ok`**：真源写成功就是成功，派生失败只在这里如实报（下一次保存会再同步一次） |
+
+> ⚠ 为什么要有 `config_result`：T14 起 **GUI 不再自己写 `config.yaml`**（唯一写入者是
+> Agent，见 [`adr/0005`](adr/0005-config-single-writer.md)）。"我让你改的那几行到底写进去没有"
+> 必须有个明确回执，否则界面只能猜或者一直等。
+> ⚠ **关联字段放在 payload 里**（`id`），不是新增信封字段 —— 协议从来没有版本号/关联字段
+> （见 §4 里 `query_schedule` 的说明），这里照旧：Agent 把同一个 `id` 塞回这条推送。
+> ⚠ 老 GUI 不认识这条 topic —— 按 §3 开头的要求**忽略**即可，不会因此出错。
 
 ### `status.mode` 的取值
 
@@ -231,6 +244,15 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
 | `music_play_pause` | — | — | 暂停/继续**当前这首**（T8-4）；PC 上没在放时**从环形队列当前位置起播**（T8-5b）。应答是随后那条 `music` 推送（§3） |
 | `music_next` / `music_prev` | — | — | 在**环形队列**里前后走一格 —— 到尾回第一首、到首回最后一首（T8-5b）；队列空时回一条 `llm` 说明 |
 | `music_stop` | — | — | 停止播放（**不改**本地库） |
+| `set_config` | `id` | string | **回执 id**（调用方随便给，非空字符串；Agent 原样带回）—— 见 §3 的 `config_result` |
+| | `keys` | object | `{"点号路径": "字符串值"}`：要改的那些设置项（T14-2）。⚠ **键清单以 `config.example.yaml` 为准**：不在模板里的键、结构级（映射/序列）的键、类型不对的值一律**拒绝且一个字节都不写**；值没变就不写、不留 `.bak`。空对象 `{}` 是合法的（= 只让 Agent 重新派生一次 `llm.env`） |
+| | `credentials` | object | **可选**：B 站凭据 `{"SESSDATA"/"bili_jct"/"DedeUserID": "…"}`（写进 `bilibili.cookie_file` 指的**另一个文件**）。⚠ 它在**写配置之前**就校验：键写错时配置那一行也不落盘（不留"配置写了、凭据没写"的中间态） |
+
+> ⚠ **为什么 GUI 要"求"Agent 去写**（T14-2）：`config.yaml` 与 `llm.env` 的写入者**只有 Agent 一个**
+> （见 [`adr/0005`](adr/0005-config-single-writer.md)）—— 两个进程各写一份，就会互相覆盖、
+> `.bak` 也会互相盖掉。所以 GUI 只发"要改哪些键"，落盘、校验、`.bak`、派生 `llm.env`
+> 全在 Agent 侧一次做完，再回一条 `config_result`。
+> ⚠ Agent 没在跑时 GUI 就改不了设置（**刻意不退回直写**）：界面要如实说"Agent 没连上"。
 
 > ⚠ **音乐那条线的分工（T8-5b）**：**队列内容**由**对话**决定（工具 `next_music` 的
 > `enqueue` / `clear_queue`），
@@ -280,6 +302,7 @@ Agent 收到后按 `action` 分发。**不认识的 action 忽略**（记 warnin
 {"action":"chat_input","payload":{"text":"帮我看看现在几点了"}}
 {"action":"next_bilibili","payload":{}}
 {"action":"query_schedule","payload":{}}
+{"action":"set_config","payload":{"id":"7f2","keys":{"study.relative_band":"0.06"}}}
 ```
 
 ---
@@ -440,6 +463,8 @@ while b"\n" in buf:
 | `TOPIC_WALLPAPER` | `"wallpaper"` |
 | `TOPIC_MUSIC` | `"music"` |
 | `TOPIC_SCHEDULE` | `"schedule"` |
+| `TOPIC_BILIBILI` | `"bilibili"` |
+| `TOPIC_CONFIG_RESULT` | `"config_result"` |
 | `COMMAND_SWITCH_MODE` | `"switch_mode"` |
 | `COMMAND_CHAT_INPUT` | `"chat_input"` |
 | `COMMAND_NEXT_BILIBILI` | `"next_bilibili"` |
@@ -448,6 +473,7 @@ while b"\n" in buf:
 | `COMMAND_MUSIC_NEXT` | `"music_next"` |
 | `COMMAND_MUSIC_PREV` | `"music_prev"` |
 | `COMMAND_MUSIC_STOP` | `"music_stop"` |
+| `COMMAND_SET_CONFIG` | `"set_config"` |
 
 > ⚠ T7-3 删掉了 `COMMAND_NEXT_WALLPAPER`（`"next_wallpaper"`）：换壁纸只走对话，
 > 不再有这条命令 —— 见 §4 的说明。C++ 侧也请把对应分支删掉（留着也不会有人发）。

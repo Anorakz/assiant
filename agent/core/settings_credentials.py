@@ -31,7 +31,7 @@ from typing import Any, Dict, Mapping, Optional
 from agent.config import write_text_atomic
 
 __all__ = ["CredentialsError", "ALLOWED_KEYS", "DEFAULT_COOKIE_FILE",
-           "cookie_path", "read_cookie", "write_cookie"]
+           "cookie_path", "read_cookie", "clean_values", "write_cookie"]
 
 #: 只认这三个（B 站的键名, 大小写敏感）。
 ALLOWED_KEYS = ("SESSDATA", "bili_jct", "DedeUserID")
@@ -74,11 +74,14 @@ def read_cookie(config: Optional[Mapping[str, Any]] = None) -> Dict[str, str]:
     return {key: str(value) for key, value in data.items() if key in ALLOWED_KEYS and value}
 
 
-def write_cookie(config: Optional[Mapping[str, Any]], values: Mapping[str, Any]) -> str:
-    """把凭据写进文件（**合并**已有内容, 不认识的键拒绝）。
+def clean_values(values: Mapping[str, Any]) -> Dict[str, str]:
+    """**只校验、不写盘**：把一次 credentials 改动归一成"要写的那几个键"。
 
-    @return 写进去的文件路径
-    @raise CredentialsError 键不认识 / 值不是字符串 / 写不进去
+    给 T14-2 的 IPC 处理器用：它要先确认凭据合法，再决定要不要动配置真源 ——
+    一次性写两处（真源 + 凭据）时，"先校验后写"比"写一半发现键写错了"好。
+
+    @return 要写的键（空值被丢掉 = 不改动那个键）；输入里没有可写的键时返回 {}
+    @raise CredentialsError 键不认识 / 值不是字符串 / 值里有换行
     """
     cleaned: Dict[str, str] = {}
     for key, value in (values or {}).items():
@@ -86,12 +89,25 @@ def write_cookie(config: Optional[Mapping[str, Any]], values: Mapping[str, Any])
         if name not in ALLOWED_KEYS:
             raise CredentialsError("不认识的键 %r（只认 %s —— 笔误会被 B 站当成没登录）"
                                    % (key, " / ".join(ALLOWED_KEYS)))
+        if value is not None and not isinstance(value, str):
+            raise CredentialsError("值必须是字符串（%s 收到 %s）"
+                                   % (name, type(value).__name__))
         text = str(value or "").strip()
         if not text:
             continue
         if "\n" in text or "\r" in text:
             raise CredentialsError("值不能换行（凭据是一行的）")
         cleaned[name] = text
+    return cleaned
+
+
+def write_cookie(config: Optional[Mapping[str, Any]], values: Mapping[str, Any]) -> str:
+    """把凭据写进文件（**合并**已有内容, 不认识的键拒绝）。
+
+    @return 写进去的文件路径
+    @raise CredentialsError 键不认识 / 值不是字符串 / 一个可写的值都没给 / 写不进去
+    """
+    cleaned = clean_values(values)
     if not cleaned:
         raise CredentialsError("没给任何值（要写至少一个: %s）" % " / ".join(ALLOWED_KEYS))
     path = cookie_path(config)

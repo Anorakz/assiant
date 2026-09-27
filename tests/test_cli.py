@@ -591,50 +591,69 @@ class TestScheduleWindow(unittest.TestCase):
                     cli.positive_hours(bad)
 
 
-class TestDerivationVerdict(unittest.TestCase):
-    def test_no_diff_is_ok(self):
-        status, detail = cli.derivation_verdict(0, "[sync] dry-run（未写文件）\n[sync] 无差异\n")
+class TestDerivationCheck(unittest.TestCase):
+    """`doctor` 的"派生 llm.env"这一项（T14-2 起走 Python 那份唯一实现）。
+
+    ⚠ 这里**不重实现映射表**：只造出"一致 / 有差异 / 文件不在"三种局面, 看它怎么判。
+    """
+
+    def _repo(self):
+        tmp = tempfile.mkdtemp(prefix="cli-doc-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (Path(tmp) / "config").mkdir()
+        (Path(tmp) / "llm" / "config").mkdir(parents=True)
+        return tmp
+
+    def _write(self, tmp, config_port, env_port):
+        config_file = os.path.join(tmp, "config", "config.yaml")
+        env_file = os.path.join(tmp, "llm", "config", "llm.env")
+        with open(config_file, "w", encoding="utf-8") as handle:
+            handle.write("llm:\n  port: %s\n" % config_port)
+        with open(env_file, "w", encoding="utf-8") as handle:
+            handle.write("LLM_PORT=%s\n" % env_port)
+        return config_file, env_file
+
+    def test_in_sync_is_ok(self):
+        tmp = self._repo()
+        config_file, env_file = self._write(tmp, 9000, 9000)
+        status, detail = cli.derivation_check(config_file, env_file)
         self.assertEqual(status, cli.OK)
         self.assertIn("一致", detail)
 
-    def test_diff_is_a_warning(self):
-        status, detail = cli.derivation_verdict(0, "[sync] dry-run\n--- a\n+++ b\n-LLM_PORT=1\n")
+    def test_a_difference_is_a_warning_and_names_the_key(self):
+        tmp = self._repo()
+        config_file, env_file = self._write(tmp, 9100, 9000)
+        status, detail = cli.derivation_check(config_file, env_file)
         self.assertEqual(status, cli.WARN)
-        self.assertIn("有差异", detail)
+        self.assertIn("LLM_PORT", detail)
+        self.assertIn("9000", detail)
+        self.assertIn("9100", detail)
 
-    def test_nonzero_exit_is_a_warning_with_the_code(self):
-        status, detail = cli.derivation_verdict(2, "[sync] 文件不存在: /tmp/x.env")
-        self.assertEqual(status, cli.WARN)
-        self.assertIn("退出码 2", detail)
-
-
-class TestDerivationCheck(unittest.TestCase):
-    def test_missing_binary_is_a_warning_not_a_crash(self):
-        tmp = tempfile.mkdtemp(prefix="cli-doc-")
-        self.addCleanup(shutil.rmtree, tmp, True)
+    def test_missing_files_are_warnings_not_crashes(self):
+        tmp = self._repo()
         status, detail = cli.run_derivation_check(
-            os.path.join(tmp, "nope"), os.path.join(tmp, "config.yaml"),
-            os.path.join(tmp, "llm.env"))
+            os.path.join(tmp, "config", "nope.yaml"),
+            os.path.join(tmp, "llm", "config", "llm.env"))
         self.assertEqual(status, cli.WARN)
         self.assertIn("没找到", detail)
 
-    @unittest.skipUnless(UNIX_SOCKET_SUPPORTED, "需要可执行脚本（POSIX）")
-    def test_runs_the_real_binary_and_reads_its_verdict(self):
-        tmp = tempfile.mkdtemp(prefix="cli-doc-run-")
-        self.addCleanup(shutil.rmtree, tmp, True)
-        binary = os.path.join(tmp, "gui_config_sync")
-        with open(binary, "w", encoding="utf-8") as handle:
-            handle.write("#!/bin/sh\necho '[sync] dry-run（未写文件）'\necho '[sync] 无差异'\n")
-        os.chmod(binary, 0o755)
-        config_file = os.path.join(tmp, "config.yaml")
-        env_file = os.path.join(tmp, "llm.env")
-        for path in (config_file, env_file):
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write("x\n")
+        config_file, _env_file = self._write(tmp, 9000, 9000)
+        status, detail = cli.run_derivation_check(config_file,
+                                                  os.path.join(tmp, "llm.env"))
+        self.assertEqual(status, cli.WARN)
+        self.assertIn("没找到", detail)
 
-        status, detail = cli.run_derivation_check(binary, config_file, env_file)
-        self.assertEqual(status, cli.OK)
-        self.assertIn("一致", detail)
+    def test_a_broken_config_is_a_warning_not_a_crash(self):
+        tmp = self._repo()
+        config_file = os.path.join(tmp, "config", "config.yaml")
+        env_file = os.path.join(tmp, "llm", "config", "llm.env")
+        with open(config_file, "w", encoding="utf-8") as handle:
+            handle.write("llm: [这不是映射]\n")
+        with open(env_file, "w", encoding="utf-8") as handle:
+            handle.write("LLM_PORT=9000\n")
+        status, detail = cli.derivation_check(config_file, env_file)
+        self.assertEqual(status, cli.WARN)
+        self.assertTrue(detail, "要说清为什么算不出来")
 
 
 class TestScheduleCommand(unittest.TestCase):

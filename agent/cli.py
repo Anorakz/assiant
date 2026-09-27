@@ -32,7 +32,6 @@ import json
 import logging
 import os
 import signal
-import subprocess
 import sys
 import time
 from datetime import date, datetime, timedelta
@@ -1527,34 +1526,34 @@ OK = "OK"
 WARN = "警告"
 
 
-def derivation_verdict(exit_code: int, output: str) -> Tuple[str, str]:
-    """纯逻辑：把 `gui_config_sync`（dry-run）的输出判成 OK / 警告。
+def derivation_check(config_file: Optional[str], env_file: Optional[str]) -> Tuple[str, str]:
+    """派生一致性：用 **Python 那份唯一实现**（`agent/core/llm_env.py`）算一次差异。
 
-    ⚠ 派生一致性**不在这边重实现映射表**：映射表只有 `gui/src/core/config_sync.cpp`
-      一份，这里只是跑它、读它的结论。
+    ⚠ T14-2 之前这一步是跑 C++ 的 `gui_config_sync`（dry-run）；实现搬到 Python 之后
+      （见 `docs/adr/0005`）这里不再依赖板端有没有构建 gui/ —— 而且"映射表只有一份"
+      这条承诺现在由**这一个模块**承担。
     """
-    text = (output or "").strip()
-    flat = " | ".join(line.strip() for line in text.splitlines() if line.strip())
-    if "[sync] 无差异" in text:
-        return OK, "llm.env 与 config.yaml 一致"
-    if exit_code != 0:
-        return WARN, "gui_config_sync 退出码 %d：%s" % (exit_code, flat[:200])
-    return WARN, "llm.env 与 config.yaml 有差异：%s" % flat[:200]
+    from agent.core import llm_env
 
-
-def run_derivation_check(binary: str, config_file: str, env_file: str) -> Tuple[str, str]:
-    """跑一次 dry-run（不写文件）。"""
-    if not os.path.exists(binary):
-        return WARN, "没找到 %s（板端还没构建 gui/？这一步跳过）" % binary
-    if not os.path.exists(env_file):
+    if not config_file or not os.path.exists(config_file):
+        return WARN, "没找到 %s（真源不在，派生无从谈起）" % config_file
+    if not env_file or not os.path.exists(env_file):
         return WARN, "没找到 %s（还没派生过？）" % env_file
     try:
-        proc = subprocess.run([binary, "--config", config_file, "--env", env_file],
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              universal_newlines=True, timeout=20)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return WARN, "跑不起来：%s" % exc
-    return derivation_verdict(proc.returncode, proc.stdout or "")
+        plans = llm_env.plan(config_path=config_file, env_path=env_file)
+    except llm_env.LlmEnvError as exc:
+        return WARN, "算不出来：%s" % exc
+    if not plans:
+        return OK, "llm.env 与 config.yaml 一致"
+    diff = "；".join("%s: %s -> %s" % (item["key"],
+                                       item["old"] if item["old"] is not None else "(缺)",
+                                       item["new"]) for item in plans)
+    return WARN, "有 %d 处差异（下一次保存会按真源覆盖）：%s" % (len(plans), diff[:200])
+
+
+def run_derivation_check(config_file: str, env_file: str) -> Tuple[str, str]:
+    """保留旧名字给调用方（内容已经是纯 Python）。"""
+    return derivation_check(config_file, env_file)
 
 
 async def cmd_doctor(args: argparse.Namespace) -> int:
@@ -1589,10 +1588,9 @@ async def cmd_doctor(args: argparse.Namespace) -> int:
             with contextlib.suppress(Exception):
                 await client.close()
 
-    # 派生一致性：跑 C++ 那份唯一实现
+    # 派生一致性：用 Python 那份唯一实现（T14-2 起不再依赖板端构建 gui/）
     if root:
-        status, detail = run_derivation_check(
-            os.path.join(root, "gui", "build", "gui_config_sync"),
+        status, detail = derivation_check(
             config_file,
             os.path.join(root, "llm", "config", "llm.env"),
         )
