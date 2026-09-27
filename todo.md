@@ -1934,9 +1934,22 @@ T13-7 ☑ **文档收口**: `docs/study.md`（新的主文档: 判定口径 / �
       `frame_pipeline`）、`docs/architecture.md` §4.3（模块表 + 共用一份模型）、
       `docs/tagging.md` §10（**边界**: 标签化 ≠ 学习监督, 为什么不合成一份数据）
 
-□ T13-8…T13-10（第二段: 最后统一改 GUI + CLI）待做 —— `assistant set` / `assistant study`
-      + GUI 三张卡片（学习监督 / 游戏检测 / 画像压缩）与"缺段就新建" + 板端 GUI 验收
+T13-8 ☑ **设置写入器 + CLI**: `agent/core/settings_config.py`（**文本级**改 config.yaml:
+      只动目标那一行、注释/顺序/CRLF 逐字节保留、`.bak`、缺键插段尾、**缺段按模板新建**;
+      能改的键 = 模板里的标量键, 类型跟着模板走）+ `agent/core/settings_credentials.py`
+      （B 站凭据文件: 合并 + 只认三个键 + `.bak`）+ CLI `assistant set study|game-watch|profile|cookie`
+      （默认只看, `--apply` 才写; cookie 只回显掩码 + `--verify`）与
+      `assistant study status|check|label|freeze|unfreeze|reset`（**不用起 Agent**;
+      `check`/`label` 过真 NPU 判一张截图）+ `tests/test_settings_config.py`（40 项）
+      ☑ 板端实测: `study status` 读出标定播的 39 条锚点/带 0.05; 在**副本**上
+      `set study --enabled --relative-band 0.06 --apply` 一次长出新 `study:` 段（真配置 md5 未变）;
+      `study check --image <code 截图>` -> study（相对分 +0.1740, 最像 code）
+      ⚠ 冒烟踩到两件事（都记进注释）: ① `--config` 按**目录**定位真源, 传别的文件名会悄悄写到
+      同目录的 config.yaml -> 现在直接拒绝; ② cookie 用**相对路径**跑测试会覆盖仓库里那份真凭据
+      （write_cookie 留了 .bak, 已逐字节恢复）—— 测试必须用绝对路径
 
+□ T13-9 / T13-10（第二段剩下的）: GUI 三张卡片（学习监督 / 游戏检测(含 B 站 cookie) /
+      画像压缩）与"缺段就新建" + 板端 GUI 验收
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档
