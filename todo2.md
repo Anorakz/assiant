@@ -21,7 +21,9 @@
 | 受控实验 E3 | **软键盘有替代** | `qtvirtualkeyboard-plugin` 5.12.8 有包 |
 | T15-0 | socket 被误删的隐患已硬化（新鲜度 + 连探两次 + 证据日志） | `db176bd`，板端 130 项 ipc 测试 OK |
 | T15-1 切片1a | **我们的 GUI 在 EGLFS（无 X）下跑通**：`--screenshot` 出图、退出码 0；加 `QT_QPA_EGLFS_ROTATION=90` 后是 **1280×800 横屏**、逐项与 X 基线布局一致 | QPA 日志 `New DRM/KMS via GBM integration created` → `Creating GBM device for /dev/dri/card0`；截图 935×1280（未转）与 1280×800（转后）；唯一告警是 EGLFS 下的光标 `Failed to move cursor on screen DSI1: -14` |
-| T15-1 待办 | 1b 软键盘换 Qt VirtualKeyboard（onboard 是 X11 的）；1c 视频改 GStreamer+kmssink（`QMediaPlayer` 在无 X 下未验）；1a 的**永久**旋转方案进 T15-13（cmdline/DTB vs EGLFS 旋转的开销对比） | — |
+| T15-1 切片1b 取证 | **Qt 虚拟键盘可用**：`qtvirtualkeyboard-plugin` 装上后，EGLFS 下日志 `qt.virtualkeyboard: Loading extension "default"/"hangul"/"thai"` + `PlatformInputContext::setFocusObject()` 收到焦点；我们自己的键盘按钮那条路**如实报错**（`[ui] 软键盘不可用（输入框获得焦点）: 没找到 onboard 进程`）| 1b 只剩**代码**：无 X（`QGuiApplication::platformName() != "xcb"`）时不去找 onboard，直接依赖 Qt 输入法；⚠ **验证方法**：Qt 虚拟键盘是**独立窗口**，`QWidget::grab()`（`--screenshot`）**抓不到它** —— 要用 **linuxfb + 读 `/dev/fb0`**（竖屏 800×1280、stride 3200）来取证 |
+| T15-1 切片1c 取证 | GStreamer 控制路径已验证（`mp4→qtdemux→h264parse→mppvideodec→videoconvert→kmssink` 退出码 0）；但**上一轮 `--video` 的截图无效** —— 视频面板**只在 GAME 模式**显示，HOME 模式主区是壁纸（截图里主区纯蓝、底部仍是「未播放」）| 1c 下一步：`--mode-demo GAME --video <mp4>` 在 EGLFS 下重跑；若 `QMediaPlayer` 在 EGLFS 渲染不出来，再实现"Agent 侧 ffmpeg→`kmssink` 直出"那条路（T15-8 一并做） |
+| T15-1 切片1d | 无 X 全功能回归 + 三组数字（内存/CPU/启动） | 待 1b/1c 收口后做 |
 
 **结论：极小镜像可以不要 X**（省实测 703 MB 桌面栈 + 整条 X 依赖链）。
 
