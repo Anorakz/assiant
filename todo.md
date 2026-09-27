@@ -1948,8 +1948,30 @@ T13-8 ☑ **设置写入器 + CLI**: `agent/core/settings_config.py`（**文本�
       同目录的 config.yaml -> 现在直接拒绝; ② cookie 用**相对路径**跑测试会覆盖仓库里那份真凭据
       （write_cookie 留了 .bak, 已逐字节恢复）—— 测试必须用绝对路径
 
-□ T13-9 / T13-10（第二段剩下的）: GUI 三张卡片（学习监督 / 游戏检测(含 B 站 cookie) /
-      画像压缩）与"缺段就新建" + 板端 GUI 验收
+T13-9 ☑ **GUI 三张卡片 + 缺段新建**（与 T13-8 的 Python 写作器**同一套约定**，两边不能共用代码）:
+      · `gui/src/core/config_store.cpp`: 载入 `config.example.yaml` 当**键清单 + 说明注释**的真源 ->
+        `loadTemplate()` 之后缺段/缺块**按模板整块搬**（含段内其它键的默认值、含目标键上面那段注释；
+        缩进按目标位置对齐）、键在段里缺就插段末、值的**类型跟着模板走**（bool/int/float/str，
+        `relative_band: "0.05"` 这种错写不进去）; 没载模板时行为与 T13-8 之前**完全一致**（拒绝新建）;
+        `LineChange` 支持多行插入（`newLines`），落盘改成**按计划顺序回放**
+      · `gui/src/core/cookie_store.{h,cpp}`（新）: B 站凭据 JSON（只认 `SESSDATA`/`bili_jct`/`DedeUserID`、
+        合并写、空值不改动、`.bak` + 原子写、两空格缩进与 Python 侧**同一份文件**对得上、`mask()` 回显）
+      · `gui/src/ui/settings_page.cpp`: 三张卡片 —— **学习监督**（开关 + 学习时长/复查间隔/连不通过次数/
+        冷却时间/冷却查看间隔 + 起始相对阈值，说明里写清"不进 LLM / unknown 中性 / 阈值运行期自己挪"）、
+        **游戏检测**（开关 + 检测间隔 + "有把握"分数，卡里带 **B 站凭据**三个键 + 路径 + 掩码状态）、
+        **画像压缩**（开关 + 触发字数/轮数）; 凭据框**故意不预填**（预填会把掩码串当新值写回去）
+      · 测试: `test_config_store` 17 项（缺段/嵌套缺块/带注释插键/类型/拒绝 + **行尾注释对齐**）、
+        `test_cookie_store` 11 项、`test_settings_page` 13 项 —— 含**按键盘点的白名单契约测试**
+        （拿仓库里那份真模板当真源，逐行 diff 出被改的键，只许是 `gui.*`/`llm.*` 与三张卡片那 14 个键）
+      ☑ 板端（真 Qt 5.12.8 / RK3568）: 零告警构建 + `ctest` **23/23 全绿**（新增 1 个测试目标）;
+        真 GUI 在**真配置的副本**上点保存（`--settings-save-demo`）-> `study:`/`bilibili:`/`profile:`
+        三段一次长出来，且与模板里那三段**逐字节相同**; 真配置 md5 `b5d09542…` 未变
+      ⚠ 逼出两个**真 bug**（都修 + 钉测试）: ① 顶层新键的缩进写成"根块 -1 + 2 = 1 空格" ->
+        读回来变成上一个块的子键（加了"新建块里必须有这个键"的校验才暴露）;
+        ② 改值时行尾注释的**对齐空白**被吃成一个空格（Python 写作器是保留的）—— 现在两边同口径
+
+□ T13-10: 板端 GUI 验收（真配置上保存 + 截图取证）+ 文档收口（docs/study.md 的 GUI 一节、
+      docs/config-sources.md 的写入者表、Readme）
 Phase 8 — 固化与优化
 □ .github/workflows/host-ci.yml：lint + host 单测 + 交叉编译检查
 □ .github/workflows/release.yml：tag 触发，产出 .so + agent/ 归档
