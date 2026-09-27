@@ -1,0 +1,31 @@
+{
+  "when": "2026-09-27T17:24:48",
+  "board": {
+    "temp_c": 36,
+    "npu_freq_hz": "600000000",
+    "loadavg": "0.57 0.31 0.17"
+  },
+  "npu_encode": {
+    "ok": true,
+    "n": 20,
+    "p50_ms": 1827.3,
+    "p95_ms": 1908.8,
+    "error": "",
+    "first_ms": 1765.1,
+    "max_ms": 1952.8
+  },
+  "mpp_decode": {
+    "ok": true,
+    "frames": 12,
+    "ms_per_frame": 75.42,
+    "total_ms": 905.0,
+    "error": "",
+    "binary": "tests/board/mpp_decode_smoke"
+  },
+  "end_to_end": {
+    "ok": false,
+    "skipped": true,
+    "ms": null,
+    "error": "默认跳过（加 --with-stream 且 PC 开着 Sunshine）"
+  }
+}
