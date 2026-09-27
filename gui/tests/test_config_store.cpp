@@ -274,6 +274,11 @@ void TestConfigStore::inMemorySetIsVisibleBeforeSave()
 
     QVERIFY(store.save());
     QVERIFY(readFile(path).contains(QStringLiteral("debug: true")));
+    // T13-9: 顶层新键必须插成 **0 空格** —— 早先一律按"父块缩进 + 2"算，根块的缩进是 -1，
+    // 于是写成 1 个空格，读回来就成了上一个块的子键（`wake.theme`）。
+    QVERIFY2(readFile(path).contains(QStringLiteral("\ntheme: grey")), qPrintable(readFile(path)));
+    QCOMPARE(store.value(QStringLiteral("theme")), QStringLiteral("grey"));
+    QVERIFY(!store.contains(QStringLiteral("wake.theme")));
     QCOMPARE(store.boolValue(QStringLiteral("debug"), false), true);
 }
 
