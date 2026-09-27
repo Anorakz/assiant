@@ -53,9 +53,13 @@
 #include <QTimer>
 #include <QToolButton>
 
+#include <csignal>    // T14-8: --crash-demo segv 用 raise(SIGSEGV)
+#include <cstdlib>    // T14-8: std::atexit
+
 #include <unistd.h>   // STDIN_FILENO / read
 
 #include "core/config_store.h"
+#include "core/crash_log.h"
 #include "core/idle_watcher.h"
 #include "main_window.h"
 #include "ui/schedule_panel.h"
@@ -110,6 +114,7 @@ int modeDemoMs = 3000;          ///< 上面那一下在启动后多久点（默�
     int settingsScrollDemo = -1;    ///< >=0 = 启动后把设置页滚到该像素再截图（T13-10 取证用）
     bool settingsDumpCards = false; ///< 打印三张卡片**当前读到的值**并退出（T13-10 取证用）
     bool dumpLayout = false;        ///< 打印控件树真实尺寸/最小尺寸并退出（T14-7b 取证用）
+    QString crashDemo;              ///< 非空 = 装好崩溃日志后立刻崩一次（T14-8 验收用）
     bool dumpSchedule = false;      ///< 打印日程区**真实渲染出来的行**并退出（S8 取证用）
     bool focusInputDemo = false;    ///< 启动后把焦点给对话输入框（S10 取证：软键盘应这时才弹）
     QString videoNoteDemo;         ///< 非空 = 触发视频区占位说明（验收用）
@@ -159,6 +164,7 @@ void printUsage()
         "  --settings-dump-cards    打印三张卡片当前读到的值并退出（T13-10 取证用）\n"
         "  --dump-schedule      打印日程区真实渲染出来的行并退出（取证用）\n"
         "  --dump-layout        打印整棵控件树的真实尺寸/最小尺寸并退出（T14-7b 取证用，配 --screenshot-delay）\n"
+        "  --crash-demo <fatal|segv>  装好崩溃日志后立刻崩一次并退出（T14-8 验收用）\n"
         "  --focus-input-demo   启动后把焦点给对话输入框（取证：软键盘应这时才弹）\n"        "  --config <path>      指定 config/config.yaml（默认自动在仓库里找）\n"
         "  --socket <path>      Agent 的 unix socket 路径（默认 /tmp/agent.sock）\n"
         "  -h, --help           显示本帮助\n";
@@ -317,6 +323,9 @@ Options parseArgs(int argc, char** argv)
             opt.dumpSchedule = true;
         } else if (arg == QLatin1String("--dump-layout")) {
             opt.dumpLayout = true;
+        } else if (arg == QLatin1String("--crash-demo")
+                   || arg.startsWith(QLatin1String("--crash-demo="))) {
+            opt.crashDemo = optionValue(arg, QStringLiteral("--crash-demo"), i, argc, argv, opt);
         } else if (arg == QLatin1String("--focus-input-demo")) {
             opt.focusInputDemo = true;
         } else if (arg == QLatin1String("--video-note-demo")
@@ -528,6 +537,40 @@ int runGuiMode(const Options& opt, int argc, char** argv)
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("agent_gui"));
     QApplication::setApplicationVersion(QStringLiteral("0.3.0"));
+
+    // ---- T14-8：崩溃日志 ----------------------------------------------------
+    // 尽早装（在界面之前）：QMediaPlayer / GStreamer(mppvideodec) / onboard 崩起来是
+    // 信号级的，Python 那套看不到；装在这里以后，任何 qFatal / std::terminate /
+    // SIGSEGV 都会在 logs/crash/ 留下一份带"最近消息"的报告。
+    const QString crashPath = core::installCrashLogger(
+        QString(),
+        QStringLiteral("gui"),
+        {{QStringLiteral("配置"), opt.configPath.isEmpty() ? QStringLiteral("(自动查找)")
+                                                          : opt.configPath},
+         {QStringLiteral("形态"), opt.windowed ? QStringLiteral("窗口") : QStringLiteral("全屏 kiosk")}});
+    if (!crashPath.isEmpty()) {
+        qInfo().noquote() << "[gui] 崩溃日志:" << crashPath;
+        // 收尾走 atexit（与 Agent 侧同一个套路）：所有 return 路径都覆盖到，
+        // 而"写过报告"时 closeCrashLoggerCleanly 不会删文件（见 crash_log.h）。
+        std::atexit(core::closeCrashLoggerCleanly);
+        const QString banner = core::previousReportBanner();
+        if (!banner.isEmpty()) {
+            qWarning().noquote() << "[gui] 上次崩溃报告:\n" + banner;
+        }
+    }
+    if (!opt.crashDemo.isEmpty()) {
+        if (opt.crashDemo == QLatin1String("fatal")) {
+            qFatal("崩溃日志自检（--crash-demo fatal）");     // 处理器会写报告后 abort
+        } else if (opt.crashDemo == QLatin1String("segv")) {
+            qInfo().noquote() << "[gui] 崩溃自检：制造 SIGSEGV";
+            std::fflush(nullptr);
+            std::raise(SIGSEGV);                              // 信号处理器写裸尾巴
+        } else {
+            qWarning().noquote() << "[gui] 不认识的 --crash-demo:" << opt.crashDemo;
+            core::closeCrashLoggerCleanly();
+            return 2;
+        }
+    }
 
     MainWindow window;
 

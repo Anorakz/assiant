@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import importlib
 import inspect
 import logging
@@ -70,6 +71,7 @@ from agent.core import Scheduler, State, StateMachine, ToolRouter
 from agent.core import read_intents
 from agent.core import schedule_config
 from agent.core.chat_memory import ChatMemory
+from agent.core.crash_log import git_revision, install_crash_logging
 from agent.core.scheduler import (
     WEEKDAYS,
     ScheduleEvent,
@@ -3254,6 +3256,36 @@ async def run(
     return 0
 
 
+def _crash_demo(kind: str, log: logging.Logger) -> int:
+    """T14-8 验收：制造一次**真的**崩溃，验证 logs/crash/ 里留下现场。
+
+    @param kind raise = 主线程未捕获异常；thread = 子线程未捕获异常；segv = 段错误
+    @return 正常路径下不会返回（进程会死）
+    """
+    import ctypes
+
+    if kind == "raise":
+        log.info("崩溃自检：制造主线程未捕获异常")
+        raise RuntimeError("崩溃日志自检（--crash-demo raise）")
+    if kind == "thread":
+        log.info("崩溃自检：制造子线程未捕获异常")
+
+        def _boom() -> None:
+            raise ValueError("崩溃日志自检（--crash-demo thread）")
+
+        worker = threading.Thread(target=_boom, name="crash-demo")
+        worker.start()
+        worker.join()
+        log.info("崩溃自检：子线程已崩，本次会话报告应留在 logs/crash/")
+        return 0
+    if kind == "segv":
+        log.info("崩溃自检：制造 SIGSEGV（验证 faulthandler）")
+        ctypes.string_at(0)          # 真段错误：faulthandler 会写下全线程栈
+        return 0                     # 走不到这里
+    log.error("不认识的崩溃自检类型: %r", kind)
+    return 2
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """命令行入口。"""
     parser = argparse.ArgumentParser(
@@ -3273,6 +3305,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--check-config", action="store_true",
         help="只校验配置能读能解, 然后退出",
     )
+    parser.add_argument(
+        "--crash-demo", choices=["raise", "segv", "thread"], default=None,
+        help="T14-8 验收: 装好崩溃日志后立刻制造一次崩溃 (raise/segv/thread)",
+    )
     args = parser.parse_args(argv)
 
     # 环境变量兜底 (方便 systemd unit / 冒烟脚本)
@@ -3285,6 +3321,27 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     log = setup_logging(args.log)
     _silence_noisy_libraries()
+
+    # ---- T14-8: 崩溃日志 ----------------------------------------------------
+    # 尽早装：之后任何未捕获异常 / 段错误都会在 logs/crash/ 里留下现场。
+    # `close_cleanly` 用 atexit 收尾（正常退出 = 删掉本次会话文件；写过报告 = 留着），
+    # 所以这里不需要在每个 return 前面加清理。
+    crash = install_crash_logging(
+        app="agent",
+        log=log,
+        context={
+            "配置": args.config or "(默认 config/config.yaml)",
+            "版本": git_revision() or "(未知)",
+        },
+    )
+    atexit.register(crash.close_cleanly)
+    _banner = crash.previous_report_banner()
+    if _banner:
+        # 上一次没干净退出：把现场的头尾打在启动日志里（logs/agent.out 里直接能看）
+        log.warning("上次崩溃报告 %s\n%s", crash.previous_report(), _banner)
+
+    if args.crash_demo:
+        return _crash_demo(args.crash_demo, log)
 
     if args.config:
         os.environ.setdefault("AGENT_CONFIG_DIR", str(Path(args.config).resolve().parent))

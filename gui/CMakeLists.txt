@@ -76,6 +76,8 @@ add_library(gui_services STATIC
     src/core/image_fit.cpp
     src/core/system_stats.h
     src/core/system_stats.cpp
+    src/core/crash_log.h
+    src/core/crash_log.cpp
     src/core/schedule_model.h
     src/core/schedule_model.cpp
 )

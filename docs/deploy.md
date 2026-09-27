@@ -257,5 +257,6 @@ PC 侧另有一条守卫 `tests/test_gui_includes.py`：GUI 源码里任何 `#in
 
 - 架构与拓扑、板端目录布局：[`architecture.md`](architecture.md)
 - GUI 的构建与使用：[`gui.md`](gui.md)
+- 崩溃日志（崩了之后看哪里）：[`crash.md`](crash.md)
 - 交叉编译与 sysroot：[`cross-build-rk3568.md`](cross-build-rk3568.md)
 - Agent ⇄ GUI 协议：[`ipc-protocol.md`](ipc-protocol.md)
