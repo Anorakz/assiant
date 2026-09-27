@@ -664,6 +664,10 @@ def _apply(args, groups, cv2, model, report):
         band = min(row["band"] for row in safe if row["miss"] == fewest)
 
     anchors = StudyAnchors(keep_shots=False)
+    try:
+        anchors.load()                                       # ⚠ 先 load: reset() 才清得干净
+    except Exception as exc:                                 # noqa: BLE001
+        print("   ⚠ 旧锚点库读不了（照样清空重播）: %s" % exc)
     removed = anchors.reset()
     added = 0
     for name in CLASSES:

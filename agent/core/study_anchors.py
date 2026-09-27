@@ -567,10 +567,15 @@ class StudyAnchors(object):
         return dropped
 
     def reset(self, cls: Optional[str] = None, *, save: bool = True) -> int:
-        """清空锚点（`cls=None` = 全清，否则只清那一类）。@return 清掉几条。
+        """清空锚点（`cls=None` = 全清，否则只清那一类）。@return 这条**内存里**清掉几条。
 
         @note 这是给人用的开关（`assistant study reset`）: 学歪了要能一键回到干净状态，
               而不是让人去手改 jsonl。
+        @note ⚠ `save=True` 时**总是**把文件写成内存里这份 —— 哪怕这个实例还没 `load()`
+              过（那时 `_rows` 是空的, 于是文件被清空）。为什么这么定: T13-4 标定脚本
+              就踩过 —— `StudyAnchors(path).reset()` 之后又 `add()` 39 条, 结果**追加**
+              在原来那 39 条后面, 库里变成 78 条（每条锚点重复一遍）。
+              "清空"的语义就是"文件里也清空", 忘了 load 却以为清掉了才更糟。
         """
         if cls is None:
             removed = len(self._rows)
@@ -581,7 +586,7 @@ class StudyAnchors(object):
             self._rows = [row for row in self._rows if str(row.get("cls") or "") != name]
             removed = before - len(self._rows)
         self._invalidate()
-        if removed and save:
+        if save:
             self._rewrite()
         return removed
 

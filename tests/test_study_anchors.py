@@ -424,6 +424,17 @@ class TestReset(TempDirCase):
         self.assertEqual(anchors.reset("doc"), 0)
         self.assertEqual(len(self.read_lines()), 1)
 
+    def test_reset_empties_the_file_even_without_loading(self):
+        """⚠ T13-4 踩过的坑: `StudyAnchors(path).reset()` 没 load 过也要把文件清空 ——
+        否则后面的 `add()` 会**追**在旧内容后面（标定跑两次就变成每条锚点两份）。"""
+        self.make_anchors().add(cls="code", vector=vector(1))
+        self.assertEqual(len(self.read_lines()), 1)
+        fresh = self.make_anchors()                          # 故意不 load
+        self.assertEqual(fresh.reset(), 0)                   # 内存里本来就没有
+        self.assertEqual(self.read_lines(), [], "文件也得清空")
+        fresh.add(cls="code", vector=vector(2))
+        self.assertEqual(len(self.read_lines()), 1, "清空之后再 add 只该有一条")
+
 
 # ===========================================================================
 #  匹配
