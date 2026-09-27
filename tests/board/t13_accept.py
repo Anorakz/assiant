@@ -434,6 +434,13 @@ async def part_b(runtime, sock, frames, rows, no_stream):
     clock = FakeClock()
     watcher.clock = clock                                # 只换时钟, 逻辑全真
     watcher.reset_cycle()
+    # ⚠ 背景那个 **2 秒心跳**会按**真时钟**改 `_next_at`（那是产品行为, 没错）—— 但假时钟
+    #   的确定性链会被它一句"还没到点"挡掉。所以这一段先把它停下来, ⑤ 再起一个新的。
+    task, runtime._study_task = runtime._study_task, None
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
     from agent.core.state_machine import State
 
     if runtime.state.current() is not State.STUDY:
@@ -455,8 +462,12 @@ async def part_b(runtime, sock, frames, rows, no_stream):
     decision = watcher.tick(naughty_frame, state="study")
     check("① 不像学习 -> 提醒, 且**不计入**那 3 次",
           decision["action"] == ACTION_REMIND and decision["failures"] == 0
-          and decision["verdict"] == VERDICT_NOT_STUDY, decision["note"][:50])
-    check("气泡原话 = 「%s」" % REMIND_TEXT, decision["text"] == REMIND_TEXT)
+          and decision["verdict"] == VERDICT_NOT_STUDY,
+          "verdict=%s action=%s failures=%s skipped=%s 相对分=%s"
+          % (decision["verdict"], decision["action"], decision["failures"],
+             decision["skipped"] or "-", decision["relative"]))
+    check("气泡原话 = 「%s」" % REMIND_TEXT, decision["text"] == REMIND_TEXT,
+          decision["text"])
 
     # ② 5 分钟一查, 三次之后弹桌面
     seen = []
@@ -502,16 +513,20 @@ async def part_b(runtime, sock, frames, rows, no_stream):
         skip("IPC 气泡", "--no-stream")
     else:
         reader = await PushReader.open(sock)
+        loop_task = None
         try:
-            clock.advance(60 * 60)
-            watcher._next_at = 0.0
             watcher.reset_cycle()
             runtime.image_reader = FrameReader(naughty_frame)   # 让循环自己判一次
-            pushes = await reader.collect(["llm"], 1, timeout=15)
+            loop_task = asyncio.ensure_future(runtime._study_watch_loop())
+            pushes = await reader.collect(["llm"], 1, timeout=20)
             text = json.dumps(pushes[0], ensure_ascii=False) if pushes else ""
             check("⑤ 提醒**真的推到了 IPC 的 llm topic**（气泡原话）",
                   bool(pushes) and REMIND_TEXT in text, text[:110])
         finally:
+            if loop_task is not None:
+                loop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await loop_task
             reader.close()
             runtime.image_reader = None
 
