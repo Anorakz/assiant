@@ -82,6 +82,7 @@ tests/test_tool_permissions.py
 tests/test_wallpaper.py
 tests/test_image_parameter.py
 tests/test_image_recipe.py
+tests/test_image_runtime.py
 "
 
 pytest_file=tests/test_ipc.py

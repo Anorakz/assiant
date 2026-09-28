@@ -10,6 +10,10 @@ image/
 ├─ prepare-libmali.sh                  # 把厂商 deb 里的 G52 blob 按 buildroot 期望的名字落位（T15-2-5）
 ├─ sdk-make.sh                         # 构建入口：先剔掉 PATH 里的 Windows 条目，再 exec make
 ├─ prime-dl.sh                         # 把 Qt 源码（与 buildroot 钉的 hash 一致的那份）预置进 dl/（T15-2-6）
+├─ prepare-mpp.sh                      # 补上厂商 MPP 快照漏掉的 build/cmake/merge_objects.cmake（T15-2-7）
+├─ prepare-rknnlite.sh                 # 把 SDK 里 cp311 那份 rknn-toolkit-lite2 wheel 装进 site-packages（T15-2-7）
+├─ build-llama.sh                      # 交叉编译 llama.cpp（钉 b387ddfd8）装进 /usr/lib/assistant/llm/bin（T15-2-7）
+├─ check-runtime-deps.py               # 运行时闭环验收：逐项在位 + DT_NEEDED 闭包 + chroot 冒烟（T15-2-7）
 ├─ check-parameter.py                  # 分区表校验器（纯算术；tests/test_image_parameter.py 有 8 项守卫）
 ├─ buildroot/configs/
 │   ├─ rockchip_rk3568_kickpi_k1mini_release_defconfig     # buildroot defconfig（片段式）
@@ -21,6 +25,9 @@ image/
     ├─ rk3568-kickpi-k1Mini-assistant.dts
     ├─ rk3568-kickpi-k1Mini-assistant.dtsi
     └─ rk3568-kickpi-assistant-overrides.dtsi
+└─ board/rockchip/kickpi/k1mini/                            # 注入到 SDK 的 board 目录（T15-2-7）
+    ├─ post-build.sh                                        # /data 与 fstab + 交叉编译 llama + 装 rknnlite
+    └─ rootfs-overlay/usr/lib/assistant/llm/scripts/        # 由 llm/scripts/ 复制而来（单一来源在仓库）
 ```
 
 ## 用起来

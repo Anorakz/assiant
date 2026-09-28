@@ -444,6 +444,147 @@ depends Qt.labs.folderlistmodel 2.1
 `usr/include/qt5` 的 32 MB、测试用二进制、以及 `QtTest` / `Qt/test` 这些模块，都是厂商打包行为的
 副产品（`INSTALL_STAGING` 的副作用），**不是我们加的**；release 镜像要不要剔掉，统一放到体积账里决定。
 
+### 5.6 我们的运行时与依赖闭环（T15-2-7）
+
+#### 决策 D7：代码进 rootfs，可写状态进 userdata
+
+A/B OTA 换的是**系统槽**。凡是"运行期会长出来"的东西都不能放在系统槽里 ——
+换了槽就没了（用户设的模型参数被冲回默认、日志丢光、PID 文件残留）。所以分两处：
+
+| 位置 | 放什么 | 为什么 |
+| --- | --- | --- |
+| **rootfs** `/usr/lib/assistant/` | `llm/bin/`（交叉编译的 llama-server + 8 个 ggml/llama 库）、`llm/scripts/`（起停脚本）、（2-8 的）agent / GUI / systemd 单元 | 属于"OS 的一部分"：跟着 A/B 槽一起升级 |
+| **userdata** `/data/` | `assistant/config/`（`config.yaml`）、`assistant/llm/config/llm.env`（**派生文件**）、`assistant/llm/{run,logs}`、`assistant/{logs,run}`、`model/`（4.9 GB 模型） | 运行期状态与大数据：OTA 不该碰，也不该每次重下 |
+
+落地靠三个小东西：
+
+1. **`llm/scripts/*` 加两个位置覆盖点**（`LLM_ENV_FILE` / `LLM_STATE_DIR`）。原脚本把
+   `config/llm.env`、`run/`、`logs/` 都算在 `llm/` 自己目录下；镜像里代码在 rootfs、状态在
+   `/data`，没有这两个变量就必然写进系统槽。**不设它们时行为与板端那版完全一致**，所以板端现有那套不受影响。
+2. **`llm/scripts/*` 收进仓库**：它们原先**不在仓库里**（板端手工投放，`git ls-files llm` = 0），
+   也就是说只看仓库复现不出板端在跑的那套脚本。T15-2-7 把它们导进来，并改了一处实现：
+   PID 身份判断从 `ps -p PID -o args=` 改成读 `/proc/<pid>/cmdline`（镜像里没有 procps，
+   busybox 的 `ps` 对 `-o args=` 支持不保证）。来源与改动写在 `llm/README.md`。
+3. **`/data` 挂载点与 fstab 用 post-build 追加**，**不能**放进 rootfs overlay：
+   overlay 会**整份替换** `/etc/fstab`，而 buildroot 生成的那份里有根文件系统那行
+   （`/dev/root / auto rw 0 1`），替换掉等于把根挂载项弄丢。
+
+> ⚠ **踩到的坑：本树片段合并器的 `+=` 是"替换"不是"追加"。** 我先按厂商 chip 片段的写法用了
+> `BR2_ROOTFS_OVERLAY+="board/.../rootfs-overlay"`，生成的 `.config` 里**只剩我们这一项** ——
+> 厂商的 `board/rockchip/common/base board/rockchip/rk3566_rk3568/fs-overlay/` 被整条丢掉
+> （base overlay 里有东西，丢了会直接坏根文件系统）。所以这两个符号在片段里**写全量值**
+> （把厂商原有项原样抄在前面再加我们的），并加进 `tests/test_image_recipe.py` 的不变量里。
+
+#### R8：Python 依赖清单（用 AST 扫出来的，不是猜的）
+
+仓库里没有依赖声明文件，所以 T15-2-7 用 AST 扫了 `agent/ scripts/ tests/ gui/tools/` 的**真实 import**，
+逐个定性。这张表就是 R8 的答案，也机器化在 `image/check-runtime-deps.py` 的 `PY_MODULES` 里：
+
+| 模块 | 定性 | 镜像里的落点 | 说明 |
+| --- | --- | --- | --- |
+| `numpy` | required | `python-numpy`（1.25.0） | 视觉/帧管线的点采样（15 个文件在用） |
+| `cv2` | required | `opencv4` + `LIB_PYTHON`（4.9.0） | 视觉/帧管线（6 个文件） |
+| `yaml` | required | `python-pyyaml`（6.0.1） | 配置读写（9 个文件） |
+| `psutil` | required | `python-psutil` | `rknnlite` 的 `Requires-Dist` |
+| `ruamel.yaml` | required | `python-ruamel-yaml` | 同上 |
+| `rknnlite` | required | `image/prepare-rknnlite.sh`（SDK 的 cp311 wheel） | SigLIP 走 NPU 的入口 |
+| `openai` | optional | **镜像里没有**（`provider.py` 懒加载） | cloud 模式的可选 SDK |
+| `tokenizers` | optional | **镜像里没有**（`tokenizer.py` 懒加载） | SigLIP 分词的可选后端 |
+| `cryptography` | host | 只在 `scripts/pair_analyze.py` | 开发机分析工具 |
+| `pytest` / `pytest_asyncio` | host | 只在 `tests/` | 测试框架 |
+| `agent_native` | host | pybind11 扩展，镜像侧还没做 | 本地原生扩展 |
+
+#### 镜像里新增/确认的组件
+
+- **新开的包**：`bash`（`llm/scripts/*.sh` 是 bash 脚本，ash 跑不了）、`libcurl` + **curl 二进制**
+  （`status.sh` 的健康检查；只开 libcurl 只给库、不给命令行工具，两个符号是分开的）、
+  `python-psutil`、`python-ruamel-yaml`。
+- **rknnlite**：SDK 里 `external/rknn-toolkit2/rknn-toolkit-lite2/packages/` 同时提供
+  cp37/38/39/310/**311**/312 的 aarch64 wheel。这份 wheel 里**有 8 个编译扩展**
+  （`rknn_runtime.cpython-311-aarch64-linux-gnu.so` 等），**必须按镜像的 python 版本挑** ——
+  本树 python 是 **3.11.8**，正好有 cp311 那份；脚本按编译出来的 python 版本挑，对不上就报错退出，
+  并且用 SDK 自带的 `packages.md5sum` 校验 wheel 指纹。
+- **llama.cpp**：`image/build-llama.sh` **交叉编译**（用户 2026-09-28 批准的做法 A），
+  钉板端验证过的 commit `b387ddfd8`（= build 10677），参数与板端逐条对齐
+  （`BUILD_SHARED_LIBS` / `Release -O3` / `GGML_OPENMP` / `GGML_CPU_REPACK` / `LLAMA_CURL=OFF`），
+  只有一项必须改：交叉编译不能 `GGML_NATIVE=ON`，改成 `GGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16`。
+  **仓库不放 16 MB 构建产物、也不用板端那份二进制。**
+  源码**多源 + 逐源 sha256 校验**：实测 github 直连拿到过一个**只有 15.5 MB、缺
+  `tools/server/server.cpp`** 的残档，而国内两个反代拿到的是完整的 37,067,727 B 且彼此逐字节相同。
+- **字体**：`source-han-sans-cn`（**包名是 `source-han-sans-cn`，不是 `source-han-sans`**）+
+  DejaVu + Liberation + FontAwesome。⚠ **Source Han Sans CN 装了 7 个字重，共 70 MB** —— 体积账。
+- **MPP + gst**：`rockchip-mpp`（+ `rockchip-rga`）与 `gstreamer1-rockchip`，
+  产出 `libgstrockchipmpp.so`（`mppvideodec` 那条硬解路，T15-5/6 要靠它把 80% 的 CPU 解码降下来）。
+
+#### 验收：`image/check-runtime-deps.py`（就是"逐项在位 + ldd 无缺失"的机器化）
+
+```bash
+# 真 chroot 冒烟需要 root：sudo 或 wsl -u root 跑
+python3 <SDK>/tools/assistant/check-runtime-deps.py <SDK>
+```
+
+它做三件事：① 逐项在位（MANIFEST）；② **DT_NEEDED 闭包** —— 按 ld.so 的真实搜索顺序
+（它自己的 RPATH/RUNPATH，展开 `$ORIGIN` → target 的 lib 目录；**不含"可执行文件自己所在目录"**，
+ld.so 并不搜它）解析每个 ELF 的依赖，覆盖**库与插件**（`ldd` 一次只能看一个文件，交叉场景下也跑不起来）；
+③ chroot 冒烟（权限不足时如实标"跳过"，不假装通过）。
+
+#### 验收实测（2026-09-28）
+
+```
+== 结论：通过（在位缺 0、依赖缺 0、冒烟失败 0）
+```
+
+| 段 | 实测 |
+| --- | --- |
+| 逐项在位 | **缺 0**（MANIFEST 全绿：二进制 / 库 / gst 插件 / QML / 字体 / python 模块 / llama 运行时） |
+| **DT_NEEDED 闭包** | 检查 **1970 个 ELF**，**缺失 0** |
+| chroot: python | `Python 3.11.8` |
+| chroot: 视觉库 | `numpy 1.25.0` + `cv2 4.9.0`（真 import，不是看目录在不在） |
+| chroot: NPU API | `from rknnlite.api import RKNNLite` → **ok**（cp311 wheel 在 3.11.8 上真能 import） |
+| chroot: shell 工具 | `bash ok`、`curl 8.6.0 (aarch64-buildroot-linux-gnu) libcurl/8.6.0 OpenSSL/3.2.1`、`nmcli tool, version 1.44.2` |
+| chroot: 硬解 | `gst-inspect-1.0 mppvideodec` 能起来（输出里那条 `mpp_soc: open /proc/device-tree/compatible error` 是 chroot 里没有设备树，板上不会有） |
+| chroot: 中文 | `fc-list :lang=zh` → `Source Han Sans CN,思源黑体 CN` |
+| chroot: LLM | `llama-server` 跑得起来（`version: 0.3.0-dev … built with GNU 13.4.0 for Linux aarch64`） |
+
+> ⚠ **llama-server 的 `--version` 版本串不能当版本依据**：我们是**从 tarball 构建**（没有 `.git`），
+> llama.cpp 的 cmake 会去 `git rev-parse` 外层目录，于是抓到了 **SDK 内核仓库的 commit**
+> （`544b6630a`，那其实是内核的 HEAD），build 号也退化成默认值 103。
+> **版本以 `.llama-source-commit`（`b387ddfd8`）与源码 tarball 的 sha256 为准。**
+
+> ⚠ **验收器自己被抓出过一次假阴性**（值得记下来）：第一版的闭包检查把"可执行文件自己所在目录"
+> 也算进搜索路径，于是 `llama-server` 缺 `libllama-server-impl.so`（**交叉编译产物一开始没有
+> `$ORIGIN` rpath**）也被判成"解析得到"—— 是 chroot 冒烟那句
+> `cannot open shared object file` 把它暴露出来的。两处都修了：
+> 检查器不再搜可执行文件自己的目录（照 ld.so 的真实语义），`build-llama.sh` 加上
+> `CMAKE_BUILD_RPATH/INSTALL_RPATH='$ORIGIN'` + `CMAKE_BUILD_WITH_INSTALL_RPATH=ON`
+> （后者是为了不让**构建机的绝对路径**漏进产物），另外 `llm/scripts/start.sh` 再加一条
+> `LD_LIBRARY_PATH` 兜底。修完 llama 三个主要产物 / 库的 RPATH 都只剩 `$ORIGIN`。
+
+#### 途中修掉的三个"不修就编不出来/装不上"的问题
+
+1. **厂商 MPP 快照缺件**：`external/mpp` 是 1.0.11（2025-09-10）的新源码，`CMakeLists.txt:42`
+   **无条件** `include(.../build/cmake/merge_objects.cmake)`，而那个文件**整个 SDK 里都没有**
+   （不是 .gitignore 吞的，是真没进快照）→ `make rockchip-mpp` 在 configure 就死
+   （`Unknown CMake command "merge_objects"`）。上游 `develop`/`master` 上那份接口一致
+   （2037 B / sha256 `4411cd9a…`），`image/prepare-mpp.sh` 按字节校验后补上。
+   ⚠ 补完还要**删掉已经 rsync 过的 `output/<cfg>/build/rockchip-mpp-develop/`**，
+   否则 buildroot 不会重新同步（`.stamp_rsynced` 还在）。
+2. **厂商设的 GNU 镜像 403**：`BR2_GNU_MIRROR="https://mirrors.ustc.edu.cn/gnu"` 现在对本机
+   **403 Forbidden**（http 那条直接超时）→ `bash` 的依赖 `readline` 拉不下来，构建停在下载阶段。
+   实测 ftp.gnu.org / 清华 / 阿里 / 南大都 200，片段里改成清华源。
+3. 上面那条 `+=` 的坑（差点丢掉厂商 overlay）。
+
+#### 明确交给后面几步的事
+
+- **2-8**：`assistant.target` + agent/GUI 的 unit；unit 里要把
+  `LLM_ENV_FILE=/data/assistant/llm/config/llm.env`、`LLM_STATE_DIR=/data/assistant/llm` 传下去；
+  agent/GUI 的 payload（代码与二进制）进 rootfs 也还没做。
+- **2-9**：整机构建会**通过 post-build 自动带上** llama-server 与 rknnlite
+  （`BR2_ROOTFS_POST_BUILD_SCRIPT` 里追加了我们的钩子）。
+- **2-11**：首次刷机后 `userdata` 是**未格式化**的（要 `mkfs.ext4` 一次），
+  4.9 GB 模型要投放到 `/data/model/`；`llm.env` 的 `LLM_MODEL_PATH` 指过去。
+- **体积**：target 现在 **553 MB**（字体 70 MB、`usr/include/qt5` 32 MB、llama 约 16 MB）。
+
 ---
 
 ## 6. 板级对齐（T15-2-3，已编译验证）

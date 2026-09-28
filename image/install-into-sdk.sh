@@ -84,6 +84,27 @@ install_file image/kernel/rk3568-kickpi-k1Mini-assistant.dtsi "$DTS_DIR/rk3568-k
 install_file image/kernel/rk3568-kickpi-assistant-overrides.dtsi \
              "$DTS_DIR/rk3568-kickpi-assistant-overrides.dtsi"
 
+# ---------------------------------------------------------------------------
+#  T15-2-7：overlay 里的运行期脚本 + 构建工具 + post-build 钩子
+#  ---------------------------------------------------------------------------
+#  · llm/scripts/* 进 overlay（镜像里落在 /usr/lib/assistant/llm/scripts/）。
+#    仓库里只维护这一份来源，overlay 那份由这里复制生成——避免两处漂。
+#  · post-build.sh 进 buildroot/board/rockchip/kickpi/k1mini/（片段里用全量值挂上去）。
+#  · build-llama.sh / prepare-rknnlite.sh / check-runtime-deps.py 进 <SDK>/tools/assistant/：
+#    post-build 钩子是**在 SDK 里**跑的，够不到我们的仓库，所以工具得跟着进去。
+#  ⚠ 目的地是 `buildroot/board/...` 而不是 `board/...`：buildroot 片段里的路径是
+#    **以 buildroot 为根**解析的，但注入是相对 SDK 根写文件——第一版就写错了一级，
+#    结果 post-build.sh 落在 <SDK>/board/ 下，buildroot 根本看不到它。
+OVERLAY_DIR="buildroot/board/rockchip/kickpi/k1mini/rootfs-overlay"
+for f in lib.sh start.sh stop.sh status.sh restart.sh; do
+    install_file "llm/scripts/$f" "$OVERLAY_DIR/usr/lib/assistant/llm/scripts/$f"
+done
+install_file image/board/rockchip/kickpi/k1mini/post-build.sh \
+             buildroot/board/rockchip/kickpi/k1mini/post-build.sh
+install_file image/build-llama.sh tools/assistant/build-llama.sh
+install_file image/prepare-rknnlite.sh tools/assistant/prepare-rknnlite.sh
+install_file image/check-runtime-deps.py tools/assistant/check-runtime-deps.py
+
 if [ "$FAILED" != "0" ]; then
     echo "!! 有源文件缺失，注入不完整" >&2
     exit 1
@@ -117,7 +138,23 @@ else
     bash "$HERE/prime-dl.sh" "$SDK"
 fi
 
+# ---------------------------------------------------------------------------
+#  MPP 缺件修复（T15-2-7）
+#  ---------------------------------------------------------------------------
+#  厂商快照的 external/mpp（1.0.11）少了 build/cmake/merge_objects.cmake，
+#  而 CMakeLists.txt 无条件 include 它 → `make rockchip-mpp` 在 configure 就死。
+#  上游那份接口一致，脚本按字节哈希校验后补上。
+echo
+if [ -n "$DRY" ]; then
+    bash "$HERE/prepare-mpp.sh" "$SDK" --dry-run
+else
+    bash "$HERE/prepare-mpp.sh" "$SDK"
+fi
+
 echo "== 完成。下一步（在 SDK 根目录）："
-echo "     cd buildroot && make O=output/rockchip_rk3568_kickpi_k1mini_release \\"
-echo "          rockchip_rk3568_kickpi_k1mini_release_defconfig"
-echo "   （整机构建走 lunch：./build.sh rk3566_rk3568:rockchip_rk3568_kickpi_k1mini_release_defconfig）"
+echo "     # 1) 生成 .config（片段里已挂上 overlay 与 post-build 钩子）"
+echo "     bash image/sdk-make.sh <SDK> rockchip_rk3568_kickpi_k1mini_release_defconfig"
+echo "     # 2) 整机构建（post-build 会顺带交叉编译 llama-server 并装 rknnlite）"
+echo "     cd <SDK> && ./build.sh rk3566_rk3568:rockchip_rk3568_kickpi_k1mini_release_defconfig"
+echo "     # 3) 验收运行时闭环（逐项在位 + DT_NEEDED 闭包 + chroot 冒烟）"
+echo "     python3 <SDK>/tools/assistant/check-runtime-deps.py <SDK>"
