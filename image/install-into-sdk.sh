@@ -103,6 +103,20 @@ else
     bash "$HERE/prepare-libmali.sh" "$SDK"
 fi
 
+# ---------------------------------------------------------------------------
+#  Qt 源码预置（T15-2-6）
+#  ---------------------------------------------------------------------------
+#  这个 buildroot 的 Qt5 走 invent.kde.org 的"按 commit 现生成"归档，而 KDE 会**重新打包**
+#  （同一 commit、内容一致、外层 tar 字节不同）→ buildroot 钉的 sha256 对不上，构建在下载
+#  校验就死。primary site 上放着原始的那份，这个脚本把它按 hash 校验后放进 dl/。
+#  细节与验证方式见脚本头注释与 docs/image.md。
+echo
+if [ -n "$DRY" ]; then
+    bash "$HERE/prime-dl.sh" "$SDK" --dry-run
+else
+    bash "$HERE/prime-dl.sh" "$SDK"
+fi
+
 echo "== 完成。下一步（在 SDK 根目录）："
 echo "     cd buildroot && make O=output/rockchip_rk3568_kickpi_k1mini_release \\"
 echo "          rockchip_rk3568_kickpi_k1mini_release_defconfig"

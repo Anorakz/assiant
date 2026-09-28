@@ -40,6 +40,7 @@ DEFCONFIG = (_ROOT / "image" / "buildroot" / "configs"
              / "rockchip_rk3568_kickpi_k1mini_release_defconfig")
 PREPARE = _ROOT / "image" / "prepare-libmali.sh"
 SDK_MAKE = _ROOT / "image" / "sdk-make.sh"
+PRIME_DL = _ROOT / "image" / "prime-dl.sh"
 
 MALI = "BR2_PACKAGE_ROCKCHIP_MALI_"
 
@@ -243,6 +244,89 @@ class TestSdkMakeSanitisesPath(unittest.TestCase):
             self.assertNotIn(" ", seen_path, "带空格的条目没被剔掉: %r" % seen_path)
             self.assertNotIn("/mnt/", seen_path, "Windows 路径没被剔掉: %r" % seen_path)
             self.assertIn(str(bindir), seen_path)
+
+
+class TestPrimeDlExpandsMakeVariables(unittest.TestCase):
+    """prime-dl.sh 必须能**展开 .mk 里的变量**再判断。
+
+    背景（T15-2-6 实测踩到的）：qt5 的 .mk 里是
+        QT5BASE_SITE = $(QT5_SITE)/qtbase/-/archive/$(QT5BASE_VERSION)
+        QT5BASE_SOURCE = qtbase-$(QT5BASE_VERSION).tar.bz2
+    第一版脚本直接对**文本**匹配 "invent.kde.org"，结果 6 个 Qt 包全被跳过、
+    一个都没预置（不报错、静默什么都不做）。这个用例用一棵假 SDK 树把那次的
+    失败方式钉死：必须认出这是 KDE 的 commit 归档，并算出确切的目标文件名。
+    """
+
+    COMMIT = "da6e958319e95fe564d3b30c931492dd666bfaff"
+    SHA = "935d01f5c34903ad9e979431cec7a8a59332ed3fc539e639f5ba87e8d6989b9d"
+
+    def _fake_sdk(self, tmp: Path, with_kde: bool = True, with_other: bool = False):
+        br = tmp / "buildroot"
+        qt5 = br / "package" / "qt5"
+        (qt5 / "qt5base").mkdir(parents=True)
+        (qt5 / "qt5.mk").write_text(
+            "QT5_VERSION_MAJOR = 5.15\n"
+            "QT5_VERSION = $(QT5_VERSION_MAJOR).11\n"
+            "QT5_SITE = %s\n" % ("https://invent.kde.org/qt/qt" if with_kde
+                                 else "https://example.invalid/qt"),
+            encoding="utf-8")
+        (qt5 / "qt5base" / "qt5base.mk").write_text(
+            "QT5BASE_VERSION = %s\n"
+            "QT5BASE_SITE = $(QT5_SITE)/qtbase/-/archive/$(QT5BASE_VERSION)\n"
+            "QT5BASE_SOURCE = qtbase-$(QT5BASE_VERSION).tar.bz2\n" % self.COMMIT,
+            encoding="utf-8")
+        (qt5 / "qt5base" / "qt5base.hash").write_text(
+            "sha256  %s  qtbase-%s.tar.bz2\n" % (self.SHA, self.COMMIT),
+            encoding="utf-8")
+        if with_other:
+            (qt5 / "qt5other").mkdir()
+            (qt5 / "qt5other" / "qt5other.mk").write_text(
+                "QT5OTHER_VERSION = 1.0\n"
+                "QT5OTHER_SITE = https://example.invalid/other\n"
+                "QT5OTHER_SOURCE = other-$(QT5OTHER_VERSION).tar.gz\n",
+                encoding="utf-8")
+            (qt5 / "qt5other" / "qt5other.hash").write_text(
+                "sha256  %s  other-1.0.tar.gz\n" % ("0" * 64), encoding="utf-8")
+        cfg = tmp / "config"
+        cfg.write_text("BR2_PACKAGE_QT5BASE=y\n"
+                       + ("BR2_PACKAGE_QT5OTHER=y\n" if with_other else ""),
+                       encoding="utf-8")
+        return tmp, cfg
+
+    def setUp(self):
+        self.bash = shutil.which("bash")
+        if not self.bash:
+            self.skipTest("需要 bash（Windows 上由 .ps1 那套跑）")
+
+    def run_prime(self, sdk, cfg):
+        return subprocess.run([self.bash, str(PRIME_DL), str(sdk),
+                               "--config", str(cfg), "--dry-run"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              universal_newlines=True, timeout=60)
+
+    def test_expands_variables_and_finds_the_commit_archive(self):
+        with tempfile.TemporaryDirectory() as t:
+            sdk, cfg = self._fake_sdk(Path(t))
+            proc = self.run_prime(sdk, cfg)
+            self.assertEqual(proc.returncode, 0, proc.stdout)
+            self.assertIn("dl/qt5base/qtbase-%s.tar.bz2" % self.COMMIT, proc.stdout)
+            self.assertIn("sources.buildroot.net/qt5base/qtbase-%s.tar.bz2" % self.COMMIT,
+                          proc.stdout)
+            self.assertIn("invent.kde.org", proc.stdout)   # 打印解析出来的 Qt 来源
+
+    def test_non_kde_package_is_skipped(self):
+        with tempfile.TemporaryDirectory() as t:
+            sdk, cfg = self._fake_sdk(Path(t), with_other=True)
+            proc = self.run_prime(sdk, cfg)
+            self.assertEqual(proc.returncode, 0, proc.stdout)
+            self.assertIn("qt5other: 不是 KDE 的 commit 归档", proc.stdout)
+
+    def test_usage_and_bad_sdk(self):
+        self.assertEqual(subprocess.run([self.bash, str(PRIME_DL)],
+                                        stdout=subprocess.PIPE,
+                                        universal_newlines=True).returncode, 2)
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(self.run_prime(Path(t), Path(t) / "nope").returncode, 2)
 
 
 if __name__ == "__main__":

@@ -161,7 +161,7 @@ KICKPI 自己的 `batch_build.sh` **当前就在编 K1Mini 的 debian12 + ubuntu
 | # | 缺口 / 风险 | 应对 | 归属任务 |
 | --- | --- | --- | --- |
 | R1 ✅ | `external/libmali` **没有 G52**（只有 RK3588 的 valhall-g610） | 已闭环（§5.4）：`image/prepare-libmali.sh` 从 SDK 自带的厂商 deb 里抽 `.so`，按 buildroot 期望的文件名落位，并校验两级 sha256 + `SONAME` + `gbm_*` 符号数 | T15-2-5 ✅ |
-| R2 | Qt 5.15.11 源码要从 `invent.kde.org` 按 commit 拉（`dl` 里没有） | 允许联网；若慢/断则设 `BR2_PRIMARY_SITE` 镜像或把源码包先放进 `dl/` | T15-2-6 |
+| R2 ✅ | Qt 5.15.11 源码要从 `invent.kde.org` 按 commit 拉（`dl` 里没有） | 已闭环（§5.5）：KDE 会**重新打包**同一 commit 的归档 → 与 buildroot 钉的 sha256 不符，构建在下载校验就死。先证明包内 LICENSE 逐文件哈希与 buildroot 所钉一致（内容没问题），再由 `image/prime-dl.sh` 从 buildroot 的 primary site 取**与 hash 一致的那份**预置进 `dl/`。**没有改 buildroot 的 hash，也没改厂商树** | T15-2-6 ✅ |
 | R3 | WSL 只有 7 GB 内存，24 核全开必 OOM | 构建封顶 `-j8` + `BR2_CCACHE`；必要时夜里串行 | T15-2-9 |
 | R4 | **触摸复位脚不一致**（板端 PB6 vs SDK dtsi PB5） | 用设备树 + pinctrl 逐项核对；拿不准就先按板端实测值改 dts 再刷 | T15-2-3 |
 | R5 | 版本漂移：Qt **5.12→5.15**、Python **3.8→3.11**、libmali **g2p0→g24p0**、MPP 打包名 1.5.0 vs 源码 CHANGELOG 1.0.11 | 镜像出来后**在板上**复跑 T15-1 的三套脚本（1b/1c/1d）+ T14 验收；不通过就回退到对应版本。⚠ libmali 这条**已经确定会漂**：镜像装的是 SDK 的 **g24p0**，而板端 Ubuntu 现在是 **g2p0**（§5.4），所以 2-11 必须专门验 GPU/EGLFS | T15-2-11 |
@@ -189,6 +189,7 @@ bash image/install-into-sdk.sh /home/anorak/rk3568_buildroot/linux-kernel-6.1/rk
 | `image/install-into-sdk.sh` | —— | 注入脚本（打印 `新增/覆盖/已一致`，重复执行幂等；最后会调 `prepare-libmali.sh`） |
 | `image/prepare-libmali.sh` | `external/libmali/lib/aarch64-linux-gnu/` | 从 SDK 自带的厂商 deb 里抽出 G52 的 `libmali.so.1.9.0`，按 buildroot 期望的文件名落位并做指纹/符号校验（T15-2-5，见 §5.4） |
 | `image/sdk-make.sh` | —— | **构建入口**：剔掉 PATH 里带空格的 Windows 条目后 `exec make`（见 §3.5 的 PATH 陷阱） |
+| `image/prime-dl.sh` | `<SDK>/buildroot/dl/<包名>/` | 把 Qt 源码包**原始的、与 buildroot 钉的 sha256 一致的那份**从 primary site 预置进下载缓存（T15-2-6，见 §5.5） |
 
 ```bash
 # 只配置（快，用来验证配方本身 —— T15-2-2 的验收就是这条）
@@ -346,6 +347,103 @@ x11-xcb, xcb-dri2`）—— 这几条**不是我们想要，是 blob 要**。
 - 跑完之后 SDK 那棵树的 `git status` 会多出 8 项：4 个配置/分区表、3 个 `-assistant` 内核
   dts/dtsi、1 个 blob —— 正好等于"我们注入了什么"的清单（注入不写进厂商仓库）。
 
+### 5.5 Qt 5.15.11：源码从哪来、为什么会被 hash 校验拦下、四个 QML 模块装在哪（T15-2-6）
+
+#### 来源，以及"KDE 重新打包"这件事
+
+这个 buildroot 的 Qt5 **不走官方发行 tarball**，而是 `invent.kde.org` 的**按 commit 现生成**归档：
+
+```
+QT5_SITE       = https://invent.kde.org/qt/qt
+QT5BASE_SITE   = $(QT5_SITE)/qtbase/-/archive/$(QT5BASE_VERSION)
+QT5BASE_SOURCE = qtbase-$(QT5BASE_VERSION).tar.bz2      # VERSION 是 40 位 commit
+```
+
+`make qt5base` 直接死在**下载校验**（不是编译）：
+
+```
+ERROR: qtbase-da6e958...tar.bz2 has wrong sha256 hash:
+ERROR: expected: 935d01f5c34903ad9e979431cec7a8a59332ed3fc539e639f5ba87e8d6989b9d
+ERROR: got     : 3067c4d84ba9927bfe65bf606c17af082199e0a3b22781fbf9bc6c6bc3de26dd
+ERROR: Incomplete download, or man-in-the-middle (MITM) attack
+```
+
+**先证明那包内容没问题**（不然就不该往下走）：
+
+| 证据 | 结果 |
+| --- | --- |
+| 同一 URL 连下两次 | 都是 57,931,736 B，sha256 **两次完全相同** → 不是传输损坏 |
+| 包内 `.qmake.conf` | `MODULE_VERSION = 5.15.11` —— 就是这个版本 |
+| 包内 `LICENSE.LGPLv3` / `LICENSE.GPL2` / `LICENSE.FDL` | sha256 与 buildroot 在**同一个 `.hash` 文件里钉的逐文件哈希完全一致** |
+
+⇒ 同一个源码树，只是 KDE 换了外层打包方式（两份差 2,230 B）。
+
+**修法：不改 hash，改"从哪拿"。** buildroot 的 primary site 上放着**与 hash 一致的那份**
+（`sources.buildroot.net/<包名>/<源文件名>`，57,929,506 B，sha256 正是 `935d01f5…`）。
+新增的 `image/prime-dl.sh` 把**已启用的** Qt 包逐个按 buildroot 钉的 sha256 校验后预置进 `dl/`：
+
+```
+qt5base / qt5declarative / qt5svg / qt5quickcontrols2 / qt5virtualkeyboard / qt5multimedia
+→ 6 个全部"校验通过"（共 ~105 MB）
+```
+
+预置之后 buildroot 不会再 fallback 到 invent.kde.org 那份重打包归档。两个细节值得记：
+
+- 脚本必须**展开 `.mk` 里的变量**才认得出这是 KDE 的归档（`_SITE` 写的是 `$(QT5_SITE)/…`）。
+  第一版直接对文本匹配 `invent.kde.org` → 6 个包被**静默全跳过**（不报错、什么都不做），
+  所以 `tests/test_image_recipe.py` 用一棵假 SDK 树把这个失败方式钉死了。
+- 判断"哪些 Qt 包启用"优先读 `output/<cfg>/.config`；还没有 `.config` 时回落到我们自己的
+  products 片段（配方里写了什么就是什么），所以注入之后、defconfig 之前也能先预置。
+
+#### 验收实测（2026-09-28）
+
+```
+bash image/sdk-make.sh <SDK> qt5base qt5declarative qt5svg qt5quickcontrols2 qt5virtualkeyboard
+→ 退出码 0，用时 9 分 58 秒（20:15:34 → 20:25:32）
+```
+
+| 验收项 | 实测 |
+| --- | --- |
+| Qt 版本 | `libQt5Core.so.5` 里就是 `Qt 5.15.11` |
+| GUI 要用的库 | Core / Gui / Widgets / Network / Xml / DBus / Qml / Quick / Svg / QuickControls2 / QuickTemplates2 / VirtualKeyboard 全在 |
+| **`libqeglfs.so`** | `target/usr/lib/qt/plugins/platforms/libqeglfs.so`（同目录还有 `libqvnc.so` / `libqminimal.so` / `libqoffscreen.so`） |
+| EGLFS 的 KMS/GBM 通路 | `plugins/egldeviceintegrations/libqeglfs-kms-integration.so`（200,720 B）与 `…-kms-egldevice-integration.so`；`libqeglfs.so` 的 `DT_NEEDED` 里**直接有 `libmali.so.1`**（还有 `libdrm`、`libinput`、`libmtdev`） |
+| **`libqtvirtualkeyboardplugin.so`** | `target/usr/lib/qt/plugins/platforminputcontexts/`（56,440 B），`DT_NEEDED` 全解（缺失 0） |
+| 四个 QML 运行时模块 | `usr/qml/QtQuick.2/`、`usr/qml/QtQuick/Window.2/`、`usr/qml/QtQuick/Layouts/`、`usr/qml/Qt/labs/folderlistmodel/`，每个都有 `qmldir` + `plugins.qmltypes` + 插件 `.so`；四个插件的 `DT_NEEDED` **缺失都是 0** |
+| 虚拟键盘的 QML | `usr/qml/QtQuick/VirtualKeyboard/`（+ `Styles/`、`Settings/`），qmldir 头上写着 `depends QtQuick 2.0 / QtQuick.Window 2.2 / QtQuick.Layouts 1.0 / Qt.labs.folderlistmodel 2.1` |
+| 语言布局 | 片段写的是 `en_US zh_CN`。configure 行 `CONFIG+="lang-en_US lang-zh_CN"`；`src/virtualkeyboard/config.pri` 第 83/91 行确实有 `lang-en(_GB)?` 与 `lang-en(_US)?` → **en_US 是合法布局**（不用改）。编进去的 qrc 里 `layouts/en_US/*.fallback` 5 条；`zh_CN` 走拼音插件（`layouts/zh_CN/{main.qml,symbols.qml,…}`），`libQt5VirtualKeyboard.so.5` 里有 `Pinyin` |
+| 软件渲染后端 | `libQt5Quick.so.5` 里有 56 个 software 符号（`QSGSoftwareRenderer*`）→ 现有的 `QT_QUICK_BACKEND=software` **仍然可用**（不过 Mali 的 GL 通路已经通了，它不再是必需项） |
+
+#### QML 模块装在 `/usr/qml`（T15-1 1b 的卡点，在镜像里的机器化复现）
+
+Qt 的 QML 模块在 **`/usr/qml`**（不是 `/usr/lib/qt/qml`；`/usr/lib/qt/` 下只有 `plugins/`），
+全树共 **29 个 `qmldir`**。而 `QtQuick/VirtualKeyboard/qmldir` 自己就把 T15-1 1b 那四个依赖写在头上：
+
+```
+depends QtQuick 2.0
+depends QtQuick.Window 2.2
+depends QtQuick.Layouts 1.0
+depends Qt.labs.folderlistmodel 2.1
+```
+
+—— 这正是"Ubuntu 上只装 `qtvirtualkeyboard-plugin` 就是白板"的原因（它不拉这四个），
+也正是我们验收必须**逐个盯住这四个目录**的原因。现在四个都在，且依赖可解。
+
+#### 体积（release 镜像的账，留到 2-9/2-12 一起算）
+
+| 项 | 大小 |
+| --- | --- |
+| `usr/qml` | 11 MB |
+| Qt5 运行库（`libQt5*.so.5.15.11`） | 48 MB |
+| `usr/lib/qt/plugins` | 5.5 MB |
+| **`usr/include/qt5`（在 target 里）** | **32 MB** |
+| `usr/bin/qml*`（qml / qmlscene / qmlpreview / qmltime / qmltestrunner） | 388 KB |
+| target 合计 | 313 MB |
+| 下载缓存 `dl/`（含 Qt 六个包 ~105 MB） | 424 MB |
+
+`usr/include/qt5` 的 32 MB、测试用二进制、以及 `QtTest` / `Qt/test` 这些模块，都是厂商打包行为的
+副产品（`INSTALL_STAGING` 的副作用），**不是我们加的**；release 镜像要不要剔掉，统一放到体积账里决定。
+
 ---
 
 ## 6. 板级对齐（T15-2-3，已编译验证）
@@ -473,7 +571,7 @@ make ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu- -j8 rockchip/rk3568-kickpi
 | 2-3 ✅ | 板级对齐（面板变体 / 触摸复位脚 / WiFi / 以太网 / PMIC / 容量） | 差异表 + "要不要改 dts"结论，逐项带证据（见 §6）：**要改 2 处** —— 面板 include 换成 v2 MIPI、触摸复位脚 PB5→**PB6**；改动落在 `image/kernel/` 的 3 个文件里，并用**内核真管线编出 dtb（退出码 0）**再反编译逐项核对 |
 | 2-4 ✅ | 分区与 OTA 布局定稿（A/B；模型 4.9 GB 落点） | 见 §7：**A/B 双 rootfs（3 GiB×2）+ 共享 userdata（grow ≈22.8 GiB，模型/配置/日志都在这）**；机制用 SDK 原生的 `RK_AB_UPDATE` + `ota-updateimg`，回退靠 `misc` 元数据；分区表由 `image/check-parameter.py` + `tests/test_image_parameter.py`（8 项）守住 |
 | 2-5 ✅ | libmali G52(GBM) 进 buildroot | 见 §5.4：`image/prepare-libmali.sh` 把厂商 deb 里的 G52 blob 按 buildroot 期望的名字落位；**`make rockchip-mali` 退出码 0（22 分 46 秒，含首次整条交叉工具链）**，进镜像的 blob 与源 blob **逐字节相同**、`gbm_*` **39**（≥30）、`BR2_PACKAGE_HAS_LIBGBM=y`、blob 的 **16 个 `DT_NEEDED` 缺失 0**，sysroot 里 `egl.pc`/`gbm.pc`/EGL·GLES 头齐全（Qt5 要用） |
-| 2-6 | Qt5.15 + EGLFS + 虚拟键盘 + 四个 QML 模块 | 四目录 + `libqeglfs.so`/`libqtvirtualkeyboardplugin.so` 在位 |
+| 2-6 ✅ | Qt5.15 + EGLFS + 虚拟键盘 + 四个 QML 模块 | 见 §5.5：`make` 退出码 0（9 分 58 秒）；**`libqeglfs.so`**（`DT_NEEDED` 里直接有 `libmali.so.1`，KMS/GBM 集成插件在位）与 **`libqtvirtualkeyboardplugin.so`** 在位；**四个 QML 模块** `usr/qml/{QtQuick.2, QtQuick/Window.2, QtQuick/Layouts, Qt/labs/folderlistmodel}` 各有 `qmldir`+插件且依赖缺失 0；`en_US`+`zh_CN`(拼音) 布局确认编入；Qt = 5.15.11 |
 | 2-7 | 我们的运行时与依赖闭环（python3/numpy/cv2/yaml、yaml-cpp、librknnrt、MPP+gst、NM、sshd、字体、llama-server+模型） | chroot 内逐项在位 + `ldd` 无缺失 |
 | 2-8 | 只起我们的东西（`assistant.target` + agent + 无 X 的 GUI 单元） | `systemctl list-dependencies assistant.target` 只有我们的服务 |
 | 2-9 | 首次完整构建（不刷板） | 构建成功 + 时长/体积/组件版本三组数字 |

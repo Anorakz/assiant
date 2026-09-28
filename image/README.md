@@ -9,6 +9,7 @@ image/
 ├─ install-into-sdk.sh                 # 把下面这些文件复制进厂商 SDK（幂等，支持 --dry-run）
 ├─ prepare-libmali.sh                  # 把厂商 deb 里的 G52 blob 按 buildroot 期望的名字落位（T15-2-5）
 ├─ sdk-make.sh                         # 构建入口：先剔掉 PATH 里的 Windows 条目，再 exec make
+├─ prime-dl.sh                         # 把 Qt 源码（与 buildroot 钉的 hash 一致的那份）预置进 dl/（T15-2-6）
 ├─ check-parameter.py                  # 分区表校验器（纯算术；tests/test_image_parameter.py 有 8 项守卫）
 ├─ buildroot/configs/
 │   ├─ rockchip_rk3568_kickpi_k1mini_release_defconfig     # buildroot defconfig（片段式）
@@ -25,7 +26,7 @@ image/
 ## 用起来
 
 ```bash
-# 1) 注入：配方文件 + G52 的 Mali blob（逐条打印 新增/覆盖/已一致）
+# 1) 注入：配方文件 + G52 的 Mali blob + Qt 源码预置（逐条打印 新增/覆盖/已一致）
 bash image/install-into-sdk.sh /home/anorak/rk3568_buildroot/linux-kernel-6.1/rk-linux6.1-2026060914/rk-linux6.1-2026060914
 
 # 2) 只配置（快，用来验证配方本身）
@@ -46,6 +47,9 @@ cd <SDK> && ./build.sh rk3566_rk3568:rockchip_rk3568_kickpi_k1mini_release_defco
   （与 buildroot 本身无关）。整机构建的 `./build.sh` 也要先清 PATH。
 - **G52 的 Mali blob 不放在本仓库**（56 MB）：它从 SDK 自带的厂商 deb 里现取，
   `prepare-libmali.sh` 负责指纹校验与文件名推导（为什么文件名是关键，见 `docs/image.md` §5.4）。
+- **Qt 源码走 `prime-dl.sh` 预置**：`invent.kde.org` 会重新打包同一 commit 的归档，
+  与 buildroot 钉的 sha256 不符；primary site 上有与 hash 一致的那份，脚本按 hash 校验后放进
+  `dl/`（细节与"怎么证明内容没问题"见 `docs/image.md` §5.5）。
 - 片段顺序有意义：`rockchip_rk3568_kickpi_k1mini_release_defconfig` 里**基座片段在前、
   我们的 products 片段在后** —— 后面能覆盖前面的选择。
 - 片段文件有**四条书写纪律**（尾注释、注释里藏配置、符号必须存在），
