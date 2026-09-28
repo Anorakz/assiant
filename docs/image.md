@@ -150,7 +150,9 @@ KICKPI 自己的 `batch_build.sh` **当前就在编 K1Mini 的 debian12 + ubuntu
 | 磁盘 | `/` 1007 GB，**751 GB 可用** ✅ |
 | CPU / 内存 | **24 核 / 7 GB**（⚠ 内存偏小：并行构建 Qt 要封顶 `-j8` + 开 ccache） |
 | 工具链 | gcc / make / python3 / git / rsync / bc / cpio / unzip / wget / **dtc** 全在 ✅ |
+| 工具链（buildroot 侧） | ⚠ **buildroot 会自己编一套 glibc 工具链**：`BR2_TOOLCHAIN_BUILDROOT=y` / `BR2_TOOLCHAIN_EXTERNAL` 未开 / GCC **13.4.0** / `BR2_KERNEL_HEADERS_AS_KERNEL`（→ 6.1）/ `BR2_GCC_TARGET_CPU="cortex-a55"`。SDK 里那份 `prebuilts/gcc/linux-x86/aarch64/gcc-arm-10.3-2021.07-…` 只给**内核/u-boot** 用。⇒ 首次构建里有一段 40 分钟量级的"编工具链"（gcc-initial → glibc 头 → gcc-final → glibc），之后是缓存；`BR2_CCACHE` 目前**没开**（R3，2-9 决定） |
 | 下载缓存 | `buildroot/dl` 58 项，**无 Qt/mali** → Qt 必须联网；另有 `linux-kernel-6.1/rootfs/buildroot-dl-rk-linux6.1-20260801.tar.gz`（272 MB，历史缓存） |
+| ⚠ PATH 陷阱 | WSL 默认把 **Windows 的 PATH 接到 Linux PATH 后面**，里面有 `/mnt/c/Program Files/...` 这种**带空格**的条目 → buildroot 第一步 `support/dependencies/dependencies.sh` 直接判死：`This doesn't work. Fix you PATH.`（`dependencies.mk:27`，退出码 2）。看上去像 buildroot 坏了，其实与环境有关。**构建一律走 `image/sdk-make.sh`**，它把带 `/mnt/` 或带空格的条目剔掉再 exec make（`tests/test_image_recipe.py` 用假 `make` 把这件事钉住了） |
 
 ---
 
@@ -158,11 +160,12 @@ KICKPI 自己的 `batch_build.sh` **当前就在编 K1Mini 的 debian12 + ubuntu
 
 | # | 缺口 / 风险 | 应对 | 归属任务 |
 | --- | --- | --- | --- |
-| R1 | `external/libmali` **没有 G52**（只有 RK3588 的 valhall-g610） | 从 SDK 自带 `libmali-bifrost-g52-g24p0-x11-wayland-gbm_1.9-1_arm64.deb` 抽 `.so` 做成本地 buildroot 包；验收看 `nm -D` 的 `gbm_*` 数量 | T15-2-5 |
+| R1 ✅ | `external/libmali` **没有 G52**（只有 RK3588 的 valhall-g610） | 已闭环（§5.4）：`image/prepare-libmali.sh` 从 SDK 自带的厂商 deb 里抽 `.so`，按 buildroot 期望的文件名落位，并校验两级 sha256 + `SONAME` + `gbm_*` 符号数 | T15-2-5 ✅ |
 | R2 | Qt 5.15.11 源码要从 `invent.kde.org` 按 commit 拉（`dl` 里没有） | 允许联网；若慢/断则设 `BR2_PRIMARY_SITE` 镜像或把源码包先放进 `dl/` | T15-2-6 |
 | R3 | WSL 只有 7 GB 内存，24 核全开必 OOM | 构建封顶 `-j8` + `BR2_CCACHE`；必要时夜里串行 | T15-2-9 |
 | R4 | **触摸复位脚不一致**（板端 PB6 vs SDK dtsi PB5） | 用设备树 + pinctrl 逐项核对；拿不准就先按板端实测值改 dts 再刷 | T15-2-3 |
-| R5 | 版本漂移：Qt **5.12→5.15**、Python **3.8→3.11**、libmali **g2p0→g24p0**、MPP 打包名 1.5.0 vs 源码 CHANGELOG 1.0.11 | 镜像出来后**在板上**复跑 T15-1 的三套脚本（1b/1c/1d）+ T14 验收；不通过就回退到对应版本 | T15-2-11 |
+| R5 | 版本漂移：Qt **5.12→5.15**、Python **3.8→3.11**、libmali **g2p0→g24p0**、MPP 打包名 1.5.0 vs 源码 CHANGELOG 1.0.11 | 镜像出来后**在板上**复跑 T15-1 的三套脚本（1b/1c/1d）+ T14 验收；不通过就回退到对应版本。⚠ libmali 这条**已经确定会漂**：镜像装的是 SDK 的 **g24p0**，而板端 Ubuntu 现在是 **g2p0**（§5.4），所以 2-11 必须专门验 GPU/EGLFS | T15-2-11 |
+| R9 | 路线 C 说"没有 X"，但 Mali blob 的 `DT_NEEDED` 硬依赖 `libX11 / libxcb / libwayland-*` → 镜像里必然带 X/Wayland 的**客户端库**（§5.4） | 已确认无解（blob 只有合集版、也只有 G52 这一份）：接受，但**不开 X server、不开桌面、Qt 只跑 EGLFS**（`QT5BASE_XCB` 保持关）。实测代价 **3,760 KB**（§5.4）；真要去掉得向厂商索取 GBM-only blob | T15-2-5 ✅ |
 | R6 | **无线 OTA（D5）要求分区表现在就定** | 在 `parameter-*.txt` 上定 A/B 或 recovery 方案，并把"写谁/怎么回退"写进文档 | T15-2-4 |
 | R7 | 首次刷板可能需要物理 Maskrom | 先试 `reboot loader`（软件进 rockusb）；失败再请用户按键 | T15-2-11 |
 | R8 | 仓库**没有** Python 依赖声明，pip 装的 numpy/opencv 版本只在板端 | 生成并提交依赖清单（版本钉住），镜像按它装 | T15-2-7 |
@@ -183,17 +186,22 @@ bash image/install-into-sdk.sh /home/anorak/rk3568_buildroot/linux-kernel-6.1/rk
 | `image/buildroot/configs/rockchip_rk3568_kickpi_k1mini_release_defconfig` | `buildroot/configs/` | buildroot defconfig（片段式）：base + chip + 中文字体/区域 + wireless + mpp + gst(video/audio) + npu2 + mali + 我们的 products 片段 |
 | `image/buildroot/configs/rockchip/products/kickpi-k1mini-release.config` | `buildroot/configs/rockchip/products/` | 我们自己的片段：systemd + Qt5(EGLFS/虚拟键盘) + GPU 型号 + 输入 + NM + Python/OpenCV/yaml-cpp |
 | `image/device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1mini_release_defconfig` | 同名路径 | SDK 板级 defconfig：dts `rk3568-kickpi-k1Mini-linux`、FIT、`parameter-buildroot-fit.txt`、rootfs=buildroot |
-| `image/install-into-sdk.sh` | —— | 注入脚本（打印 `新增/覆盖/已一致`，重复执行幂等） |
+| `image/install-into-sdk.sh` | —— | 注入脚本（打印 `新增/覆盖/已一致`，重复执行幂等；最后会调 `prepare-libmali.sh`） |
+| `image/prepare-libmali.sh` | `external/libmali/lib/aarch64-linux-gnu/` | 从 SDK 自带的厂商 deb 里抽出 G52 的 `libmali.so.1.9.0`，按 buildroot 期望的文件名落位并做指纹/符号校验（T15-2-5，见 §5.4） |
+| `image/sdk-make.sh` | —— | **构建入口**：剔掉 PATH 里带空格的 Windows 条目后 `exec make`（见 §3.5 的 PATH 陷阱） |
 
 ```bash
 # 只配置（快，用来验证配方本身 —— T15-2-2 的验收就是这条）
-cd <SDK>/buildroot
-make O=output/rockchip_rk3568_kickpi_k1mini_release \
-     rockchip_rk3568_kickpi_k1mini_release_defconfig
+bash image/sdk-make.sh <SDK> rockchip_rk3568_kickpi_k1mini_release_defconfig
+# 单包构建（例如只验 Mali —— T15-2-5 的验收）
+bash image/sdk-make.sh <SDK> rockchip-mali
 # 整机构建（内核 + u-boot + rootfs + 镜像，会联网拉 Qt 等源码 —— T15-2-9）
-cd <SDK>
-./build.sh rk3566_rk3568:rockchip_rk3568_kickpi_k1mini_release_defconfig
+cd <SDK> && ./build.sh rk3566_rk3568:rockchip_rk3568_kickpi_k1mini_release_defconfig
 ```
+
+> `sdk-make.sh` 里的 `make O=output/<cfg> -j8` 可以照抄手打，但**必须先把 PATH 里的
+> Windows 条目去掉**，否则连 `make` 第一步都过不去（§3.5）。整机构建的 `./build.sh`
+> 也要注意同一个坑。
 
 ### 5.1 配置验收（2026-09-28 实测，只到"配置通过"，还没构建）
 
@@ -229,13 +237,114 @@ cd <SDK>
 
 ### 5.3 已知缺口（配方"配置对"≠"能编出来"）
 
-- **G52 的 Mali 用户态 .so 不在 SDK 里**：`external/libmali` 只有 valhall-g610。
-  配置能选 G52，但构建时会找不到 `.so` → **T15-2-5** 用厂商 deb
-  `ubuntu/packages/arm64/libmali/libmali-bifrost-g52-g24p0-x11-wayland-gbm_1.9-1_arm64.deb`
-  里的二进制补上。
+- **G52 的 Mali 用户态 .so 不在 SDK 的 `external/libmali` 里**：那里只有 valhall-g610
+  （RK3588）。G52 的 blob 厂商**放在 SDK 里**了，只是放在 Ubuntu rootfs 那套 deb 里，
+  而不是 buildroot 会去找的 `lib/` 下 → **T15-2-5 已闭环**，做法与文件名推导见 §5.4。
 - **Qt 源码不在 `dl` 缓存里**（要联网拉 `invent.kde.org`）→ 见 R2。
 - 我们的运行时文件（Agent/GUI 二进制、unit、模型 4.9 GB）还没进镜像 →
   **T15-2-7 / 2-8**（片段里给 overlay 留了位置，故意先不开）。
+
+### 5.4 G52 的 Mali blob：从哪来、叫什么名字、为什么名字是关键（T15-2-5）
+
+#### 来源与指纹
+
+| 项 | 值 |
+| --- | --- |
+| 载体 | SDK 自带 `<SDK>/ubuntu/packages/arm64/libmali/libmali-bifrost-g52-g24p0-x11-wayland-gbm_1.9-1_arm64.deb`（15,901,824 B） |
+| deb 的 sha256 | `c8707755f9e3734c051cd6b71b63214290e70cc653eea7de799e013fe67098de` |
+| 里面的本体 | `usr/lib/aarch64-linux-gnu/libmali.so.1.9.0`，**56,387,136 B**，`SONAME=libmali.so.1` |
+| 本体的 sha256 | `e208194f2ec03a35f15fce3141ccfa2fac954feebe59c368fb6e9b82f32f8bdf` |
+| 导出符号 | `gbm_*` **39**、`egl*` 121、`gl*` 654、`cl*` 152、`vk_*` **0** |
+| 落位 | `<SDK>/external/libmali/lib/aarch64-linux-gnu/libmali-bifrost-g52-g24p0-x11-wayland-gbm.so` |
+| 谁做的 | `image/prepare-libmali.sh`（幂等；deb 与 .so **两级 sha256 都对得上**才动手，另外自检 SONAME 与 `gbm_*` 数量） |
+
+**blob 不进本仓库**（56 MB，git 里不合适）：它从 SDK 自带的那个 deb 里现取，
+所以"配方"里只留它的**指纹与期望文件名**，而不是二进制本体。
+
+那个 deb 里另有 6 个 stub（`mali/lib{EGL,GLESv1_CM,GLESv2,MaliOpenCL,gbm,wayland-egl}.so*`）、
+`libmali-hook.so.1.9.0`、`mali.pc`、`/etc/ld.so.conf.d/00-aarch64-mali.conf`、
+`/etc/OpenCL/vendors/mali.icd` —— 那是 Ubuntu deb 那套的交付方式，buildroot 这一侧
+**不需要**（meson 会自己生成 wrapper 与 pkgconfig，见 §5.1）。
+
+#### 文件名是怎么"算"出来的（不是猜的）
+
+`buildroot/package/rockchip/rockchip-mali/rockchip-mali.mk` 把
+`-Dgpu -Dversion -Dsubversion -Dplatform` 交给 `external/libmali/meson.build`，
+meson 再调 `scripts/grabber.sh`，后者在 `optimize_<O>/<arch>*/` 下按
+`.*libmali-<gpu>-<version>[-<subversion>]-<platform>.so` 去 `find`。各段的实际取值：
+
+| 段 | 值 | 出处（都能在树的原文里点到） |
+| --- | --- | --- |
+| gpu | `bifrost-g52` | `rockchip-mali/Config.in` 第 55 行（我们的片段选了 BIFROST_G52） |
+| version | `g24p0` | 同文件第 65 行 |
+| subversion | **空** | 同文件第 68–71 行：只有 px3se / utgard-400 有默认值。`grabber.sh` 里 `${4:-none}` 会把空当 `none` 处理 |
+| optimize | `O3` → 目录 `optimize_3`（本树里就是 `lib` 的软链） | 同文件第 75 行默认值 + `grabber.sh` 第 25–29 行 |
+| platform | `x11-wayland-gbm` | `rockchip-mali.mk` 第 42–86 行按**已启用的 winsys** 拼：HAS_X11→x11、HAS_WAYLAND→wayland、HAS_GBM→gbm（HAS_OPENCL 关着才会多一个 nocl） |
+
+⇒ **`libmali-bifrost-g52-g24p0-x11-wayland-gbm.so`**，与厂商自己的命名一致
+（那个 deb 就叫这个名字，`lib/` 下已有的 `libmali-valhall-g610-g24p0-x11-wayland-gbm.so`
+是同一规格）。脚本最后用厂商自带的两个脚本互相印证：
+`grabber.sh` 必须**找得到**这个文件，`parse_name.sh --format` 必须把这个文件名**反解回原名**
+（后者证明我们不是"凑了一个能匹配的名字"，而是厂商的规范格式）。
+
+`tests/test_image_recipe.py` 又把这条**跨文件不变量**钉进 CI：片段里的 winsys 选择
+→ 算出的平台串 → `prepare-libmali.sh` 里的 `PLATFORM`/`GPU`/`VERSION`，三者必须一致。
+改了片段却没同步脚本 = 只有真构建才会炸的 `ERROR: Failed to find matched library`。
+
+#### ⚠ 由此确定的一件事：这个 blob **硬依赖 X11/Wayland 的客户端库**
+
+`readelf -d` 的 `DT_NEEDED`（**整库加载级**：ld.so 载入 libmali.so 时这些必须都在，
+否则 EGLFS 连 EGL 都拿不到）：
+
+```
+libdrm.so.2  libwayland-client.so.0  libwayland-server.so.0
+libX11.so.6  libX11-xcb.so.1  libxcb.so.1
+libxcb-dri2.so.0  libxcb-dri3.so.0  libxcb-xfixes.so.0  libxcb-present.so.0
+libstdc++.so.6  libm.so.6  libpthread.so.0  libdl.so.2  libc.so.6  libgcc_s.so.1
+```
+
+所以"没有 X"的镜像里**必须**有 X11/Wayland 的**客户端库** → 片段里开 `XORG7` + `WAYLAND`
+（`HAS_X11` 依赖前者、`HAS_WAYLAND` 依赖后者；**依赖不满足时 kconfig 会让这两个符号直接消失**，
+平台串会悄悄变成别的值，blob 就找不到了）。meson.build 也会按 blob 里的
+`libxcb.so` / `libwayland-client.so` 两个字符串判定 has_x11 / has_wayland，再
+`dependency()` 这些包 —— 不启用连 meson 配置阶段都过不去。
+
+**这不是"要装 X/桌面"**：没有 X server、没有桌面，`QT5BASE_XCB` 保持关、QPA 仍是 eglfs
+（`tests/test_image_recipe.py` 把这两条也钉住了）。真要去掉只能是向厂商索取 GBM-only 的 blob。
+
+#### 构建实测（2026-09-28，`make rockchip-mali`）
+
+命令：`bash image/sdk-make.sh <SDK> rockchip-mali` → **退出码 0**，耗时 **22 分 46 秒**
+（19:24:03 → 19:46:49）。这段时间里还**从零编了一整条交叉工具链**（见 §3.5），
+属首次构建的一次性成本，后面都是缓存。
+
+| 验收项 | 实测 |
+| --- | --- |
+| `make rockchip-mali` | 退出码 **0**；日志末尾 `fixup_dummy.sh lib optimize_3/aarch64-linux-gnu/libmali-bifrost-g52-g24p0-x11-wayland-gbm.so` |
+| meson 到底用了哪个 blob | `Building for aarch64\|bifrost-g52\|g24p0\|\|x11-wayland-gbm\|O3`、`Source libraries: ['optimize_3/aarch64-linux-gnu/libmali-bifrost-g52-g24p0-x11-wayland-gbm.so']`、`Using … with x11 wayland gbm` —— **决定性证据** |
+| 进镜像的 blob | `target/usr/lib/libmali.so.1.9.0` = **56,387,136 B**，sha256 `e208194f…`（与源 blob **逐字节相同**） |
+| `gbm_*` 符号 | **39**（要求 ≥ 30） |
+| SONAME / 软链 | `libmali.so` → `libmali.so.1` → `libmali.so.1.9.0`，`SONAME=libmali.so.1` |
+| blob 的 `DT_NEEDED` | **16/16 在镜像里找得到**（缺失 0） |
+| 提供的虚拟包 | `BR2_PACKAGE_HAS_LIBGBM=y`、`BR2_PACKAGE_HAS_LIBEGL=y` |
+| wrapper / pkgconfig（T15-2-6 的 Qt5 要用） | sysroot 里 `libEGL.so.1`/`libgbm.so.1`/`libGLESv2.so.2`/`libGLESv1_CM.so.1`/`libOpenCL.so.1` 都指到 `libmali.so.1`；`egl.pc`/`gbm.pc`/`glesv2.pc`/`glesv1_cm.pc`/`OpenCL.pc`/`mali.pc` 在位；头 `EGL/ GLES/ GLES2/ GLES3/ KHR/` + `gbm.h` 在位 |
+| meson 的依赖检查 | `Dependency libdrm found: YES 2.4.124`、`Dependency x11 found: YES 1.8.7` —— 不开 XORG7/WAYLAND 就卡在这里 |
+
+`egl.pc` 自己就把这件事写明白了（`Requires: libdrm, wayland-client, wayland-server, x11, xcb,
+x11-xcb, xcb-dri2`）—— 这几条**不是我们想要，是 blob 要**。
+
+副作用（都记在案，不值得为它去改厂商包）：
+
+- **X11/Wayland 客户端库占 rootfs 3,760 KB**（按实际文件去重后统计）：`libX11.so.6.4.0` 1,457,464 B、
+  `libxml2.so.2.12.5` 1,523,952 B（被 wayland 选中）、`libxcb.so.1.1.0` 220,688 B、
+  `libexpat.so.1.9.1` 176,304 B、`libwayland-server.so.0.23.1` 112,952 B、
+  `libdrm.so.2.124.0` 111,912 B、`libwayland-client.so.0.23.1` 86,576 B 等。
+- **开发文件也进了 rootfs**：`usr/include/{EGL,GLES,GLES2,GLES3,CL,KHR}` + `gbm.h` + 6 个 `.pc`，
+  合计 **276 KB**。成因是厂商 meson.build 把 headers/pkgconfig 无条件装进 prefix，而
+  buildroot 的 `INSTALL_STAGING` 会让 install 跑两遍（一遍 staging、一遍 target）——
+  这是**厂商包的行为，不是我们加的**。release 镜像要不要剔掉，等 2-9/2-12 一起看体积时再定。
+- 跑完之后 SDK 那棵树的 `git status` 会多出 8 项：4 个配置/分区表、3 个 `-assistant` 内核
+  dts/dtsi、1 个 blob —— 正好等于"我们注入了什么"的清单（注入不写进厂商仓库）。
 
 ---
 
@@ -363,7 +472,7 @@ make ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu- -j8 rockchip/rk3568-kickpi
 | 2-2 ✅ | K1Mini 的 buildroot defconfig 落地（release 骨架 + **systemd** + Qt5 替 weston） | `make <defconfig>` 通过（退出码 0）、`.config` 里 systemd 与 Qt/EGLFS/虚拟键盘/G52/GBM/NPU/MPP/NM/Python 逐项在位（见 §5.1） |
 | 2-3 ✅ | 板级对齐（面板变体 / 触摸复位脚 / WiFi / 以太网 / PMIC / 容量） | 差异表 + "要不要改 dts"结论，逐项带证据（见 §6）：**要改 2 处** —— 面板 include 换成 v2 MIPI、触摸复位脚 PB5→**PB6**；改动落在 `image/kernel/` 的 3 个文件里，并用**内核真管线编出 dtb（退出码 0）**再反编译逐项核对 |
 | 2-4 ✅ | 分区与 OTA 布局定稿（A/B；模型 4.9 GB 落点） | 见 §7：**A/B 双 rootfs（3 GiB×2）+ 共享 userdata（grow ≈22.8 GiB，模型/配置/日志都在这）**；机制用 SDK 原生的 `RK_AB_UPDATE` + `ota-updateimg`，回退靠 `misc` 元数据；分区表由 `image/check-parameter.py` + `tests/test_image_parameter.py`（8 项）守住 |
-| 2-5 | libmali G52(GBM) 进 buildroot | `gbm_*` ≥ 30，`BR2_PACKAGE_HAS_LIBGBM=y` |
+| 2-5 ✅ | libmali G52(GBM) 进 buildroot | 见 §5.4：`image/prepare-libmali.sh` 把厂商 deb 里的 G52 blob 按 buildroot 期望的名字落位；**`make rockchip-mali` 退出码 0（22 分 46 秒，含首次整条交叉工具链）**，进镜像的 blob 与源 blob **逐字节相同**、`gbm_*` **39**（≥30）、`BR2_PACKAGE_HAS_LIBGBM=y`、blob 的 **16 个 `DT_NEEDED` 缺失 0**，sysroot 里 `egl.pc`/`gbm.pc`/EGL·GLES 头齐全（Qt5 要用） |
 | 2-6 | Qt5.15 + EGLFS + 虚拟键盘 + 四个 QML 模块 | 四目录 + `libqeglfs.so`/`libqtvirtualkeyboardplugin.so` 在位 |
 | 2-7 | 我们的运行时与依赖闭环（python3/numpy/cv2/yaml、yaml-cpp、librknnrt、MPP+gst、NM、sshd、字体、llama-server+模型） | chroot 内逐项在位 + `ldd` 无缺失 |
 | 2-8 | 只起我们的东西（`assistant.target` + agent + 无 X 的 GUI 单元） | `systemctl list-dependencies assistant.target` 只有我们的服务 |

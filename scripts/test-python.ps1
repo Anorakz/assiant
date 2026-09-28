@@ -69,7 +69,9 @@ $tests = @(
     "tests\test_cli.py",
     "tests\test_tools.py",
     "tests\test_tool_permissions.py",
-    "tests\test_wallpaper.py"
+    "tests\test_wallpaper.py",
+    "tests\test_image_parameter.py",
+    "tests\test_image_recipe.py"
 )
 
 $failed = @()

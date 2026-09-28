@@ -89,6 +89,20 @@ if [ "$FAILED" != "0" ]; then
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+#  唯一一个"二进制输入"：G52 的预编译 Mali blob（T15-2-5）
+#  ---------------------------------------------------------------------------
+#  它**不进我们的仓库**（56 MB，git 里不合适），而是用脚本从 SDK 自带的厂商 deb 里
+#  取出来、按 buildroot 期望的文件名放进 external/libmali。脚本对 blob 做指纹
+#  （deb 与 .so 两级 sha256）与能力（SONAME / gbm_* 符号 / DT_NEEDED）校验，
+#  所以这一步失败一定是"东西不对"，不是"路径顺手写错了"。
+echo
+if [ -n "$DRY" ]; then
+    bash "$HERE/prepare-libmali.sh" "$SDK" --dry-run
+else
+    bash "$HERE/prepare-libmali.sh" "$SDK"
+fi
+
 echo "== 完成。下一步（在 SDK 根目录）："
 echo "     cd buildroot && make O=output/rockchip_rk3568_kickpi_k1mini_release \\"
 echo "          rockchip_rk3568_kickpi_k1mini_release_defconfig"
