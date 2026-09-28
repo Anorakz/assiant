@@ -21,6 +21,7 @@ import importlib.util
 import os
 import pathlib
 import sys
+import sysconfig
 import unittest
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -30,6 +31,33 @@ SCAN_DIRS = ("agent", "scripts", "tests", "gui/tools")
 LOCAL = {"agent", "config", "tools", "io", "core", "ui", "pages", "state",
          "llm", "vision", "tests", "scripts", "native", "gui", "widgets"}
 _LOCAL_NAMES = None
+
+
+def is_stdlib(name: str) -> bool:
+    """是不是标准库。
+
+    ⚠ 不能只靠 `sys.stdlib_module_names`：那是 **3.10+** 才有的，
+    CI 跑的是 **3.8**（与板端解释器同版本）——只有它的话，3.8 上会把
+    `argparse`/`asyncio` 这些全判成"第三方"，用例直接红（第一次就是这么红的）。
+    所以再补一条跨版本可靠的判据：找到模块的位置，看它在不在 stdlib 目录里。
+    """
+    if name in sys.builtin_module_names:
+        return True
+    if name in getattr(sys, "stdlib_module_names", ()):
+        return True
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, ValueError):
+        return False
+    if spec is None:
+        return False
+    if spec.origin in (None, "built-in", "frozen"):
+        return True
+    origin = str(spec.origin)
+    if "site-packages" in origin or "dist-packages" in origin:
+        return False
+    stdlib_dir = sysconfig.get_paths().get("stdlib", "")
+    return bool(stdlib_dir) and origin.startswith(stdlib_dir)
 
 
 def is_local(name: str) -> bool:
@@ -64,7 +92,6 @@ def load_checker():
 
 def repo_third_party() -> dict:
     """AST 扫出仓库真实 import 的第三方顶层模块 -> 出现的文件集合。"""
-    stdlib = set(getattr(sys, "stdlib_module_names", ()))
     found = {}
     for top in SCAN_DIRS:
         for p in (_ROOT / top).rglob("*.py"):
@@ -81,7 +108,7 @@ def repo_third_party() -> dict:
                         continue
                     names = [node.module.split(".")[0]]
                 for n in names:
-                    if is_local(n) or n in stdlib:
+                    if is_local(n) or is_stdlib(n):
                         continue
                     found.setdefault(n, set()).add(str(p.relative_to(_ROOT)))
     return found
