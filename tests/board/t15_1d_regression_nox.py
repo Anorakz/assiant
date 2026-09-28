@@ -275,6 +275,24 @@ def main():
 
         # ---- 3. T14 验收脚本（offscreen，服务在跑）----
         say("[3] T14 验收脚本（它们本来就走 offscreen；现在服务是**无 X**形态）")
+        # ⚠ t14_8 的 B6 会数 logs/crash 里的 gui-*.log（"停服务后应当为 0"）。被 kill -9 过的
+        #   测试进程会留下"只有表头"的会话文件 —— 那是**真的**没干净退出（产品会当历史报告
+        #   留着），但会让 B6 的计数判据失去意义。所以先把历史挪到 /tmp（**保留不删**）再跑。
+        crash_dir = os.path.join(REPO, "logs", "crash")
+        trash = "/tmp/t151d_crashtrash"
+        os.makedirs(trash, exist_ok=True)
+        moved = []
+        if os.path.isdir(crash_dir):
+            for name in sorted(os.listdir(crash_dir)):
+                if name.startswith("gui-") and name.endswith(".log"):
+                    try:
+                        os.replace(os.path.join(crash_dir, name), os.path.join(trash, name))
+                        moved.append(name)
+                    except OSError:
+                        pass
+        if moved:
+            say("    （先把 %d 份测试期遗留的 gui 会话文件挪到 %s 再跑：它们是 kill -9/"
+                "退出崩的痕迹，留着会让 t14_8 的数数判据失效；**没删**）" % (len(moved), trash))
         for script in T14_SCRIPTS:
             started = time.time()
             rc, output = run(["python3", os.path.join("tests", "board", script)], timeout=900)

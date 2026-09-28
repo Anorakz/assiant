@@ -30,9 +30,69 @@ cd gui && cmake -S . -B build && cmake --build build -j4
 `--dump-schedule`（打印日程区真实渲染的行）、`--dump-layout`（打印整棵控件树的
 `size/min/hint`，用来查"窗口为什么不是一屏"这类问题，见 §2.1）等。
 
-测试：`cd gui/build && ctest --output-on-failure`（**23 个测试**：核心逻辑 + 控件级 + 图标守卫
-+ 面板尺寸守卫 `test_page_heights` + e2e IPC）。⚠ GUI 只能在**板端**编（PC 没有 Qt），
+测试：`cd gui/build && ctest --output-on-failure`（**25 个测试**：核心逻辑 + 控件级 + 图标守卫
++ 面板尺寸守卫 `test_page_heights` + 虚拟键盘让位守卫 `test_keyboard_inset` + e2e IPC）。
+⚠ GUI 只能在**板端**编（PC 没有 Qt），
 所以"源码树自洽"另有一条 PC 侧守卫 `tests/test_gui_includes.py`（悬空 include 见 §2.1）。
+
+### 1.1 无 X 形态（路线 B：极小镜像，T15-1）
+
+板端实测（2026-09-28）：**没有 X 也能跑**，而且桌面栈那 ~703 MB 全省下。要跑起来只需要
+把"显示/输入/软键盘"三件事都交给 Qt 平台插件：
+
+```bash
+# 1) 平台：EGLFS + KMS（linuxfb **不行**：它转不了屏，见下）
+# 2) 旋转：EGLFS 自己的环境变量（xrandr 那条路随 X 一起消失；"无损"旋转属 T15-13）
+# 3) 软键盘：Qt 虚拟键盘（onboard 是 GTK/X11 的，没有 X 就不存在）
+# 4) 输入：不用额外配置 —— libinput 自己会认触摸屏/鼠标/键盘
+export QT_QPA_PLATFORM=eglfs
+export QT_QPA_EGLFS_INTEGRATION=eglfs_kms
+export QT_QPA_EGLFS_ROTATION=90
+export QT_QUICK_BACKEND=software          # 虚拟键盘是 Quick 窗口，无 GL 时走软渲染
+export QT_IM_MODULE=qtvirtualkeyboard
+export GST_PLUGIN_FEATURE_RANK=souphttpsrc:0   # 板端 souphttpsrc 是坏的（B 站取流走别处）
+
+sudo systemctl stop slim.service          # 让出 DRM（X 在跑时 EGLFS 拿不到 master）
+./gui/build/agent_gui --config config/config.yaml
+```
+
+**虚拟键盘的 QML 依赖（必须一起装，否则"白板"）** —— `qtvirtualkeyboard-plugin` 的依赖里
+**没有** QML 运行时模块，只装它的话面板窗口会起来、`IM_VISIBLE=1`，但一个键都画不出来：
+
+```bash
+sudo apt-get install -y qml-module-qtquick-virtualkeyboard \
+                        qml-module-qtquick2 qml-module-qtquick-window2 \
+                        qml-module-qtquick-layouts qml-module-qt-labs-folderlistmodel
+```
+
+**软键盘与布局（T15-1 1b）**：Qt 的 `DesktopInputPanel` 是"整屏（半透明）窗口 + 键盘贴窗口
+底部"，板端实测键盘矩形 **`0,400 1280x400`**（默认样式：高 = 屏宽 × 800/2560）。我们原来的
+对话输入行在 `y=496..544` —— **正好被压在键盘底下**。现在 `MainPage::setKeyboardInset()`
+在键盘可见时把模式卡/日程卡收起来（高度上限压 0 + 隐藏）、把对话卡高度压到键盘上沿以内
+（输入行在卡片底部，于是被顶到键盘上方），收起键盘全部复原。三条不变式钉在
+`gui/tests/test_keyboard_inset.cpp` 里：**别用布局下边距让位**（会把布局最小高度撑大：
+窗口 800→1063）、隐藏的控件在布局里仍占地方、压了上限还得加一根尾部弹簧才贴列顶。
+
+**常驻单元**：X 形态 = `systemd/agent-gui.service`（里面写着
+`Requires=display-manager.service`，**只加 drop-in 改平台会把 X 一起拉起来**，实测
+`pgrep -c Xorg` 0→1，两个显示栈抢 DRM master）；无 X 形态 = `systemd/agent-gui-nox.service`
+（原型，T15-12 定稿）。
+
+**取证脚本（板端）**
+```bash
+python3 tests/board/t15_1b_keyboard_nox.py     # 无 X 软键盘：像素 + 产品形态 + uinput 打字 + vnc 合成
+python3 tests/board/t15_1d_regression_nox.py   # 无 X 全量回归 + 空闲 CPU/RSS（临时顶替 systemd 单元）
+python3 tests/board/t15_1c_video_nox.py        # 无 X 视频：QMediaPlayer 播本机 MPEG-TS 流
+```
+
+**平台陷阱（都是实测，写下来免得再踩）**
+| 事 | 结论 |
+| --- | --- |
+| `linuxfb:rotation=90` | **不生效** —— `rotation/invertx/inverty` 是 **evdevtouch** 的参数，不是 linuxfb 屏幕的；`/sys/class/graphics/fb0/rotate` 写进去 `virtual_size` 也不变。linuxfb 下 app 被挤成最小尺寸 935×663 且右边被裁 → 它**只能当像素证据**，不能当产品形态 |
+| linuxfb / vnc 的 alpha | 都没有合成：虚拟键盘那个"半透明整屏窗口"在这两个平台上变成**不透明白底**（fb 上半屏颜色只有 1 种）→ 产品必须用 EGLFS（窗口合成器带 alpha 混合） |
+| `QScreen::grabWindow(0)` @EGLFS | **抓不到东西**（返回一张 800×800 空白）→ 想抓"键盘+界面"合成图就用 `QT_QPA_PLATFORM=vnc:size=1280x800:depth=32:port=NNNN`，再自己走 RFB 协议取一帧（Qt 的 VNC 平台只说 **RFB 003.003**） |
+| linuxfb + 虚拟键盘 | 退出时 **SIGSEGV**（崩溃日志最后一行是 `hideInputPanel()`，发生在取证之后）；EGLFS 下退出码 0 |
+
 
 ## 2. 界面结构
 
