@@ -1,7 +1,23 @@
 # T15-2-9 断点存档（2026-09-29 00:05 停电前）
 
 > 用途：停电/中断后**照着这份恢复**，不用重新推导。
-> 状态：**首次完整构建进行中**（不是失败，是被打断）。
+> 状态：**首次完整构建进行中**（不是失败，是**按用户要求在 00:03:57 主动停的**，早于 00:08 停电）。
+
+## 0. 主动停止时（2026-09-29 00:03:57）的确切状态
+
+```
+pgrep t1529-retry.sh = 0     pgrep build-image.sh = 0
+pgrep brmake = 0             pgrep 'make -C' = 0        ← 全部已停，不会再自己重启
+target  = 472 MB
+firmware= MiniLoaderAll.bin boot.img misc.img uboot.img   ← kernel/u-boot/misc 阶段已完成
+最后装完的包: qt5multimedia（已 Installing to target）
+当时正在编  : Mali 依赖的 X 客户端库链（xorgproto、xutil_util-macros、zlib 等）
+```
+
+停止方式：先 `pkill` 续跑循环（否则它会自动重启构建），再 vendor `build.sh`、
+再我们的 `build-image.sh`（同一个命令行也匹配到它的时钟看门狗子壳），最后 TERM→KILL 掉
+`brmake`/`make` 树。**中途被打断的包目录可能处于"半编译"状态**，恢复时若报
+`build/<pkg>-<ver>/.stamp_*` 相关错误，删掉那个包目录重跑即可（第 2/4 节有说明）。
 
 ## 1. 现在到哪了
 
