@@ -1,0 +1,66 @@
+# ============================================================================
+#  systemd/agent-gui-nox.service — GUI 的**无 X 形态**常驻单元（T15-1 1d 原型）
+#
+#  和 `systemd/agent-gui.service`（X 形态）的区别，只有"谁提供显示"这一件事
+#  ---------------------------------------------------------------------------
+#    X 形态（现在的出厂状态）                无 X 形态（路线 B：极小镜像）
+#    ------------------------------------    ------------------------------------
+#    Requires=display-manager.service        **不要**（镜像里根本没有 X）
+#    After=display-manager.service           After=agent.service
+#    After=xrandr-startup.service            旋转交给 QT_QPA_EGLFS_ROTATION（T15-13 再定稿）
+#    Environment=DISPLAY=:0                  不要（没有 X）
+#    ExecStartPre 等 /tmp/.X11-unix/X0       不要（没有 X socket）
+#                                            加 QT_QPA_PLATFORM=eglfs 等四个环境变量
+#
+#  ⚠ 为什么不能只加一个 drop-in 了事（2026-09-28 实测）
+#  ---------------------------------------------------------------------------
+#    只给 X 形态的单元加 `Environment=QT_QPA_PLATFORM=eglfs` 的 drop-in，
+#    启动时 `Requires=display-manager.service` 会**把 X 一起拉起来**：
+#    于是 EGLFS 的 GUI 和 Xorg 抢 DRM master（实测 `pgrep -c Xorg` 从 0 变 1），
+#    t14_8 里"停服务后自己的会话文件应当被删掉"那两条检查因此失败。
+#    而且 drop-in 也删不掉 `Requires=`/`After=`（systemd 245 的 `After=` 清空不生效，
+#    见 systemd/xrandr-startup.service 顶部记录）—— 所以这里整份替换。
+#
+#  安装（测试期临时顶替 agent-gui.service；跑完由 tests/board/t15_1d_regression_nox.py 还原）
+#  ---------------------------------------------------------------------------
+#      cp /etc/systemd/system/agent-gui.service /tmp/agent-gui.service.bak
+#      cp systemd/agent-gui-nox.service /etc/systemd/system/agent-gui.service
+#      systemctl daemon-reload && systemctl stop slim.service
+#      systemctl start agent-gui.service
+#      # 自检：不该把 X 带起来
+#      pgrep -c Xorg            # -> 0
+#      grep -c libqeglfs /proc/$(systemctl show -p MainPID --value agent-gui.service)/maps
+#
+#  T15-12 还要在这份基础上定：最终环境变量清单（含 T15-13 的无损旋转）、
+#  是否再要 `After=assistant.target`、以及发行镜像里 `graphical.target` 是否还留。
+# ============================================================================
+[Unit]
+Description=板端助手 GUI（无 X 形态：EGLFS + Qt 虚拟键盘）
+Documentation=file:///home/kickpi/myproject/assitant/docs/gui.md
+After=agent.service
+Wants=agent.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/kickpi/myproject/assitant
+# 无 X：平台/旋转/软键盘全在这几个环境变量里（板端实测见 todo2.md §0 / docs/gui.md）
+Environment=QT_QPA_PLATFORM=eglfs
+Environment=QT_QPA_EGLFS_INTEGRATION=eglfs_kms
+Environment=QT_QPA_EGLFS_ROTATION=90
+Environment=QT_QUICK_BACKEND=software
+Environment=QT_IM_MODULE=qtvirtualkeyboard
+# 板端 souphttpsrc 是坏的（B 站取流走别处），沿用 X 形态那份的设置
+Environment=GST_PLUGIN_FEATURE_RANK=souphttpsrc:0
+ExecStart=/home/kickpi/myproject/assitant/gui/build/agent_gui --config config/config.yaml
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+StandardOutput=append:/home/kickpi/myproject/assitant/logs/gui.out
+StandardError=append:/home/kickpi/myproject/assitant/logs/gui.out
+SyslogIdentifier=agent-gui
+
+[Install]
+WantedBy=graphical.target
