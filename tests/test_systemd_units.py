@@ -352,11 +352,29 @@ class TestXrandrUnitIsFixed(unittest.TestCase):
         self.assertTrue(any("xrandr --query" in pre for pre in pres),
                         "要轮询 `xrandr --query` 等 X 真能连上: %r" % (pres,))
 
+    def test_every_xrandr_call_is_bounded(self):
+        """每个 `xrandr` 调用都必须套 `timeout`。
+
+        2026-09-28 实测：DRM 被卡住时 `xrandr --query` **不报错也不返回**（进程躺了 2 分钟+）。
+        原来 ExecStartPre 里是裸的 `xrandr --query`，于是"最多等 30 秒"根本没生效 ——
+        单元卡在 `activating (start-pre)`，而它 `WantedBy=graphical.target`，开机会把
+        graphical.target 一起卡住。所以这条守的是"**不可能挂死 boot**"，不是某个具体写法。
+        """
+        pres = raw_values(self.sections, "Service", "ExecStartPre")
+        for pre in pres:
+            if "xrandr" in pre:
+                self.assertIn("timeout", pre, "xrandr 调用没套 timeout（会挂死 boot）: %r" % pre)
+        for start in raw_values(self.sections, "Service", "ExecStart"):
+            if "xrandr" in start:
+                self.assertIn("timeout", start, "xrandr 调用没套 timeout（会挂死 boot）: %r" % start)
+
     def test_rotates_as_root_without_xauthority(self):
         self.assertEqual(values(self.sections, "Service", "User"), ["root"],
                          "kickpi 的 .Xauthority 在板端根本不存在；root 不需要它（实测）")
-        self.assertEqual(raw_values(self.sections, "Service", "ExecStart"),
-                         ["/usr/bin/xrandr --output DSI-1 --rotate left"])
+        starts = raw_values(self.sections, "Service", "ExecStart")
+        self.assertEqual(len(starts), 1, "ExecStart 应当只有一条: %r" % (starts,))
+        self.assertIn("/usr/bin/xrandr --output DSI-1 --rotate left", starts[0],
+                      "转屏命令本身不能变（只是外面套了 timeout，见上一条）")
 
 
 class TestDeployDocListsEveryUnit(unittest.TestCase):
