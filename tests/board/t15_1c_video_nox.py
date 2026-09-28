@@ -33,7 +33,39 @@ def say(msg):
 
 
 def systemctl(*args):
-    return subprocess.run(["systemctl", *args], stdout=subprocess.DEVNULL).returncode
+    # ⚠ 必须有 timeout：xrandr-startup 那种 oneshot 会卡在 ExecStartPre（xrandr 在 DRM
+    #   卡住时永远不返回），`systemctl restart` 就会一直等 —— 实测把测试钩死在收尾那步。
+    try:
+        return subprocess.run(["systemctl", *args], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=60).returncode
+    except subprocess.TimeoutExpired:
+        say("    !! systemctl %s 超时 60s（单元卡住了？继续）" % " ".join(args))
+        return 124
+
+
+def x_ready():
+    """X 真能连上吗。探测必须带 timeout：DRM 卡住时 xrandr 不报错也不返回。"""
+    try:
+        res = subprocess.run(["timeout", "3", "xrandr", "--query"],
+                             env=dict(os.environ, DISPLAY=":0"),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
+        return res.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def heal_stale_x_lock():
+    """Xorg 异常退出会留下陈旧 /tmp/.X0-lock，slim 就起不来（实测 Server is already active）。"""
+    xorg = subprocess.run(["pgrep", "-c", "Xorg"], stdout=subprocess.PIPE,
+                          universal_newlines=True).stdout.strip() or "0"
+    if xorg != "0" or not os.path.exists("/tmp/.X0-lock"):
+        return
+    say("    发现陈旧 /tmp/.X0-lock -> 清掉再起 slim")
+    for path in ("/tmp/.X0-lock", "/tmp/.X11-unix/X0"):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def start_fake_agent():
@@ -133,14 +165,22 @@ def main():
     if os.path.exists(FAKE_SOCK):
         os.unlink(FAKE_SOCK)
     say("  === 复原桌面 ===")
+    heal_stale_x_lock()
     systemctl("start", "slim.service")
-    time.sleep(6)
-    systemctl("restart", "xrandr-startup.service")
-    time.sleep(3)
+    for _ in range(20):                       # 等 X 真能连上再转屏（探测带 timeout）
+        time.sleep(1)
+        if x_ready():
+            break
+    if x_ready():
+        systemctl("restart", "xrandr-startup.service")
+        time.sleep(3)
+    else:
+        say("    !! X 没就绪：跳过转屏（单元自身已带 timeout，不会卡住 boot）")
     systemctl("restart", "agent-gui.service")
     time.sleep(10)
     rot = subprocess.run(["bash", "-lc",
-                          "DISPLAY=:0 xrandr --query 2>/dev/null | grep -oE 'DSI-1 connected [0-9x+]+ [a-z]+'"],
+                          "DISPLAY=:0 timeout 5 xrandr --query 2>/dev/null"
+                          " | grep -oE 'DSI-1 connected [0-9x+]+ [a-z]+'"],
                          stdout=subprocess.PIPE, universal_newlines=True).stdout.strip()
     say("  slim=%s gui=%s rot=%s"
         % (subprocess.run(["systemctl", "is-active", "slim.service"], stdout=subprocess.PIPE,

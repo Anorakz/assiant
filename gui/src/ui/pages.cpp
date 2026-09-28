@@ -156,6 +156,7 @@ MainPage::MainPage(QWidget* parent)
 
     auto* modeFrame = new QFrame(rightContent);
     modeFrame->setObjectName(QStringLiteral("AreaFrame"));
+    modeFrame_ = modeFrame;
     auto* modeBox = new QVBoxLayout(modeFrame);
     modeBox->setContentsMargins(14, 10, 14, 10);
     modePanel_ = new ModePanel(modeFrame);
@@ -189,9 +190,67 @@ MainPage::MainPage(QWidget* parent)
     rightBox->addWidget(scheduleFrame_, 2);
 
     rightRegion_ = new RegionHost(RegionHost::Edge::Right, rightContent, this);
+    rightBox_ = rightBox;
 
     root->addWidget(middle, 1);
     root->addWidget(rightRegion_);
+}
+
+void MainPage::setKeyboardInset(int px)
+{
+    if (chatFrame_ == nullptr || px == keyboardInset_) {
+        return;                     // 值没变就别折腾布局（键盘矩形会连着报好几次）
+    }
+    keyboardInset_ = px;
+    if (px <= 0) {                                          // 收起键盘：一切复原
+        chatFrame_->setMaximumHeight(QWIDGETSIZE_MAX);
+        if (modeFrame_ != nullptr) {
+            modeFrame_->setMaximumHeight(QWIDGETSIZE_MAX);
+            modeFrame_->setVisible(true);
+        }
+        if (scheduleFrame_ != nullptr) {
+            scheduleFrame_->setMaximumHeight(QWIDGETSIZE_MAX);
+            scheduleFrame_->setVisible(true);
+        }
+        if (tailSpacer_ != nullptr && rightBox_ != nullptr) {
+            rightBox_->removeItem(tailSpacer_);
+            delete tailSpacer_;
+            tailSpacer_ = nullptr;
+        }
+        return;
+    }
+    // 键盘一出来就占掉下半屏（QVK 默认样式：高 = 屏宽 × 800/2560 = 400px @1280）。
+    // 右区域整列（模式卡 + 对话卡 + 日程卡）的最小高度 ≈ 663px，塞不进"键盘以上"的
+    // 那点高度，所以打字时这一列只留**对话卡**：
+    //   · 模式卡/日程卡先收起来（它们本来也放不下、或正好在键盘底下）
+    //   · 对话卡高度**压**到键盘上沿以内 —— 输入行在对话卡底部，于是被顶到键盘上方
+    // ⚠ 别用"给布局加下边距"：那会把布局的**最小高度**一起撑大（板端实测：窗口从
+    //   800 涨到 1063，输入行反而更往里掉）。上限/隐藏都不影响最小高度。
+    if (modeFrame_ != nullptr) {
+        // ⚠ 只 setVisible(false) 不够：**隐藏的控件在布局里仍然占着它那块地方**
+        //   （板端实测：模式卡藏了，对话卡还是被压在 y=283）。高度上限压到 0 才真让开。
+        modeFrame_->setMaximumHeight(0);
+        modeFrame_->setVisible(false);
+    }
+    if (scheduleFrame_ != nullptr) {
+        scheduleFrame_->setMaximumHeight(0);
+        scheduleFrame_->setVisible(false);
+    }
+    const int limit = qMax(0, height() - px);               // 键盘上沿（本页坐标）
+    // ⚠ top 不能用 chatFrame_->y()：那一刻布局还没重排（模式卡刚藏起来，对话卡还停在
+    //   旧位置），算出来的上限会偏小得离谱（实测算成 18 -> 反而把输入行推到键盘下面）。
+    //   用**右区域那一列**的顶边（它的几何不随子控件隐藏而变）当基准。
+    const QWidget* column = rightBox_ != nullptr ? rightBox_->parentWidget() : nullptr;
+    const int columnTop = column != nullptr ? column->mapTo(this, QPoint(0, 0)).y()
+                                            : chatFrame_->mapTo(this, QPoint(0, 0)).y();
+    chatFrame_->setMaximumHeight(qMax(120, limit - columnTop - 6));
+    // ⚠ 光压上限还不够：列里没有别的"能长大"的东西时，QBoxLayout 会把多出来的空间
+    //   往两头分（板端实测：对话卡被摆到 y=283 而不是列顶 y=88）。加一根弹簧把多余
+    //   空间全部吸到最下面，对话卡就真贴到列顶了。
+    if (tailSpacer_ == nullptr && rightBox_ != nullptr) {
+        tailSpacer_ = new QSpacerItem(0, 0, QSizePolicy::Minimum, QSizePolicy::Expanding);
+        rightBox_->addItem(tailSpacer_);
+    }
 }
 
 void MainPage::setMainHint(const QString& text, bool warn)

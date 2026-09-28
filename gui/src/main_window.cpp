@@ -309,6 +309,19 @@ MainWindow::MainWindow(QWidget* parent)
     root->addWidget(body, 1);
     setCentralWidget(central);
 
+    // ---- T15-1 1b：软键盘（Qt 虚拟键盘）让位 ----
+    // 虚拟键盘是**独立窗口**（Qt 的 DesktopInputPanel：整屏半透明窗口 + 键盘贴底），
+    // 它不会改我们的窗口大小，所以"它盖住的那半屏"必须由我们自己让开：
+    // 跟着输入法的 visibleChanged / keyboardRectangleChanged，把右区域（对话输入行在那）
+    // 的底部让出键盘高度 —— 否则输入行正好被键盘压住（板端实测：键盘 0,400 1280x400，
+    // 输入行 y=496..544，全在键盘下面）。
+    if (QGuiApplication::inputMethod() != nullptr) {
+        connect(QGuiApplication::inputMethod(), &QInputMethod::visibleChanged,
+                this, &MainWindow::applyKeyboardInset);
+        connect(QGuiApplication::inputMethod(), &QInputMethod::keyboardRectangleChanged,
+                this, &MainWindow::applyKeyboardInset);
+    }
+
     // ---- T3：唤醒机制 ----
     watcher_ = new core::IdleWatcher(this);
     watcher_->installOn(QCoreApplication::instance());
@@ -805,6 +818,32 @@ void MainWindow::hideOnboard(const QString& why)
         return;
     }
     qInfo().noquote() << QStringLiteral("[ui] 软键盘收起（%1）").arg(why);
+}
+
+void MainWindow::applyKeyboardInset()
+{
+    QInputMethod* im = QGuiApplication::inputMethod();
+    QRect kb;
+    int covered = 0;
+    if (im != nullptr && im->isVisible()) {
+        kb = im->keyboardRectangle().toRect();          // 窗口坐标
+        if (mainPage_ != nullptr && kb.height() > 0) {
+            // 换成"本页被盖住多少"：键盘上沿在本页里的 y 一减就是
+            const int topInPage = mainPage_->mapFrom(this, kb.topLeft()).y();
+            covered = qBound(0, mainPage_->height() - topInPage, mainPage_->height());
+        }
+    }
+    if (mainPage_ != nullptr) {
+        mainPage_->setKeyboardInset(covered);
+    }
+    if (covered != keyboardInset_) {
+        keyboardInset_ = covered;
+        qInfo().noquote() << QStringLiteral("[ui] %1：虚拟键盘盖住 %2 px -> 对话区高度上限 "
+                                           "让开（键盘矩形 %3,%4 %5x%6，窗口 %7x%8）")
+                                 .arg(QGuiApplication::platformName())
+                                 .arg(covered).arg(kb.x()).arg(kb.y()).arg(kb.width())
+                                 .arg(kb.height()).arg(width()).arg(height());
+    }
 }
 
 void MainWindow::onChatInputFocused(bool focused)

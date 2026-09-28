@@ -144,6 +144,9 @@ private:
     /// 弹/收软键盘（失败时往对话里说明一次）。S10：弹的调用点只有焦点变化那一处。
     void showOnboard(const QString& why);
     void hideOnboard(const QString& why);
+    /// T15-1 1b：跟着 `QInputMethod` 的可见性/键盘矩形，把对话区底部让开键盘那么高
+    /// （虚拟键盘是浮在窗口上的独立窗口，不让位就正好压住输入行）。
+    void applyKeyboardInset();
 
     QStackedWidget* stack_ = nullptr;
     QVector<QPushButton*> navButtons_;
@@ -163,6 +166,8 @@ private:
     OnboardCtl* onboard_ = nullptr;
     QString configPath_;
     bool onboardAuto_ = true;
+    /// 当前已经让给虚拟键盘的高度（px，0 = 没让）；只用于"变化了才打日志"
+    int keyboardInset_ = -1;
     /// 当前输入源（S10：焦点策略要知道它；由 applyInputType/applyConfig 维护）
     QString inputSource_ = QStringLiteral("keyboard");
     QPixmap wallpaper_;

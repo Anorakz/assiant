@@ -18,6 +18,7 @@
 class QLabel;
 class QPushButton;
 class QVBoxLayout;
+class QSpacerItem;
 class RegionHost;
 class ModePanel;
 class ChatPanel;
@@ -82,6 +83,12 @@ public:
     void setMainHint(const QString& text, bool warn = false);
     void setGameMode(bool game);
 
+    /// T15-1 1b：虚拟键盘是**浮在窗口上**的独立窗口（Qt 的 DesktopInputPanel），
+    /// 它盖住的正好是屏幕下半截 —— 而对话输入行就在那儿。这里把对话区的高度上限
+    /// 压到键盘上沿以内（输入行在对话区底部，所以它就被顶到键盘上方了）。
+    /// `px` = 本页被键盘盖住的高度（本页坐标）；px<=0 恢复原样。
+    void setKeyboardInset(int px);
+
 private:
     RegionHost* bottomRegion_ = nullptr;
     RegionHost* rightRegion_ = nullptr;
@@ -96,6 +103,14 @@ private:
     bool isGameMode_ = false;
     QStackedWidget* mainStack_ = nullptr;
     VideoPanel* videoPanel_ = nullptr;
+    /// 右区域（模式区 / 对话区 / 日程区）那个竖排布局（几何断言/以后调让位用）
+    QVBoxLayout* rightBox_ = nullptr;
+    /// 模式卡（打字时收起来给对话卡腾地方，见 setKeyboardInset）
+    QWidget* modeFrame_ = nullptr;
+    /// 打字让位时插在列尾的弹簧（吸掉多余空间，逼对话卡贴列顶）；收起键盘就删掉
+    QSpacerItem* tailSpacer_ = nullptr;
+    /// 当前已经让出去的高度（-1 = 还没设过），避免重复改上限触发重排
+    int keyboardInset_ = -1;
 };
 
 /// 造一个带标题的区域容器（占位用）。objectName 供后续样式表定位。

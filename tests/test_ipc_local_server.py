@@ -39,6 +39,7 @@ import socket
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -1843,6 +1844,11 @@ class TestLocalServerSocket(unittest.IsolatedAsyncioTestCase):
         raw.bind(self.path)
         raw.close()
         self.assertTrue(os.path.exists(self.path))
+        # ⚠ T15-0 起"残留 socket"还要求**够旧**（默认 30s，见 local_server.SOCKET_STALE_MIN_AGE_S）：
+        #   刚建出来又没人听，更可能是"有实例正在起"，这时**不许删**。
+        #   所以这里把 mtime 往前拨一个钟头，才是真正的"上次留下的"。
+        old = time.time() - 3600
+        os.utime(self.path, (old, old))
 
         server = self.make_server()
         await server.start()
@@ -1852,6 +1858,24 @@ class TestLocalServerSocket(unittest.IsolatedAsyncioTestCase):
         await server.push(TOPIC_STATUS, {"mode": "IDLE"})
         topic, data = decode(await asyncio.wait_for(reader.readline(), 2))
         self.assertEqual(topic, TOPIC_STATUS)
+
+    async def test_fresh_socket_file_is_not_deleted(self):
+        """T15-0：刚建出来（< 30s）又没人听的 socket 文件**不许删**。
+
+        板端真实事故：GUI/Agent 重启的夹缝里，`/tmp/agent.sock` 会莫名其妙消失
+        （journal 里只有下一条连接的 "Connection refused"）。原因就是老逻辑
+        "探活一次没回应 -> 直接 unlink"：正在启动的那个实例路径被抽走。
+        所以新逻辑是"够旧 + 两次探活都没回应"才敢删；这里钉住"新鲜的不删"。
+        """
+        raw = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        raw.bind(self.path)
+        raw.close()
+        self.assertTrue(os.path.exists(self.path))
+
+        server = self.make_server()
+        with self.assertRaises(IpcServerError):
+            await server.start()
+        self.assertTrue(os.path.exists(self.path), "新鲜 socket 文件不许删")
 
     async def test_live_instance_is_not_stolen(self):
         first = self.make_server()

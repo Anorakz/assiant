@@ -52,6 +52,17 @@
 #    `systemctl show xrandr-startup.service -p After` 里 `graphical.target` 依然在，
 #    环还在（`slim.service` 倒是因为后一行加进去了）。所以这里是整份替换，不是 drop-in。
 #
+#  2026-09-28 又踩到一个：**xrandr 自己会挂住**
+#  ---------------------------------------------------------------------------
+#    板端把 X 停掉跑 EGLFS/KMS 测试、又 SIGKILL 掉持有 DRM master 的进程之后，
+#    DSI/DRM 那套状态会卡住：此时 `xrandr --query` **不是报错，而是永远不返回**
+#    （实测：进程躺了 2 分钟+）。原来 ExecStartPre 里是裸的 `xrandr --query`，
+#    于是"最多等 30 秒"根本没生效 —— 单元卡在 `activating (start-pre)`，
+#    而它 `WantedBy=graphical.target`，开机就会把 graphical.target 一起卡住。
+#    这一版给每次探测加 `timeout 2`（15 次 × 0.5s + 最坏 2s ≈ 30 秒上限），
+#    ExecStart 也套 `timeout 10`。
+#    （真要根治得把 X 整条去掉 —— 见 todo2.md 路线 B / T15-12；这里是"X 还在时"的兜底。）
+#
 #  安装（覆盖板端原文件）
 #  ---------------------------------------------------------------------------
 #      sudo cp systemd/xrandr-startup.service /etc/systemd/system/
@@ -72,10 +83,11 @@ Type=oneshot
 User=root
 Environment=DISPLAY=:0
 # 等 X 真能连上（slim.service 的 start 完成 ≠ Xorg 已在听，实测差约 1s；
-# 不等就是 "Can't open display :0"）。最多等 30 秒，超时也照样往下走，
+# 不等就是 "Can't open display :0"）。最多等约 30 秒，超时也照样往下走，
 # 免得 X 真起不来时把 graphical.target 卡住 —— 转屏失败会由单元状态暴露出来。
-ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do xrandr --query >/dev/null 2>&1 && exit 0; sleep 0.5; done; echo "X 一直没就绪（等了 30s），仍然尝试转屏"; exit 0'
-ExecStart=/usr/bin/xrandr --output DSI-1 --rotate left
+# ⚠ 每次探测都要 `timeout 2`：xrandr 在"DRM 被卡住"时会**永远不返回**（见文件头）。
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 15); do timeout 2 xrandr --query >/dev/null 2>&1 && exit 0; sleep 0.5; done; echo "X 一直没就绪（等了约 30s），仍然尝试转屏"; exit 0'
+ExecStart=/usr/bin/timeout 10 /usr/bin/xrandr --output DSI-1 --rotate left
 
 [Install]
 WantedBy=graphical.target

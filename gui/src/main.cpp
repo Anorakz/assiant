@@ -37,11 +37,15 @@
 #include <cstdio>
 #include <QCheckBox>          // T13-10: --settings-*-demo / --settings-dump-cards 要读勾选框
 #include <QDoubleSpinBox>
+#include <QElapsedTimer>      // T15-1 1b: --dump-input 的逐秒采样用相对时刻
+#include <QInputMethod>       // T15-1 1b: --dump-input 打印输入法面板可见性
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMouseEvent>
 #include <QObject>
+#include <QPixmap>             // T15-1 1b: --dump-screen 的整屏抓图
+#include <QScreen>             // T15-1 1b: --dump-screen / --dump-input 的屏幕几何
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSocketNotifier>
@@ -53,6 +57,7 @@
 #include <QSpinBox>
 #include <QTimer>
 #include <QToolButton>
+#include <QWindow>            // T15-1 1b: --dump-input 打印顶层窗口几何（键盘是独立窗口）
 
 #include <csignal>    // T14-8: --crash-demo segv 用 raise(SIGSEGV)
 #include <cstdlib>    // T14-8: std::atexit
@@ -119,6 +124,8 @@ int modeDemoMs = 3000;          ///< 上面那一下在启动后多久点（默�
     QString crashDemo;              ///< 非空 = 装好崩溃日志后立刻崩一次（T14-8 验收用）
     bool dumpSchedule = false;      ///< 打印日程区**真实渲染出来的行**并退出（S8 取证用）
     bool focusInputDemo = false;    ///< 启动后把焦点给对话输入框（S10 取证：软键盘应这时才弹）
+    bool dumpInput = false;         ///< 打印对话输入框真实装着的文本并退出（T15-1 1b 取证用）
+    QString dumpScreen;             ///< 非空 = 把**整屏**（含虚拟键盘那种独立窗口）抓成 PNG 并退出
     QString videoNoteDemo;         ///< 非空 = 触发视频区占位说明（验收用）
     QString videoFile;             ///< 非空 = 主区视频源（本地文件，验收用）
     bool help = false;
@@ -168,7 +175,10 @@ void printUsage()
         "  --dump-layout        打印整棵控件树的真实尺寸/最小尺寸并退出（T14-7b 取证用，配 --screenshot-delay）\n"
         "  --dump-wifi          打印网络卡片渲染出来的状态/SSID 列表并退出（T14-9 取证用）\n"
         "  --crash-demo <fatal|segv>  装好崩溃日志后立刻崩一次并退出（T14-8 验收用）\n"
-        "  --focus-input-demo   启动后把焦点给对话输入框（取证：软键盘应这时才弹）\n"        "  --config <path>      指定 config/config.yaml（默认自动在仓库里找）\n"
+        "  --focus-input-demo   启动后把焦点给对话输入框（取证：软键盘应这时才弹）\n"
+        "  --dump-input         打印对话输入框当前装着的文本并退出（T15-1 1b 取证用）\n"
+        "  --dump-screen <png>  抓**整屏**成 PNG 并退出（T15-1 1b 取证：软键盘是独立窗口，\n"
+        "                       --screenshot 只抓主窗口，抓不到它）\n"        "  --config <path>      指定 config/config.yaml（默认自动在仓库里找）\n"
         "  --socket <path>      Agent 的 unix socket 路径（默认 /tmp/agent.sock）\n"
         "  -h, --help           显示本帮助\n";
     qInfo().noquote() << QString::fromUtf8(text);
@@ -333,6 +343,11 @@ Options parseArgs(int argc, char** argv)
             opt.crashDemo = optionValue(arg, QStringLiteral("--crash-demo"), i, argc, argv, opt);
         } else if (arg == QLatin1String("--focus-input-demo")) {
             opt.focusInputDemo = true;
+        } else if (arg == QLatin1String("--dump-input")) {
+            opt.dumpInput = true;
+        } else if (arg == QLatin1String("--dump-screen")
+                   || arg.startsWith(QLatin1String("--dump-screen="))) {
+            opt.dumpScreen = optionValue(arg, QStringLiteral("--dump-screen"), i, argc, argv, opt);
         } else if (arg == QLatin1String("--video-note-demo")
                    || arg.startsWith(QLatin1String("--video-note-demo="))) {
             opt.videoNoteDemo =
@@ -767,6 +782,97 @@ int runGuiMode(const Options& opt, int argc, char** argv)
             if (window.chatPanel() != nullptr && window.chatPanel()->input() != nullptr) {
                 window.chatPanel()->input()->setFocus(Qt::OtherFocusReason);
             }
+        });
+    }
+    // T15-1 1b 取证：打印对话输入框**真正装着的文本**（逐秒）+ 输入法/顶层窗口状态，再退出。
+    // 为什么要这个钩子：Qt 虚拟键盘是**独立窗口**，`--screenshot`（QWidget::grab）抓不到它，
+    // 所以"无 X 下软键盘弹出来了没有 / 打进去字了没有"只能在**应用自己**身上取文本证据：
+    //   · INPUT_SAMPLE —— 输入框里的文本（逐秒；QVK 的回填是渐进的，单点取值会被后来的
+    //     退格/回车抹掉，逐秒采样才证明"确实打进去了"）
+    //   · IM_VISIBLE    —— 输入法面板可见性
+    //   · WINDOW        —— 每个顶层窗口的类名/几何/可见性（键盘窗口会以 1280×(高度) 出现）
+    // 打印时刻复用 `--screenshot-delay`（默认 1500），给"注入触摸 -> 键盘回填"留时间。
+    if (opt.dumpInput) {
+        QElapsedTimer clock;        // dump 内的相对时刻（毫秒）：比绝对时间好读
+        clock.start();
+        QTimer* sampler = new QTimer(&window);
+        sampler->setInterval(1000);
+        QObject::connect(sampler, &QTimer::timeout, &window, [&window, clock]() {
+            QString text;
+            if (window.chatPanel() != nullptr && window.chatPanel()->input() != nullptr) {
+                text = window.chatPanel()->input()->text();
+            }
+            std::printf("INPUT_SAMPLE\t%lld\t%s\n", static_cast<long long>(clock.elapsed()),
+                        qPrintable(text));
+            std::fflush(stdout);
+        });
+        sampler->start();
+        const int delay = opt.screenshotDelayMs;
+        QTimer::singleShot(delay, &window, [&window, clock]() {
+            QString text;
+            if (window.chatPanel() != nullptr && window.chatPanel()->input() != nullptr) {
+                text = window.chatPanel()->input()->text();
+            }
+            QWidget* focus = QApplication::focusWidget();
+            std::printf("INPUT_TEXT\t%s\n", qPrintable(text));
+            std::printf("INPUT_LEN\t%d\n", text.size());
+            std::printf("FOCUS_WIDGET\t%s\n",
+                        focus == nullptr ? "(无)" : focus->metaObject()->className());
+            // T15-1 1b：对话输入框**在屏上的位置**（全局坐标）。
+            // 用它跟虚拟键盘条带比，才能回答"键盘到底挡住输入框没有"（不挡布局）。
+            if (window.chatPanel() != nullptr && window.chatPanel()->input() != nullptr) {
+                QWidget* box = window.chatPanel()->input();
+                const QPoint origin = box->mapToGlobal(QPoint(0, 0));
+                std::printf("INPUT_RECT\t%d,%d %dx%d\n", origin.x(), origin.y(), box->width(),
+                            box->height());
+            }
+            QInputMethod* im = QGuiApplication::inputMethod();
+            std::printf("IM_VISIBLE\t%d\n", (im != nullptr && im->isVisible()) ? 1 : 0);
+            if (im != nullptr) {
+                const QRectF kb = im->keyboardRectangle();
+                std::printf("IM_RECT\t%.0f,%.0f %.0fx%.0f\twindow=%dx%d\n",
+                            kb.x(), kb.y(), kb.width(), kb.height(),
+                            window.width(), window.height());
+            }
+            for (QScreen* s : QGuiApplication::screens()) {
+                std::printf("SCREEN\t%s\t%d,%d %dx%d\tdpr=%.2f\n", qPrintable(s->name()),
+                            s->geometry().x(), s->geometry().y(), s->geometry().width(),
+                            s->geometry().height(), s->devicePixelRatio());
+            }
+            // T15-1 1b 诊断：键盘"让位"到底作用在谁身上（AreaFrame = 模式/对话/日程三张卡片）
+            for (QWidget* f : window.findChildren<QWidget*>(QStringLiteral("AreaFrame"))) {
+                const QPoint tl = f->mapToGlobal(QPoint(0, 0));
+                std::printf("AREAFRAME\t%d,%d %dx%d\tmaxh=%d\tsh=%d\tminh=%d\tvis=%d\n",
+                            tl.x(), tl.y(), f->width(), f->height(), f->maximumHeight(),
+                            f->sizeHint().height(), f->minimumSizeHint().height(),
+                            f->isVisible() ? 1 : 0);
+            }
+            std::printf("WINDOW_COUNT\t%d\n", QGuiApplication::topLevelWindows().size());
+            for (QWindow* w : QGuiApplication::topLevelWindows()) {
+                std::printf("WINDOW\t%s\t%d,%d %dx%d\tvisible=%d\n",
+                            w->metaObject()->className(), w->x(), w->y(), w->width(), w->height(),
+                            w->isVisible() ? 1 : 0);
+            }
+            std::printf("DUMP_AT_MS\t%lld\n", static_cast<long long>(clock.elapsed()));
+            std::fflush(stdout);
+            QCoreApplication::exit(0);
+        });
+    }
+    // T15-1 1b 取证：抓**整屏**（`QScreen::grabWindow(0)`）。
+    // 与 `--screenshot`（QWidget::grab，只抓主窗口）的区别：虚拟键盘是**独立窗口**，
+    // 只有整屏抓才可能带上它 —— 能不能抓得到取决于平台（抓不到就如实报空，别假装有）。
+    if (!opt.dumpScreen.isEmpty()) {
+        const QString path = opt.dumpScreen;
+        const int delay = opt.screenshotDelayMs;
+        QTimer::singleShot(delay, &window, [path]() {
+            QScreen* screen = QGuiApplication::primaryScreen();
+            const QPixmap shot = screen == nullptr ? QPixmap() : screen->grabWindow(0);
+            const bool ok = !shot.isNull() && !path.isEmpty() && shot.save(path);
+            std::printf("SCREEN_GRAB\t%s\t%s\t%dx%d\n", qPrintable(path),
+                        shot.isNull() ? "抓不到（空图）" : (ok ? "ok" : "存盘失败"),
+                        shot.width(), shot.height());
+            std::fflush(stdout);
+            QCoreApplication::exit(ok ? 0 : 3);
         });
     }
     if (!opt.musicNoteDemo.isEmpty()) {
