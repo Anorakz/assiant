@@ -71,10 +71,33 @@ T15-15 文档收口（docs/image.md、docs/power.md、docs/net.md 增补）
 | **1c** ✅ | 视频：`QMediaPlayer` 在 EGLFS 下**不需要**改 kmssink（真播了本机 MPEG-TS 流，position 推到 15.9s）| 真 B 站流的联调并入 **T15-8** |
 | 1d ✅ | 回归：无 X 形态下跑完整功能回归清单 + 空转 CPU 长采样 | `tests/board/t15_1d_regression_nox.py` 16/17 项过（唯一那项是 `t14_8` 数遗留会话文件，已查清并固化清理）；空闲数字 + 凶手线程已留档（见 §0）；`docs/gui.md` §1.1 已补无 X 形态（环境变量、**四个 QML 必装包**、键盘让位、无 X 单元、平台陷阱表）|
 
-### T15-2 SDK 组件探测 → 最小镜像可行性配方
-- 探测：厂商 SDK（`rk356x_linux_sdk`）在不在、Buildroot/Yocto 版本、覆盖层里有什么；
-- **逐项确认来源**：`qt5base(+eglfs,widgets,svg)`、`libmali` 的 **gbm flavor**、**`mppvideodec`（Rockchip gst 插件）**、`rknpu2(librknnrt.so)`、`python3 + numpy/cv2`、`yaml-cpp`、`NetworkManager|wpa_supplicant`、`sshd`、字体/时区；
-- 出口：一份**能编出最小 rootfs 的配方**（包清单 + 每个包从哪来 + 谁负责交叉编译），并给出体积/启动的**预估**。
+### T15-2 【路线 C】厂商 6.1 SDK + Buildroot 重建最小镜像（用户 2026-09-28 已批准任务列表）
+
+**决策（用户拍板，详见 [docs/image.md](docs/image.md) §1）**：D1 走 **路线 C**（SDK + Buildroot 重建，不是裁剪现镜像）；
+D2 允许 WSL 联网构建；D3 允许刷板（Maskrom 兜底）；D4 **开发镜像 + 发行镜像都要**；
+D5 OTA **走无线**（→ 分区表必须现在定）；D6 睡眠**允许息屏**，唤醒要 **触摸 + CLI 双通道**。
+
+**SDK 事实**（盘点见 [docs/image.md](docs/image.md) §3）：KICKPI 定制 Rockchip Linux 6.1 **V1.2.0**，内核 6.1.141、u-boot 2017.09、
+buildroot 2024.02、Qt 5.15.11（联网拉）；**K1Mini 是一等目标**（`.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1Mini_{ubuntu,debian}_defconfig`）；
+厂商 .deb 全集里有 **`libmali-bifrost-g52-g24p0-x11-wayland-gbm`**（解决 EGLFS 的 G52 缺口）；板端面板变体已核实 =
+**`rk3568-kickpi-lcd-mipi0-10.1-800-1280-v2-k1Mini.dtsi`**。
+
+| # | 任务 | 出口判据 |
+| --- | --- | --- |
+| 2-1 ✅ | 决策与配方文档定稿（`docs/image.md` §1–§4） | 文档能独立复述 D1–D6 |
+| 2-2 | K1Mini 的 buildroot defconfig 落地（release 骨架 + **systemd** + Qt5 替 weston） | `make <defconfig>` 通过、`BR2_INIT_SYSTEMD=y` |
+| 2-3 | 板级对齐（面板变体已定 / **触摸复位脚 PB6 vs SDK 的 PB5** / WiFi / 以太网 / PMIC / 容量） | 差异表 + "要不要改 dts"结论，逐项带证据 |
+| 2-4 | **分区与 OTA 布局定稿**（A/B 或 recovery；模型 4.9 GB 落点） | 分区表可落地 + 回退路径明确 |
+| 2-5 | libmali G52(GBM) 进 buildroot | `nm -D libmali.so \| grep -c gbm_` ≥ 30 + `BR2_PACKAGE_HAS_LIBGBM=y` |
+| 2-6 | Qt5.15 + EGLFS + 虚拟键盘 + 四个 QML 模块 | 四个 QML 目录 + `libqeglfs.so`/`libqtvirtualkeyboardplugin.so` 在位 |
+| 2-7 | 我们的运行时与依赖闭环（python3/numpy/cv2/yaml、yaml-cpp、librknnrt、MPP+gst、NM、sshd、字体、llama-server+模型） | chroot 内逐项在位 + `ldd` 无缺失 |
+| 2-8 | 只起我们的东西（`assistant.target` + agent + 无 X 的 GUI 单元） | `systemctl list-dependencies assistant.target` 只有我们的服务 |
+| 2-9 | 首次完整构建（不刷板） | 构建成功 + 时长/体积/组件版本三组数字 |
+| 2-10 | 刷板前验证（chroot 跑 ctest + 仓库 Python 套件 + ldd/符号检查） | 测试结果表（区分缺包 vs 只能板上测） |
+| 2-11 | 首次刷板 + 板端基线（复跑 1b/1c/1d + T14 验收） | 板子起得来 + target 自动拉起 + 全绿 + 数字 |
+| 2-12 | 开发镜像（同套 + sshd/调试工具/pytest/串口控制台） | `ssh` 能进、能在板上跑 pytest 与验收脚本 |
+
+⚠ 构建两条风险先记在这：**WSL 只有 7 GB 内存**（并行构建封顶 `-j8` + ccache）、**Qt 源码 dl 里没有**（联网或预拉镜像）。
 
 ### T15-3 代码规范审计（重复造轮子 / 死代码 / 规范）
 - ① **同一功能多处实现**：日程解析、config 读取/写入、CLI 与 GUI 各一套的路径解析、`agent/net/*` 与 `gui/src/*` 重叠逻辑；
