@@ -20,8 +20,10 @@
 # ============================================================================
 
 RK_KERNEL_DTS_NAME="rk3568-kickpi-k1Mini-assistant"
-RK_PARAMETER="parameter-buildroot-fit.txt"
+RK_PARAMETER="parameter-assistant-ab.txt"
 RK_USE_FIT_IMG=y
 
 RK_ROOTFS_SYSTEM_BUILDROOT=y
 RK_BUILDROOT_BASE_CFG="rk3568_kickpi_k1mini_release"
+
+RK_AB_UPDATE=y

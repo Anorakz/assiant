@@ -73,9 +73,11 @@ install_file image/buildroot/configs/rockchip_rk3568_kickpi_k1mini_release_defco
              buildroot/configs/rockchip_rk3568_kickpi_k1mini_release_defconfig
 install_file image/buildroot/configs/rockchip/products/kickpi-k1mini-release.config \
              buildroot/configs/rockchip/products/kickpi-k1mini-release.config
-# SDK 板级 defconfig（lunch 用）
+# SDK 板级 defconfig（lunch 用）+ 我们的 A/B 分区表
 install_file image/device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1mini_release_defconfig \
              device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1mini_release_defconfig
+install_file image/device/rockchip/.chips/rk3566_rk3568/parameter-assistant-ab.txt \
+             device/rockchip/.chips/rk3566_rk3568/parameter-assistant-ab.txt
 # 内核：我们的板级 dts/dtsi（全部 -assistant 后缀，不动厂商同名文件）
 install_file image/kernel/rk3568-kickpi-k1Mini-assistant.dts "$DTS_DIR/rk3568-kickpi-k1Mini-assistant.dts"
 install_file image/kernel/rk3568-kickpi-k1Mini-assistant.dtsi "$DTS_DIR/rk3568-kickpi-k1Mini-assistant.dtsi"

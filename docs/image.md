@@ -301,7 +301,59 @@ make ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu- -j8 rockchip/rk3568-kickpi
 
 ---
 
-## 7. 任务列表（T15-2，已批准 2026-09-28）
+## 7. 分区与 OTA 布局（T15-2-4 定稿）
+
+**为什么选 A/B**（D5 定了无线 OTA）：这份 SDK **原生支持 A/B 更新** ——
+`RK_AB_UPDATE`（`device/rockchip/common/configs/Config.in.update`）+
+`mk-updateimg.sh` 的 `build_ota_updateimg`（日志会打 "Making A/B update image for OTA..."）+
+分区模板 `parameter-buildroot-fit-ab.txt`。A/B 最大好处是**回退是机制自带的**：
+新槽起不来就回旧槽，不需要 recovery 分区、不需要人插手；代价是 rootfs 存两份
+（3 GiB × 2，29 GiB eMMC 完全够）。
+
+**我们的表**：`image/device/rockchip/.chips/rk3566_rk3568/parameter-assistant-ab.txt`
+（板级 defconfig 里 `RK_PARAMETER="parameter-assistant-ab.txt"` + `RK_AB_UPDATE=y`）。
+
+| 分区 | 起始（扇区） | 大小 | 作用 |
+| --- | --- | --- | --- |
+| uboot | 0x4000 | 4 MiB | 引导链（loader/trust 按 SDK 约定） |
+| misc | 0x6000 | 4 MiB | **A/B 引导元数据**（U-Boot `CONFIG_ANDROID_AB` 用它记"起哪个槽 / 试过几次"） |
+| boot_a / boot_b | 0x8000 / 0x28000 | 32 MiB ×2 | FIT（内核 + dtb + resource），**每槽一份** |
+| backup | 0x48000 | 32 MiB | SDK 约定保留 |
+| system_a / system_b | 0x58000 / 0x658000 | **3 GiB ×2** | 我们的 rootfs（名字沿用 Rockchip A/B 约定） |
+| oem | 0xc58000 | 128 MiB | SDK 约定保留 |
+| userdata | 0xc98000 | **grow ≈ 22.8 GiB** | **模型（4.9 GB）/ 日志 / 运行时配置**，两个槽**共用** |
+
+固定分区到 0xc98000（13,205,504 扇区）结束，`userdata` 吃掉剩下的 ≈22.8 GiB
+（eMMC 实测 61,071,360 扇区 = 29.12 GiB）。
+
+**模型放 userdata 是这里最关键的取舍**：4.9 GB GGUF **不进 rootfs** ——
+① 进 rootfs 就要 A/B 各存一份（≈10 GB）；
+② 每次 OTA 都得重下 4.9 GB（无线 OTA 最慢的一环）。
+放共享 `userdata` 之后：OTA 只写"另一个 system 槽 + 对应 boot 槽"，模型/配置/日志原地不动。
+运行时的 `/data` 挂载与应用读写路径在 **T15-2-7 / 2-8** 落地。
+
+**无线 OTA 流程（机制定稿；实现归 T15-14）**
+
+1. 云端出包：`./build.sh ota-updateimg`（SDK 的 A/B OTA 包；可 `edit-ota-package-file` 改清单）；
+2. 板端下到 `userdata` → **校验**（哈希/签名）→ 写**非当前槽**（`system_b` + `boot_b`）；
+3. 在 `misc` 里把引导目标指向新槽，并标记"未确认成功"；
+4. 重启 → U-Boot 起新槽；
+5. 新系统自检（Agent/GUI 都起来）通过才"确认成功"；
+   不确认就按 `misc` 的计数回退到旧槽 —— **这就是回退路径**。
+
+**守卫**：`image/check-parameter.py` 是纯算术校验器（连续性 / A-B 成对 / 容量 / 最小尺寸），
+`tests/test_image_parameter.py` 把它钉进 CI（8 项：我们的真表必须过，四种坏表必须被抓）。
+跑法：`python image/check-parameter.py image/device/rockchip/.chips/rk3566_rk3568/parameter-assistant-ab.txt`
+
+⚠ **首次刷机会重新分区**（板上现有的 p1…p6 会被换掉）→ 板上的数据会没有；
+刷机与回退步骤归 **T15-2-11 / T15-14**。另有三条接线要在首次构建/刷机时核实：
+① 每个槽的 FIT 自带指向本槽 rootfs 的 `root=`（`PARTLABEL=system_a|system_b` 或对应 uuid）；
+② U-Boot 的 `CONFIG_ANDROID_AB` 与 `misc` 元数据真的开着；
+③ SDK 能正确消费我们的表（`rk_partition_parse_names` 应看到 9 段且 A/B 成对）。
+
+---
+
+## 8. 任务列表（T15-2，已批准 2026-09-28）
 
 顺序即依赖顺序；每条做完等验收。
 
@@ -310,7 +362,7 @@ make ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu- -j8 rockchip/rk3568-kickpi
 | 2-1 | 决策与配方文档定稿（本文档 §1–§4） | 文档能独立复述 D1–D6 |
 | 2-2 ✅ | K1Mini 的 buildroot defconfig 落地（release 骨架 + **systemd** + Qt5 替 weston） | `make <defconfig>` 通过（退出码 0）、`.config` 里 systemd 与 Qt/EGLFS/虚拟键盘/G52/GBM/NPU/MPP/NM/Python 逐项在位（见 §5.1） |
 | 2-3 ✅ | 板级对齐（面板变体 / 触摸复位脚 / WiFi / 以太网 / PMIC / 容量） | 差异表 + "要不要改 dts"结论，逐项带证据（见 §6）：**要改 2 处** —— 面板 include 换成 v2 MIPI、触摸复位脚 PB5→**PB6**；改动落在 `image/kernel/` 的 3 个文件里，并用**内核真管线编出 dtb（退出码 0）**再反编译逐项核对 |
-| 2-4 | 分区与 OTA 布局定稿（A/B 或 recovery；模型 4.9 GB 落点） | 分区表可落地 + 回退路径明确 |
+| 2-4 ✅ | 分区与 OTA 布局定稿（A/B；模型 4.9 GB 落点） | 见 §7：**A/B 双 rootfs（3 GiB×2）+ 共享 userdata（grow ≈22.8 GiB，模型/配置/日志都在这）**；机制用 SDK 原生的 `RK_AB_UPDATE` + `ota-updateimg`，回退靠 `misc` 元数据；分区表由 `image/check-parameter.py` + `tests/test_image_parameter.py`（8 项）守住 |
 | 2-5 | libmali G52(GBM) 进 buildroot | `gbm_*` ≥ 30，`BR2_PACKAGE_HAS_LIBGBM=y` |
 | 2-6 | Qt5.15 + EGLFS + 虚拟键盘 + 四个 QML 模块 | 四目录 + `libqeglfs.so`/`libqtvirtualkeyboardplugin.so` 在位 |
 | 2-7 | 我们的运行时与依赖闭环（python3/numpy/cv2/yaml、yaml-cpp、librknnrt、MPP+gst、NM、sshd、字体、llama-server+模型） | chroot 内逐项在位 + `ldd` 无缺失 |
