@@ -63,6 +63,41 @@ for d in assistant assistant/llm assistant/llm/config assistant/llm/run assistan
 done
 echo "   + 已建 /data 目录骨架（assistant/、model/）"
 
+# ---------------------------------------------------------------------------
+#  T15-2-8：开机目标 = assistant.target，并把它要拉的东西 enable 上
+#  ---------------------------------------------------------------------------
+#  为什么是 `ln -sf` 而不是 `systemctl enable`：
+#    enable 只是"建符号链接"这一件事，用 ln 做**不需要主机上有 systemd**、
+#    也不受 systemctl 版本/preset 影响，构建机上可复现。
+SYSD="$TARGET_DIR/usr/lib/systemd/system"
+ETC="$TARGET_DIR/etc/systemd/system"
+
+# 1) 开机目标：default.target -> assistant.target
+ln -sfn "/usr/lib/systemd/system/assistant.target" "$ETC/default.target"
+echo "   + default.target -> assistant.target"
+
+# 2) assistant.target.wants/：单元自己的 [Install] WantedBy 落地形式
+mkdir -p "$ETC/assistant.target.wants"
+for u in assistant-init.service agent.service agent-gui.service; do
+    if [ -f "$SYSD/$u" ]; then
+        ln -sfn "/usr/lib/systemd/system/$u" "$ETC/assistant.target.wants/$u"
+    else
+        echo "   !! 缺单元文件 $SYSD/$u（overlay 没铺上？）" >&2
+        exit 1
+    fi
+done
+echo "   + assistant.target.wants/ 已挂上我们的三个单元"
+
+# 3) network-online.target 要真的"等网"：buildroot 并不启用 wait-online，
+#    而我们的 target 只在 basic.target 之外依赖它，不挂它就是个空等。
+mkdir -p "$ETC/network-online.target.wants"
+ln -sfn "/usr/lib/systemd/system/NetworkManager-wait-online.service" \
+        "$ETC/network-online.target.wants/NetworkManager-wait-online.service" 2>/dev/null || true
+echo "   + network-online.target.wants/NetworkManager-wait-online.service"
+
+echo "   ---- /etc/systemd/system 现在长这样："
+ls -la "$ETC" | sed 's/^/     /'
+
 # --- 2) llama-server（交叉编译）---------------------------------------------
 if [ -x "$TOOLS/build-llama.sh" ]; then
     echo "== [assistant post-build] llama.cpp"

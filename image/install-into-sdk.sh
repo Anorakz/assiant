@@ -99,11 +99,19 @@ OVERLAY_DIR="buildroot/board/rockchip/kickpi/k1mini/rootfs-overlay"
 for f in lib.sh start.sh stop.sh status.sh restart.sh; do
     install_file "llm/scripts/$f" "$OVERLAY_DIR/usr/lib/assistant/llm/scripts/$f"
 done
+# systemd 单元**镜像形态**（T15-2-8）：进 overlay 的 /usr/lib/systemd/system/
+#   ⚠ 与 systemd/ 下板端形态的单元是**两套**：板端那份指向 git checkout
+#     (/home/kickpi/...)，镜像这份指向 /usr/lib/assistant 与 /data。
+#     tests/test_image_target.py 守住"除记录在案的差异外必须一致"，防止两套漂。
+for u in assistant.target agent.service agent-gui.service assistant-init.service; do
+    install_file "systemd/image/$u" "$OVERLAY_DIR/usr/lib/systemd/system/$u"
+done
 install_file image/board/rockchip/kickpi/k1mini/post-build.sh \
              buildroot/board/rockchip/kickpi/k1mini/post-build.sh
 install_file image/build-llama.sh tools/assistant/build-llama.sh
 install_file image/prepare-rknnlite.sh tools/assistant/prepare-rknnlite.sh
 install_file image/check-runtime-deps.py tools/assistant/check-runtime-deps.py
+install_file image/check-assistant-target.py tools/assistant/check-assistant-target.py
 
 if [ "$FAILED" != "0" ]; then
     echo "!! 有源文件缺失，注入不完整" >&2

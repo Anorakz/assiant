@@ -1,0 +1,54 @@
+# ============================================================================
+#  systemd/image/assistant-init.service — 首启把 userdata 上的状态目录铺出来（T15-2-8）
+#
+#  为什么需要它
+#  ---------------------------------------------------------------------------
+#  D7 把可写状态放在 /data（userdata 分区）。**刚刷完的板子上那个分区是空的**，
+#  于是 Agent 起来时：
+#    · AGENT_CONFIG_DIR=/data/assistant/config 里既没有 config.yaml 也没有
+#      config.example.yaml → agent.config 会抛 ConfigNotFoundError（它只在
+#      "<name>.yaml 与 <name>.example.yaml 都没有"时才报，而这两种都在 rootfs 里）；
+#    · logs/、llm/config/、run/ 这些目录也都不存在。
+#  这个 oneshot 单元就是补这一步：建目录 + 把 rootfs 里的模板**复制**（不是软链）
+#  到 /data，这样 Agent 第一次就能起来，用户之后改的也是 userdata 上那份。
+#
+#  为什么是复制而不是软链
+#  ---------------------------------------------------------------------------
+#    config.yaml 是**用户可写的真源**（GUI 保存设置 → Agent 落盘）。软链到 rootfs
+#    的话，写入会落到系统槽里 —— A/B OTA 一换槽就没了，正是 D7 要避免的事。
+#
+#  ⚠ `RemainAfterExit=yes` + `ConditionPathExists` 的组合是刻意的
+#  ---------------------------------------------------------------------------
+#    oneshot 跑完就"active (exited)"，agent.service 的 After= 才不会被卡住；
+#    `ConditionPathExists=!/data/assistant/config/config.yaml` 让它只在**缺配置**时
+#    做复制这一步（之后每次开机都只是建目录，不会覆盖用户改过的配置）。
+# ============================================================================
+[Unit]
+Description=板端助手：铺 userdata 上的状态目录与默认配置
+Documentation=file:///usr/lib/assistant/docs/image.md
+# /data 是 userdata 分区：让 systemd 把挂载依赖带上（先挂载再跑这个单元）
+RequiresMountsFor=/data
+DefaultDependencies=no
+Before=agent.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+ExecStart=/bin/sh -c '\
+  mkdir -p /data/assistant/config /data/assistant/logs/crash /data/assistant/run \
+           /data/assistant/llm/config /data/assistant/llm/run /data/assistant/llm/logs \
+           /data/assistant/llm/logs /data/model && \
+  for f in config user_profile; do \
+    if [ ! -f "/data/assistant/config/$f.yaml" ] && [ -f "/usr/lib/assistant/config/$f.example.yaml" ]; then \
+      cp -n "/usr/lib/assistant/config/$f.example.yaml" "/data/assistant/config/$f.yaml"; \
+      echo "[assistant-init] 已铺默认配置 $f.yaml"; \
+    fi; \
+  done'
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=assistant-init
+
+[Install]
+WantedBy=assistant.target

@@ -585,6 +585,92 @@ ld.so 并不搜它）解析每个 ELF 的依赖，覆盖**库与插件**（`ldd`
   4.9 GB 模型要投放到 `/data/model/`；`llm.env` 的 `LLM_MODEL_PATH` 指过去。
 - **体积**：target 现在 **553 MB**（字体 70 MB、`usr/include/qt5` 32 MB、llama 约 16 MB）。
 
+### 5.7 开机目标：起来之后只有我们的东西（T15-2-8）
+
+#### 为什么自己写一个 target，而不是往 multi-user 上挂
+
+挂 `multi-user.target` 只能保证"**我们的**起来了"，**保证不了"别人的没起来"** ——
+厂商 base overlay 与各个包都可能往 multi-user / graphical 上挂东西（桌面、显示管理器、调试服务）。
+所以镜像把 `default.target` **直接指到 `assistant.target`**：
+
+```
+/etc/systemd/system/default.target -> /usr/lib/systemd/system/assistant.target
+```
+
+`assistant.target` 里只有两条支撑：
+
+| 依赖 | 为什么 |
+| --- | --- |
+| `Requires/After=basic.target` | **摘掉 graphical 之后必须自己接上系统d 的基座**（sysinit/udev/dbus 那一路都在 basic 下面）。删了它系统就起不来 —— 这是"精简"与"搞瘫"之间的那根线 |
+| `Wants=assistant-init.service agent.service agent-gui.service` | 我们自己的三个（显式列出，静态可查；post-build 同时建 `.wants/` 符号链接，两条路 systemd 取并集） |
+| `Wants/After=NetworkManager.service` | ⚠ **唯一一个不是我们的**直接依赖，理由见下 |
+
+#### 单元（4 个，都在 `systemd/image/`）
+
+| 单元 | 干什么 | 关键点 |
+| --- | --- | --- |
+| `assistant.target` | 开机目标 | 见上；`AllowIsolate=yes`（排查时能手动切） |
+| `assistant-init.service` | **首启**把 userdata 上的目录与默认配置铺出来 | oneshot + `RequiresMountsFor=/data`；只复制（`cp -n`）**不软链** —— `config.yaml` 是用户可写的真源，软链会让写入落到 rootfs，正是 D7 要避免的 |
+| `agent.service` | Agent 常驻 | root；`AGENT_CONFIG_DIR=/data/assistant/config`（顺带把派生 `llm.env` 定到 `/data/assistant/llm/config/llm.env`）、`AGENT_LOG`/`AGENT_CRASH_DIR` 也在 userdata、`PYTHONPATH=/usr/lib/assistant` |
+| `agent-gui.service` | GUI 常驻（无 X） | EGLFS + 虚拟键盘那一组环境变量（T15-1 板端实测的那套），旋转走 `QT_QPA_EGLFS_ROTATION`；镜像里没有第二种形态，所以**不带 `-nox` 后缀** |
+
+#### ⚠ NetworkManager 为什么必须显式要
+
+实测：buildroot 的 `NETWORK_MANAGER_INSTALL_INIT_SYSTEMD` **只建了一个 dbus 别名**
+（`/etc/systemd/system/dbus-org.freedesktop.NetworkManager.service`），
+`etc/systemd/system/` 里**一个 `.wants` 都没有**；而它的 preset 文件是空的。
+也就是说 vendor 那边是靠 **multi-user.target.wants** 启的 —— 而我们**已经不进 multi-user 了**。
+更麻烦的是 `network-online.target` **自己不会拉起任何东西**（它只是"等别人把网弄好"）。
+所以：
+
+- `assistant.target` 里显式 `Wants=NetworkManager.service`；
+- 另外把 `NetworkManager-wait-online.service` 挂进 `network-online.target.wants/`，
+  否则 `agent.service` 的 `After=network-online.target` 是个**空等**。
+
+不带它们的后果很具体：Agent 的 ssh / 云端 LLM / GUI 的 WiFi 卡片**全都没有网**。
+`image/check-assistant-target.py` 把 NetworkManager（两个单元）列进**白名单**，
+除此之外闭包里出现任何非我们的单元都算失败。
+
+> 串口 CLI（D6 的"CLI 也能唤醒"）**不需要**额外 enable：`systemd-getty-generator`
+> 会按内核 cmdline 里的 `console=ttyFIQ0` 自动生成 `serial-getty@ttyFIQ0.service`。
+
+#### 单元有**两套**，而且不许悄悄漂
+
+板端形态在 `systemd/`（指向 git 工作区 `/home/kickpi/myproject/assitant`），
+镜像形态在 `systemd/image/`（指向 `/usr/lib/assistant` 与 `/data`）。
+同一服务的行为必须一致 —— `tests/test_image_target.py` 会逐键比对，
+**只允许差异表里那几项**（Description/Documentation、WorkingDirectory、ExecStart*、
+StandardOutput/Error、Environment、WantedBy、After）。改一边忘另一边会当场红。
+
+#### 验收：`image/check-assistant-target.py`（两种模式）
+
+```bash
+python3 image/check-assistant-target.py --units systemd/image   # 仓库模式（CI 里跑）
+python3 image/check-assistant-target.py --sdk <SDK>             # 镜像模式（对着 target 树）
+```
+
+`systemctl list-dependencies` **没法离线用**（它要跟正在跑的 systemd 说话，
+`systemctl --root=` 不支持子命令），所以这里**自己解析 unit 文件与 `.wants/`/`.requires/` 符号链接**
+算闭包。镜像模式实测：
+
+```
+   default.target -> assistant.target
+   assistant.target.wants      -> agent-gui.service agent.service assistant-init.service
+   network-online.target.wants -> NetworkManager-wait-online.service
+   闭包：我们的 agent-gui.service, agent.service, assistant-init.service, assistant.target
+         基础设施 NetworkManager-wait-online.service, NetworkManager.service
+== 通过：只有我们的服务（+ NetworkManager 这一个白名单基础设施）
+```
+
+判据三条：① `default.target` 必须指向 `assistant.target`；② 闭包里除 systemd 基座
+（`basic/sysinit/local-fs/getty` 这些 target、`systemd-*`、`*.slice`、`*.mount`）之外，
+只允许我们的单元与白名单基础设施；`graphical/display-manager/weston/slim/xorg/x11/bluetooth/cups/avahi`
+**出现即失败**（单元文件里出现 X 相关字样、或还留着 `/home/kickpi/...` 路径也算失败）；
+③ 单元自身的 `ExecStart` 必须在允许的可执行文件表里。
+
+> ⚠ **静态闭包 ≠ 板上真跑**：这里证明的是"配置上没有别的东西被拉起来"。
+> 板上真跑 `systemctl list-dependencies assistant.target` 与 `systemd-analyze` 是 **T15-2-11** 的事。
+
 ---
 
 ## 6. 板级对齐（T15-2-3，已编译验证）

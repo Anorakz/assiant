@@ -1,0 +1,62 @@
+# ============================================================================
+#  systemd/image/agent.service — **镜像形态**的 Agent 常驻单元（T15-2-8）
+#
+#  与 systemd/agent.service（板端 git checkout 形态）的关系
+#  ---------------------------------------------------------------------------
+#    板端那份指向 `/home/kickpi/myproject/assitant`（一个 git 工作区），
+#    镜像里没有那个目录：按 D7（docs/image.md §5.6）代码在 rootfs、状态在 userdata。
+#    所以镜像单独一份，**只差这几处**（tests/test_image_target.py 会守住"除这些之外必须一致"）：
+#      WorkingDirectory / 日志路径 / Doc 路径  → 镜像落点
+#      新增 Environment= 那几个覆盖点         → D7 的"状态进 /data"
+#      WantedBy=assistant.target              → 不再挂 multi-user.target
+#
+#  为什么是 root
+#  ---------------------------------------------------------------------------
+#    Agent 要 MPP 硬解（/dev/mpp_service）、要写配置与 B 站凭据、要 ssh 到 PC、
+#    以后还要 nmcli 改 WiFi —— 都要 root。GUI 也走 root（IPC socket 0600，
+#    两个都 root 就不用放宽 socket 权限）。
+#
+#  环境变量为什么是这几条
+#  ---------------------------------------------------------------------------
+#    · AGENT_CONFIG_DIR=/data/assistant/config —— 顺带把派生文件也定下来了：
+#      agent/core/llm_env.py 从 **config.yaml 所在目录**往上推 llm.env，
+#      于是它落在 /data/assistant/llm/config/llm.env（与下面的 LLM_ENV_FILE 一致）。
+#    · AGENT_LOG / AGENT_CRASH_DIR —— 崩溃现场也要留在 userdata 上（rootfs 会被 OTA 换掉）。
+#    · LLM_ENV_FILE / LLM_STATE_DIR —— llm/scripts/* 只认这两个变量，它们自己
+#      不知道配置在哪（见 llm/README.md）。
+# ============================================================================
+[Unit]
+Description=板端助手 Agent（Python / asyncio）
+Documentation=file:///usr/lib/assistant/Readme.md
+After=network-online.target assistant-init.service
+Wants=network-online.target
+# systemd 245（板端 Ubuntu 20.04）里 StartLimit* 属 [Unit]；写在 [Service] 会被
+# "Unknown key name ... ignoring" 静默丢掉 —— 2026-09-27 T14-7 取证发现，已改正。
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/data/assistant
+Environment=PYTHONPATH=/usr/lib/assistant
+Environment=AGENT_CONFIG_DIR=/data/assistant/config
+Environment=AGENT_LOG=/data/assistant/logs/agent.log
+Environment=AGENT_CRASH_DIR=/data/assistant/logs/crash
+Environment=LLM_ENV_FILE=/data/assistant/llm/config/llm.env
+Environment=LLM_STATE_DIR=/data/assistant/llm
+# 日志目录先建出来（append: 不会自己建目录；/data 由 assistant-init.service 保证已挂）
+ExecStartPre=/bin/mkdir -p /data/assistant/logs/crash /data/assistant/run
+ExecStart=/usr/bin/python3 -m agent.main --config config/config.yaml
+# 崩溃/被杀都拉回来（T14-8 会把崩溃栈落进 logs/crash/）
+Restart=on-failure
+RestartSec=3
+# 给足时间优雅退出（native 线程 / moonlight 收流要几秒）
+TimeoutStopSec=20
+KillSignal=SIGINT
+StandardOutput=append:/data/assistant/logs/agent.out
+StandardError=append:/data/assistant/logs/agent.out
+SyslogIdentifier=agent
+
+[Install]
+WantedBy=assistant.target

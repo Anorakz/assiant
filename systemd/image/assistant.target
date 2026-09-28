@@ -1,0 +1,51 @@
+# ============================================================================
+#  systemd/image/assistant.target — 镜像的**开机目标**（T15-2-8）
+#
+#  路线 C 的要点：系统起来之后**只有我们的东西**。所以镜像里
+#      default.target -> assistant.target
+#  而不是 vendor 的 graphical.target / multi-user.target 那一套。
+#
+#  为什么自己写一个 target 而不是往 multi-user 上挂
+#  ---------------------------------------------------------------------------
+#    · 挂 multi-user.target 只能保证"我们的服务起来了"，**保证不了"别人的没起来"**
+#      —— 厂商 base overlay / 各种包都可能往 multi-user 或 graphical 上挂东西
+#      （桌面、显示管理器、调试服务）。自己当 default.target 才是"只有我们"。
+#    · 但系统d 自己的基座还得起：`Requires/After=basic.target`
+#      （basic.target 那一路才带 sysinit.target、dbus、udev 等）。
+#      ⚠ 这是"把 graphical 摘掉"与"别把系统搞瘫"之间的那根线，删了会起不来。
+#
+#  ⚠ `Wants=` 里只许出现我们的单元
+#  ---------------------------------------------------------------------------
+#    image/check-assistant-target.py 会静态解析这个目标的全量依赖闭包，
+#    除了 systemd 自带的几个 target，出现任何非我们的单元都会报错。
+#    （板上真跑 `systemctl list-dependencies assistant.target` 是 T15-2-11 的事。）
+# ============================================================================
+[Unit]
+Description=板端助手（Agent + GUI，路线 C：没有 X、没有桌面）
+Documentation=file:///usr/lib/assistant/docs/image.md
+# 系统d 基座：不带这一条，摘掉 graphical 之后连 udev/dbus 都不一定起得来
+Requires=basic.target
+After=basic.target
+# 我们自己的东西
+# ⚠ 这三个都**显式**列出来（不是只靠单元自己的 WantedBy + .wants 符号链接）：
+#   静态一看就知道这个目标会拉起什么，check-assistant-target.py 也是按这里算闭包的。
+#   post-build 里同时会建 assistant.target.wants/ 的符号链接（enable 的常规形式），
+#   两条路 systemd 会取并集，不冲突。
+Wants=assistant-init.service agent.service agent-gui.service
+After=agent.service agent-gui.service
+# ⚠ 唯一一个**不是我们的**直接依赖：NetworkManager
+#   为什么非要显式带上它：buildroot 的 NetworkManager 钩子只管建 dbus 别名
+#   （实测 `etc/systemd/system/` 里一个 .wants 都没有），而 `network-online.target`
+#   **自己不会拉起任何东西** —— 它只是"等别人把网弄好"。vendor 的 Ubuntu 那边靠
+#   multi-user.target.wants 启它，而我们已经不boot multi-user 了。
+#   不带它的后果是具体的：Agent 的 ssh / 云端 LLM / wifi 卡片全没有网。
+#   image/check-assistant-target.py 把 NetworkManager 列进白名单，
+#   除此之外**任何**非我们的单元出现在闭包里都算失败。
+Wants=NetworkManager.service
+After=NetworkManager.service
+# 允许 `systemctl isolate assistant.target` 手动切过来（排查时有用）
+AllowIsolate=yes
+
+# ⚠ 故意**不写 [Install]**：这个 target 不是"被 multi-user 拉起来"的，
+#   而是把 default.target 直接指到它（post-build 里 `ln -sf` 建符号链接）。
+#   写了 WantedBy=multi-user.target 反而会让人以为 multi-user 还是开机目标。

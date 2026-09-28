@@ -1,0 +1,55 @@
+# ============================================================================
+#  systemd/image/agent-gui.service — **镜像形态**的 GUI 常驻单元（T15-2-8）
+#
+#  内容来自 systemd/agent-gui-nox.service（T15-1 1d 那个无 X 原型，板端实测过）：
+#  镜像里根本没有 X，所以直接就是它那一套（EGLFS + 虚拟键盘），不需要任何 drop-in。
+#  单元名在镜像里叫 **agent-gui.service**（不带 -nox 后缀）：镜像里没有"另一种形态"，
+#  带着后缀只会让人以为还有 X 版。
+#
+#  为什么路径是这几条（D7）
+#  ---------------------------------------------------------------------------
+#    代码在 rootfs：/usr/lib/assistant/gui/agent_gui
+#    配置与日志在 userdata：/data/assistant/{config,logs}
+#    旋转交给 QT_QPA_EGLFS_ROTATION（镜像里没有 xrandr 那条链）
+#
+#  为什么这些环境变量一个都不能少（都是板端实测出来的）
+#  ---------------------------------------------------------------------------
+#    QT_QPA_PLATFORM=eglfs           无 X 的平台插件（镜像里 libqeglfs.so 在，链到 libmali.so.1）
+#    QT_QPA_EGLFS_INTEGRATION=eglfs_kms  走 KMS/GBM（libqeglfs-kms-integration.so）
+#    QT_QPA_EGLFS_ROTATION=90        竖屏面板
+#    QT_QUICK_BACKEND=software       软键盘面板的 scenegraph 后端（libQt5Quick 里那套 software
+#                                    适配仍在；T15-2-11 会在板上对比 GL 后端再定稿）
+#    QT_IM_MODULE=qtvirtualkeyboard  软键盘输入法
+#    GST_PLUGIN_FEATURE_RANK=souphttpsrc:0  板端 souphttpsrc 是坏的（B 站取流走别处）
+# ============================================================================
+[Unit]
+Description=板端助手 GUI（镜像形态：EGLFS + Qt 虚拟键盘，无 X）
+Documentation=file:///usr/lib/assistant/docs/gui.md
+After=agent.service
+Wants=agent.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/data/assistant
+Environment=AGENT_CONFIG_DIR=/data/assistant/config
+Environment=QT_QPA_PLATFORM=eglfs
+Environment=QT_QPA_EGLFS_INTEGRATION=eglfs_kms
+Environment=QT_QPA_EGLFS_ROTATION=90
+Environment=QT_QUICK_BACKEND=software
+Environment=QT_IM_MODULE=qtvirtualkeyboard
+Environment=GST_PLUGIN_FEATURE_RANK=souphttpsrc:0
+ExecStartPre=/bin/mkdir -p /data/assistant/logs
+ExecStart=/usr/lib/assistant/gui/agent_gui --config config/config.yaml
+# kiosk：正常退出（窗口被关/被杀）也要回来；真起不来由 [Unit] 的 StartLimit 兜底
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+StandardOutput=append:/data/assistant/logs/gui.out
+StandardError=append:/data/assistant/logs/gui.out
+SyslogIdentifier=agent-gui
+
+[Install]
+WantedBy=assistant.target
