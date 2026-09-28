@@ -1,0 +1,157 @@
+
+// ============================================================================
+//  我们自己的 K1Mini 板级 dtsi（T15-2-3）—— 由 image/install-into-sdk.sh 注入
+//
+//  这是**厂商 rk3568-kickpi-k1Mini.dtsi 的副本**（SDK HEAD 544b6630a），
+//  我们只有两处改动（都在下面标了「我们的改动」）：
+//    ① 面板：HDMI → 板端实测那一款 MIPI0 10.1" 800x1280 **v2**
+//    ② 末尾追加 image/kernel/rk3568-kickpi-assistant-overrides.dtsi
+//       （触摸复位脚等；两份文件合起来才是"这台机器"）
+//  为什么用新文件名而不是覆盖厂商文件：厂商文件保持原样，差异一眼可审、可回退。
+//
+//  判据（详见 docs/image.md §7）：
+//    · 板端 live DT（`dtc -I fs` 导出的实际运行设备树）里面板 init sequence 与
+//      rk3568-kickpi-lcd-mipi0-10.1-800-1280-v2-k1Mini.dtsi **逐字节一致**
+//      （8 寸那款开头是 FF 98 81 03，不是我们）；
+//    · 该 LCD 文件里有重复节点 vcc3v3-lcd0-n 与 evb.dtsi 撞名 → 我们用
+//      -assistant 副本改成引用式覆盖（见那个文件里的说明）。
+// ============================================================================
+
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright (c) 2020 Rockchip Electronics Co., Ltd.
+ *
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/rockchip.h>
+#include <dt-bindings/display/rockchip_vop.h>
+#include "rk3568.dtsi"
+#include "rk3568-kickpi-evb.dtsi"
+
+// LCD —— 我们的改动①：换成板端实测的那一款（10.1" 800x1280 v2 / MIPI0）
+//   ⚠ 用**厂商原文件**，不要自己复制一份：它自带的 vcc3v3_lcd0_n / lcd1_n 稳压器
+//     与背光**不是**重复定义 —— evb.dtsi 里那两个节点在一段 /* */ 块注释里
+//     （见 evb.dtsi 约 285 行起），所以这两处只有这个 LCD 文件在定义。
+//     （T15-2-3 第一次就是在这里判错了：以为撞名、改成 &vcc3v3_lcd0_n 覆盖，
+//       结果 dtc 报 "Label or path vcc3v3_lcd0_n not found" —— 内核真管线复现。）
+#include "rk3568-kickpi-lcd-mipi0-10.1-800-1280-v2-k1Mini.dtsi"
+// 厂商原来的 HDMI 那一份（以及其它面板候选）留在这里备查，都不再 include：
+// #include "rk3568-kickpi-lcd-hdmi.dtsi"
+// #include "rk3568-kickpi-lcd-edp-15.6-1920-1080.dtsi"
+// #include "rk3568-kickpi-lcd-mipi0-10.1-800-1280-k1Mini.dtsi"
+// #include "rk3568-kickpi-lcd-mipi1-10.1-800-1280-k1Mini.dtsi"
+// #include "rk3568-kickpi-lcd-mipi0-10.1-800-1280-v2-k1Mini.dtsi"
+// #include "rk3568-kickpi-lcd-mipi1-10.1-800-1280-v2-k1Mini.dtsi"
+// #include "rk3568-kickpi-lcd-lvds0-7-1024-600-k1Mini.dtsi"
+// #include "rk3568-kickpi-lcd-lvds1-7-1024-600-k1Mini.dtsi"
+// #include "rk3568-kickpi-lcd-mipi0-5-720-1280-k1Mini.dtsi"
+// #include "rk3568-kickpi-lcd-mipi1-5-720-1280-k1Mini.dtsi"
+// #include "rk3568-kickpi-lcd-mipi0-8-800-1280-k1Mini.dtsi"
+// #include "rk3568-kickpi-lcd-mipi1-8-800-1280-k1Mini.dtsi"
+// #include "rk3568-kickpi-lcd-dual-lvds-32-1920-1080.dtsi"
+
+// Triple LCD
+// #include "rk3568-kickpi-triple-lcd-hdmi-mipi1-lvds.dtsi"
+// #include "rk3568-kickpi-triple-lcd-edp-mipi1-lvds.dtsi"
+
+// Network
+#include "rk3568-kickpi-eth-gmac0.dtsi"
+#include "rk3568-kickpi-eth-gmac1.dtsi"
+#include "rk3568-kickpi-wifibt.dtsi"
+
+// Camera
+//#include "rk3568-kickpi-mipi-camera-gc5035.dtsi"
+#include "rk3568-kickpi-mipi-camera-ov5647.dtsi"
+
+// Other
+#include "rk3568-kickpi-usb.dtsi"
+#include "rk3568-kickpi-ir.dtsi"
+#include "rk3568-kickpi-sata.dtsi"
+#include "rk3568-kickpi-pcie.dtsi"
+#include "rk3568-kickpi-K1mini-extend-40pin.dtsi"
+
+
+/ {
+	model = "Rockchip RK3568 KICKPI K1Mini Board";
+	compatible = "rockchip,rk3568-kickpi-k1Mini", "rockchip,rk3568";
+
+	vcc2v5_sys: vcc2v5-ddr {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc2v5-sys";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <2500000>;
+		regulator-max-microvolt = <2500000>;
+		vin-supply = <&vcc3v3_sys>;
+	};
+
+	vcc3v3_bu: vcc3v3-bu {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc3v3_bu";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&vcc5v0_sys>;
+	};
+/*
+	fan0: gpio-fan {
+		#cooling-cells = <2>;
+		compatible = "gpio-fan";
+		gpio-fan,speed-map = <0 0 
+								3000 1>;
+		gpios = <&gpio0 RK_PD6 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+	*/
+};
+
+&leds {
+    fan {
+        gpios = <&gpio0 RK_PD6 GPIO_ACTIVE_HIGH>;
+        default-state = "on";
+    };
+};
+
+&rk809_sound {
+	// spk-det-gpio = <&gpio4 RK_PC6 GPIO_ACTIVE_LOW>;
+	hp-det-gpio = <&gpio1 RK_PD3 GPIO_ACTIVE_HIGH>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&hp_det>;
+	hp-volume = <20>;
+	spk-volume = <30>;
+};
+
+&i2c5 {
+	status = "okay";
+
+	hym8563: hym8563@51 {
+		compatible = "haoyu,hym8563";
+		reg = <0x51>;
+		#clock-cells = <0>;
+		clock-frequency = <32768>;
+		clock-output-names = "hym8563";
+		// IRQ GPIO IS MODIFYED FOR UPDATE HYM8562 DRIVER 
+		rtc-irq-gpio = <&gpio0 RK_PD3 IRQ_TYPE_EDGE_FALLING>;
+	};
+	
+};
+
+&pinctrl {
+	headphone {
+		hp_det: hp-det {
+			rockchip,pins = <1 RK_PD3 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+};
+
+&rk809_codec {
+	/delete-property/ spk-ctl-gpios;
+};
+
+// 我们的改动②：这台机器的板级覆盖（触摸复位脚等，逐条带证据）
+#include "rk3568-kickpi-assistant-overrides.dtsi"
+

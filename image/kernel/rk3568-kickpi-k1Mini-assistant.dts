@@ -1,0 +1,18 @@
+// ============================================================================
+//  image/kernel/rk3568-kickpi-k1Mini-assistant.dts
+//
+//  「板端助手」这台 KICKPI K1 Mini 的内核顶层 dts（T15-2-3）
+//
+//  它只是把三件事拼起来：
+//    1) 我们的板级 dtsi（= 厂商 rk3568-kickpi-k1Mini.dtsi 的副本，只改了两处：
+//       面板换成 MIPI0 10.1" 800x1280 v2、末尾追加我们的板级覆盖）
+//    2) 厂商的 linux 公共部分（rk3568-linux.dtsi）
+//
+//  用法：SDK 板级 defconfig 里 `RK_KERNEL_DTS_NAME="rk3568-kickpi-k1Mini-assistant"`
+//  （mk-kernel.sh 会按这个名字去 build `rk3568-kickpi-k1Mini-assistant.img`）。
+// ============================================================================
+
+/dts-v1/;
+
+#include "rk3568-kickpi-k1Mini-assistant.dtsi"
+#include "rk3568-linux.dtsi"

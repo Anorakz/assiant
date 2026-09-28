@@ -86,7 +86,7 @@ buildroot 2024.02、Qt 5.15.11（联网拉）；**K1Mini 是一等目标**（`.c
 | --- | --- | --- |
 | 2-1 ✅ | 决策与配方文档定稿（`docs/image.md` §1–§4） | 文档能独立复述 D1–D6 |
 | 2-2 ✅ | K1Mini 的 buildroot defconfig 落地（release 骨架 + **systemd** + Qt5 替 weston） | 配方在 `image/`（本仓库维护 + `image/install-into-sdk.sh` 注入）；SDK 里 `make O=output/rockchip_rk3568_kickpi_k1mini_release rockchip_rk3568_kickpi_k1mini_release_defconfig` **退出码 0**，`.config` 里 systemd / 串口 CLI / Qt Widgets+EGLFS / 虚拟键盘(en_US+zh_CN) / QML 运行时 / **G52+GBM** / RKNPU2 / MPP / NM+nmcli / CA 证书 / python3+numpy+pyyaml+opencv4 / yaml-cpp / libinput 逐项在位（行号见 `docs/image.md` §5.1）|
-| 2-3 | 板级对齐（面板变体已定 / **触摸复位脚 PB6 vs SDK 的 PB5** / WiFi / 以太网 / PMIC / 容量） | 差异表 + "要不要改 dts"结论，逐项带证据 |
+| 2-3 ✅ | 板级对齐（面板变体 / **触摸复位脚 PB5→PB6** / WiFi / 以太网 / PMIC / 容量） | 差异表 + 结论见 `docs/image.md` §6：**要改 2 处**（面板 include → `mipi0-10.1-800-1280-v2`；触摸复位 → PB6，厂商 pinctrl 与板端 live DT 都是 PB6，是那句属性写错）；改动落在 `image/kernel/` 三个文件，并用**内核真管线编出 dtb（退出码 0）**后反编译核对（触摸 PB6 ✓ / 面板 800×1280 ✓ / wifi rtl8822cs ✓ / PC7 使能 ✓ / 双 gmac 延迟 ✓）|
 | 2-4 | **分区与 OTA 布局定稿**（A/B 或 recovery；模型 4.9 GB 落点） | 分区表可落地 + 回退路径明确 |
 | 2-5 | libmali G52(GBM) 进 buildroot | `nm -D libmali.so \| grep -c gbm_` ≥ 30 + `BR2_PACKAGE_HAS_LIBGBM=y` |
 | 2-6 | Qt5.15 + EGLFS + 虚拟键盘 + 四个 QML 模块 | 四个 QML 目录 + `libqeglfs.so`/`libqtvirtualkeyboardplugin.so` 在位 |

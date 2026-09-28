@@ -239,7 +239,69 @@ cd <SDK>
 
 ---
 
-## 6. 任务列表（T15-2，已批准 2026-09-28）
+## 6. 板级对齐（T15-2-3，已编译验证）
+
+**方法**：以**板端实际运行**的设备树为准（`dtc -I fs /sys/firmware/devicetree/base` 导出 6065 行，
+来自 5.10 厂商镜像 —— 触摸/显示/WiFi 都是好的），逐项对 SDK 的 K1Mini dts 链
+（`rk3568-kickpi-k1Mini.dtsi` → `rk3568-kickpi-evb.dtsi` + eth/wifibt/相机/USB/IR/SATA/PCIe/40pin）；
+然后把我们的 dts 用**内核自己的构建管线**编成 dtb，再反编译核对取值。
+
+| 项 | 板端（live DT / 运行时） | SDK 的 K1Mini 链 | 结论 |
+| --- | --- | --- | --- |
+| 板名 | compatible `rockchip,rk3568-kickpi-k1a`，model "K1A Board" | `rockchip,rk3568-kickpi-k1Mini`，model "K1Mini Board" | 厂商旧镜像的命名差异，不影响 |
+| 显示通路 | dsi0(`fe060000`)/`panel@0`，800×1280 @ 68 MHz，init sequence 与 **v2** 面板逐字节一致 | 默认只 include **HDMI**，MIPI 面板那几个 include 全注释 | **要改**：换成 `rk3568-kickpi-lcd-mipi0-10.1-800-1280-v2-k1Mini.dtsi` |
+| 背光 / 面板电源 | `backlight-dsi0`（pwm4）+ `vcc3v3-lcd0-n`（**gpio0 PC7** 使能） | 同（都在 LCD 文件里） | ✅ 一致 |
+| 触摸 | goodix gt9xx @ i2c5(`fe5a0000`) 0x5d，800×1280，IRQ **gpio3 PA3 低有效**，复位 **gpio0 PB6** | IRQ 一致；**复位属性写 PB5**，但同一文件里的 pinctrl 写的是 PB6 | **要改**：复位脚改 **PB6**（用覆盖文件） |
+| WiFi / BT | `wifi_chip_type = "rtl8822cs"` | `rk3568-kickpi-wifibt.dtsi` 里正是 **rtl8822cs**（它覆盖了 evb.dtsi 的 ap6398s） | ✅ 一致（⚠ 差点误判：只看 evb.dtsi 会以为不匹配） |
+| 以太网 | 两个 gmac 都 rgmii：`fe010000` tx 0x2f / rx 0x39 / reset gpio3 PA7；`fe2a0000` tx 0x21 / rx 0x3c / reset gpio2 PD3 | gmac0 = 0x21/0x3c + gpio2 PD3；gmac1 = 0x2f/0x39 + gpio3 PA7 | ✅ 逐项一致 |
+| PMIC / 音频 | rk809（codec rk817）、hp-det gpio1 PD3 | evb.dtsi 里 rk809 + K1Mini 里 hp-det gpio1 PD3 | ✅ 一致 |
+| RTC | 双 RTC：rk809 内置 + **hym8563 @ i2c5 0x51** | K1Mini dtsi 里 hym8563 @ i2c5 0x51 | ✅ 一致 |
+| 内存 / 存储 | **4 GB**（MemTotal 3.99 GB）；**32 GB eMMC** | 由 DDR 初始化 + 分区表决定 | 归 **T15-2-4**（分区）与**首次刷机**核验 |
+| 相机 / USB / SATA / PCIe / IR / 40pin | live DT 里都有对应节点 | K1Mini dtsi 全部 include | ✅ 同族（未逐条比电路细节） |
+
+### 6.1 我们改了什么（3 个文件，全部 `-assistant` 后缀，不动厂商同名文件）
+
+| 文件（本仓库） | 改动 |
+| --- | --- |
+| `image/kernel/rk3568-kickpi-k1Mini-assistant.dtsi` | 厂商 `rk3568-kickpi-k1Mini.dtsi` 的副本，**只两处**：① LCD include 换成 v2 MIPI 面板 ② 末尾 include 我们的覆盖文件 |
+| `image/kernel/rk3568-kickpi-assistant-overrides.dtsi` | 触摸复位脚 `RK_PB5` → **`RK_PB6`**（三条证据写在文件里：live DT 引脚 14、厂商 pinctrl 也是 PB6、IRQ 两侧一致） |
+| `image/kernel/rk3568-kickpi-k1Mini-assistant.dts` | 顶层：我们的 dtsi + `rk3568-linux.dtsi` |
+
+板级 defconfig 里已经指向它：`RK_KERNEL_DTS_NAME="rk3568-kickpi-k1Mini-assistant"`。
+
+### 6.2 编译验证（内核真管线）
+
+```bash
+cd <SDK>/kernel-6.1
+export PATH=<SDK>/prebuilts/gcc/linux-x86/aarch64/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/bin:$PATH
+make ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu- rockchip_linux_defconfig
+make ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu- -j8 rockchip/rk3568-kickpi-k1Mini-assistant.dtb
+# → DTC arch/arm64/boot/dts/rockchip/rk3568-kickpi-k1Mini-assistant.dtb   （退出码 0）
+```
+
+反编译这份 dtb 逐项核对（这才是板子将来真正启动用的东西）：
+
+| 项 | dtb 里的值 | 与板端一致？ |
+| --- | --- | --- |
+| 触摸复位脚 | `goodix_rst_gpio = <gpio0 14 0>` = **PB6** | ✅（live 也是引脚 14） |
+| 触摸 IRQ | `= <gpio3 3 8>` = PA3 + 低有效 | ✅（引脚号/触发方式一致；phandle 数字两次构不同，不可比） |
+| 面板 | `hactive = 800` / `vactive = 1280` | ✅ |
+| 面板电源 | `vcc3v3-lcd0-n` 带 `gpio = <gpio0 0x17>` = PC7 使能 | ✅ |
+| WiFi | `wifi_chip_type = "rtl8822cs"` | ✅ |
+| 以太网 | 两组 tx/rx delay = 0x2f/0x39 与 0x21/0x3c | ✅ |
+
+⚠ **一次误判记录**（留着防复发）：我先把厂商 LCD 文件里自带的 `vcc3v3-lcd0-n` 当成"与 evb.dtsi 撞名"，
+改成 `&vcc3v3_lcd0_n` 引用式覆盖 → 内核管线直接报
+`Error: ...v2-k1Mini-assistant.dtsi:56 ... Label or path vcc3v3_lcd0_n not found`。
+真相：evb.dtsi 约 285 行起有一段 **`/* ... */` 块注释**，把 `vcc5v0_host`、`vcc5v0_otg`、
+`vcc3v3_lcd0_n`、`vcc3v3_lcd1_n` 全注释掉了 —— 所以那两个稳压器**只有** LCD 文件在定义，
+厂商写法本来就是对的。已撤回，改用厂商原文件。
+（教训：`grep` 只看"文件里有没有"不够，得看**预处理之后**还在不在；判 dts 冲突要么用内核管线，
+要么至少 `cpp` 一遍。）
+
+---
+
+## 7. 任务列表（T15-2，已批准 2026-09-28）
 
 顺序即依赖顺序；每条做完等验收。
 
@@ -247,7 +309,7 @@ cd <SDK>
 | --- | --- | --- |
 | 2-1 | 决策与配方文档定稿（本文档 §1–§4） | 文档能独立复述 D1–D6 |
 | 2-2 ✅ | K1Mini 的 buildroot defconfig 落地（release 骨架 + **systemd** + Qt5 替 weston） | `make <defconfig>` 通过（退出码 0）、`.config` 里 systemd 与 Qt/EGLFS/虚拟键盘/G52/GBM/NPU/MPP/NM/Python 逐项在位（见 §5.1） |
-| 2-3 | 板级对齐（面板变体已定 / 触摸复位脚 / WiFi / 以太网 / PMIC / 容量） | 差异表 + "要不要改 dts"结论，逐项带证据 |
+| 2-3 ✅ | 板级对齐（面板变体 / 触摸复位脚 / WiFi / 以太网 / PMIC / 容量） | 差异表 + "要不要改 dts"结论，逐项带证据（见 §6）：**要改 2 处** —— 面板 include 换成 v2 MIPI、触摸复位脚 PB5→**PB6**；改动落在 `image/kernel/` 的 3 个文件里，并用**内核真管线编出 dtb（退出码 0）**再反编译逐项核对 |
 | 2-4 | 分区与 OTA 布局定稿（A/B 或 recovery；模型 4.9 GB 落点） | 分区表可落地 + 回退路径明确 |
 | 2-5 | libmali G52(GBM) 进 buildroot | `gbm_*` ≥ 30，`BR2_PACKAGE_HAS_LIBGBM=y` |
 | 2-6 | Qt5.15 + EGLFS + 虚拟键盘 + 四个 QML 模块 | 四目录 + `libqeglfs.so`/`libqtvirtualkeyboardplugin.so` 在位 |

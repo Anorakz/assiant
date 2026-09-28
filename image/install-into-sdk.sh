@@ -4,10 +4,10 @@
 #
 #  为什么要有这个脚本
 #  ---------------------------------------------------------------------------
-#  配方（buildroot 片段 / defconfig / 板级 defconfig）由**我们的仓库**维护，
-#  厂商 SDK 只是一棵被注入的树：
+#  配方（buildroot 片段 / defconfig / 板级 defconfig / 内核 dts·dtsi）由**我们的仓库**
+#  维护，厂商 SDK 只是一棵被注入的树：
 #    · 好处 1：配方能 code review、能回滚、能进 CI（docs/image.md 引用它）；
-#    · 好处 2：SDK 里"哪些是厂商的、哪些是我们加的"一眼可辨（不散落在各处改动里）；
+#    · 好处 2：SDK 里"哪些是厂商的、哪些是我们加的"一眼可辨；
 #    · 好处 3：换 SDK 版本时重跑这个脚本即可，不用手工再点一遍。
 #
 #  用法
@@ -18,8 +18,9 @@
 #      bash image/install-into-sdk.sh \
 #        /home/anorak/rk3568_buildroot/linux-kernel-6.1/rk-linux6.1-2026060914/rk-linux6.1-2026060914
 #
-#  它只做"复制我们的文件进去"，**不改** SDK 的任何既有文件（同路径覆盖 = 我们故意的，
-#  会打印 COVER 提示）。重复执行是幂等的。
+#  只做"复制我们的文件进去"：目标已存在且内容不同 = 覆盖（打印 ~ 覆盖）；
+#  内容相同 = 跳过（= 已一致）。重复执行幂等。
+#  ⚠ 我们的内核 dts/dtsi 一律用 **-assistant 后缀的新文件名**，不覆盖厂商同名文件。
 # ============================================================================
 set -euo pipefail
 
@@ -39,36 +40,52 @@ if [ ! -d "$SDK/buildroot" ] || [ ! -d "$SDK/device/rockchip" ]; then
 fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DTS_DIR="kernel-6.1/arch/arm64/boot/dts/rockchip"
+FAILED=0
 
-# 源（本仓库）→ 目标（SDK）相对路径
-FILES="
-buildroot/configs/rockchip_rk3568_kickpi_k1mini_release_defconfig
-buildroot/configs/rockchip/products/kickpi-k1mini-release.config
-device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1mini_release_defconfig
-"
-
-echo "== 注入配方到 SDK: $SDK"
-for rel in $FILES; do
-    src="$HERE/$rel"
-    dst="$SDK/$rel"
+# install_file <本仓库相对路径> <SDK 相对路径>
+install_file() {
+    local src="$HERE/../$1"
+    local dst="$SDK/$2"
     if [ ! -f "$src" ]; then
         echo "!! 源文件不在: $src" >&2
-        exit 1
+        FAILED=1
+        return
     fi
     if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
-        echo "   = 已经一致: $rel"
-        continue
+        echo "   = 已经一致: $2"
+        return
     fi
     if [ -f "$dst" ]; then
-        echo "   ~ 覆盖: $rel"
+        echo "   ~ 覆盖: $2"
     else
-        echo "   + 新增: $rel"
+        echo "   + 新增: $2"
     fi
     if [ -z "$DRY" ]; then
         mkdir -p "$(dirname "$dst")"
         cp "$src" "$dst"
     fi
-done
+}
+
+echo "== 注入配方到 SDK: $SDK"
+# buildroot：defconfig + 我们自己的片段
+install_file image/buildroot/configs/rockchip_rk3568_kickpi_k1mini_release_defconfig \
+             buildroot/configs/rockchip_rk3568_kickpi_k1mini_release_defconfig
+install_file image/buildroot/configs/rockchip/products/kickpi-k1mini-release.config \
+             buildroot/configs/rockchip/products/kickpi-k1mini-release.config
+# SDK 板级 defconfig（lunch 用）
+install_file image/device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1mini_release_defconfig \
+             device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1mini_release_defconfig
+# 内核：我们的板级 dts/dtsi（全部 -assistant 后缀，不动厂商同名文件）
+install_file image/kernel/rk3568-kickpi-k1Mini-assistant.dts "$DTS_DIR/rk3568-kickpi-k1Mini-assistant.dts"
+install_file image/kernel/rk3568-kickpi-k1Mini-assistant.dtsi "$DTS_DIR/rk3568-kickpi-k1Mini-assistant.dtsi"
+install_file image/kernel/rk3568-kickpi-assistant-overrides.dtsi \
+             "$DTS_DIR/rk3568-kickpi-assistant-overrides.dtsi"
+
+if [ "$FAILED" != "0" ]; then
+    echo "!! 有源文件缺失，注入不完整" >&2
+    exit 1
+fi
 
 echo "== 完成。下一步（在 SDK 根目录）："
 echo "     cd buildroot && make O=output/rockchip_rk3568_kickpi_k1mini_release \\"
