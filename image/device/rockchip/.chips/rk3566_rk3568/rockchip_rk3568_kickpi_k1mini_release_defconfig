@@ -1,0 +1,27 @@
+# ============================================================================
+#  image/device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1mini_release_defconfig
+#
+#  SDK 的**板级 defconfig**（lunch 用）—— KICKPI K1 Mini 发行镜像（T15-2-2）
+#
+#  放哪儿：`device/rockchip/.chips/rk3566_rk3568/`
+#  （这一代 SDK 的板级配置就在 `.chips/<chip>/`，不是老的 `device/rockchip/rk3568/`；
+#    判据：`build.sh` 里 `RK_CHIPS_DIR="$RK_DEVICE_DIR/.chips"`）
+#
+#  与厂商那两个 K1Mini defconfig（_ubuntu / _debian）的差别只有 rootfs 与
+#  buildroot 配置名；dts / 分区 / FIT 三项保持一致。
+#
+#  符号含义（都在 device/rockchip/common/configs/ 里）：
+#    · RK_KERNEL_DTS_NAME  → 内核 dts（`rk3568-kickpi-k1Mini-linux`）
+#    · RK_PARAMETER        → 分区表模板（⚠ 无线 OTA 方案定稿后可能要换成 -ab 那份，见 T15-2-4）
+#    · RK_USE_FIT_IMG      → 内核+dtb 打成一个 FIT
+#    · RK_ROOTFS_SYSTEM_BUILDROOT → 选 Buildroot 作为 rootfs（派生 RK_ROOTFS_SYSTEM=buildroot）
+#    · RK_BUILDROOT_BASE_CFG → 派生 RK_BUILDROOT_CFG="rockchip_<这个值>"，
+#                              即 buildroot/configs/rockchip_<值>_defconfig
+# ============================================================================
+
+RK_KERNEL_DTS_NAME="rk3568-kickpi-k1Mini-linux"
+RK_PARAMETER="parameter-buildroot-fit.txt"
+RK_USE_FIT_IMG=y
+
+RK_ROOTFS_SYSTEM_BUILDROOT=y
+RK_BUILDROOT_BASE_CFG="rk3568_kickpi_k1mini_release"

@@ -94,20 +94,24 @@ class TestMonitorScriptShape(unittest.TestCase):
         self.assertIn("不认识的参数", proc.stdout)
 
     def test_repo_shell_scripts_are_lf_without_bom(self):
-        """仓里每个 `scripts/*.sh` 都必须是 **LF + 无 BOM**。
+        """仓里每个 `scripts/*.sh` 与 `image/*.sh` 都必须是 **LF + 无 BOM**。
 
         ⚠ 这条是踩出来的（T14-10）：用 PowerShell 的 `Set-Content -Encoding utf8` 改脚本，
         会同时塞进 **BOM 与 CRLF** —— 板端 `bash scripts/monitor.sh` 直接报
         `#!/bin/bash: No such file or directory`（BOM 让第一行不再是注释）+ `$'\\r'`。
         PC 上编辑脚本一律用 `edit` 工具，或者事后跑一次 `dos2unix` 式的转换。
+
+        T15-2 起把 `image/*.sh` 也纳进来：那些脚本是在 WSL 里跑构建/注入的，
+        同样经不起 BOM/CRLF（注入脚本第一行是 `#!/usr/bin/env bash`）。
         """
         bad = []
-        for path in sorted((_PROJECT_ROOT / "scripts").glob("*.sh")):
-            raw = path.read_bytes()
-            if raw.startswith(b"\xef\xbb\xbf"):
-                bad.append("%s 有 BOM" % path.name)
-            if b"\r\n" in raw:
-                bad.append("%s 有 CRLF" % path.name)
+        for pattern in ("scripts/*.sh", "image/*.sh"):
+            for path in sorted(_PROJECT_ROOT.glob(pattern)):
+                raw = path.read_bytes()
+                if raw.startswith(b"\xef\xbb\xbf"):
+                    bad.append("%s 有 BOM" % path.name)
+                if b"\r\n" in raw:
+                    bad.append("%s 有 CRLF" % path.name)
         self.assertFalse(bad, "脚本行尾/BOM 不对（板端会跑不起来）: %s" % "；".join(bad))
 
     def test_csv_and_json_are_mutually_exclusive(self):

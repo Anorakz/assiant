@@ -1,0 +1,49 @@
+# ============================================================================
+#  image/buildroot/configs/rockchip_rk3568_kickpi_k1mini_release_defconfig
+#
+#  KICKPI K1 Mini（RK3568）**发行镜像**的 buildroot defconfig（T15-2-2）
+#
+#  怎么用（在 SDK 根目录）—— 两条等价的路：
+#      # 1) 直接让 buildroot 配置（输出目录跟 SDK 的约定一致）
+#      cd buildroot
+#      make O=output/rockchip_rk3568_kickpi_k1mini_release \
+#           rockchip_rk3568_kickpi_k1mini_release_defconfig
+#      # 2) 走 SDK 自己的 lunch（会顺带配内核/uboot/分区，整机构建用这条）
+#      ./build.sh rk3566_rk3568:rockchip_rk3568_kickpi_k1mini_release_defconfig
+#
+#  这是**片段式**配置（与本 SDK 自带的 rockchip_rk3568_defconfig 同一套路）：
+#  只 include 我们要的片段。相对下面这份"不做的事"，少 include 就是省事：
+#      weston / X11 / chromium（没有桌面）、camera / can / pci、
+#      SDK 的 benchmark + test 工具（那是开发板演示包，不是产品）
+#
+#  ⚠ `#include` 行**不能带尾注释**：SDK 给 buildroot 打的片段合并器是 sed 实现的，
+#    它会把 `#include "x.config"   # 说明` 里的 "说明" 也当成路径去 sed 读 → 直接报错。
+#    所以说明一律另起一行。
+#
+#  命名约定：chip defconfig 里的 `RK_BUILDROOT_BASE_CFG="rk3568_kickpi_k1mini_release"`
+#  会派生出 `RK_BUILDROOT_CFG="rockchip_rk3568_kickpi_k1mini_release"`，
+#  正好等于本文件名去掉 `_defconfig`（见 device/rockchip/common/configs/Config.in.buildroot）。
+# ============================================================================
+
+# 基座：eudev / ext4 / 基础工具（其中 eudev 会被下面的 products 片段换成 devtmpfs）
+#include "base/base.config"
+# RK3566/RK3568 + aarch64
+#include "chips/rk3566_rk3568_aarch64.config"
+# 思源黑体（中文界面必须）
+#include "font/chinese.config"
+# zh_CN.UTF-8 + unicode busybox
+#include "locale/chinese.config"
+# wpa_supplicant / hostapd + 基础网络
+#include "wifibt/wireless.config"
+# Rockchip MPP + DRM allocator + RGA
+#include "multimedia/mpp.config"
+# GStreamer 视频（mppvideodec 在这条链上）
+#include "multimedia/gst/video.config"
+# GStreamer 音频
+#include "multimedia/gst/audio.config"
+# rknpu2（librknnrt.so）
+#include "ai/npu2.config"
+# rockchip-mali（型号 G52 在本仓库的 products 片段里选）
+#include "gpu/mali.config"
+# 我们的：systemd + Qt5(EGLFS/虚拟键盘) + 运行时（本仓库维护）
+#include "products/kickpi-k1mini-release.config"

@@ -169,14 +169,84 @@ KICKPI 自己的 `batch_build.sh` **当前就在编 K1Mini 的 debian12 + ubuntu
 
 ---
 
-## 5. 任务列表（T15-2，已批准 2026-09-28）
+## 5. 配方（T15-2-2 起）
+
+配方由**本仓库**维护，用注入脚本装进厂商 SDK —— 厂商树只被注入、不被改：
+
+```bash
+# 幂等注入（可先 --dry-run 预演）
+bash image/install-into-sdk.sh /home/anorak/rk3568_buildroot/linux-kernel-6.1/rk-linux6.1-2026060914/rk-linux6.1-2026060914
+```
+
+| 本仓库文件 | 注入到 SDK | 作用 |
+| --- | --- | --- |
+| `image/buildroot/configs/rockchip_rk3568_kickpi_k1mini_release_defconfig` | `buildroot/configs/` | buildroot defconfig（片段式）：base + chip + 中文字体/区域 + wireless + mpp + gst(video/audio) + npu2 + mali + 我们的 products 片段 |
+| `image/buildroot/configs/rockchip/products/kickpi-k1mini-release.config` | `buildroot/configs/rockchip/products/` | 我们自己的片段：systemd + Qt5(EGLFS/虚拟键盘) + GPU 型号 + 输入 + NM + Python/OpenCV/yaml-cpp |
+| `image/device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1mini_release_defconfig` | 同名路径 | SDK 板级 defconfig：dts `rk3568-kickpi-k1Mini-linux`、FIT、`parameter-buildroot-fit.txt`、rootfs=buildroot |
+| `image/install-into-sdk.sh` | —— | 注入脚本（打印 `新增/覆盖/已一致`，重复执行幂等） |
+
+```bash
+# 只配置（快，用来验证配方本身 —— T15-2-2 的验收就是这条）
+cd <SDK>/buildroot
+make O=output/rockchip_rk3568_kickpi_k1mini_release \
+     rockchip_rk3568_kickpi_k1mini_release_defconfig
+# 整机构建（内核 + u-boot + rootfs + 镜像，会联网拉 Qt 等源码 —— T15-2-9）
+cd <SDK>
+./build.sh rk3566_rk3568:rockchip_rk3568_kickpi_k1mini_release_defconfig
+```
+
+### 5.1 配置验收（2026-09-28 实测，只到"配置通过"，还没构建）
+
+`make <defconfig>` 退出码 0，生成的
+`buildroot/output/rockchip_rk3568_kickpi_k1mini_release/.config` 里逐项核对：
+
+| 项 | 实测行 |
+| --- | --- |
+| systemd 作为 init | `BR2_INIT_SYSTEMD=y`（503） |
+| 串口 CLI（D6 的"CLI 唤醒"通路） | `BR2_TARGET_SERIAL_SHELL_GETTY=y`（523）+ `BR2_TARGET_GENERIC_GETTY_PORT="ttyFIQ0"`（528） |
+| 主机名/时区 | `=assistant`（495）/ `="Asia/Shanghai"`（545） |
+| Qt Widgets + EGLFS | `QT5BASE_WIDGETS=y`（1521）/ `QT5BASE_EGLFS=y`（1535）/ `QT5BASE_DEFAULT_QPA="eglfs"` |
+| 虚拟键盘 + 布局 | `QT5VIRTUALKEYBOARD=y`（1577）+ `_LANGUAGE_LAYOUTS="en_US zh_CN"`（1578） |
+| QML 运行时（防"白板"） | `QT5DECLARATIVE=y` / `_QUICK=y` / `QT5QUICKCONTROLS2=y`（1566） |
+| 视频 | `QT5MULTIMEDIA=y`（1563） |
+| G52 + GBM | `ROCKCHIP_MALI_BIFROST_G52=y`（656）/ `_HAS_GBM=y`（664）/ `PROVIDES_LIBGBM="rockchip-mali"`（670）→ Qt 会拿到 `-gbm` |
+| NPU / MPP | `RKNPU2=y`（639）/ `ROCKCHIP_MPP=y`（673） |
+| 网络 | `NETWORK_MANAGER_CLI=y`（3704）/ `CA_CERTIFICATES=y`（2549）/ `OPENSSH_SERVER=y`（3731）/ `# BR2_PACKAGE_DROPBEAR is not set`（3587） |
+| 运行时 | `PYTHON_NUMPY=y`（2199）/ `PYTHON_PYYAML=y`（2293）/ `OPENCV4_LIB_PYTHON=y`（2816）/ `YAML_CPP=y`（3016） |
+| 触摸/输入 | `LIBINPUT=y`（2913）（+ `LIBEVDEV` / `MTDEV`） |
+
+### 5.2 写配方的四条纪律（都是踩出来的）
+
+1. **`#include` 行不能带尾注释** —— SDK 给 buildroot 打的片段合并器是 sed 实现的，会把注释
+   当路径去 sed 读，直接 `The merge file 'configs/rockchip/#' does not exist. Exit.`。
+2. **普通配置行也别带尾注释** —— 注释文本会被并进"值"里（实测 `CA_CERTIFICATES` 的"新值"
+   就带上了注释）。
+3. **注释里出现"符号全名 + 等号"这种写法会被当成配置解析** —— 实测它把一句注释当成了
+   `CA_CERTIFICATES` 的新值。所以注释里提符号要省掉 `BR2_` 前缀、也不写等号。
+4. **写的符号必须真的存在于本树**，否则 kconfig **静默丢掉**（"看起来写了、其实没生效"）：
+   串口那条就吃过一次 —— 本树里必须先开 `BR2_TARGET_SERIAL_SHELL_GETTY`，它才会
+   select `BR2_TARGET_GENERIC_GETTY`，只写后者无效。
+
+### 5.3 已知缺口（配方"配置对"≠"能编出来"）
+
+- **G52 的 Mali 用户态 .so 不在 SDK 里**：`external/libmali` 只有 valhall-g610。
+  配置能选 G52，但构建时会找不到 `.so` → **T15-2-5** 用厂商 deb
+  `ubuntu/packages/arm64/libmali/libmali-bifrost-g52-g24p0-x11-wayland-gbm_1.9-1_arm64.deb`
+  里的二进制补上。
+- **Qt 源码不在 `dl` 缓存里**（要联网拉 `invent.kde.org`）→ 见 R2。
+- 我们的运行时文件（Agent/GUI 二进制、unit、模型 4.9 GB）还没进镜像 →
+  **T15-2-7 / 2-8**（片段里给 overlay 留了位置，故意先不开）。
+
+---
+
+## 6. 任务列表（T15-2，已批准 2026-09-28）
 
 顺序即依赖顺序；每条做完等验收。
 
 | # | 任务 | 出口 |
 | --- | --- | --- |
 | 2-1 | 决策与配方文档定稿（本文档 §1–§4） | 文档能独立复述 D1–D6 |
-| 2-2 | K1Mini 的 buildroot defconfig 落地（release 骨架 + systemd + Qt5 替 weston） | `make <defconfig>` 通过、`BR2_INIT_SYSTEMD=y` |
+| 2-2 ✅ | K1Mini 的 buildroot defconfig 落地（release 骨架 + **systemd** + Qt5 替 weston） | `make <defconfig>` 通过（退出码 0）、`.config` 里 systemd 与 Qt/EGLFS/虚拟键盘/G52/GBM/NPU/MPP/NM/Python 逐项在位（见 §5.1） |
 | 2-3 | 板级对齐（面板变体已定 / 触摸复位脚 / WiFi / 以太网 / PMIC / 容量） | 差异表 + "要不要改 dts"结论，逐项带证据 |
 | 2-4 | 分区与 OTA 布局定稿（A/B 或 recovery；模型 4.9 GB 落点） | 分区表可落地 + 回退路径明确 |
 | 2-5 | libmali G52(GBM) 进 buildroot | `gbm_*` ≥ 30，`BR2_PACKAGE_HAS_LIBGBM=y` |
