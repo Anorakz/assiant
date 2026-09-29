@@ -23,6 +23,14 @@ T15-2-7 的出口是"**chroot 内逐项在位 + ldd 无缺失**"。这句话要�
 
 用法：
     python3 image/check-runtime-deps.py <SDK 根目录> [--chroot|--no-chroot] [--json]
+    python3 image/check-runtime-deps.py <SDK 根目录> --target <target 树>
+
+    ⚠ 不指定 `--target` 时，会**优先选整机构建那棵树**（`buildroot/output/<CFG>/<CFG>/target`，
+    也就是 `update.img` 的来源），并把选中的是哪棵打印出来 —— T15-2-10 之前这里写死成
+    单包那棵，于是"整机构建后的验证"其实在看另一棵树（详见 image/imagelib.py 的说明）。
+
+退出码：0 = 全过；1 = 缺件/闭包缺/冒烟失败；3 = 上面都过、但 **payload 还没装**
+（agent/GUI/native/默认配置，2-8 明确留给后面的那批，见 §5.6 末段）。
 """
 from __future__ import annotations
 
@@ -34,7 +42,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-CFG = os.environ.get("IMG_CFG", "rockchip_rk3568_kickpi_k1mini_release")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import imagelib  # noqa: E402  （同目录的工具模块，两个检查器共用）
+
+CFG = imagelib.CFG_DEFAULT
 
 # ---------------------------------------------------------------------------
 #  R8：仓库里出现过的第三方 Python 模块 → 定性
@@ -103,13 +114,53 @@ PY_IN_IMAGE = {
 
 
 def target_dir(sdk: Path) -> Path:
-    return sdk / "buildroot" / "output" / CFG / "target"
+    """兼容旧调用：按 imagelib 的规则选树（整机构建优先）。"""
+    t, _why = imagelib.resolve_target(sdk)
+    return t if t else (sdk / "buildroot" / "output" / CFG / "target")
 
 
 def site_packages(target: Path) -> Path:
-    for p in sorted(target.glob("usr/lib/python3.*/site-packages")):
-        return p
-    return target / "usr/lib/python3.11/site-packages"
+    return imagelib.site_packages(target)
+
+
+# ---------------------------------------------------------------------------
+#  4) payload：agent / GUI / native / 默认配置（unit 文件已经按这些路径写好了）
+#  ---------------------------------------------------------------------------
+#  与 MANIFEST 的区别：
+#    · MANIFEST = "镜像里必须有、而且现在就该有"（缺了就是 bug，构建/配方错了）
+#    · PAYLOAD  = "unit 文件已经指向它们，但**还没做**"（docs/image.md §5.6 末段：
+#                 "agent/GUI 的 payload（代码与二进制）进 rootfs 也还没做"）
+#  为什么必须单独一类：缺 payload 不会让 buildroot 报错，只会让板子起来之后
+#  agent.service 反复 `No module named agent`、agent-gui.service 反复
+#  `No such file or directory` —— 构建绿的、板子废的。所以刷板前必须能看见。
+# ---------------------------------------------------------------------------
+PAYLOAD = [
+    ("agent", "usr/lib/assistant/agent/main.py",
+     "agent.service 的 ExecStart 是 `python3 -m agent.main`（PYTHONPATH=/usr/lib/assistant）"),
+    ("agent", "usr/lib/assistant/agent/__init__.py",
+     "同上：得是个**包**才 import 得进来"),
+    ("gui", "usr/lib/assistant/gui/agent_gui",
+     "agent-gui.service 的 ExecStart（Qt5/EGLFS，要用 buildroot 的 Qt 交叉编译）"),
+    ("native", "usr/lib/assistant/agent_native.cpython-311-aarch64-linux-gnu.so",
+     "agent 的 pybind11 扩展（懒加载，缺了输入/视觉/Moonlight 那几条走不通；"
+     "仓库里现有那份是 cp38，镜像 python 是 3.11 用不了）"),
+    ("config", "usr/lib/assistant/config/config.example.yaml",
+     "assistant-init.service 首启从这里 `cp -n` 出 /data/assistant/config/config.yaml"),
+    ("config", "usr/lib/assistant/config/user_profile.example.yaml",
+     "同上（user_profile.yaml）"),
+    ("doc", "usr/lib/assistant/Readme.md", "agent.service 的 Documentation= 指向它"),
+    ("doc", "usr/lib/assistant/docs/gui.md", "agent-gui.service 的 Documentation= 指向它"),
+    ("doc", "usr/lib/assistant/docs/image.md", "assistant-init.service 的 Documentation= 指向它"),
+]
+
+
+def check_payload(target: Path) -> list:
+    rows = []
+    for kind, rel, why in PAYLOAD:
+        p = target / rel
+        rows.append({"kind": kind, "name": rel, "why": why, "ok": p.exists(),
+                     "detail": "" if p.exists() else "还没装进 rootfs"})
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -317,26 +368,43 @@ def main(argv) -> int:
     flags = {a for a in argv[1:] if a.startswith("--")}
     if not args:
         print(__doc__.strip().splitlines()[-1])
-        print("用法: python3 image/check-runtime-deps.py <SDK 根目录> [--chroot|--no-chroot] [--json]")
+        print("用法: python3 image/check-runtime-deps.py <SDK 根目录> "
+              "[--target <target 树>] [--chroot|--no-chroot] [--json]")
         return 2
     sdk = Path(args[0]).resolve()
-    target = target_dir(sdk)
-    if not target.is_dir():
-        print("!! 找不到 target 树：%s" % target, file=sys.stderr)
+
+    # --target <目录>：显式指定（也给 --target=<目录> 这种写法留个口子）
+    explicit = ""
+    for i, a in enumerate(argv[1:]):
+        if a == "--target" and i + 2 <= len(argv[1:]):
+            explicit = argv[1:][i + 1]
+        elif a.startswith("--target="):
+            explicit = a.split("=", 1)[1]
+    target, why = imagelib.resolve_target(sdk, explicit or None)
+    if target is None:
+        print("!! %s" % why, file=sys.stderr)
         return 2
 
     want_chroot = "--no-chroot" not in flags
     rows = check_present(target)
+    payload = check_payload(target)
     missing, checked = check_closure(target)
     smoke = chroot_smoke(target, want_chroot)
 
+    payload_bad = [r for r in payload if not r["ok"]]
+
     if "--json" in flags:
-        print(json.dumps({"present": rows, "closure_missing": missing,
+        print(json.dumps({"target": str(target), "target_kind": why,
+                          "present": rows, "payload": payload,
+                          "closure_missing": missing,
                           "closure_checked": checked, "smoke": smoke},
                          ensure_ascii=False, indent=2))
-        return 0
+        return 0 if not payload_bad else 3
 
-    print("== 逐项在位（target = %s）" % target)
+    print("== 树：%s" % target)
+    print("   （%s）" % why)
+    print()
+    print("== 逐项在位")
     bad = 0
     for r in rows:
         mark = "[OK] " if r["ok"] else "[缺] "
@@ -369,13 +437,28 @@ def main(argv) -> int:
                     print("          %s" % line[:140])
 
     print()
+    print("== payload（我们的 agent / GUI / native / 默认配置；unit 文件已经按这些路径写好了）")
+    for r in payload:
+        mark = "[OK] " if r["ok"] else "[未做]"
+        print("   %s %-8s %-64s %s" % (mark, r["kind"], r["name"], r["why"]))
+    if payload_bad:
+        print("   ⚠ %d/%d 项还没装进 rootfs —— 这不是构建错误，是**已计划但还没做**的那一步"
+              % (len(payload_bad), len(payload)))
+        print("      （docs/image.md §5.6 末段写明留给后面）。缺了它，assistant.target 起得来、"
+              "但 agent/gui 会一直重启。")
+
+    print()
     verdict = (bad == 0 and not missing and smoke_bad == 0)
     skipped = sum(1 for s in smoke if s["ok"] is None)
-    print("== 结论：%s（在位缺 %d、依赖缺 %d、冒烟失败 %d%s）"
+    print("== 结论：%s（在位缺 %d、依赖缺 %d、冒烟失败 %d%s、payload 未做 %d/%d）"
           % ("通过" if verdict else "不通过", bad, len(missing), smoke_bad,
-             "、冒烟跳过 %d" % skipped if skipped else ""))
+             "、冒烟跳过 %d" % skipped if skipped else "",
+             len(payload_bad), len(payload)))
     if skipped and bad == 0 and not missing:
         print("   （在位与闭包都过了；冒烟是因权限不足跳过的，拿到 root 再跑一遍就有真证据）")
+    if verdict and payload_bad:
+        print("   → 系统层可以刷；**但要让 assistant.target 真的把服务拉起来，得先把 payload 装进 rootfs**")
+        return 3
     return 0 if verdict else 1
 
 

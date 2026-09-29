@@ -19,6 +19,7 @@ from __future__ import annotations
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -142,6 +143,113 @@ class TestBoardAndImageUnitsDoNotDrift(unittest.TestCase):
         self.assertEqual(problems, [],
                          "镜像单元与板端单元除了差异表之外不该不一样（要么同步，要么往差异表里加）:\n"
                          + "\n".join(problems))
+
+
+class TestVendorServicesInOurBootChain(unittest.TestCase):
+    """T15-2-10：**整机构建**那棵树里，我们的启动链上其实还挂着厂商服务。
+
+    2-8 那次"只有我们的东西"是在**单包构建**那棵树上验的（那时还没装到这些），
+    整机构建后对着真树一查就露出来了：
+
+      · `wifibt-init.service`（`WantedBy=sysinit.target`，oneshot，加载 rtl8822cs 固件）
+        —— **必须留**：屏蔽了 wlan0 连设备都没有，network-online 永远等不到；
+      · `usb-gadget.service`（`WantedBy=local-fs.target`，`Type=simple` 常驻）
+        —— 发行镜像 **mask 掉**（与"只起我们的东西"矛盾），开发镜像保留。
+
+    这一组用例把"白名单有理由"与"mask 由 post-build 落"两件事钉住，
+    并且用一棵**假的 target 树**真跑一遍检查器验证 mask 的语义
+    （masked = systemd 语义上起不来 = 不算进闭包）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(_ROOT / "image"))
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("check_assistant_target", str(CHECKER))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        cls.mod = mod
+
+    def test_wifibt_init_is_allowlisted_with_a_reason(self):
+        self.assertIn("wifibt-init.service", self.mod.INFRA_UNITS)
+
+    def test_usb_gadget_is_masked_not_allowlisted(self):
+        self.assertIn("usb-gadget.service", self.mod.MASKED_BY_US)
+        self.assertNotIn("usb-gadget.service", self.mod.INFRA_UNITS,
+                         "usb-gadget 是常驻的调试通道，不该进白名单（要么 mask，要么真需要）")
+
+    def test_post_build_masks_it(self):
+        post = (_ROOT / "image" / "board" / "rockchip" / "kickpi" / "k1mini"
+                / "post-build.sh").read_text(encoding="utf-8")
+        self.assertIn("usb-gadget.service", post)
+        self.assertIn("MASK_UNITS", post)
+        self.assertIn("/dev/null", post)
+
+    # -- 用假树真跑检查器 ---------------------------------------------------
+    def _fake_target(self, tmp: pathlib.Path, mask_usb_gadget: bool):
+        target = pathlib.Path(tmp) / "target"
+        sysd = target / "usr/lib/systemd/system"
+        etc = target / "etc/systemd/system"
+        sysd.mkdir(parents=True)
+        for u in ("assistant.target", "agent.service", "agent-gui.service",
+                  "assistant-init.service"):
+            (sysd / u).write_text((IMG / u).read_text(encoding="utf-8"), encoding="utf-8")
+        # systemd 基座的最小链条（**必须有**，否则闭包走不到 local-fs/sysinit，
+        # 也就看不见厂商挂在那两个 target 上的服务 —— 第一版假树就漏了这个，
+        # 于是"未 mask 应该失败"的用例假通过了）
+        (sysd / "basic.target").write_text(
+            "[Unit]\nDescription=Basic System\nRequires=sysinit.target\n", encoding="utf-8")
+        (sysd / "sysinit.target").write_text(
+            "[Unit]\nDescription=System Initialization\nRequires=local-fs.target\n",
+            encoding="utf-8")
+        (sysd / "local-fs.target").write_text(
+            "[Unit]\nDescription=Local File Systems\n", encoding="utf-8")
+        # 厂商那两个（内容够解析即可）
+        (sysd / "wifibt-init.service").write_text(
+            "[Unit]\nDescription=Init Rockchip Wifi/BT\n[Service]\n"
+            "Type=oneshot\nExecStart=/usr/bin/wifibt-init.sh start\n[Install]\n"
+            "WantedBy=sysinit.target\n", encoding="utf-8")
+        (sysd / "usb-gadget.service").write_text(
+            "[Unit]\nDescription=Manage USB gadget functions\n[Service]\n"
+            "Type=simple\nExecStart=/usr/bin/usb-gadget start\n[Install]\n"
+            "WantedBy=local-fs.target\n", encoding="utf-8")
+
+        (etc / "assistant.target.wants").mkdir(parents=True)
+        for u in ("agent.service", "agent-gui.service"):
+            (etc / "assistant.target.wants" / u).symlink_to("/usr/lib/systemd/system/" + u)
+        (etc / "sysinit.target.wants").mkdir()
+        (etc / "sysinit.target.wants" / "wifibt-init.service").symlink_to(
+            "/usr/lib/systemd/system/wifibt-init.service")
+        (etc / "local-fs.target.wants").mkdir()
+        (etc / "local-fs.target.wants" / "usb-gadget.service").symlink_to(
+            "/usr/lib/systemd/system/usb-gadget.service")
+        (etc / "default.target").symlink_to("/usr/lib/systemd/system/assistant.target")
+        if mask_usb_gadget:
+            (etc / "usb-gadget.service").symlink_to("/dev/null")
+        return target
+
+    def _run(self, target: pathlib.Path):
+        sdk = target.parent
+        return subprocess.run([sys.executable, str(CHECKER), "--sdk", str(sdk),
+                               "--target", str(target)],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              universal_newlines=True, timeout=120)
+
+    def test_unmasked_vendor_service_fails_the_check(self):
+        with tempfile.TemporaryDirectory() as t:
+            target = self._fake_target(pathlib.Path(t), mask_usb_gadget=False)
+            proc = self._run(target)
+            self.assertEqual(proc.returncode, 1, proc.stdout)
+            self.assertIn("usb-gadget.service", proc.stdout)
+
+    def test_masked_vendor_service_passes_and_is_reported(self):
+        with tempfile.TemporaryDirectory() as t:
+            target = self._fake_target(pathlib.Path(t), mask_usb_gadget=True)
+            proc = self._run(target)
+            self.assertEqual(proc.returncode, 0, proc.stdout)
+            self.assertIn("被我们 mask 掉", proc.stdout)
+            self.assertIn("wifibt-init.service", proc.stdout)
+            self.assertIn("--target 指定", proc.stdout)
 
 
 if __name__ == "__main__":

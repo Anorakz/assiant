@@ -118,6 +118,12 @@ install_file image/build-llama.sh tools/assistant/build-llama.sh
 install_file image/prepare-rknnlite.sh tools/assistant/prepare-rknnlite.sh
 install_file image/check-runtime-deps.py tools/assistant/check-runtime-deps.py
 install_file image/check-assistant-target.py tools/assistant/check-assistant-target.py
+# T15-2-10：两个检查器共用的"看哪棵 target 树"模块（imagelib.py），
+# 以及刷板前一键入口 preflash-check.sh。
+# ⚠ imagelib.py 必须跟着进去：两个检查器都 `import imagelib`，
+#   只拷检查器不拷它 → SDK 里那两个脚本直接 ImportError（只有真跑才发现）。
+install_file image/imagelib.py tools/assistant/imagelib.py
+install_file image/preflash-check.sh tools/assistant/preflash-check.sh
 
 if [ "$FAILED" != "0" ]; then
     echo "!! 有源文件缺失，注入不完整" >&2

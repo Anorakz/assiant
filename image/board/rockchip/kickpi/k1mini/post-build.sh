@@ -98,6 +98,29 @@ echo "   + network-online.target.wants/NetworkManager-wait-online.service"
 echo "   ---- /etc/systemd/system 现在长这样："
 ls -la "$ETC" | sed 's/^/     /'
 
+# ---------------------------------------------------------------------------
+#  T15-2-10：屏蔽厂商的调试/传输类常驻服务
+#  ---------------------------------------------------------------------------
+#  实测（对着**整机构建**那棵树查闭包，见 image/preflash-check.sh）：厂商在
+#  `local-fs.target.wants/` 里挂了 usb-gadget.service，而它是 `Type=simple` 的常驻服务
+#  （/usr/bin/usb-gadget start，adb/rndis 那一类），**每次开机都会起来** ——
+#  这与 T15-2-8 的出口"只起我们的东西"直接矛盾。
+#  另外一个厂商服务 wifibt-init.service（sysinit.target.wants/）**要留**：
+#  wlan0(rtl8822cs) 的固件是它加载的，屏蔽了就没网（它在检查器的白名单里有理由）。
+#  屏蔽方式用 systemd 的标准做法：`/etc/systemd/system/<unit> -> /dev/null`；
+#  开发镜像可以设 ASSISTANT_FLAVOR=dev 保留它（T15-2-12 用得上 adb）。
+MASK_UNITS="usb-gadget.service"
+for u in $MASK_UNITS; do
+    if [ "${ASSISTANT_FLAVOR:-release}" = "dev" ]; then
+        echo "   ~ 开发镜像：保留 $u（不屏蔽）"
+        continue
+    fi
+    if [ -e "$SYSD/$u" ]; then
+        ln -sfn /dev/null "$ETC/$u"
+        echo "   - 已屏蔽厂商常驻服务 $u（$ETC/$u -> /dev/null）"
+    fi
+done
+
 # --- 2) llama-server（交叉编译）---------------------------------------------
 if [ -x "$TOOLS/build-llama.sh" ]; then
     echo "== [assistant post-build] llama.cpp"
@@ -111,7 +134,13 @@ fi
 # --- 3) rknnlite -------------------------------------------------------------
 if [ -x "$TOOLS/prepare-rknnlite.sh" ]; then
     echo "== [assistant post-build] rknnlite"
-    bash "$TOOLS/prepare-rknnlite.sh" "$SDK" || { echo "!! rknnlite 安装失败" >&2; exit 1; }
+    # ⚠ 必须把 TARGET_DIR 传下去（T15-2-10 修的）：
+    #   整机构建与单包构建是**两棵** output 树（docs/image.md §5.8），而这个脚本第一版
+    #   自己算落点，算的是**单包那棵** —— 于是 T15-2-9 的整机镜像里根本没进 rknnlite，
+    #   构建却全绿（它还因为那棵树里留着 T15-2-7 的旧戳，打印"已经一致"就退了）。
+    #   post-build 环境里的 TARGET_DIR 就是当前这棵 target 树，传它最准。
+    bash "$TOOLS/prepare-rknnlite.sh" "$SDK" --target "$TARGET_DIR" \
+        || { echo "!! rknnlite 安装失败" >&2; exit 1; }
 else
     echo "!! 找不到 $TOOLS/prepare-rknnlite.sh" >&2
     exit 1

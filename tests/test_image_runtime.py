@@ -22,7 +22,9 @@ import os
 import pathlib
 import sys
 import sysconfig
+import tempfile
 import unittest
+from unittest import mock
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 _CHECKER = _ROOT / "image" / "check-runtime-deps.py"
@@ -169,6 +171,168 @@ class TestDependencyManifest(unittest.TestCase):
         for s in ("start.sh", "stop.sh"):
             self.assertTrue(any(n.endswith("llm/scripts/" + s) for n in names),
                             "MANIFEST 里必须盯着 llm/scripts/" + s)
+
+
+class TestPayloadIsItsOwnCategory(unittest.TestCase):
+    """T15-2-10：payload（agent/GUI/native/默认配置）必须与 MANIFEST 分开看。
+
+    为什么单独一类：MANIFEST 缺了 = 构建/配方错了（必须修）；payload 缺了 =
+    **unit 文件已经指向它、但东西还没做**（docs/image.md §5.6 末段写明留给后面）。
+    前者让构建红，后者让构建**照样绿**、板子起来之后服务反复重启 ——
+    正是刷板前验证必须看见、而普通"构建成功"看不见的那一类。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load_checker()
+
+    def test_payload_paths_live_under_the_assistant_root(self):
+        self.assertTrue(self.mod.PAYLOAD, "PAYLOAD 不该是空的")
+        for kind, rel, why in self.mod.PAYLOAD:
+            self.assertFalse(rel.startswith("/"), "应为 target 相对路径: %s" % rel)
+            self.assertTrue(rel.startswith("usr/lib/assistant/"),
+                            "payload 都在 /usr/lib/assistant 下（D7：代码进 rootfs）: %s" % rel)
+            self.assertTrue(why, "%s 缺少 why" % rel)
+            self.assertIn(kind, ("agent", "gui", "native", "config", "doc"),
+                          "未知的 payload 类别: %s" % kind)
+
+    def test_payload_and_manifest_do_not_overlap(self):
+        """同一个路径不该既算"必须有"又算"还没做"——那是自相矛盾的清单。"""
+        man = {rel for _k, rel, _w in self.mod.MANIFEST}
+        pay = {rel for _k, rel, _w in self.mod.PAYLOAD}
+        self.assertEqual(man & pay, set())
+
+    def test_units_point_at_paths_that_are_watched(self):
+        """unit 里 ExecStart / Documentation 指向的路径必须都在清单里被盯着。
+
+        （这就是为什么 payload 表里连 docs/*.md 都有：unit 的 Documentation=
+        指向它们。清单与 unit 对不上的话，改名只会静默漂。）
+        """
+        pay = {rel for _k, rel, _w in self.mod.PAYLOAD}
+        for rel in ("usr/lib/assistant/agent/main.py",
+                    "usr/lib/assistant/gui/agent_gui",
+                    "usr/lib/assistant/Readme.md",
+                    "usr/lib/assistant/docs/gui.md",
+                    "usr/lib/assistant/docs/image.md",
+                    "usr/lib/assistant/config/config.example.yaml",
+                    "usr/lib/assistant/config/user_profile.example.yaml"):
+            self.assertIn(rel, pay)
+
+
+class TestWhichTargetTreeTheCheckersLookAt(unittest.TestCase):
+    """T15-2-10 的根因守卫：**整机构建与单包构建是两棵树**，只差一层同名目录。
+
+    T15-2-9 整机镜像里漏掉 rknnlite，就是因为检查器（和 post-build 调的那个脚本）
+    都看/写单包那棵树。`image/imagelib.py` 把选树收在一处，这里钉住优先级：
+
+        --target  >  IMG_TARGET  >  整机构建树（update.img 的来源）  >  单包树
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(_ROOT / "image"))
+        import imagelib
+        cls.lib = imagelib
+
+    def _sdk(self, tmp, trees):
+        """造一棵假 SDK：trees 是 ("integrated"|"single",) 的组合。"""
+        sdk = pathlib.Path(tmp)
+        c = "test_cfg"
+        base = sdk / "buildroot" / "output"
+        for kind in trees:
+            p = (base / c / c / "target" if kind == "integrated" else base / c / "target")
+            (p / "usr/lib").mkdir(parents=True)
+        return sdk
+
+    def test_integrated_wins_when_both_exist(self):
+        with tempfile.TemporaryDirectory() as t:
+            with mock.patch.dict(os.environ, {"IMG_CFG": "test_cfg"}, clear=False):
+                os.environ.pop("IMG_TARGET", None)
+                sdk = self._sdk(t, ("single", "integrated"))
+                target, why = self.lib.resolve_target(sdk)
+                self.assertTrue(target)
+                self.assertIn("整机构建", why)
+                self.assertEqual(target.parts[-2:], ("test_cfg", "target"))
+                self.assertEqual(target.parts.count("test_cfg"), 2,
+                                 "选中的必须是**嵌一层**那棵树")
+
+    def test_single_is_the_fallback(self):
+        with tempfile.TemporaryDirectory() as t:
+            with mock.patch.dict(os.environ, {"IMG_CFG": "test_cfg"}, clear=False):
+                os.environ.pop("IMG_TARGET", None)
+                sdk = self._sdk(t, ("single",))
+                target, why = self.lib.resolve_target(sdk)
+                self.assertEqual(target.parts.count("test_cfg"), 1)
+                self.assertIn("单包", why)
+
+    def test_explicit_target_wins_and_must_exist(self):
+        with tempfile.TemporaryDirectory() as t:
+            with mock.patch.dict(os.environ, {"IMG_CFG": "test_cfg"}, clear=False):
+                sdk = self._sdk(t, ("single", "integrated"))
+                other = pathlib.Path(t) / "elsewhere"
+                other.mkdir()
+                target, why = self.lib.resolve_target(sdk, str(other))
+                self.assertEqual(target, other)
+                self.assertIn("--target", why)
+                target, why = self.lib.resolve_target(sdk, str(pathlib.Path(t) / "nope"))
+                self.assertIsNone(target)
+                self.assertIn("不存在", why)
+
+    def test_img_target_env_is_honoured(self):
+        with tempfile.TemporaryDirectory() as t:
+            with mock.patch.dict(os.environ, {"IMG_CFG": "test_cfg"}, clear=False):
+                sdk = self._sdk(t, ("single", "integrated"))
+                other = pathlib.Path(t) / "from_env"
+                other.mkdir()
+                with mock.patch.dict(os.environ, {"IMG_TARGET": str(other)}):
+                    target, why = self.lib.resolve_target(sdk)
+                self.assertEqual(target, other)
+                self.assertIn("IMG_TARGET", why)
+
+    def test_missing_trees_says_which_paths_it_looked_at(self):
+        with tempfile.TemporaryDirectory() as t:
+            with mock.patch.dict(os.environ, {"IMG_CFG": "test_cfg"}, clear=False):
+                os.environ.pop("IMG_TARGET", None)
+                target, why = self.lib.resolve_target(pathlib.Path(t))
+                self.assertIsNone(target)
+                self.assertIn("target", why)
+
+
+class TestPostBuildFeedsTheRightTree(unittest.TestCase):
+    """T15-2-10：post-build 必须把 `$TARGET_DIR` 传给 prepare-rknnlite.sh。
+
+    那一次的实际后果：不传 → 脚本自己算落点 → 算成单包那棵 → 整机镜像里没有
+    rknnlite，而构建**全绿**（脚本还因为旧树里有 T15-2-7 的戳而打印"已经一致"）。
+    这两个文件是跨文件不变量，缺一边这个 bug 就会回来。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.post = (_ROOT / "image" / "board" / "rockchip" / "kickpi" / "k1mini"
+                    / "post-build.sh").read_text(encoding="utf-8")
+        cls.rknn = (_ROOT / "image" / "prepare-rknnlite.sh").read_text(encoding="utf-8")
+
+    def test_post_build_passes_target_dir(self):
+        self.assertIn('--target "$TARGET_DIR"', self.post,
+                      "post-build 调 prepare-rknnlite.sh 时必须传 --target \"$TARGET_DIR\"")
+
+    def test_rknnlite_script_accepts_target(self):
+        self.assertIn("--target", self.rknn)
+        self.assertIn("TARGET_DIR", self.rknn, "还要认 buildroot 导出的 TARGET_DIR")
+
+    def test_rknnlite_script_no_longer_derives_the_tree_from_the_build_dir(self):
+        """第一版用 `$OUT/build/python3-*` 推 python 版本 —— 那正是在算错误的树。
+
+        现在 python 版本从 **target 树自己**（usr/lib/python3.x）看。
+        """
+        self.assertNotIn("/build/python3-", self.rknn)
+        self.assertIn('"$TARGET"/usr/lib/python3.', self.rknn)
+
+    def test_installer_ships_imagelib(self):
+        """两个检查器都 `import imagelib`；只拷检查器不拷它 = SDK 里直接 ImportError。"""
+        install = (_ROOT / "image" / "install-into-sdk.sh").read_text(encoding="utf-8")
+        self.assertIn("image/imagelib.py tools/assistant/imagelib.py", install)
+        self.assertIn("image/preflash-check.sh tools/assistant/preflash-check.sh", install)
 
 
 if __name__ == "__main__":

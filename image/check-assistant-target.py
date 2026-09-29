@@ -29,9 +29,13 @@ T15-2-8 的出口是：`systemctl list-dependencies assistant.target` **只有�
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import imagelib  # noqa: E402  （同目录的工具模块：两棵树只差一层同名目录，选树收在一处）
 
 #: 我们自己的单元（镜像里就这四个）
 OUR_UNITS = {
@@ -48,6 +52,22 @@ INFRA_UNITS = {
     "NetworkManager.service",
     "NetworkManager-wait-online.service",
     "NetworkManager-dispatcher.service",
+    # 厂商的 WiFi/BT 固件初始化（`/usr/bin/wifibt-init.sh start`，oneshot，
+    # `WantedBy=sysinit.target`）。**必须留着**：wlan0(rtl8822cs) 的固件/模块是它加载的，
+    # 没有它 NetworkManager 连设备都没有，network-online 永远等不到。
+    # —— T15-2-10 才发现它在我们的启动链里：2-8 那次检查看的是**单包构建**那棵树
+    # （那时还没装到这一步），整机构建的树里它在 `sysinit.target.wants/`。
+    "wifibt-init.service",
+}
+
+#: 被我们**主动 mask** 掉的厂商服务（`/etc/systemd/system/<unit> -> /dev/null`）。
+#: 出现在这里 = post-build 明确不要它；检查器看到 mask 就当它不存在（systemd 的语义也是
+#: "屏蔽"，即使别的 target 还 Want 它也起不来）。每一个都要有理由。
+MASKED_BY_US = {
+    # USB gadget（adb/rndis 那一类调试与传输通道）：`Type=simple` 常驻，
+    # `WantedBy=local-fs.target` —— 不屏蔽的话**每次开机都会起**，与
+    # "只起我们的东西"（T15-2-8 的出口）矛盾。发行镜像屏蔽，开发镜像保留（T15-2-12）。
+    "usb-gadget.service",
 }
 
 #: systemd 自带的基座（这些出现在闭包里是正常的；桌面那一路不在其中）
@@ -117,6 +137,18 @@ def load_units(units_dir: Path) -> dict:
         if p.is_file() or p.is_symlink():
             units[p.name] = parse_unit(p)
     return units
+
+
+def is_masked(etc_dir: Path, name: str) -> bool:
+    """`/etc/systemd/system/<unit> -> /dev/null` = systemd 的"屏蔽"。
+
+    ⚠ 不能用 `Path.readlink()`：那是 Python **3.9+** 才有的，CI 跑 3.8。
+    """
+    p = etc_dir / name
+    try:
+        return p.is_symlink() and os.readlink(str(p)) == "/dev/null"
+    except OSError:
+        return False
 
 
 def direct_deps(units: dict, name: str) -> set:
@@ -224,8 +256,14 @@ def run_units_mode(units_dir: Path) -> int:
     return 0
 
 
-def run_sdk_mode(sdk: Path) -> int:
-    target = sdk / "buildroot" / "output" / "rockchip_rk3568_kickpi_k1mini_release" / "target"
+def run_sdk_mode(sdk: Path, target: Path = None) -> int:
+    if target is None:
+        target, why = imagelib.resolve_target(sdk)
+        if target is None:
+            print("!! %s" % why, file=sys.stderr)
+            return 2
+    else:
+        why = "--target 指定"
     sysd = target / "usr/lib/systemd/system"
     etc = target / "etc/systemd/system"
     if not sysd.is_dir():
@@ -233,6 +271,7 @@ def run_sdk_mode(sdk: Path) -> int:
         return 2
 
     print("== 镜像模式：检查 %s" % target)
+    print("   （%s）" % why)
     units = load_units(sysd)
     for p in sorted(etc.glob("*")) if etc.is_dir() else []:
         if p.is_file() and p.suffix in (".service", ".target"):
@@ -251,18 +290,39 @@ def run_sdk_mode(sdk: Path) -> int:
 
     # 2) .wants/.requires 目录（enable 的落地形式）
     extra: dict = {}
+    masked = []
     if etc.is_dir():
         for d in sorted(etc.glob("*.wants")) + sorted(etc.glob("*.requires")):
             owner = d.name.rsplit(".", 1)[0]     # assistant.target.wants -> assistant.target
-            names = {p.name for p in d.iterdir()}
+            names = set()
+            for p in d.iterdir():
+                if is_masked(etc, p.name):
+                    masked.append("%s（%s 里挂过，已被我们 mask）" % (p.name, d.name))
+                    continue
+                names.add(p.name)
             extra.setdefault(owner, set()).update(names)
             print("   %-34s -> %s" % (d.name, " ".join(sorted(names)) or "(空)"))
+    if masked:
+        print("   被我们 mask 掉（/dev/null，systemd 语义上起不来，因此不算进闭包）:")
+        for m in masked:
+            print("     - %s" % m)
 
     # 3) 闭包
     for name, unit in units.items():
         if name in OUR_UNITS:
             check_unit_file(name, unit, problems)
     closure_all = closure(units, "assistant.target", extra)
+    # mask 掉的单元即使被 Wants= 直接引用也不会起来，所以不算进闭包（但要说出来）。
+    # ⚠ 判据是**磁盘上真有那个 /dev/null 符号链接**，不是 MASKED_BY_US 这张策略表 ——
+    #   否则"策略要求 mask、但 post-build 没落"就会被自己人掩盖过去。
+    really_masked = {u for u in closure_all if is_masked(etc, u)}
+    for m in sorted(really_masked):
+        print("   （闭包里点到了被 mask 的 %s —— 按 systemd 语义不会起来，已忽略）" % m)
+    closure_all = closure_all - really_masked
+    # 策略表里要求 mask 的，必须真的被 mask 了（少了这一步，策略只是文档）
+    for u in sorted(MASKED_BY_US):
+        if (sysd / u).exists() and not is_masked(etc, u):
+            problems.append("按策略要 mask 的 %s 没有被 mask（post-build 的 MASK_UNITS 没落？）" % u)
     ours = sorted(u for u in closure_all if u in OUR_UNITS)
     infra = sorted(u for u in closure_all if u in INFRA_UNITS)
     print("   闭包：我们的 %s" % ", ".join(ours))
@@ -281,6 +341,12 @@ def run_sdk_mode(sdk: Path) -> int:
     # 4) 整个 /etc/systemd/system 里也不许有桌面那一套被 enable
     if etc.is_dir():
         for d in list(etc.glob("*.wants")) + list(etc.glob("*.requires")):
+            # 厂商自己的 enable 目录名里带空格（实测：`local-fs.target graphical.target.wants`）
+            # → systemd **不认这种目录名**，里面的单元永远不会被拉起。
+            # 不是我们的问题，但板端基线时别以为它跑了（T15-2-10 记录）。
+            if " " in d.name:
+                print("   ! 目录名不合规（含空格），systemd 会忽略: %s（里面: %s）"
+                      % (d.name, " ".join(sorted(p.name for p in d.iterdir())) or "(空)"))
             for p in d.iterdir():
                 for bad in ("graphical", "display-manager", "weston", "slim", "xorg", "x11"):
                     if bad in p.name.lower():
@@ -292,7 +358,11 @@ def run_sdk_mode(sdk: Path) -> int:
         for p in problems:
             print("   - %s" % p)
         return 1
-    print("== 通过：只有我们的服务（+ NetworkManager 这一个白名单基础设施）")
+    print("== 通过：闭包里只有我们的 %d 个单元 + 白名单基础设施 %s"
+          % (len(ours), ", ".join(infra) or "(无)"))
+    if masked:
+        print("   （另有 %d 个厂商常驻服务被我们 mask 掉：%s）"
+              % (len(masked), ", ".join(m.split("（")[0] for m in masked)))
     return 0
 
 
@@ -300,11 +370,14 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--units", metavar="DIR", help="仓库模式的单元目录（例如 systemd/image）")
     ap.add_argument("--sdk", metavar="SDK", help="镜像模式：SDK 根目录")
+    ap.add_argument("--target", metavar="DIR",
+                    help="镜像模式：直接指定 target 树（不给则优先选整机构建那棵，"
+                         "见 image/imagelib.py）")
     args = ap.parse_args(argv)
     if args.units:
         return run_units_mode(Path(args.units))
     if args.sdk:
-        return run_sdk_mode(Path(args.sdk))
+        return run_sdk_mode(Path(args.sdk), Path(args.target) if args.target else None)
     ap.print_help()
     return 2
 

@@ -671,6 +671,14 @@ python3 image/check-assistant-target.py --sdk <SDK>             # 镜像模式�
 > ⚠ **静态闭包 ≠ 板上真跑**：这里证明的是"配置上没有别的东西被拉起来"。
 > 板上真跑 `systemctl list-dependencies assistant.target` 与 `systemd-analyze` 是 **T15-2-11** 的事。
 
+> ⚠ **T15-2-10 追记（这条很重要）**：上面那次验收是对着**单包构建**那棵树做的
+> （那时整机构建还没跑，两棵树的区别见 §5.8）。对着**整机构建**那棵树重跑之后，
+> 闭包里多出两个厂商服务 —— `wifibt-init.service`（厂商挂在 `sysinit.target.wants/`，
+> 加载 rtl8822cs 固件，**必须留**）与 `usb-gadget.service`（挂在 `local-fs.target.wants/`，
+> `Type=simple` 常驻，发行镜像**已 mask**）。也就是说"只有我们的东西"这句话，
+> 在整机镜像上的准确形态是：**我们的 4 个 + NetworkManager(2) + wifibt-init**，
+> 加上被 mask 的 usb-gadget。详见 §5.9。
+
 ### 5.8 首次完整构建（T15-2-9）
 
 #### 怎么跑
@@ -797,6 +805,114 @@ wsl -u root bash image/build-image.sh <SDK 根目录>
 - **T15-2-12 开发镜像**：同一套配方 + sshd/调试工具/pytest/串口控制台。
 - 属主：root 跑过之后执行 `chown -R anorak:anorak $SDK/output $SDK/buildroot/output`
   （否则非 root 的 T15-2-10 chroot 测试会碰壁）。
+
+### 5.9 刷板前验证（T15-2-10）：一条命令，三张表
+
+#### 一条命令
+
+```bash
+wsl -u root bash image/preflash-check.sh <SDK>
+```
+
+root 是给 chroot 冒烟用的：WSL 的 `binfmt_misc` 里已经注册了 `qemu-aarch64`
+（`qemu-user-static` 8.2.2），所以 **aarch64 的 `python3` 能直接在 chroot 里跑真 import**，
+不需要 `qemu-aarch64-static` 手动塞进树里。脚本按优先级选树（`--target` > `IMG_TARGET` >
+整机构建树 > 单包树），并把"我在看哪棵树"打印出来。退出码：0 全过、1 有缺件、3 系统层过了但 payload 没装。
+
+#### 这一轮真正的收获：**前面几步的验收，验的是另一棵树**
+
+§5.8 记了"两条 output 路径"，但两个检查器（以及 post-build 调的那个脚本）当初都按**单包**
+那棵写死了路径。于是 T15-2-9 整机构建成功之后，所谓"刷板前验证"其实在看另一棵树 ——
+**实测后果**：`prepare-rknnlite.sh` 把 wheel 解进了单包那棵的 site-packages，
+而整机镜像里**根本没有 `rknnlite`**，构建却全绿（它还因为那棵树里留着 T15-2-7 的旧戳，
+打印了一句"已经一致"就退出了）。取证就在会话日志第 1081 行：
+
+```
+site-packages: .../buildroot/output/rockchip_rk3568_kickpi_k1mini_release/target/usr/lib/python3.11/site-packages
+                                                                        ↑ 少了一层，是单包那棵
+= 已经一致：... 里已经是 rknn_toolkit_lite2-2.3.2-cp311-...whl
+```
+
+修法三条，都落进了配方：
+
+1. **选树收在一处**：`image/imagelib.py`（两个检查器都 `import` 它），
+   优先级 `--target` > `IMG_TARGET` > 整机构建树 > 单包树；打印选中哪棵。
+2. **post-build 把 `$TARGET_DIR` 传给 `prepare-rknnlite.sh`**，脚本加 `--target`；
+   它的 python 版本也改成**从 target 树自己看**（`usr/lib/python3.x`），
+   不再从 `$OUT/build/python3-*` 推 —— 那个路径本身就是"算错树"的来源。
+   不给 `--target` 且只找到单包树时，它会**大声警告**而不是安静地装错地方。
+3. **新入口 `image/preflash-check.sh`**：一条命令跑完全部，且把结果分成
+   "缺件（必须修）/ payload（已计划未做）/ 只能板上测" 三类。
+
+#### 结果（2026-09-29，对着整机构建树）
+
+| 段 | 结果 |
+| --- | --- |
+| 逐项在位 | **31 项，缺 0**（二进制/库/gst 插件/QML/字体/python 模块/llama 运行时；`rknnlite` 修好后由缺变有） |
+| DT_NEEDED 闭包 | **2496 个 ELF，缺失 0**（交叉版 ldd，照 ld.so 真实搜索顺序） |
+| chroot 冒烟 | **9/9 全过**：`Python 3.11.8`、`numpy 1.25.0 + cv2 4.9.0`、`rknnlite ok`、`bash ok`、`curl 8.6.0`、`nmcli 1.44.2`、`mppvideodec` 起得来、`fc-list :lang=zh` 出思源黑体、`llama-server` 跑得起来 |
+| 开机目标闭包 | **我们的 4 个 + NetworkManager(2) + `wifibt-init`**；`usb-gadget` 被 mask（见 F3） |
+| **payload** | **9/9 未做** —— 见 F5 |
+
+#### 四个发现（F1/F2 已修，F3 已处理，F4 只记录）
+
+**F1 `rknnlite` 装错树**（上面那段）：已修 + 已对现有 target 补装，chroot 里
+`from rknnlite.api import RKNNLite` 真的通过了。
+
+**F2 检查器看错树**（meta bug，比 F1 更值钱）：已修，见上。
+
+**F3 我们的启动链里还挂着两个厂商服务**（2-8 那次是在单包树上验的，所以没看见）：
+
+| 服务 | 厂商挂在哪 | 判断 |
+| --- | --- | --- |
+| `wifibt-init.service` | `sysinit.target.wants/`（`WantedBy=sysinit.target`，oneshot） | **留**：`/usr/bin/wifibt-init.sh start` 负责加载 wlan0(rtl8822cs) 的固件/模块，屏蔽了连设备都没有，`network-online` 永远等不到 → 进白名单（带理由） |
+| `usb-gadget.service` | `local-fs.target.wants/`（`WantedBy=local-fs.target`，`Type=simple` 常驻） | **发行镜像 mask**：adb/rndis 那一类调试与传输通道，每次都起，与"只起我们的东西"矛盾 → `post-build.sh` 里 `ln -sfn /dev/null /etc/systemd/system/usb-gadget.service`；开发镜像（2-12）可 `ASSISTANT_FLAVOR=dev` 保留 |
+
+检查器现在把 mask 当**真语义**处理：磁盘上真有 `/dev/null` 才算"起不来"，
+而且**策略表里要求 mask 的必须真被 mask**（否则报"post-build 的 MASK_UNITS 没落？"）。
+
+> 顺带看清了厂商自己的一处 bug：`/etc/systemd/system/` 里有个目录叫
+> **`local-fs.target graphical.target.wants`**（名字里带空格）。systemd 不认这种目录名，
+> 所以厂商以为自己 enable 了的 `async-commit.service`（`Enable ASYNC_COMMIT for Rockchip BSP kernel`）
+> **实际从来没跑过**。不是我们的问题，但板端基线时别以为它在跑（检查器会打印这条提示）。
+> 另外 `multi-user.target.wants/` 里那几个（`dhcpcd`/`input-event-daemon`/`irqbalance`/`log-guardian`）
+> 在我们这种形态下**不会被拉起** —— 我们根本不进 `multi-user.target`。
+
+**F4** 即上面那条目录名带空格的厂商 bug（只记录，不阻塞）。
+
+**F5 payload 9/9 未做**（这是刷板前**必须**解决的那件事）：
+
+| 类别 | 缺的东西 | 说明 |
+| --- | --- | --- |
+| agent | `usr/lib/assistant/agent/{main.py,__init__.py,...}` | `agent.service` 的 `ExecStart` 是 `python3 -m agent.main`（`PYTHONPATH=/usr/lib/assistant`） |
+| gui | `usr/lib/assistant/gui/agent_gui` | `agent-gui.service` 的 `ExecStart`；**要用 buildroot 的 Qt 5.15.11 交叉编译** |
+| native | `usr/lib/assistant/agent_native.cpython-311-aarch64-linux-gnu.so` | pybind11 扩展。⚠ 仓库里现有那份是 **cp38**（板端 Ubuntu 的 python），镜像 python 是 **3.11**，**必须重编** |
+| config | `config/{config,user_profile}.example.yaml` | `assistant-init.service` 首启 `cp -n` 到 `/data/assistant/config/` |
+| doc | `Readme.md`、`docs/{gui,image}.md` | 三个 unit 的 `Documentation=` 指向它们 |
+
+也就是说：**当前这套镜像刷上去，系统层是好的（能起、有网、字体/EGLFS/硬解/NPU 运行时都在），
+但 `assistant.target` 拉起来的 agent/gui 会一直重启**（`No module named agent` /
+`No such file or directory`）。所以 2-11 之前需要先补 payload（方案与排期见任务表）。
+
+#### 只能板上测的（构建机给不出证据，别当成"没做"）
+
+DRM/KMS 真出图（Mali G52 的 EGLFS、旋转 90°、开机到首帧）· 触摸（gt9xx、旋转后坐标）·
+wlan0 真联网与 `network-online` 真等到 · RTC（hym8563 @i2c5 0x51、掉电走时）·
+NPU 真推理（`RKNNLite.init_runtime()`）· 硬解真解码（帧率与 CPU，不是 `gst-inspect` 能看就行）·
+温度/功耗/启动耗时（`systemd-analyze`、`/sys/class/thermal`）· A/B 槽与 OTA 回滚。
+
+#### 交给 T15-2-11 的
+
+- 现有 `update.img` 是**修复前**的（缺 rknnlite、未 mask usb-gadget）→ 刷板前要重新打包，
+  顺便把 payload 决定一起落进去（只重跑 `./build.sh all` 的打包段即可，增量很快）。
+- 刷写用的镜像路径见 §5.8 的提醒（`output/update-ab/Image/update.img`）。
+
+> **关于原始出口里那句"chroot 跑 ctest + 仓库 Python 套件"**：镜像里**没有** ctest，
+> 也不该有 —— 发行镜像不带编译工具与测试框架。我们那套测试是**构建机/CI 的产物**：
+> host ctest 与 `scripts/test-python.sh` 每次提交都在 CI 里跑（本轮新增/加固：
+> `test_image_recipe` 27 项、`test_image_runtime` 19 项、`test_image_target` 10 项）。
+> 板上要跑测试的那一套属于开发镜像（2-12，带 pytest）。chroot 在这里能给的证据是
+> "**镜像自带的运行时真能跑**"，已经在上面那张冒烟表里逐条列出来了。
 
 ---
 

@@ -31,7 +31,15 @@
 #
 #  用法
 #  ---------------------------------------------------------------------------
-#      bash image/prepare-rknnlite.sh <SDK 根目录> [--dry-run]
+#      bash image/prepare-rknnlite.sh <SDK 根目录> [--target <target 树>] [--dry-run]
+#
+#  ⚠ **`--target` 是 T15-2-10 补上的，而且是必须的**：整机构建与单包构建是两棵
+#    output 树（`buildroot/output/<CFG>/target` 与 `.../<CFG>/<CFG>/target`，
+#    见 docs/image.md §5.8）。本脚本第一版把落点写死成**前者**，于是 T15-2-9 整机
+#    构建时，post-build 虽然调用了它，它却把 wheel 解进了**另一棵树** ——
+#    而且因为那棵树里早就有 T15-2-7 留下的戳，它打印"已经一致"就退出了，
+#    整机镜像里根本没有 rknnlite（构建全绿）。现在：post-build 传 `$TARGET_DIR`，
+#    不传时若只找到单包那棵树会**大声警告**，两个都找不到才报错。
 #
 #  幂等：site-packages 里已有同一份 wheel 的戳就跳过。**不改 SDK 的源码树**
 #  （只往已经建好的 target 树里放东西；镜像构建时由 post-build 脚本调用）。
@@ -41,44 +49,70 @@ set -euo pipefail
 SDK="${1:-}"
 shift || true
 DRY=""
+TARGET_ARG=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY="1" ;;
+        --target) TARGET_ARG="${2:-}"; shift ;;
+        --target=*) TARGET_ARG="${1#--target=}" ;;
         *) echo "未知参数: $1" >&2; exit 2 ;;
     esac
     shift
 done
 
 if [ -z "$SDK" ]; then
-    echo "用法: bash image/prepare-rknnlite.sh <SDK 根目录> [--dry-run]" >&2
+    echo "用法: bash image/prepare-rknnlite.sh <SDK 根目录> [--target <target 树>] [--dry-run]" >&2
     exit 2
 fi
 
 CFG="${IMG_CFG:-rockchip_rk3568_kickpi_k1mini_release}"
 OUT="$SDK/buildroot/output/$CFG"
-TARGET="$OUT/target"
 PKGDIR="$SDK/external/rknn-toolkit2/rknn-toolkit-lite2/packages"
 
-echo "== T15-2-7 rknnlite（rknn-toolkit-lite2）装进镜像"
+# ---------------------------------------------------------------------------
+#  落点：--target > 调用方导出的 TARGET_DIR（buildroot post-build 会给）> 自动选树
+# ---------------------------------------------------------------------------
+INTEGRATED="$OUT/$CFG/target"
+SINGLE="$OUT/target"
+if [ -n "$TARGET_ARG" ]; then
+    TARGET="$TARGET_ARG"; HOW="--target 指定"
+elif [ -n "${TARGET_DIR:-}" ]; then
+    TARGET="$TARGET_DIR"; HOW="TARGET_DIR（buildroot 的 post-build 环境）"
+elif [ -d "$INTEGRATED" ]; then
+    TARGET="$INTEGRATED"; HOW="自动选中：整机构建树（update.img 的来源）"
+elif [ -d "$SINGLE" ]; then
+    TARGET="$SINGLE"
+    HOW="自动选中：**单包构建树**"
+    echo "!! 注意：没给 --target / TARGET_DIR，只能选到单包那棵树："
+    echo "!!   $TARGET"
+    echo "!!   如果你的目的是整机构建（update.img），那就装错树了 —— 请让调用方传 --target。"
+else
+    echo "!! 两棵 output 树都没有 target：$INTEGRATED / $SINGLE" >&2
+    echo "!! （先把包编出来，或显式给 --target <target 树>）" >&2
+    exit 2
+fi
+
+echo "== T15-2-7 rknnlite（rknn-toolkit-lite2）装进镜像（T15-2-10 修订选树）"
 
 if [ ! -d "$TARGET" ]; then
-    echo "!! 还没有 target 树：$TARGET（先把包编出来）" >&2
+    echo "!! target 树不存在：$TARGET（$HOW）" >&2
     exit 2
 fi
 if [ ! -d "$PKGDIR" ]; then
     echo "!! 找不到 wheel 目录：$PKGDIR" >&2
     exit 2
 fi
+echo "   target     : $TARGET（$HOW）"
 
 # ---------------------------------------------------------------------------
-#  镜像里实际的 python 版本（从编译出来的 python3 目录名取）
+#  镜像里实际的 python 版本：**从 target 树自己看**（不依赖 build 目录，
+#  因为整机构建的 build 目录在另一层，第一版就是从这里开始错下去的）
 # ---------------------------------------------------------------------------
-PYDIR="$(ls -d "$OUT"/build/python3-[0-9]* 2>/dev/null | head -1 || true)"
-if [ -z "$PYDIR" ]; then
-    echo "!! 找不到编译出来的 python3 目录（$OUT/build/python3-*）" >&2
+PYVER="$(ls -d "$TARGET"/usr/lib/python3.[0-9]* 2>/dev/null | head -1 | xargs -r basename | sed 's/^python//' || true)"
+if [ -z "$PYVER" ]; then
+    echo "!! target 里没有 usr/lib/python3.x —— target 选错了或 python 还没装上：$TARGET" >&2
     exit 2
 fi
-PYVER="$(basename "$PYDIR" | sed 's/^python3-//' | cut -d. -f1,2)"
 PYTAG="cp$(printf '%s' "$PYVER" | tr -d '.')"
 echo "   镜像 python : $PYVER（tag $PYTAG）"
 
