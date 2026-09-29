@@ -13,7 +13,10 @@ image/
 ├─ prepare-mpp.sh                      # 补上厂商 MPP 快照漏掉的 build/cmake/merge_objects.cmake（T15-2-7）
 ├─ prepare-rknnlite.sh                 # 把 SDK 里 cp311 那份 rknn-toolkit-lite2 wheel 装进 site-packages（T15-2-7）
 ├─ build-llama.sh                      # 交叉编译 llama.cpp（钉 b387ddfd8）装进 /usr/lib/assistant/llm/bin（T15-2-7）
-├─ check-runtime-deps.py               # 运行时闭环验收：逐项在位 + DT_NEEDED 闭包 + chroot 冒烟（T15-2-7）
+├─ check-runtime-deps.py               # 运行时闭环验收：逐项在位 + DT_NEEDED 闭包 + chroot 冒烟 + payload（T15-2-7/2-10）
+├─ check-assistant-target.py           # 开机目标闭包：default.target 起来之后只有我们的东西（T15-2-8/2-10）
+├─ imagelib.py                         # 两个检查器共用：**看哪棵 target 树**（整机构建 vs 单包构建，T15-2-10）
+├─ preflash-check.sh                   # 刷板前一键验证：上面两个 + "只能板上测"清单（T15-2-10）
 ├─ check-parameter.py                  # 分区表校验器（纯算术；tests/test_image_parameter.py 有 8 项守卫）
 ├─ buildroot/configs/
 │   ├─ rockchip_rk3568_kickpi_k1mini_release_defconfig     # buildroot defconfig（片段式）
@@ -42,6 +45,9 @@ bash image/sdk-make.sh <SDK> rockchip_rk3568_kickpi_k1mini_release_defconfig
 # 3) 构建：单包（例如只验 Mali）/ 整机（内核 + u-boot + rootfs + 镜像）
 bash image/sdk-make.sh <SDK> rockchip-mali
 cd <SDK> && ./build.sh rk3566_rk3568:rockchip_rk3568_kickpi_k1mini_release_defconfig
+
+# 4) 刷板前验证（root 是给 chroot 冒烟用的；一条命令跑完在位/闭包/冒烟/payload/开机目标）
+wsl -u root bash image/preflash-check.sh <SDK>
 ```
 
 ## 约定
