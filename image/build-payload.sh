@@ -145,6 +145,7 @@ write_stamp() {
 #  按清单干活
 # ---------------------------------------------------------------------------
 n_copy=0; n_skip=0; n_gen=0; n_todo=0
+native_done=""; gui_done=""
 while IFS='|' read -r how src dest; do
     case "$how" in ""|\#*) continue ;; esac
     # 去掉行尾空白与注释
@@ -203,10 +204,20 @@ while IFS='|' read -r how src dest; do
         ;;
     gen)
         want gen || continue
-        srcdir="$SRC_ROOT/${src}"
-        [ -f "$srcdir" ] || srcdir="$HERE/../${src}"
-        if [ ! -f "$srcdir" ]; then
+        # 模板路径要在**两种布局**下都能找到（第一版只试了前两个，整机构建里就断在
+        # "清单里的模板不存在：image/payload/assistant"）：
+        #   仓库：      <repo>/image/payload/assistant
+        #   SDK 注入：  <SDK>/tools/assistant/payload/assistant   ← post-build 走的是这条
+        # 所以这里按顺序试四个位置，都没有才报错（报错时把试过的都打出来）。
+        base="$(basename "$src")"
+        srcdir=""
+        for cand in "$SRC_ROOT/$src" "$SRC_ROOT/payload/$base" "$HERE/payload/$base" \
+                    "$HERE/../$src" "$HERE/$base"; do
+            [ -f "$cand" ] && { srcdir="$cand"; break; }
+        done
+        if [ -z "$srcdir" ]; then
             echo "!! 清单里的模板不存在：$src" >&2
+            echo "   （试过：$SRC_ROOT/$src、$SRC_ROOT/payload/$base、$HERE/payload/$base、$HERE/../$src）" >&2
             exit 1
         fi
         h="$(stamp_of "$srcdir")"
@@ -225,29 +236,54 @@ while IFS='|' read -r how src dest; do
         ;;
     native)
         want native || continue
-        # 落点固定为清单里的 dest；真正干活的是 build-native.sh（T15-2-10b-3）
-        if [ -x "$HERE/build-native.sh" ]; then
-            echo "   [native] 交叉编译 pybind11 扩展 -> $dest"
-            if [ -z "$DRY" ]; then
-                bash "$HERE/build-native.sh" --target "$TARGET" --src-root "$SRC_ROOT" \
-                    --dest "$dest" || { echo "!! native 构建失败" >&2; exit 1; }
+        # ⚠ **同一种 how 只跑一次**：清单里有两条 native（扩展 + 它要的 moonlight 库），
+        #   两个都去调 build-native.sh 的话，第二条会把 moonlight 那个落点覆盖成扩展本身
+        #   （实测症状：chroot 里 `import agent_native` 报
+        #    `undefined symbol: LiStartConnection`）。所以第一条真跑，后面的只**核对**。
+        if [ -z "$native_done" ]; then
+            if [ -x "$HERE/build-native.sh" ]; then
+                echo "   [native] 交叉编译 pybind11 扩展 -> $dest"
+                if [ -z "$DRY" ]; then
+                    bash "$HERE/build-native.sh" --target "$TARGET" --src-root "$SRC_ROOT" \
+                        --dest "$dest" || { echo "!! native 构建失败" >&2; exit 1; }
+                fi
+                native_done="1"
+            else
+                echo "   [native] 还没实现（image/build-native.sh 属于 T15-2-10b-3）" >&2
+                n_todo=$((n_todo+1))
             fi
         else
-            echo "   [native] 还没实现（image/build-native.sh 属于 T15-2-10b-3）" >&2
-            n_todo=$((n_todo+1))
+            if [ -e "$TARGET/$dest" ]; then
+                echo "   [native] $dest  （由上面那一步顺带产出，已在位）"
+                n_skip=$((n_skip+1))
+            else
+                echo "!! $dest 不在位 —— native 那一步没有产出它" >&2
+                exit 1
+            fi
         fi
         ;;
     gui)
         want gui || continue
-        if [ -x "$HERE/build-gui.sh" ]; then
-            echo "   [gui   ] 交叉编译 Qt5 GUI -> $dest"
-            if [ -z "$DRY" ]; then
-                bash "$HERE/build-gui.sh" --target "$TARGET" --src-root "$SRC_ROOT" \
-                    --dest "$dest" || { echo "!! GUI 构建失败" >&2; exit 1; }
+        if [ -z "$gui_done" ]; then
+            if [ -x "$HERE/build-gui.sh" ]; then
+                echo "   [gui   ] 交叉编译 Qt5 GUI -> $dest"
+                if [ -z "$DRY" ]; then
+                    bash "$HERE/build-gui.sh" --target "$TARGET" --src-root "$SRC_ROOT" \
+                        --dest "$dest" || { echo "!! GUI 构建失败" >&2; exit 1; }
+                fi
+                gui_done="1"
+            else
+                echo "   [gui   ] 还没实现（image/build-gui.sh 属于 T15-2-10b-4）" >&2
+                n_todo=$((n_todo+1))
             fi
         else
-            echo "   [gui   ] 还没实现（image/build-gui.sh 属于 T15-2-10b-4）" >&2
-            n_todo=$((n_todo+1))
+            if [ -e "$TARGET/$dest" ]; then
+                echo "   [gui   ] $dest  （已在上一步产出，已在位）"
+                n_skip=$((n_skip+1))
+            else
+                echo "!! $dest 不在位 —— GUI 那一步没有产出它" >&2
+                exit 1
+            fi
         fi
         ;;
     *)

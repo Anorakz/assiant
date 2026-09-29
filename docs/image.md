@@ -982,30 +982,48 @@ cd buildroot && make O=output/<cfg> <cfg>_defconfig   → 立刻 PYTHON3_SSL=y
 **整机构建（`./build.sh all` → `mk-buildroot.sh`）走的是后者那条路**，所以 2-9 的
 `.config` 是新的。→ 以后验证配置改动用 `make O=... <cfg>_defconfig`，别用 lunch。
 
-#### 状态
-
-| 步骤 | 状态 |
-| --- | --- |
-| 2-10b-1 清单 + 骨架 | ✅ `--dry-run` 三种走法（copy+gen → 0；全量 → 1 且明说"半成品"；无 `--target` → 2 拒绝猜树） |
-| 2-10b-2 python 侧 | ✅ 装进整机 target（66 个 .py、0 个 pyc、幂等、戳在 rootfs 之外、权限归一）；`_ssl`/`_hashlib`/`readline` 修好并随整机构建重建 —— chroot 里 `ssl ok: OpenSSL 3.2.1 | hashlib ok`、**`agent import ok`** |
-| 2-10b-3 native（cp311） | ✅ `Machine: AArch64`、`NEEDED` 里 moonlight 与 mpp 都在、chroot `import agent_native` RC=0 |
-| 2-10b-4 GUI（交叉编译） | ⬜ **唯一剩下的一项**（payload 表 1/12） |
-| 2-10b-5 串进 post-build | ⬜ |
-| 2-10b-6 重新打包 + 全量验证 | ⬜（python3 那次已顺带重打包过一次） |
-
-#### 途中的第四个坑：改配置**不等于**重建（两层机制）
+#### 第四个坑：改配置**不等于**重建（三层机制，少一层就白改）
 
 ```
 ./build.sh rk3566_rk3568:<cfg>_defconfig              # lunch：已配置过就什么都不做
 cd buildroot && make O=output/<cfg> <cfg>_defconfig   # 这才重新生成 .config
 make O=... python3-rebuild                            # 又**不重跑 configure**（DISABLED_EXTENSIONS 照旧）
-make O=... python3-dirclean python3                   # 只有 dirclean 才会重新 configure → _ssl 才编出来
+make O=... python3-dirclean python3                   # 只有 dirclean 才重新 configure → _ssl 才编出来
 ```
 
-三条都实测过：跳过任何一条，`.config` 里 `PYTHON3_SSL=y` 而 `lib-dynload/_ssl*.so` 依旧不存在。
+三条都实测过：跳过任何一条，`.config` 里那个开关是 `y` 而 `lib-dynload/_ssl*.so` 依旧不存在。
 （另外：单独 `make python3` 会在收尾的 `check-bin-arch` 上报三个**厂商二进制**的架构警告
 `architecture for /usr/bin/input-event-daemon is "ARM"` —— 与我们的改动无关，
 整机构建路径（`./build.sh all`）不报，镜像正常。）
+
+#### 状态
+
+| 步骤 | 状态 |
+| --- | --- |
+| 2-10b-1 清单 + 骨架 | ✅ `--dry-run` 三种走法（copy+gen → 0；全量 → 1 且明说"半成品"；无 `--target` → 2 拒绝猜树） |
+| 2-10b-2 python 侧 | ✅ 装进整机 target（66 个 .py、0 个 pyc、幂等、戳在 rootfs 之外、权限归一）；`_ssl`/`_hashlib`/`readline` 修好 |
+| 2-10b-3 native（cp311） | ✅ `Machine: AArch64`；moonlight 库**定义了** `LiStartConnection`；chroot `import agent_native` RC=0 |
+| 2-10b-4 GUI | ✅ Qt5 Widgets 交叉编译（1,084,712 B → strip **821,368 B**）、`Machine: AArch64`、`NEEDED` 里的 Qt5/yaml-cpp 全在镜像里；`agent_gui --help` chroot RC=0 |
+| 2-10b-5 串进 post-build | ✅ `post-build.sh` 在 llama → rknnlite 之后调 `build-payload.sh --target "$TARGET_DIR" --src-root …/payload-src`；**删掉 target 里的 payload 再整机构建，它自己装回来了**（证明真的走通了，不是"我手动拷的"） |
+| 2-10b-6 重新打包 + 全量验证 | ✅ `preflash-check.sh` **RC=0（payload 0/12）**；`update-ab` **759,050,826 B**；target 531 MB；chroot 里 `agent.cli + agent.main + agent_native + ssl + cv2 + numpy + yaml + psutil + rknnlite` **全部 import ok** |
+
+#### 途中另外三个坑（都在 payload 串线时暴露）
+
+1. **模板路径要认两种布局**：清单里的 `gen` 源写成仓库相对路径
+   （`image/payload/assistant`），而 post-build 的世界里它在 `<SDK>/tools/assistant/payload/`。
+   整机构建当场断在 `!! 清单里的模板不存在：image/payload/assistant`。
+   现在按四个候选位置依次找，找不到才报错（并把试过的路径全打出来）。
+2. **同一种 `how` 只许跑一次**：清单里有**两条** `native`（扩展 + 它的 moonlight 库），
+   第一版两条都去调 `build-native.sh` → 第二条把 moonlight 的落点**覆盖成了扩展自己**
+   → chroot 里 `import agent_native` 报 `undefined symbol: LiStartConnection`。
+   现在第一条真跑、后面的只核对在位；`build-payload.sh` 里用 `native_done`/`gui_done` 记住。
+3. **取依赖库要认"符号"而不是"文件名"**：`find … -name 'libmoonlight-common-c.so*' | head -1`
+   在构建目录里抓到过同名但不是那个库的文件。现在只从确定路径
+   `$BUILD_DIR/moonlight-common-c/libmoonlight-common-c.so` 取，**并且**
+   `nm -D --defined-only | grep ' T LiStartConnection'` 验过才装。
+
+> 这三条与 §5.9 的 F1/F2 是同一类错误：**"构建成功"与"镜像里真的是那样"之间隔着好几层**，
+> 每层都得拿产物本身（ELF 头、导出符号、chroot 里的真 import）说话。
 
 ---
 

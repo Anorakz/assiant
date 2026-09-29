@@ -79,6 +79,31 @@ done
 SR="${TF%/host/share/buildroot/toolchainfile.cmake}/host/aarch64-buildroot-linux-gnu/sysroot"
 [ -d "$SR/usr/include" ] || { echo "!! sysroot 不对：$SR" >&2; exit 2; }
 
+# ---------------------------------------------------------------------------
+#  两种落点（清单里有两条 native：扩展本身 + 它要的 moonlight 库）
+#  ---------------------------------------------------------------------------
+#  ⚠ 第一版没区分：第二条 native 也走"编扩展并 install 到 --dest"，
+#    结果把 `libmoonlight-common-c.so` 覆盖成了 pybind11 扩展，
+#    chroot 里 `import agent_native` 报
+#        undefined symbol: LiStartConnection
+#    （扩展要的那个符号当然不在"扩展自己"里）。所以：
+#      · --dest 的名字里带 moonlight → 只装 moonlight 库，不碰扩展
+#      · 否则 → 装扩展 + 保证 moonlight 库与它同目录
+case "$(basename "$DEST")" in
+    *moonlight*)
+        echo "   （落点名是 moonlight 库 → 只装这个库，不重装扩展）"
+        ML="$(find "$BUILD_DIR/moonlight-common-c" "$SR/usr/lib" -name 'libmoonlight-common-c.so*' 2>/dev/null | head -1)"
+        if [ -z "$ML" ]; then
+            echo "!! 还没有 libmoonlight-common-c.so。" >&2
+            echo "   它由**扩展那一步**（清单里第一条 native，落点是 agent_native*.so）顺带编出来；" >&2
+            echo "   build-payload.sh 会保证先跑那一步。若单独跑本脚本，请先不加 --dest 跑一次。" >&2
+            exit 1
+        fi
+        install -D -m 0755 "$ML" "$TARGET/$DEST"
+        echo "   + 已装到 $TARGET/$DEST（$(stat -c %s "$TARGET/$DEST") B）"
+        exit 0 ;;
+esac
+
 echo "== T15-2-10b-3 交叉编译 agent_native（pybind11 扩展）"
 echo "   SDK        : $SDK"
 echo "   sysroot    : $SR"
@@ -147,21 +172,26 @@ echo "   + 已装到 $TARGET/$DEST"
 
 # 依赖闭包粗查：libmoonlight-common-c.so 必须与它同目录（RPATH=\$ORIGIN）
 DIR="$(dirname "$TARGET/$DEST")"
+ML_BUILT="$BUILD_DIR/moonlight-common-c/libmoonlight-common-c.so"
 if command -v readelf >/dev/null 2>&1; then
     if readelf -d "$TARGET/$DEST" 2>/dev/null | grep -q 'moonlight'; then
-        if [ ! -f "$DIR/libmoonlight-common-c.so" ]; then
-            ML="$(find "$SR/usr/lib" "$BUILD_DIR" -name 'libmoonlight-common-c.so*' 2>/dev/null | head -1)"
-            if [ -n "$ML" ]; then
-                cp -a "$ML" "$DIR/"
-                echo "   + 从 $ML 补了 libmoonlight-common-c.so"
-            else
-                echo "!! 扩展链到 moonlight 但找不到 libmoonlight-common-c.so —— import 会失败" >&2
-                exit 1
-            fi
+        # ⚠ **只从确定的路径取**，并且**校验符号**：
+        #   第一版用 `find ... -name 'libmoonlight-common-c.so*' | head -1`，
+        #   结果在构建目录里抓到了一份同名但不是那个库的文件（扩展自己）→
+        #   chroot 里 `import agent_native` 报 `undefined symbol: LiStartConnection`。
+        #   判据：这个库必须**定义**（T）LiStartConnection，不是引用（U）。
+        if [ ! -f "$ML_BUILT" ]; then
+            echo "!! 构建目录里没有 $ML_BUILT" >&2
+            exit 1
         fi
-        # ⚠ 权限归一：源在 Windows 盘上（DrvFs），cp -a 会把 777 带进镜像
-        chmod 0755 "$DIR/libmoonlight-common-c.so"
-        echo "   = libmoonlight-common-c.so 已同目录（$(stat -c %a "$DIR/libmoonlight-common-c.so")，RPATH=\$ORIGIN 能解析）"
+        if ! nm -D --defined-only "$ML_BUILT" 2>/dev/null | grep -q ' T LiStartConnection'; then
+            echo "!! $ML_BUILT 里没有定义 LiStartConnection（拿到错的文件了）" >&2
+            nm -D "$ML_BUILT" 2>/dev/null | grep LiStartConnection | sed 's/^/     /' >&2
+            exit 1
+        fi
+        install -D -m 0755 "$ML_BUILT" "$DIR/libmoonlight-common-c.so"
+        echo "   = libmoonlight-common-c.so 已同目录（$(stat -c %s "$DIR/libmoonlight-common-c.so") B，"
+        echo "     定义了 LiStartConnection，RPATH=\$ORIGIN 能解析）"
     fi
 fi
 echo "== 完成。chroot 冒烟："

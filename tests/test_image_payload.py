@@ -232,5 +232,60 @@ class TestProfileAndUnitsAgree(unittest.TestCase):
             self.assertNotIn("function ", text, "%s 里出现了 bashism function" % name)
 
 
+class TestPostBuildInstallsThePayload(unittest.TestCase):
+    """T15-2-10b-5：post-build 必须按清单把 payload 装进**它自己那棵树**。
+
+    这一组存在的理由：payload 是"unit 早就指向、但一直没装"的那批东西
+    （§5.9 的 F5）。装不上不会让构建失败 —— 只会让板子起来之后服务反复重启，
+    所以必须由 CI 盯着"这一步真的被调用了、而且落点传对了"。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.post = (_ROOT / "image" / "board" / "rockchip" / "kickpi" / "k1mini"
+                    / "post-build.sh").read_text(encoding="utf-8")
+        cls.builder = (_ROOT / "image" / "build-payload.sh").read_text(encoding="utf-8")
+        cls.installer = (_ROOT / "image" / "install-into-sdk.sh").read_text(encoding="utf-8")
+
+    def test_post_build_calls_it_with_the_target_dir(self):
+        self.assertIn("build-payload.sh", self.post)
+        self.assertIn('--target "$TARGET_DIR"', self.post,
+                      "post-build 调 build-payload.sh 时必须传 --target \"$TARGET_DIR\"（别猜树）")
+
+    def test_post_build_points_at_the_injected_source_tree(self):
+        self.assertIn("--src-root", self.post)
+        self.assertIn("payload-src", self.post)
+
+    def test_build_payload_runs_each_how_once(self):
+        """清单里有两条 native（扩展 + moonlight 库），**不能**各跑一遍构建。
+
+        第一版的症状：第二条把 moonlight 的落点覆盖成了扩展自己，chroot 里
+        `import agent_native` 报 `undefined symbol: LiStartConnection`。
+        """
+        self.assertIn("native_done", self.builder)
+        self.assertIn("gui_done", self.builder)
+
+    def test_build_native_verifies_the_moonlight_symbol(self):
+        """取 moonlight 库时必须**校验它定义了 LiStartConnection**。
+
+        第一版用 `find … -name 'libmoonlight-common-c.so*' | head -1`，
+        在构建目录里抓到了同名但不是那个库的文件（扩展自己）。
+        """
+        native = (_ROOT / "image" / "build-native.sh").read_text(encoding="utf-8")
+        self.assertIn("LiStartConnection", native)
+        self.assertIn("--defined-only", native)
+
+    def test_installer_injects_the_payload_sources(self):
+        self.assertIn("payload-src", self.installer)
+        for needle in ("agent/", "native/", "gui/", "payload.manifest"):
+            self.assertIn(needle, self.installer,
+                          "install-into-sdk.sh 应把 %s 注入 payload-src" % needle)
+
+    def test_installer_ships_the_payload_builders(self):
+        for tool in ("build-payload.sh", "build-native.sh", "build-gui.sh", "payload.manifest"):
+            self.assertIn("tools/assistant/" + tool, self.installer,
+                          "%s 必须注入到 <SDK>/tools/assistant/" % tool)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

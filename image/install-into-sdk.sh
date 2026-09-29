@@ -124,6 +124,63 @@ install_file image/check-assistant-target.py tools/assistant/check-assistant-tar
 #   只拷检查器不拷它 → SDK 里那两个脚本直接 ImportError（只有真跑才发现）。
 install_file image/imagelib.py tools/assistant/imagelib.py
 install_file image/preflash-check.sh tools/assistant/preflash-check.sh
+# T15-2-10b：payload 的构建脚本（post-build 里按清单装 agent/GUI/native）
+install_file image/build-payload.sh tools/assistant/build-payload.sh
+install_file image/build-native.sh tools/assistant/build-native.sh
+install_file image/build-gui.sh tools/assistant/build-gui.sh
+install_file image/payload.manifest tools/assistant/payload.manifest
+for f in assistant assistant.sh; do
+    install_file "image/payload/$f" "tools/assistant/payload/$f"
+done
+
+# ---------------------------------------------------------------------------
+#  T15-2-10b-5：payload 的**源码**也要进 SDK
+#  ---------------------------------------------------------------------------
+#  理由与 llm/scripts 那次一样：post-build 是在 **SDK 里**跑的，够不到我们的仓库。
+#  仓库仍是唯一来源 —— 这里只是把它复制成 SDK 内的 `tools/assistant/payload-src/`。
+#  ⚠ 用 rsync 而不是 install_file：这些是**目录树**（agent/ 66 个文件、native/ 带
+#    submodule、gui/ 几十个源文件）。排除项：
+#      __pycache__/*.pyc  —— 别把宿主机字节码带进镜像
+#      build*/            —— 本仓库的构建产物（Windows 盘上还可能是 777）
+#      native/third_party/googletest —— 只有 host 单测用，交叉编译不需要
+#      gui/tests/         —— 镜像里 -DGUI_BUILD_TESTS=OFF，不需要
+echo
+echo "== payload 源码注入 → tools/assistant/payload-src/（post-build 在那里取源）"
+if ! command -v rsync >/dev/null 2>&1; then
+    echo "!! 没有 rsync，payload 源码无法注入（apt-get install rsync）" >&2
+    FAILED=1
+else
+    PAYLOAD_SRC="$SDK/tools/assistant/payload-src"
+    if [ -n "$DRY" ]; then
+        echo "   + (dry-run) rsync agent/ config/*.example.yaml Readme.md docs/{gui,image}.md"
+        echo "   + (dry-run) rsync native/ gui/ → $PAYLOAD_SRC"
+    else
+        mkdir -p "$PAYLOAD_SRC"
+        rsync -a --delete --exclude '__pycache__' --exclude '*.pyc' --exclude '.pytest_cache' \
+              --exclude 'build/' --exclude 'build-*/' --exclude '.git' \
+              "$HERE/../agent/" "$PAYLOAD_SRC/agent/"
+        for f in config/config.example.yaml config/user_profile.example.yaml Readme.md docs/gui.md docs/image.md; do
+            mkdir -p "$PAYLOAD_SRC/$(dirname "$f")"
+            cp "$HERE/../$f" "$PAYLOAD_SRC/$f"
+        done
+        rsync -a --delete --exclude '__pycache__' --exclude '*.pyc' \
+              --exclude 'build/' --exclude 'build-*/' --exclude '.git' \
+              --exclude 'third_party/googletest/' \
+              "$HERE/../native/" "$PAYLOAD_SRC/native/"
+        rsync -a --delete --exclude '__pycache__' --exclude '*.pyc' \
+              --exclude 'build/' --exclude 'build-*/' --exclude '.git' \
+              --exclude 'tests/' \
+              "$HERE/../gui/" "$PAYLOAD_SRC/gui/"
+        # 两个 shell 模板也放一份进 payload-src（build-payload.sh 会先在那里找；
+        # 找不到才回退到 tools/assistant/payload/ —— 两处都在，谁先被注入都不怕）
+        mkdir -p "$PAYLOAD_SRC/payload"
+        for f in assistant assistant.sh; do
+            cp "$HERE/payload/$f" "$PAYLOAD_SRC/payload/$f"
+        done
+        cp "$HERE/payload.manifest" "$PAYLOAD_SRC/payload.manifest"
+        echo "   + agent/ $(find "$PAYLOAD_SRC/agent" -name '*.py' | wc -l) 个 .py、native/ $(du -sh "$PAYLOAD_SRC/native" | cut -f1)、gui/ $(du -sh "$PAYLOAD_SRC/gui" | cut -f1)"
+    fi
+fi
 
 if [ "$FAILED" != "0" ]; then
     echo "!! 有源文件缺失，注入不完整" >&2

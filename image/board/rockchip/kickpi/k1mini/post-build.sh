@@ -146,4 +146,20 @@ else
     exit 1
 fi
 
+# --- 4) payload：我们的 agent / GUI / native / 默认配置（T15-2-10b-5）---------
+#  这是"unit 文件早就指向、但一直没装"的那批东西（docs/image.md §5.9 的 F5）：
+#  缺了它 assistant.target 起得来、agent/gui 会一直重启（No module named agent）。
+#  ⚠ 源在 <SDK>/tools/assistant/payload-src/（由 image/install-into-sdk.sh 注入）——
+#    post-build 在 SDK 里跑，够不到我们的仓库。
+#  ⚠ 落点一律传 $TARGET_DIR（T15-2-10 的教训：脚本自己猜树会静默装到另一棵树）。
+if [ -x "$TOOLS/build-payload.sh" ]; then
+    echo "== [assistant post-build] payload（agent / GUI / native / 配置模板）"
+    bash "$TOOLS/build-payload.sh" --target "$TARGET_DIR" \
+         --src-root "$TOOLS/payload-src" \
+        || { echo "!! payload 安装失败" >&2; exit 1; }
+else
+    echo "!! 找不到 $TOOLS/build-payload.sh（先跑 image/install-into-sdk.sh）" >&2
+    exit 1
+fi
+
 echo "== [assistant post-build] 完成"

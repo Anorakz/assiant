@@ -1,8 +1,9 @@
 # T15-2-10b 断点存档（payload 装进 rootfs）
 
 > 用途：**按用户要求在 23:00 断电前保存**。照着本文即可继续，不需要重新推导。
-> 状态：**2-10b-1 / 2-10b-2 / 2-10b-3 完成**（payload 表 **1/12**，只剩 GUI）；
-> 2-10b-4（GUI 交叉编译）出方案与脚本（`image/build-gui.sh`，T15-2-10b-4）是下一步。
+> 状态：**2-10b-1 … 2-10b-6 全部完成** —— payload **0/12**、`preflash-check.sh` **退出码 0**、
+> 镜像已重新打包（`update-ab` 759,050,826 B）。剩下只有 **2-10b-7 的提交/CI 与你的验收**，
+> 然后就是 **2-11 首次刷板**。
 > 任务列表与出口见 `todo2.md` 的 2-10b-1…7。
 
 ## 0. 关键路径（照抄）
@@ -26,9 +27,18 @@ REPO=/mnt/e/rk3568/project/myproject/assitant
 | 2-10b-1 源清单 + `build-payload.sh` 骨架 | ✅ | `--dry-run` 三种走法：copy+gen → RC 0；全量 → RC 1（明确报"半成品：未实现 2 项"）；不给 `--target` → RC 2 拒绝猜树。`tests/test_image_payload.py` 13 项与检查器/unit 三方互校 |
 | 2-10b-2 python 侧进镜像 | ✅ | 装进整机 target：`agent/` **66 个 .py、0 个 pyc**、两个 example.yaml、Readme、docs、`/usr/bin/assistant`、`/etc/profile.d/assistant.sh`；幂等（二次跑 7 跳过）；戳在 **rootfs 之外**；权限归一 0755/0644。**`_ssl` 缺件修好**：chroot 里 `ssl ok: OpenSSL 3.2.1 | hashlib ok` 且 **`agent import ok`** |
 | 2-10b-3 native cp311 | ✅ | `Machine: AArch64`；`NEEDED` = moonlight + `librockchip_mpp.so.1`（都在同目录/镜像里）；chroot `import agent_native` **RC=0**，导出 `BUTTON_*/MODIFIER_*/FRAME_*` |
-| 2-10b-4 GUI 交叉编译 | ⬜ **下一步** | payload 表 1/12 就是它 |
-| 2-10b-5 串进 post-build | ⬜ | — |
-| 2-10b-6 重新打包 + 全量验证 | ⬜ | python3 那次已顺带重打包成功（`update-…-2026092921.img`） |
+| 2-10b-4 GUI 交叉编译 | ✅ | `image/build-gui.sh`：1,084,712 B → strip **821,368 B**；`Machine: AArch64`；`NEEDED` 的 Qt5 全家 + yaml-cpp 都在镜像里；chroot `agent_gui --help` RC=0 |
+| 2-10b-5 串进 post-build | ✅ | 先删掉 target 里的 payload 再整机构建 → post-build 自己装回来（agent/gui/native/配置/文档/两个入口） |
+| 2-10b-6 重新打包 + 全量验证 | ✅ | `preflash-check.sh` **RC=0、payload 0/12**；`update-ab` **759,050,826 B**；chroot 里九个模块**全部 import ok** |
+
+## 1.5 这一轮的三个新坑（都在串线时暴露，已修并加了守卫）
+
+1. **模板路径两种布局**：清单里 `gen` 的源是仓库相对路径，SDK 里在 `tools/assistant/payload/`
+   → 改成按四个候选位置找，找不到才报错（整机构建当场断过一次）。
+2. **同一 `how` 只许跑一次**：清单有**两条** `native`（扩展 + moonlight），两条都跑会把
+   moonlight 落点覆盖成扩展本身 → `import agent_native` 报 `undefined symbol: LiStartConnection`。
+3. **取依赖库认符号不认文件名**：`find … -name 'libmoonlight-common-c.so*' | head -1`
+   抓到过同名错文件 → 只从 `$BUILD_DIR/moonlight-common-c/` 取，**且**验 `T LiStartConnection`。
 
 ## 2. 两个坑（都写进配方注释了）
 
