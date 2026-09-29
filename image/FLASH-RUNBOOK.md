@@ -28,40 +28,42 @@ SDK=/home/anorak/rk3568_buildroot/linux-kernel-6.1/rk-linux6.1-2026060914/rk-lin
 | ⚠ 别拿这个 | `$SDK/output/firmware/update.img`（AB 形态下它是**悬空软链**，指向不存在的 `update-ab.img`） |
 | 分区表 | `$SDK/output/firmware/parameter.txt`（= 我们的 `parameter-assistant-ab.txt`，T15-2-4 校验过） |
 
-## 2. 两条刷机路线
+## 2. 刷机路线：**已选定 B（USB loader + Windows RKDevTool）**
 
-### 路线 A：**板内本地升级**（不需要 USB 线、不需要按键）
+> 2026-09-29 22:38 你的决定：**下次专门做**、走 **路线 B**、**手上有厂商 Ubuntu 出厂镜像**
+> （所以这次刷板**可逆**）。下面是执行稿。
 
-板子自带了 `/usr/bin/updateEngine`（Rockchip 的 OTA 引擎）与 `/usr/bin/upgrade_tool`。
-板子的 `/` 现在有 13 G 可用，放得下 759 MB 的镜像。
+### 2.1 我这边已经就位的东西（下次不用再准备）
 
-```bash
-# ① 把镜像传到板子（PC 上执行；板子在 192.168.137.30）
-scp <PC 上的 update.img> rk3568:/tmp/update.img
-# ② 板上校验（必须与 §1 的 sha256 一致，不一致别继续）
-ssh rk3568 'sha256sum /tmp/update.img'
-# ③ 板上执行本地升级（先看清 updateEngine 的参数，各版本略有差别）
-ssh rk3568 'updateEngine --help | head -30'
-ssh rk3568 'updateEngine --image_url=/tmp/update.img --misc=update --save_dir=/tmp --reboot'
-```
+| 东西 | 路径 |
+| --- | --- |
+| 镜像（Windows 侧，**sha256 已核对**） | `E:\rk3568\flash\update-assistant-20260929.img` = 759,050,826 B / `cb02622b…4b4a0119` |
+| 分区镜像（按分区单独烧用） | `E:\rk3568\flash\update-assistant-20260929.raw.img` |
+| 分区表 | `E:\rk3568\flash\parameter-assistant-ab.txt` |
+| RKDevTool v3.37 | `E:\rk3568\flash-tools\RKDevTool_Release_v3.37\RKDevTool_v3.37_for_window\RKDevTool.exe` |
+| Rockusb 驱动（没装过才需要） | `E:\rk3568\flash-tools\DriverAssistant\DriverAssitant_v5.13\DriverInstall.exe` |
+| 命令行版（可选） | `E:\rk3568\flash-tools\upgrade_tool_v2.46\` 下的 `upgrade_tool.exe` |
+| 备选（SD 卡启动） | SDK `tools/windows/SDDiskTool_v1.78.zip` |
+| 备份：板上配置与 llm | `temp/board-state-20260929.tgz`（6.9 MB，含 `config.yaml` md5 `5212393a…`、`llm.env`） |
+| 备份：板上 4.9 GB 模型 | `E:\rk3568\board-model-backup\model\`（18 个文件 / **4.86 GB**） |
 
-- 风险点：它是**在运行中的系统上写同一块 eMMC**，中途失败就得走路线 B 救砖。
-  好处是**不用碰硬件**，也就不用你守在板子边上。
-- 升级期间**别断电**；重启后板子应当进我们的 `assistant.target`。
+### 2.2 下次执行（**只有 3 个手动动作要你做**）
 
-### 路线 B：**USB loader 模式 + Windows 工具**（厂商标准路线，最稳）
+1. **装驱动**（只需一次）：管理员运行 `DriverInstall.exe`。之前刷过这台板子的话，多半已装好。
+2. **插 USB 线**（板子的 USB OTG/下载口 ↔ PC）。
+3. **按住 RECOVERY 键**上电或复位，直到 RKDevTool 底部出现 **"发现一个 LOADER 设备"**（或 MASKROM），松手。
 
-SDK 里现成的工具：`$SDK/tools/windows/RKDevTool_Release_v3.37.zip`、
-`upgrade_tool_v2.46.zip`、`DriverAssistant_v5.13.zip`（Windows）；
-Linux 侧是 `rkbin/tools/upgrade_tool` 与 `tools/linux/Linux_Upgrade_Tool/`。
+然后：`升级固件 页 → 固件(F) 选 E:\rk3568\flash\update-assistant-20260929.img → 升级`，
+等 100%（**期间绝不能断电/拔线**），板子自己重启进我们的 `assistant.target`。
 
-步骤（**需要你在板子边上**）：
-1. Windows 上解压 `RKDevTool_Release_v3.37.zip`；若系统里没有 Rockusb 驱动，
-   先装 `DriverAssistant_v5.13.zip` 里的驱动（要管理员权限）。
-2. 板子**按住 RECOVERY 键**再上电/复位 → 工具里出现 **发现一个 LOADER/MASKROM 设备**。
-3. `升级固件` 页 → `固件` 选 `update.img` → `升级`。
-4. ⚠ WSL2 **不能直通 USB**（要 `usbipd-win`），所以这条路线在 Windows 侧做，
-   不要在 WSL 里试。
+> ⚠ **不要在 WSL 里试 USB 路线**：WSL2 默认不直通 USB（要 `usbipd-win`），一定在 Windows 侧。
+
+### 2.3 路线 A（板内 `updateEngine`）——本次不采用，留档
+
+板子自带 `/usr/bin/updateEngine`，可以 `scp` 镜像上去后
+`updateEngine --image_url=/tmp/update.img --misc=update --save_dir=/tmp --reboot`，
+不用插线不用按键。**没采用**：它是在运行中的系统上写同一块 eMMC，中途失败要回路线 B 救砖；
+既然出厂镜像在手、也不赶时间，路线 B 更干净。
 
 ## 3. 刷完之后的首次启动（2-11 的正文）
 
