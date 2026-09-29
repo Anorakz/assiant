@@ -89,12 +89,24 @@ SDK=/home/anorak/rk3568_buildroot/linux-kernel-6.1/rk-linux6.1-2026060914/rk-lin
 CFG=rockchip_rk3568_kickpi_k1mini_release
 T=$SDK/buildroot/output/$CFG/$CFG/target
 chroot $T /usr/bin/env PYTHONPATH=/usr/lib/assistant /usr/bin/python3 -c \
-  "import agent.cli, agent.main, agent_native, ssl, hashlib; print('payload import ok')"
+  "import agent.cli, agent.main, agent_native, ssl, cv2, numpy, yaml, psutil; from rknnlite.api import RKNNLite; print('payload import ok')"
 chroot $T /usr/bin/assistant --help | head -5          # 包装脚本（自己会设 PYTHONPATH）
-wsl -u root bash image/preflash-check.sh $SDK           # payload 应为 1/12
+chroot $T /usr/lib/assistant/gui/agent_gui --help      # GUI 二进制（真出图只能板上测）
+wsl -u root bash image/preflash-check.sh $SDK           # 应为 payload 0/12、退出码 0
+```
 
-# 1) 下一步：写 image/build-gui.sh 并交叉编译 GUI（2-10b-4）
-#    工具链要点见下面第 4 节
+**已就绪，下一步是 2-11 首次刷板**（不再是写代码）：
+
+```bash
+# 镜像：⚠ output/firmware/update.img 在 AB 形态下是**悬空软链**（docs/image.md §5.8）
+#       真身是下面这个：
+ls -l $SDK/output/update-ab/Image/update.img          # 759,050,826 B（2026-09-29 22:04 那次）
+# 刷完板后（首次）：
+#   · userdata 分区要先 mkfs.ext4（新分区表刚建出来是空的）
+#   · 4.9 GB 模型投放到 /data/model/，llm.env 的 LLM_MODEL_PATH 指过去
+#     （配置默认值由 assistant-init.service 从 /usr/lib/assistant/config/*.example.yaml 铺出）
+#   · 板上基线：systemd-analyze、systemctl list-dependencies assistant.target、
+#     EGLFS 出图/旋转、触摸坐标、wlan0、RTC、NPU 真推理、硬解真解码
 ```
 
 ## 4. 接下来（2-10b-4 GUI）已经确认的可用条件

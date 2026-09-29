@@ -74,6 +74,9 @@ Desktop.ini
 build/
 build-host/
 build-rk3568/
+# T15-2-10b：payload 的交叉编译目录（native 扩展 / GUI），由 image/build-*.sh 生成
+build-rk3568-native-payload/
+build-rk3568-gui-payload/
 dist/
 *.so
 *.pyd
