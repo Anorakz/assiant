@@ -71,3 +71,9 @@ wsl -u root bash image/build-image.sh \
 
 **T15-2-10**：刷板前验证 —— 在 `BR/target` 上 chroot 跑 ctest + 仓库 Python 套件 + `ldd`/符号检查，
 出结果表（**区分"缺包"与"只能板上测"**）。之后再 T15-2-11 首次刷板。
+
+刷板那天先看这条（T15-2-11 必踩）：`output/firmware/` 里**全是软链**，而且 AB 形态下
+**`update.img` 指向不存在的 `update-ab.img`（悬空）**。真镜像是
+`$SDK/output/update-ab/Image/update.img`（747,516,490 B），也可走那条带版本号的软链
+`firmware/update-rk3568-kickpi-k1Mini-assistant-buildroot-2026092920.img`。
+另外 `firmware/parameter.txt` 已 diff 确认**逐字节等于**我们的 `parameter-assistant-ab.txt`。

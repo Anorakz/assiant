@@ -702,11 +702,11 @@ wsl -u root bash image/build-image.sh <SDK 根目录>
 中间按用户要求的停机点中断，之后 20:03–20:29 增量续跑约 26 分钟收尾。
 （增量是真的增量：第二次进入时 178 个包目录都还在，只补了剩下的包与打包。）
 
-**② 体积**（`$SDK/output/firmware/` 合计 1.3 GB）：
+**② 体积**（表观合计 **≈1.39 GiB**；`du -sh` 会显示约 1.3 GiB，因为 rootfs 是稀疏文件，见下）：
 
 | 产物 | 大小 | 说明 |
 | --- | --- | --- |
-| `update-…-buildroot-2026092920.img`（= `update.img`） | **747,516,490 B ≈ 713 MiB** | 整套烧写镜像（A/B 形态，另存为 `update-ab.img`） |
+| `update-…-buildroot-2026092920.img` | **747,516,490 B ≈ 713 MiB** | 整套烧写镜像（软链到 `output/update-ab/Image/update.img`） |
 | `rootfs.img` → `images/rootfs.ext2` | **679,477,248 B ≈ 648 MiB** | 装进 `system_a`/`system_b`（各 3 GiB 槽，余量充足） |
 | `boot.img` | 41,900,544 B ≈ 40 MiB | FIT：kernel + dtb + resource |
 | `oem.img` | 12,582,912 B ≈ 12 MiB | |
@@ -714,6 +714,27 @@ wsl -u root bash image/build-image.sh <SDK 根目录>
 | `uboot.img` / `MiniLoaderAll.bin` | 4,194,304 B / 481,728 B | loader 与 u-boot |
 | `parameter.txt` | 579 B | **就是我们那份 `parameter-assistant-ab.txt`** ✓ |
 | `BR/target`（根文件系统树） | 522 MB | 字体 70 MB、`usr/include/qt5` 32 MB 都在里面（账见 §5.5/§5.7） |
+
+> ⚠ `output/firmware/` 里**全是软链**，而且 AB 形态下 **`update.img` 是悬空的**。
+> 实拍（`ls -la output/firmware/`）：
+>
+> ```
+> update.img                                                    -> update-ab.img        ← 悬空！firmware/ 里没有这个名字
+> update-rk3568-kickpi-k1Mini-assistant-buildroot-2026092920.img -> ../update-ab/Image/update.img   ← 真的这份
+> rootfs.img      -> ../../buildroot/output/<整机构建那棵树>/images/rootfs.ext2
+> boot.img        -> ../../kernel-6.1/boot.img
+> parameter.txt   -> ../../device/rockchip/.chips/rk3566_rk3568/parameter-assistant-ab.txt
+> ```
+>
+> 也就是：vendor 的 `mk-firmware.sh` 在 AB 分支里把真镜像放进了
+> `output/update-ab/Image/update.img`（747,516,490 B）并另建了一个带版本号的软链，
+> 但**同时也留了一个老式 `update.img -> update-ab.img`**，而这个名字在 AB 形态下没人创建。
+> **烧写要用**：`output/update-ab/Image/update.img`（或那条带版本号的软链），
+> 不是 `firmware/update.img` —— 用后者会以"文件不存在"告终（T15-2-11 会用到）。
+>
+> 体积口径：上表是**表观大小**（`stat -Lc %s`）。`rootfs.ext2` 是**稀疏文件**
+> （表观 648 MiB / 实占 529 MB，1,081,648 个 512 B 块），所以 `du -sh` 会给出
+> 大约 **1.3 GiB** 这样偏小的"实占"数字 —— 两者都对，别拿它们互相校对。
 
 **③ 组件版本**：
 
