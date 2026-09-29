@@ -151,6 +151,11 @@ PAYLOAD = [
     ("doc", "usr/lib/assistant/Readme.md", "agent.service 的 Documentation= 指向它"),
     ("doc", "usr/lib/assistant/docs/gui.md", "agent-gui.service 的 Documentation= 指向它"),
     ("doc", "usr/lib/assistant/docs/image.md", "assistant-init.service 的 Documentation= 指向它"),
+    ("bin", "usr/bin/assistant",
+     "板端 CLI 入口（包装 `python3 -m agent.cli`，并把 D7 那套环境变量备好；"
+     "T15-7 的 cli 唤醒要用它）"),
+    ("profile", "etc/profile.d/assistant.sh",
+     "交互式 shell 里也能 `python3 -m agent.cli`（单元里的 Environment= 不会传给登录 shell）"),
 ]
 
 

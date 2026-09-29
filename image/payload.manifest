@@ -1,0 +1,43 @@
+# image/payload.manifest — payload 的**源 → 落点**清单（T15-2-10b-1）
+# ============================================================================
+#  payload = "unit 文件已经指向、但 T15-2-8 当时还没做"的那批东西
+#  （docs/image.md §5.6 末段、§5.9 的 F5）。这个文件是它的**唯一来源表**：
+#
+#    · image/build-payload.sh 读它决定"复制什么、编什么、落到哪"
+#    · tests/test_image_payload.py 拿它与 image/check-runtime-deps.py 的 PAYLOAD 表
+#      **双向互校** —— 一边改了另一边没跟上，CI 当场红
+#
+#  格式（`|` 分隔，`#` 起头是注释，空行忽略）：
+#      how | src                          | dest
+#
+#    how = copy   纯复制：src 是仓库相对路径（目录要以 `/` 结尾），dest 是 target 相对路径
+#    how = gen    由 image/payload/ 里的模板生成：src 是模板文件，dest 是 target 相对路径
+#    how = native 交叉编译 pybind11 扩展（image/build-native.sh，T15-2-10b-3）
+#    how = gui    交叉编译 Qt5 GUI（image/build-gui.sh，T15-2-10b-4）
+#
+#  dest 以 `/` 结尾 = **目录**：校验时它覆盖 PAYLOAD 表里同前缀的所有路径。
+#
+#  为什么 python 侧是"整目录复制"而不是逐个文件：agent 是个包（含 8 个子包），
+#  逐个列会漏（以后加文件就得记得回来改这里）。目录 + 检查器盯着包里那两个
+#  关键文件的组合，既防漏也不啰嗦。
+# ============================================================================
+
+# --- python 侧（T15-2-10b-2）------------------------------------------------
+copy|agent/|usr/lib/assistant/agent/
+copy|config/config.example.yaml|usr/lib/assistant/config/config.example.yaml
+copy|config/user_profile.example.yaml|usr/lib/assistant/config/user_profile.example.yaml
+copy|Readme.md|usr/lib/assistant/Readme.md
+copy|docs/gui.md|usr/lib/assistant/docs/gui.md
+copy|docs/image.md|usr/lib/assistant/docs/image.md
+
+# --- 编译产物（T15-2-10b-3 / -4）-------------------------------------------
+#  ⚠ 扩展名里的 `cpython-311` 必须与镜像里的 python 一致：仓库里那份现成的
+#    `agent_native.cpython-38-...so` 是板端 Ubuntu(3.8) 那套，装进镜像 import 不进来。
+native|native/|usr/lib/assistant/agent_native.cpython-311-aarch64-linux-gnu.so
+gui|gui/|usr/lib/assistant/gui/agent_gui
+
+# --- 入口与 shell 环境（T15-2-10b-2）---------------------------------------
+#  `/usr/bin/assistant`：串口/ssh 进去直接敲 `assistant status`，不用每次 export 一堆变量
+#  （也是 T15-7 "cli 双唤醒"要用的那个入口）。
+gen|image/payload/assistant|usr/bin/assistant
+gen|image/payload/assistant.sh|etc/profile.d/assistant.sh

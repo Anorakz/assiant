@@ -1,0 +1,50 @@
+#!/bin/sh
+# ============================================================================
+#  /usr/bin/assistant — 板端 CLI 入口（镜像形态，T15-2-10b）
+#
+#  为什么需要它
+#  ---------------------------------------------------------------------------
+#  镜像里代码在 `/usr/lib/assistant`（D7），而 `-m agent.cli` 要求那个目录在
+#  PYTHONPATH 上、配置在 `/data/assistant/config`。裸 shell 里这三条谁都不设，
+#  于是"串口进去敲 CLI"要么报 `No module named agent`、要么读到不存在的配置。
+#  单元文件里那套 Environment= 只对服务生效，交互式 shell 不会继承 ——
+#  所以这里给一个可执行入口，把环境备好再 exec（exec 之后信号与退出码都直通）。
+#
+#  与 /etc/profile.d/assistant.sh 的分工
+#  ---------------------------------------------------------------------------
+#    · 这个脚本：**不管**你用什么 shell、有没有读 profile，敲 `assistant ...` 就能用
+#    · profile.d：让 `python3 -m agent.cli ...` 这种裸命令在交互式登录 shell 里也能跑
+#
+#  用法
+#  ---------------------------------------------------------------------------
+#      assistant --help
+#      assistant status
+#      assistant mode sleep
+#      assistant --config /data/assistant/config/config.yaml status
+# ============================================================================
+set -e
+
+# 代码在 rootfs（跟着 A/B 槽升级），状态在 userdata（OTA 不该碰）
+: "${PYTHONPATH:=/usr/lib/assistant}"
+export PYTHONPATH
+: "${AGENT_CONFIG_DIR:=/data/assistant/config}"
+export AGENT_CONFIG_DIR
+: "${AGENT_LOG:=/data/assistant/logs/agent.log}"
+export AGENT_LOG
+: "${AGENT_CRASH_DIR:=/data/assistant/logs/crash}"
+export AGENT_CRASH_DIR
+: "${LLM_ENV_FILE:=/data/assistant/llm/config/llm.env}"
+export LLM_ENV_FILE
+: "${LLM_STATE_DIR:=/data/assistant/llm}"
+export LLM_STATE_DIR
+
+PY=/usr/bin/python3
+[ -x "$PY" ] || PY=$(command -v python3) || {
+    echo "assistant: 找不到 python3" >&2
+    exit 1
+}
+
+# 默认配置：`--config` 给的是路径，但加载按**名字**找 config.yaml / config.example.yaml
+# （agent/cli.py 的 load_plane_config 就是这么走的），所以这里不塞默认值，
+# 让 agent.cli 自己按 AGENT_CONFIG_DIR 找 —— 与两个 systemd 单元完全同一套语义。
+exec "$PY" -m agent.cli "$@"
