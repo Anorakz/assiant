@@ -21,6 +21,13 @@ external/libmali/scripts/grabber.sh 是拿这个串去 `find` 文件名。所以
 
 三者必须一致。改一个 HAS_* 而忘了同步 prepare-libmali.sh，后果是构建期
 `ERROR: Failed to find matched library`（同样只有真构建才发现）。
+
+T15-2-9 又添了两个"只有真整机构建才炸"的坑，也一并钉在这里：
+  · **recovery 段**：`RK_AB_UPDATE=y` 会让 recovery 算出 `rockchip_rk3566_rk3568_recovery`
+    这个并不存在的 defconfig 名 → Makefile 解析阶段就 Stop。我们的分区表没有 recovery 槽，
+    所以在板级 defconfig 里显式关掉（两件事必须同时成立，故两个断言成对出现）。
+  · **厂商 `libxcrypt.mk` 少 host 变体** → `No rule to make target 'host-libxcrypt'`。
+    我们在本仓库覆盖同名 .mk（install-into-sdk.sh 注入），并钉住"只加 host、target 不动"。
 """
 from __future__ import annotations
 
@@ -41,6 +48,12 @@ DEFCONFIG = (_ROOT / "image" / "buildroot" / "configs"
 PREPARE = _ROOT / "image" / "prepare-libmali.sh"
 SDK_MAKE = _ROOT / "image" / "sdk-make.sh"
 PRIME_DL = _ROOT / "image" / "prime-dl.sh"
+INSTALL_SDK = _ROOT / "image" / "install-into-sdk.sh"
+# T15-2-9：SDK 板级 defconfig（recovery 开关）+ 我们的 A/B 分区表 + 厂商 .mk 的补丁
+BOARD_DEFCONFIG = (_ROOT / "image" / "device" / "rockchip" / ".chips" / "rk3566_rk3568"
+                   / "rockchip_rk3568_kickpi_k1mini_release_defconfig")
+AB_PARAMETER = BOARD_DEFCONFIG.parent / "parameter-assistant-ab.txt"
+LIBXCRYPT_MK = _ROOT / "image" / "buildroot" / "package" / "libxcrypt" / "libxcrypt.mk"
 
 MALI = "BR2_PACKAGE_ROCKCHIP_MALI_"
 
@@ -327,6 +340,89 @@ class TestPrimeDlExpandsMakeVariables(unittest.TestCase):
                                         universal_newlines=True).returncode, 2)
         with tempfile.TemporaryDirectory() as t:
             self.assertEqual(self.run_prime(Path(t), Path(t) / "nope").returncode, 2)
+
+
+class TestRecoveryIsOffAndThePartitionTableAgrees(unittest.TestCase):
+    """T15-2-9：`RK_AB_UPDATE=y` 会让 recovery 段算出一个**并不存在**的 defconfig 名。
+
+    实测死在整机构建的 Makefile 解析阶段：
+        Makefile:1056: *** "Can't find rockchip_rk3566_rk3568_recovery_defconfig".  Stop.
+    根因在 `Config.in.recovery`：`RK_RECOVERY_BASE_CFG` 的第一条默认值是
+    `"" if RK_AB_UPDATE`（我们先命中它），于是名字按**芯片家族**拼成
+    `rockchip_rk3566_rk3568_recovery`，而 SDK 里只有单芯片命名的那两个。
+
+    这里钉住两个必须同时成立的事实（缺一个配方就自相矛盾）：
+      ① 板级 defconfig 里 recovery **显式关掉**；
+      ② 我们的 A/B 分区表里**没有 recovery 分区** —— 回退走 A/B + misc，
+         所以关掉不是"绕过"，而是本来就不该编（编出来也没地方放）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = BOARD_DEFCONFIG.read_text(encoding="utf-8")
+
+    def test_ab_update_is_on(self):
+        self.assertIn("RK_AB_UPDATE=y", self.text)
+
+    def test_recovery_is_explicitly_off(self):
+        self.assertIn("# RK_RECOVERY is not set", self.text)
+        self.assertNotIn("RK_RECOVERY=y", self.text)
+
+    def test_parameter_has_no_recovery_slot(self):
+        cmdline = ""
+        for ln in AB_PARAMETER.read_text(encoding="utf-8").splitlines():
+            if ln.startswith("CMDLINE:"):
+                cmdline = ln
+        self.assertTrue(cmdline, "parameter 里没有 CMDLINE: 行")
+        self.assertNotIn("recovery", cmdline)
+        for want in ("misc", "boot_a", "boot_b", "system_a", "system_b", "userdata:grow"):
+            self.assertIn(want, cmdline)
+
+    def test_board_defconfig_names_the_ab_parameter(self):
+        """关掉 recovery 的前提是"确实走 A/B 那条路线"。"""
+        self.assertIn('RK_PARAMETER="parameter-assistant-ab.txt"', self.text)
+
+
+class TestLibxcryptHostVariantIsPatched(unittest.TestCase):
+    """T15-2-9：厂商 `libxcrypt.mk` 少了 **host 变体** → 整机构建死在
+    `No rule to make target 'host-libxcrypt'`（systemd 的
+    `HOST_SYSTEMD_DEPENDENCIES` 要它，而 buildroot 只有包定义了 host 变体才生成该目标）。
+
+    处理办法是**不动厂商树**，在本仓库覆盖同名 `.mk`，由 install-into-sdk.sh 注入。
+    覆盖的风险是"顺手把 target 侧也改了"，所以这里同时钉住：
+    target 变体、版本、SITE 都还在，只多了 host 两行 + 最后那行 host-autotools-package。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mk = LIBXCRYPT_MK.read_text(encoding="utf-8")
+        cls.install = INSTALL_SDK.read_text(encoding="utf-8")
+
+    def test_both_variants_are_evaluated(self):
+        self.assertIn("$(eval $(autotools-package))", self.mk)
+        self.assertIn("$(eval $(host-autotools-package))", self.mk)
+
+    def test_host_conf_opts_come_in_pairs(self):
+        """每条 LIBXCRYPT_CONF_OPTS 都要有对应的 HOST_ 版本。
+
+        上游是这么补的；漏一条会让 host 侧退回默认值（这里恰好都是
+        --disable-werror / --disable-obsolete_api，漏了不一定当场炸，
+        所以更要在 CI 里对齐）。
+        """
+        target = re.findall(r"^LIBXCRYPT_CONF_OPTS \+?= (.*)$", self.mk, re.M)
+        host = re.findall(r"^HOST_LIBXCRYPT_CONF_OPTS \+?= (.*)$", self.mk, re.M)
+        self.assertTrue(target, "没有 LIBXCRYPT_CONF_OPTS 行")
+        self.assertEqual(target, host)
+
+    def test_vendor_version_and_site_are_untouched(self):
+        self.assertIn("LIBXCRYPT_VERSION = 4.4.36", self.mk)
+        self.assertIn("$(call github,besser82,libxcrypt,v$(LIBXCRYPT_VERSION))", self.mk)
+        self.assertIn("LIBXCRYPT_INSTALL_STAGING = YES", self.mk)
+
+    def test_installer_injects_it(self):
+        self.assertIn(str(LIBXCRYPT_MK.relative_to(_ROOT)).replace("\\", "/"),
+                      self.install.replace("\\", "/"))
+        self.assertIn("buildroot/package/libxcrypt/libxcrypt.mk", self.install)
 
 
 if __name__ == "__main__":

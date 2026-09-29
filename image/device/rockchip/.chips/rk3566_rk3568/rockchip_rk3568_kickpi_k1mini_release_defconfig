@@ -27,3 +27,24 @@ RK_ROOTFS_SYSTEM_BUILDROOT=y
 RK_BUILDROOT_BASE_CFG="rk3568_kickpi_k1mini_release"
 
 RK_AB_UPDATE=y
+
+# ---------------------------------------------------------------------------
+#  关掉 recovery 镜像（T15-2-9 实测：不关就整机构建失败，而且我们也不需要它）
+#  ---------------------------------------------------------------------------
+#  两个理由，缺一不可：
+#   1) **算出来的名字根本不存在**：build_all 里 recovery 只要 RK_RECOVERY 有值就编
+#        [ -z "$RK_RECOVERY" ] || "$RK_SCRIPTS_DIR/mk-recovery.sh"
+#      而 Config.in.recovery 里 RK_RECOVERY_BASE_CFG 的第一条默认是
+#        default "" if RK_AB_UPDATE        ← 我们 RK_AB_UPDATE=y，先命中这条
+#      于是 RK_RECOVERY_CFG 被算成 rockchip_${RK_CHIP_FAMILY}_recovery
+#      = **rockchip_rk3566_rk3568_recovery**，SDK 里没有这个 defconfig
+#      （只有按单芯片命名的 rockchip_rk3566_recovery / rockchip_rk3568_recovery）。
+#      那句 default RK_CHIP if RK_CHIP_FAMILY = "rk3566_rk3568" 永远轮不到 ——
+#      整机构建因此死在：
+#          Makefile:1056: *** "Can't find rockchip_rk3566_rk3568_recovery_defconfig".  Stop.
+#   2) **本来就不该要**：我们的分区表（parameter-assistant-ab.txt，T15-2-4）里
+#      **没有 recovery 分区** —— 回退由 A/B 双槽 + misc 元数据负责（RK_AB_UPDATE=y），
+#      recovery 是另一条互斥的路线；就算编出来也没有地方放。
+#  写法用厂商 .config 里同一种"关掉"形式（井号 + 符号 + is not set）。
+# ---------------------------------------------------------------------------
+# RK_RECOVERY is not set

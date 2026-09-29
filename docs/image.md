@@ -671,6 +671,112 @@ python3 image/check-assistant-target.py --sdk <SDK>             # 镜像模式�
 > ⚠ **静态闭包 ≠ 板上真跑**：这里证明的是"配置上没有别的东西被拉起来"。
 > 板上真跑 `systemctl list-dependencies assistant.target` 与 `systemd-analyze` 是 **T15-2-11** 的事。
 
+### 5.8 首次完整构建（T15-2-9）
+
+#### 怎么跑
+
+```bash
+wsl -u root bash image/build-image.sh <SDK 根目录>
+```
+
+它做四件事：清洗 PATH → 放 `python` 垫片 → 起时钟看门狗 → `./build.sh <chip>:<defconfig>`（lunch）再 `./build.sh all`。
+三条约束都写在脚本头部，都踩过：
+
+- **必须 root**：`build.sh` 有一段**无条件**的 sudo 密码缓存（`sudo -n true` 失败就 `read -s`），
+  非交互后台跑会卡死。root 跑完记得把 `$SDK/output`、`$SDK/buildroot/output` 属主改回来。
+- **不要 export 任何 `RK_*`**：`build.sh` 会把"与 `initial.env` 不一致的 `RK_*`"当成*自定义环境*，
+  弹一句 `Press enter to continue.` —— 非交互直接失败（实测：`RK_SESSION=...` 就是这么挂的）。
+- **两条 output 路径别搞混**（这条最容易让人以为"白编了"）：
+
+| 用途 | buildroot output 目录 |
+| --- | --- |
+| 我们自己的**单包**构建（`image/sdk-make.sh`，T15-2-5/6/7 用它） | `buildroot/output/rockchip_rk3568_kickpi_k1mini_release/` |
+| vendor **整机构建**（`./build.sh all`，由 `mk-buildroot.sh` 第 12 行算出） | `.../rockchip_rk3568_kickpi_k1mini_release/rockchip_rk3568_kickpi_k1mini_release/` |
+
+也就是整机构建用的是**另一棵全新树**（交叉工具链都重编一遍）。`buildroot/dl` 是共享的，
+所以我们预置的 6 个 Qt 源码包两边都能用。
+
+#### 三组数字（2026-09-28/29 实跑）
+
+**① 时长**：**累计约 1 小时 40 分钟**。其中 22:49–00:03 那一段约 74 分钟（含**从零编交叉工具链**与 Qt），
+中间按用户要求的停机点中断，之后 20:03–20:29 增量续跑约 26 分钟收尾。
+（增量是真的增量：第二次进入时 178 个包目录都还在，只补了剩下的包与打包。）
+
+**② 体积**（`$SDK/output/firmware/` 合计 1.3 GB）：
+
+| 产物 | 大小 | 说明 |
+| --- | --- | --- |
+| `update-…-buildroot-2026092920.img`（= `update.img`） | **747,516,490 B ≈ 713 MiB** | 整套烧写镜像（A/B 形态，另存为 `update-ab.img`） |
+| `rootfs.img` → `images/rootfs.ext2` | **679,477,248 B ≈ 648 MiB** | 装进 `system_a`/`system_b`（各 3 GiB 槽，余量充足） |
+| `boot.img` | 41,900,544 B ≈ 40 MiB | FIT：kernel + dtb + resource |
+| `oem.img` | 12,582,912 B ≈ 12 MiB | |
+| `userdata.img`（首启镜像） | 8,388,608 B ≈ 8 MiB | 真实 userdata 是 22.8 GiB 的 grow 分区 |
+| `uboot.img` / `MiniLoaderAll.bin` | 4,194,304 B / 481,728 B | loader 与 u-boot |
+| `parameter.txt` | 579 B | **就是我们那份 `parameter-assistant-ab.txt`** ✓ |
+| `BR/target`（根文件系统树） | 522 MB | 字体 70 MB、`usr/include/qt5` 32 MB 都在里面（账见 §5.5/§5.7） |
+
+**③ 组件版本**：
+
+| 组件 | 版本 |
+| --- | --- |
+| kernel | **6.1.141** |
+| u-boot | **2017.09** |
+| buildroot | 2024.02（自建交叉工具链 GCC **13.4.0**、glibc） |
+| Qt5 | **5.15.11** |
+| python3 | **3.11.8** |
+| systemd | 254.9 |
+| GStreamer | 1.24.13 |
+| llama.cpp | **b387ddfd8**（= build 10677，交叉编译产物带 `$ORIGIN` RPATH） |
+| rknnlite | rknn-toolkit-lite2 2.3.2（cp311 wheel） |
+| MPP（源码） | 1.0.11（2025-09-10） |
+| librknnrt / libmali | 7,726,120 B / 56,387,136 B（G52 g24p0） |
+
+#### 产物核对（我们那套东西确实进了最终镜像）
+
+| 检查 | 结果 |
+| --- | --- |
+| `etc/systemd/system/default.target` | → `/usr/lib/systemd/system/assistant.target` ✓ |
+| `assistant.target.wants/` | `agent.service`、`agent-gui.service`、`assistant-init.service` ✓ |
+| 我们的单元 | 四个都在 `/usr/lib/systemd/system/` ✓ |
+| llama 运行时 | `usr/lib/assistant/llm/bin/llama-server`（post-build 里交叉编译出来的）✓ |
+| llm 脚本 | `usr/lib/assistant/llm/scripts/start.sh` 等 ✓ |
+| **recovery** | **没有 `recovery.img`** ✓（我们关掉了，见下） |
+
+#### 路上挡道的六个坑（前四个落成脚本，后两个落成配方）
+
+1. **PATH 里带 Windows 条目** → buildroot 依赖自检直接退出（`build-image.sh` 清洗）。
+2. **`python` 这个名字缺失** → `check-kernel.sh` 写死要 `python`（Debian 习惯用 `python-is-python3`），
+   WSL 只有 `python3` → 内核还没开始编就报 `Your python is missing`；脚本放 `python -> python3` 垫片，不动系统。
+3. **宿主缺 `gettext`** → `Your msgmerge is missing`；已 `apt-get install gettext libssl-dev libelf-dev`。
+4. **WSL 时钟偏移**：`systemd-timesyncd` 处于 active 但 unsynchronized，会**步进调时钟**，
+   于是刚写出的文件 mtime "落在未来"，make 报 `Clock skew detected … 0.2s in the future`
+   （打在 systemd、host-wayland 的 configure 上）。
+   → 已 `stop + mask systemd-timesyncd`，并在构建入口加了每 60 秒夹一次未来时间戳的看门狗。
+5. **厂商快照的 `libxcrypt.mk` 少了 host 变体** → `systemd` 的 `HOST_SYSTEMD_DEPENDENCIES` 要 `host-libxcrypt`，
+   buildroot 只有包定义了 host 变体才会生成那个目标 → 整机构建死在
+   `No rule to make target 'host-libxcrypt'`。
+   注意 **target 侧没问题**（`BR2_PACKAGE_LIBXCRYPT=y` 开着、源码也下好了），缺的只是 host 变体。
+   修法：`image/buildroot/package/libxcrypt/libxcrypt.mk`（我们仓库维护）**覆盖**厂商那份，
+   照上游补上 `HOST_LIBXCRYPT_CONF_OPTS` 与 `$(eval $(host-autotools-package))`。
+6. **recovery 段算出来的 defconfig 名不存在**：`Config.in.recovery` 里
+   `RK_RECOVERY_BASE_CFG` 的第一条默认值是 `"" if RK_AB_UPDATE` —— 我们 `RK_AB_UPDATE=y` 先命中它，
+   于是 `RK_RECOVERY_CFG = rockchip_${RK_CHIP_FAMILY}_recovery` = **rockchip_rk3566_rk3568_recovery**，
+   而 SDK 里只有按**单芯片**命名的 `rockchip_rk3566_recovery` / `rockchip_rk3568_recovery` → 必然失败：
+   `Makefile:1056: *** "Can't find rockchip_rk3566_rk3568_recovery_defconfig".  Stop.`
+   （那句 `default RK_CHIP if RK_CHIP_FAMILY = "rk3566_rk3568"` 永远轮不到。）
+   而且我们的分区表里**本来就没有 recovery 槽**（回退靠 A/B + `misc`）→ 在板级 defconfig 里关掉：
+   `# RK_RECOVERY is not set`。实测有效：构建后 `output/final.env` 里**没有** `RK_RECOVERY` 这一项，
+   `build_all` 里 `[ -z "$RK_RECOVERY" ] || mk-recovery.sh` 整段跳过，会话日志里 0 次提到 recovery。
+   （`output/.config` 文本里那行仍显示 `y` —— 那是 lunch 的落盘形式，**以 `final.env` 与实际行为为准**。）
+
+#### 交给后面几步的
+
+- **T15-2-11 首次刷板**：这套 `update.img` 会**重排 eMMC 分区**（板上数据全部丢失）；
+  `userdata` 首次要先格 ext4；4.9 GB 模型投放到 `/data/model/`。
+- **T15-2-12 开发镜像**：同一套配方 + sshd/调试工具/pytest/串口控制台。
+- 属主：root 跑过之后执行 `chown -R anorak:anorak $SDK/output $SDK/buildroot/output`
+  （否则非 root 的 T15-2-10 chroot 测试会碰壁）。
+
 ---
 
 ## 6. 板级对齐（T15-2-3，已编译验证）

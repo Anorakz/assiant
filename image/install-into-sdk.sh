@@ -73,6 +73,12 @@ install_file image/buildroot/configs/rockchip_rk3568_kickpi_k1mini_release_defco
              buildroot/configs/rockchip_rk3568_kickpi_k1mini_release_defconfig
 install_file image/buildroot/configs/rockchip/products/kickpi-k1mini-release.config \
              buildroot/configs/rockchip/products/kickpi-k1mini-release.config
+# 厂商快照的**包定义**缺件修补（T15-2-9）：libxcrypt.mk 少了 host 变体，
+# 而 systemd 的 HOST_SYSTEMD_DEPENDENCIES 要 host-libxcrypt
+# → 整机构建死在 "No rule to make target 'host-libxcrypt'"。
+# 这是"覆盖同名文件"（注入时会打印 ~ 覆盖），target 侧行为不变。
+install_file image/buildroot/package/libxcrypt/libxcrypt.mk \
+             buildroot/package/libxcrypt/libxcrypt.mk
 # SDK 板级 defconfig（lunch 用）+ 我们的 A/B 分区表
 install_file image/device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1mini_release_defconfig \
              device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1mini_release_defconfig
