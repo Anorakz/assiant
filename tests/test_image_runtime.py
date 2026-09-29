@@ -186,14 +186,24 @@ class TestPayloadIsItsOwnCategory(unittest.TestCase):
     def setUpClass(cls):
         cls.mod = load_checker()
 
+    #: D7 说"代码进 rootfs"，落点一律在 /usr/lib/assistant 下；
+    #: 例外只有两个 shell 入口（T15-2-10b-2 加的）—— 它们必须在 PATH 上/被 shell 读到，
+    #: 所以放 /usr/bin 与 /etc/profile.d，理由写在各条 why 里。
+    ASSISTANT_ROOT = "usr/lib/assistant/"
+    SHELL_ENTRIES = {"usr/bin/assistant", "etc/profile.d/assistant.sh"}
+
     def test_payload_paths_live_under_the_assistant_root(self):
         self.assertTrue(self.mod.PAYLOAD, "PAYLOAD 不该是空的")
         for kind, rel, why in self.mod.PAYLOAD:
             self.assertFalse(rel.startswith("/"), "应为 target 相对路径: %s" % rel)
-            self.assertTrue(rel.startswith("usr/lib/assistant/"),
-                            "payload 都在 /usr/lib/assistant 下（D7：代码进 rootfs）: %s" % rel)
+            if rel in self.SHELL_ENTRIES:
+                self.assertIn(kind, ("bin", "profile"),
+                              "%s 是 shell 入口，类别应是 bin/profile" % rel)
+            else:
+                self.assertTrue(rel.startswith(self.ASSISTANT_ROOT),
+                                "payload 都在 /usr/lib/assistant 下（D7：代码进 rootfs）: %s" % rel)
             self.assertTrue(why, "%s 缺少 why" % rel)
-            self.assertIn(kind, ("agent", "gui", "native", "config", "doc"),
+            self.assertIn(kind, ("agent", "gui", "native", "config", "doc", "bin", "profile"),
                           "未知的 payload 类别: %s" % kind)
 
     def test_payload_and_manifest_do_not_overlap(self):

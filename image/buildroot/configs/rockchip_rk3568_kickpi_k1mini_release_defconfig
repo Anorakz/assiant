@@ -47,3 +47,29 @@
 #include "gpu/mali.config"
 # 我们的：systemd + Qt5(EGLFS/虚拟键盘) + 运行时（本仓库维护）
 #include "products/kickpi-k1mini-release.config"
+
+# ---------------------------------------------------------------------------
+#  T15-2-10b-2：python3 的两个 C 扩展模块（缺了 agent 直接起不来）
+#  ---------------------------------------------------------------------------
+#    · SSL → `_ssl` 与 `_hashlib`（python3.mk 用 --with-openssl 一次开两个）。
+#      实测 chroot：`import agent.cli` 在
+#          agent/net/sunshine_client.py:57 → import ssl → No module named '_ssl'
+#      就断了，而 agent/core/__init__ 会连锁 import 到它 —— 板上表现就是
+#      agent.service 一直崩溃重启。
+#    · READLINE → 串口/ssh 里 CLI 的行编辑与历史（`/usr/bin/assistant` 给人用）。
+#  写在 defconfig 末尾（所有 include 之后）是"顺序上必胜"的位置：值由**最后一个**
+#  出现的赋值决定，这样即使以后有人在片段里写反了也压不住它。
+#
+#  ⚠ **踩过的坑，别误判**：把这两行只写进 products 片段时，改完配置去看 .config
+#    仍然 `is not set`，很容易得出"片段合并器不认 python3 子选项"的错误结论。
+#    真实原因是 **vendor 的 `./build.sh <defconfig>`（lunch）在已经配置过的树上
+#    不会重新生成 buildroot 的 .config** —— 它只打印
+#    "Running within sudo(root) environment! / Using last kernel version(6.1)" 就结束了。
+#    实测对照：
+#        ./build.sh rk3566_rk3568:<cfg>_defconfig        → .config 纹丝不动（时间戳没变）
+#        cd buildroot && make O=output/<cfg> <cfg>_defconfig → 立刻 PYTHON3_SSL=y
+#    整机构建（`./build.sh all` → `mk-buildroot.sh`）走的是后者那条路，所以
+#    2-9 那次的 .config 是新的（当时我们还没加这两行，所以是 not set）。
+# ---------------------------------------------------------------------------
+BR2_PACKAGE_PYTHON3_SSL=y
+BR2_PACKAGE_PYTHON3_READLINE=y

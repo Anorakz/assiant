@@ -106,11 +106,19 @@ want() {
     case ",$ONLY," in *",$1,"*) return 0 ;; *) return 1 ;; esac
 }
 
-#: 内容哈希戳：把"这次装进去的东西"的指纹写进落点目录
+#: 幂等戳放在 **rootfs 之外**（target 的兄弟目录）：它们只是构建状态，
+#: 放进 /usr/lib/assistant 就是往镜像里塞构建垃圾（而且会被下一次内容哈希算进去）。
+STAMP_DIR="$(dirname "$TARGET")/.assistant-payload-stamps"
+
+stamp_path() {
+    # $1 = target 相对路径
+    printf '%s/%s\n' "$STAMP_DIR" "$(printf '%s' "$1" | tr '/' '_')"
+}
+
+#: 内容哈希戳：把"这次装进去的东西"的指纹算出来（源侧）
 stamp_of() {
-    # $1 = 要算指纹的东西（文件或目录）
     if [ -d "$1" ]; then
-        find "$1" -type f -not -name '.payload-stamp' -print0 2>/dev/null \
+        find "$1" -type f -not -name '*.pyc' -not -path '*/__pycache__/*' -print0 2>/dev/null \
             | sort -z | xargs -0 -r cat 2>/dev/null | sha256sum | cut -d' ' -f1
     else
         sha256sum "$1" 2>/dev/null | cut -d' ' -f1
@@ -118,18 +126,18 @@ stamp_of() {
 }
 
 stamp_matches() {
-    # $1 = 落点（文件或目录）, $2 = 期望指纹
+    # $1 = target 相对路径, $2 = 期望指纹
     local sfile
-    if [ -d "$1" ]; then sfile="$1/.payload-stamp"; else sfile="$(dirname "$1")/.payload-stamp.$(basename "$1")"; fi
+    sfile="$(stamp_path "$1")"
     [ -n "$FORCE" ] && return 1
     [ -f "$sfile" ] && [ "$(cat "$sfile")" = "$2" ]
 }
 
 write_stamp() {
     local sfile
-    if [ -d "$1" ]; then sfile="$1/.payload-stamp"; else sfile="$(dirname "$1")/.payload-stamp.$(basename "$1")"; fi
+    sfile="$(stamp_path "$1")"
     [ -n "$DRY" ] && { echo "       (dry-run) 写戳 $sfile"; return 0; }
-    mkdir -p "$(dirname "$sfile")"
+    mkdir -p "$STAMP_DIR"
     printf '%s\n' "$2" > "$sfile"
 }
 
@@ -154,18 +162,31 @@ while IFS='|' read -r how src dest; do
             exit 1
         fi
         if [ -d "$srcdir" ]; then
+            h="$(stamp_of "$srcdir")"
+            if stamp_matches "$dest" "$h"; then
+                echo "   [copy] $src -> $dest  （已一致，跳过）"
+                n_skip=$((n_skip+1))
+                continue
+            fi
             echo "   [copy] $src -> $dest"
             if [ -z "$DRY" ]; then
                 mkdir -p "$TARGET/$dest"
-                # 目录复制：用 tar 管道（保留权限、排除 __pycache__ 与 pyc）
+                # 目录复制：tar 管道（排除 __pycache__/pyc）
                 ( cd "$srcdir" && tar cf - \
                     --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' . ) \
                   | ( cd "$TARGET/$dest" && tar xf - )
+                # ⚠ 权限必须归一：本仓库在 Windows 盘上（WSL 的 DrvFs），源文件是 **777**，
+                #   照抄进镜像既有安全问题也丑。目录 0755 / 文件 0644；
+                #   要可执行的（*.sh）单独留 0755。
+                find "$TARGET/$dest" -type d -exec chmod 0755 {} + 2>/dev/null || true
+                find "$TARGET/$dest" -type f -exec chmod 0644 {} + 2>/dev/null || true
+                find "$TARGET/$dest" -type f -name '*.sh' -exec chmod 0755 {} + 2>/dev/null || true
             fi
+            write_stamp "$dest" "$h"
             n_copy=$((n_copy+1))
         else
             h="$(stamp_of "$srcdir")"
-            if stamp_matches "$TARGET/$dest" "$h"; then
+            if stamp_matches "$dest" "$h"; then
                 echo "   [copy] $src -> $dest  （已一致，跳过）"
                 n_skip=$((n_skip+1))
                 continue
@@ -176,7 +197,7 @@ while IFS='|' read -r how src dest; do
                 cp -a "$srcdir" "$TARGET/$dest"
                 chmod 0644 "$TARGET/$dest"
             fi
-            write_stamp "$TARGET/$dest" "$h"
+            write_stamp "$dest" "$h"
             n_copy=$((n_copy+1))
         fi
         ;;
@@ -189,7 +210,7 @@ while IFS='|' read -r how src dest; do
             exit 1
         fi
         h="$(stamp_of "$srcdir")"
-        if stamp_matches "$TARGET/$dest" "$h"; then
+        if stamp_matches "$dest" "$h"; then
             echo "   [gen ] $src -> $dest  （已一致，跳过）"
             n_skip=$((n_skip+1))
             continue
@@ -199,7 +220,7 @@ while IFS='|' read -r how src dest; do
             mkdir -p "$(dirname "$TARGET/$dest")"
             install -m 0755 "$srcdir" "$TARGET/$dest"
         fi
-        write_stamp "$TARGET/$dest" "$h"
+        write_stamp "$dest" "$h"
         n_gen=$((n_gen+1))
         ;;
     native)

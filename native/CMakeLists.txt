@@ -1,11 +1,39 @@
 add_subdirectory(third_party/pybind11)
 
-# 交叉编译时 Python.h 必须来自 sysroot (板端 rootfs), 而不是宿主机
-if(CMAKE_CROSSCOMPILING AND NOT EXISTS "${CMAKE_SYSROOT}/usr/include/python3.8/Python.h")
-  message(FATAL_ERROR
-    "Missing ${CMAKE_SYSROOT}/usr/include/python3.8/Python.h\n"
-    "板端 sysroot 缺少 python3.8-dev 头文件, 请安装 libpython3.8-dev 到 sysroot."
-    )
+# ---------------------------------------------------------------------------
+#  交叉编译时 Python.h 必须来自 sysroot（目标 rootfs），而不是宿主机
+#  ⚠ T15-2-10b-3 改：这里原来**写死 python3.8**。板端 Ubuntu 20.04 是 3.8，
+#    而**镜像里的 buildroot python 是 3.11** —— 写死就会把 cp38 的扩展装进 3.11 的
+#    镜像里（`import agent_native` 直接失败）。现在按 sysroot 里**实际存在的版本**探测，
+#    多版本时取最高的那个；宿主机（非交叉）构建完全不走这条分支，CI 的 host ctest 不受影响。
+# ---------------------------------------------------------------------------
+if(CMAKE_CROSSCOMPILING)
+    file(GLOB _py_incs "${CMAKE_SYSROOT}/usr/include/python3.*")
+    set(_py_inc "")
+    set(_py_ver "")
+    foreach(_d ${_py_incs})
+        if(EXISTS "${_d}/Python.h")
+            get_filename_component(_v "${_d}" NAME)
+            string(REPLACE "python" "" _v "${_v}")
+            if(_py_ver STREQUAL "" OR _v VERSION_GREATER _py_ver)
+                set(_py_ver "${_v}")
+                set(_py_inc "${_d}")
+            endif()
+        endif()
+    endforeach()
+    if(_py_inc STREQUAL "")
+        message(FATAL_ERROR
+            "sysroot 里找不到 Python.h（找过 ${CMAKE_SYSROOT}/usr/include/python3.*）。\n"
+            "板端 sysroot 需要 python3-dev 头文件；镜像构建里由 buildroot 的 python3 提供。")
+    endif()
+    message(STATUS "native: 用 sysroot 的 python ${_py_ver}（${_py_inc}）")
+    # 让 pybind11 找到同一份解释器/库，而不是宿主机的
+    set(PYTHON_INCLUDE_DIRS "${_py_inc}")
+    set(PYTHON_INCLUDE_DIR "${_py_inc}")
+    if(EXISTS "${CMAKE_SYSROOT}/usr/lib/libpython${_py_ver}.so")
+        set(PYTHON_LIBRARY "${CMAKE_SYSROOT}/usr/lib/libpython${_py_ver}.so")
+    endif()
+    include_directories(SYSTEM "${_py_inc}")
 endif()
 
 pybind11_add_module(agent_native
@@ -74,21 +102,41 @@ endif()
 # host 构建 **不** 打开 AGENT_HAVE_MPP: 宿主机没有 MPP, 而 decoder_mpp.cpp 在
 # 没有这个宏时只会提供一个返回 nullptr 的工厂, 不需要任何 MPP 头文件。
 if(CMAKE_CROSSCOMPILING)
-    set(_mpp_hdr "${CMAKE_SYSROOT}/usr/include/rockchip/rk_mpi.h")
-    set(_mpp_lib "${CMAKE_SYSROOT}/usr/lib/aarch64-linux-gnu/librockchip_mpp.so")
-    if(NOT EXISTS "${_mpp_hdr}" OR NOT EXISTS "${_mpp_lib}")
+    # 两种 sysroot 布局都要认（T15-2-10b-3）：
+    #   · 板端 Ubuntu：usr/include/rockchip/… + usr/lib/aarch64-linux-gnu/librockchip_mpp.so
+    #   · 镜像 buildroot：usr/include/rockchip/… + **usr/lib**/librockchip_mpp.so（扁平）
+    # 第一版只认前者，于是在 buildroot sysroot 上直接 FATAL_ERROR，
+    # 而其实头文件与链接名都在、只是目录不同。
+    set(_mpp_hdr "")
+    foreach(_d "${CMAKE_SYSROOT}/usr/include" "${CMAKE_SYSROOT}/usr/include/aarch64-linux-gnu")
+        if(EXISTS "${_d}/rockchip/rk_mpi.h")
+            set(_mpp_hdr "${_d}/rockchip/rk_mpi.h")
+            set(_mpp_inc "${_d}")
+            break()
+        endif()
+    endforeach()
+    set(_mpp_lib "")
+    foreach(_d "${CMAKE_SYSROOT}/usr/lib" "${CMAKE_SYSROOT}/usr/lib/aarch64-linux-gnu")
+        if(EXISTS "${_d}/librockchip_mpp.so")
+            set(_mpp_lib "${_d}/librockchip_mpp.so")
+            break()
+        endif()
+    endforeach()
+    if(_mpp_hdr STREQUAL "" OR _mpp_lib STREQUAL "")
         message(FATAL_ERROR
-            "sysroot 里找不到 Rockchip MPP 开发文件:\n"
-            "    头文件: ${_mpp_hdr}\n"
-            "    库:     ${_mpp_lib}\n"
-            "板端对应的包是 librockchip-mpp-dev (pkgconfig 名 rockchip_mpp), "
-            "把它装进 sysroot (见 docs/cross-build-rk3568.md 的 MPP 一节)。")
+            "sysroot 里找不到 Rockchip MPP 开发文件（找过 usr/include[/aarch64-linux-gnu] 与 "
+            "usr/lib[/aarch64-linux-gnu]）:\n"
+            "    头文件: ${CMAKE_SYSROOT}/usr/include/rockchip/rk_mpi.h\n"
+            "    库:     ${CMAKE_SYSROOT}/usr/lib/librockchip_mpp.so\n"
+            "板端是 librockchip-mpp-dev（pkgconfig 名 rockchip_mpp），"
+            "镜像里由 buildroot 的 rockchip-mpp 包提供（它会装到 staging）。")
     endif()
+    message(STATUS "native: MPP -> ${_mpp_lib}")
 
     target_compile_definitions(agent_native PRIVATE AGENT_HAVE_MPP)
     # 头文件在 <sysroot>/usr/include/rockchip/*.h, 彼此之间用相对 include,
     # 所以源码里写 #include <rockchip/rk_mpi.h> 即可。
-    target_include_directories(agent_native PRIVATE "${CMAKE_SYSROOT}/usr/include")
+    target_include_directories(agent_native PRIVATE "${_mpp_inc}")
     target_link_libraries(agent_native PRIVATE rockchip_mpp)
 endif()
 
@@ -101,15 +149,31 @@ endif()
 # host 构建 **不** 打开 AGENT_HAVE_FFMPEG: 宿主机没有这套头文件, 而没有这个宏时
 # decoder.cpp 里的 FFmpeg 软解后端整个被条件编译挡掉, 只留纯函数和分发逻辑
 # (宿主机正好用它们测 Decoder 的契约)。
+#
+# ⚠ T15-2-10b-3：**镜像的 buildroot sysroot 里没有 FFmpeg**（镜像的硬解走 MPP +
+#   GStreamer，不需要 FFmpeg 的 dev 文件），所以这里从"缺就 FATAL_ERROR"改成
+#   "缺就跳过并说明" —— 否则镜像侧永远编不出 native 扩展。
+#   板端（Ubuntu，装了 libavcodec-dev）行为不变：有头文件就照旧打开。
+#   确实需要强制要求时传 -DAGENT_REQUIRE_FFMPEG=ON。
 if(CMAKE_CROSSCOMPILING)
-    set(_ffmpeg_hdr "${CMAKE_SYSROOT}/usr/include/aarch64-linux-gnu/libavcodec/avcodec.h")
-    if(NOT EXISTS "${_ffmpeg_hdr}")
-        message(FATAL_ERROR
-            "sysroot 里找不到 FFmpeg 头文件: ${_ffmpeg_hdr}\n"
-            "请把板端对应的 libavcodec-dev / libavutil-dev 装进 sysroot "
-            "(见 docs/cross-build-rk3568.md 的 FFmpeg 一节)。")
+    set(_ffmpeg_hdr "")
+    foreach(_d "${CMAKE_SYSROOT}/usr/include/aarch64-linux-gnu" "${CMAKE_SYSROOT}/usr/include")
+        if(EXISTS "${_d}/libavcodec/avcodec.h")
+            set(_ffmpeg_hdr "${_d}/libavcodec/avcodec.h")
+            break()
+        endif()
+    endforeach()
+    if(_ffmpeg_hdr STREQUAL "")
+        if(AGENT_REQUIRE_FFMPEG)
+            message(FATAL_ERROR
+                "sysroot 里找不到 FFmpeg 头文件（要找 libavcodec/avcodec.h）。\n"
+                "板端请装 libavcodec-dev；镜像里本来就没有 FFmpeg，此时不要开 "
+                "AGENT_REQUIRE_FFMPEG。")
+        endif()
+        message(STATUS "native: sysroot 没有 FFmpeg，跳过软解后端（AGENT_HAVE_FFMPEG 不开）")
+    else()
+        message(STATUS "native: FFmpeg -> ${_ffmpeg_hdr}")
+        target_compile_definitions(agent_native PRIVATE AGENT_HAVE_FFMPEG)
+        target_link_libraries(agent_native PRIVATE avcodec avutil)
     endif()
-
-    target_compile_definitions(agent_native PRIVATE AGENT_HAVE_FFMPEG)
-    target_link_libraries(agent_native PRIVATE avcodec avutil)
 endif()

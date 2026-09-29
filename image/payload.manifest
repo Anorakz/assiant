@@ -34,6 +34,9 @@ copy|docs/image.md|usr/lib/assistant/docs/image.md
 #  ⚠ 扩展名里的 `cpython-311` 必须与镜像里的 python 一致：仓库里那份现成的
 #    `agent_native.cpython-38-...so` 是板端 Ubuntu(3.8) 那套，装进镜像 import 不进来。
 native|native/|usr/lib/assistant/agent_native.cpython-311-aarch64-linux-gnu.so
+# 扩展的 RPATH 是 $ORIGIN，所以它链的 moonlight 库必须**同目录**放一份
+# （板端"cannot open shared object file" 那个老问题就是这么来的）。
+native|native/|usr/lib/assistant/libmoonlight-common-c.so
 gui|gui/|usr/lib/assistant/gui/agent_gui
 
 # --- 入口与 shell 环境（T15-2-10b-2）---------------------------------------

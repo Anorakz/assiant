@@ -425,5 +425,98 @@ class TestLibxcryptHostVariantIsPatched(unittest.TestCase):
         self.assertIn("buildroot/package/libxcrypt/libxcrypt.mk", self.install)
 
 
+class TestNoSymbolNamesInComments(unittest.TestCase):
+    """T15-2-10b-2：配置文件的注释里**一个符号全名都不许出现**。
+
+    SDK 那个 sed 合并器不认"注释"：
+
+      · 第一次（T15-2-2 那轮）：注释里一句带等号的写法被当成 CA_CERTIFICATES 的新值；
+      · 第二次（T15-2-10b-2）：我为了写清楚"为什么开 python3 的 ssl"，
+        在注释里写了符号全名 —— 合并时它被当成了那个开关的"上一个值"，
+        于是**那个开关怎么改都不生效**，而 .config 里始终是 "is not set"。
+        日志原话：
+            Value of <python3 的 ssl 符号> is redefined by ..._defconfig:
+            Previous value:  #    · `<符号全名>` → `_ssl` ...
+            New value:       <符号全名>=y
+
+    所以规矩是硬性的：注释里只用文字描述（"python3 的 SSL 子选项"），
+    不写全名 —— **连举例说明也不行**。唯一的例外是合并器本来就认的那种
+    "关掉某符号"行（`# <符号> is not set`），那是真配置，不是散文。
+    """
+
+    #: 合并器认的"关掉"形式（这是真配置行，允许）
+    OFF_LINE = re.compile(r"^#\s*BR2_[A-Za-z0-9_]+ is not set\s*$")
+    #: 符号全名（出现在散文注释里就是违规）
+    SYMBOL = re.compile(r"BR2_[A-Za-z0-9_]+")
+
+    def _violations(self, path):
+        bad = []
+        for i, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            line = raw.strip()
+            if not line.startswith("#"):
+                continue
+            if self.OFF_LINE.match(line):
+                continue
+            m = self.SYMBOL.search(line)
+            if m:
+                bad.append("%s:%d %s" % (path.name, i, line[:90]))
+        return bad
+
+    def test_fragment_comments_have_no_symbol_names(self):
+        self.assertEqual(self._violations(FRAGMENT), [],
+                         "products 片段的注释里出现了符号全名（合并器会当成配置解析）")
+
+    def test_defconfig_comments_have_no_symbol_names(self):
+        self.assertEqual(self._violations(DEFCONFIG), [],
+                         "defconfig 的注释里出现了符号全名（合并器会当成配置解析）")
+
+
+class TestPythonModulesTheAgentNeeds(unittest.TestCase):
+    """T15-2-10b-2：python3 的 C 扩展模块 —— 缺了 agent **根本起不来**。
+
+    实测（chroot 里真跑）：
+        import agent.cli
+          → agent/core/__init__ → ... → agent/net/sunshine_client.py:57
+          → import ssl → ModuleNotFoundError: No module named '_ssl'
+    也就是板上 `agent.service` 会一直崩溃重启。厂商基座把 python3 的这些模块
+    全关着（"最小"思路），我们必须显式打开。
+
+    这里钉两件事：
+      ① 这两个符号必须是 `=y`（不是 `is not set`）；
+      ② 它们必须出现在 **所有 `#include` 之后** —— kconfig 的值由**最后一个**
+         赋值决定，放末尾才是"顺序上必胜"的位置（放片段里也行，但这条更直白、
+         也不会被以后新增的片段压掉）。
+    """
+
+    #: agent 运行期真要用的（`: `_ssl` 由 SSL 一起带出 `_hashlib`）
+    NEEDED = ("BR2_PACKAGE_PYTHON3_SSL", "BR2_PACKAGE_PYTHON3_READLINE")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = DEFCONFIG.read_text(encoding="utf-8")
+        lines = cls.text.splitlines()
+        cls.last_include = max((i for i, ln in enumerate(lines)
+                                if ln.lstrip().startswith("#include")), default=-1)
+        cls.lines = lines
+
+    def test_modules_are_enabled(self):
+        for sym in self.NEEDED:
+            self.assertIn("%s=y" % sym, self.text, "%s 没打开" % sym)
+            self.assertNotIn("# %s is not set" % sym, self.text,
+                             "%s 同时被关掉了（两个相反的赋值同时存在）" % sym)
+
+    def test_they_come_after_every_include(self):
+        for sym in self.NEEDED:
+            idx = [i for i, ln in enumerate(self.lines) if ln.strip() == "%s=y" % sym]
+            self.assertTrue(idx, "%s=y 不在 defconfig 里" % sym)
+            self.assertGreater(min(idx), self.last_include,
+                               "%s=y 必须写在所有 #include 之后（kconfig 取最后一个赋值）" % sym)
+
+    def test_reason_is_recorded(self):
+        """注释里要写清"为什么非开不可" —— 否则以后有人为了省体积又把它关了。"""
+        self.assertIn("_ssl", self.text)
+        self.assertIn("sunshine_client", self.text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

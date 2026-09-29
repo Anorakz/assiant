@@ -914,6 +914,99 @@ NPU 真推理（`RKNNLite.init_runtime()`）· 硬解真解码（帧率与 CPU�
 > 板上要跑测试的那一套属于开发镜像（2-12，带 pytest）。chroot 在这里能给的证据是
 > "**镜像自带的运行时真能跑**"，已经在上面那张冒烟表里逐条列出来了。
 
+### 5.10 把 payload 装进 rootfs（T15-2-10b，方案 A = 全部交叉编译）
+
+#### 为什么单独一个清单文件
+
+payload = "unit 文件**已经指向**、但当时还没做"的那批东西（§5.9 的 F5）：agent 包、
+GUI 二进制、pybind11 扩展、默认配置、unit 的 `Documentation=` 文档、CLI 入口。
+它最容易出的错不是"装不进去"，而是**清单与真实意图漂**：改了路径、加了文件、
+unit 里换了 `ExecStart`，而装的那份没跟上 —— 构建全绿，板子上服务起不来。
+
+所以 `image/payload.manifest` 是唯一来源表（`how|src|dest`），三方互校钉进 CI：
+
+```
+systemd/image/*.service 里引用的路径   ←→   check-runtime-deps.py 的 PAYLOAD 表
+                                          ←→   payload.manifest（谁把它装出来）
+```
+
+`tests/test_image_payload.py`（13 项）把这三方两两对上：**"检查器盯着但没人装"**、
+**"装了但没人盯"**、unit 里的 `ExecStart`/`Documentation`/`assistant-init` 的 `cp` 源
+都必须在 PAYLOAD 里出现。改一边忘另一边，CI 当场红。
+
+#### 三条做法（都是这次踩出来的）
+
+1. **只认调用方给的 target 树**：`build-payload.sh` 没有 `--target`（也没有 buildroot
+   导出的 `TARGET_DIR`）时**直接拒绝**，绝不自己猜 —— 猜错的后果 §5.9 已经演示过一次
+   （rknnlite 装进了另一棵树，整机镜像里没有它而构建全绿）。
+2. **幂等戳放在 rootfs 之外**：`<target 的兄弟目录>/.assistant-payload-stamps/`。
+   第一版把戳写进落点目录（`usr/lib/assistant/agent/.payload-stamp`），那等于**往镜像里
+   塞构建垃圾**，而且下次算内容哈希时又会把它算进去。
+3. **权限归一**：本仓库在 Windows 盘上（WSL 的 DrvFs），源文件权限是 **777**，
+   `tar` 照抄进 rootfs 就是"镜像里全是 777"。所以目录复制后统一
+   `目录 0755 / 文件 0644 / *.sh 0755`。
+
+#### 入口与 shell 环境
+
+`/usr/bin/assistant`（包装 `python3 -m agent.cli`）与 `/etc/profile.d/assistant.sh`
+是**给交互式 shell 用的**：两个 unit 里的 `Environment=` 只作用于服务进程，
+串口/ssh 登进去的 shell 不继承它们，于是要么 `No module named agent`、要么读不到配置。
+两者设的是**同一套 D7 变量**（`PYTHONPATH`/`AGENT_CONFIG_DIR`/`AGENT_LOG`/
+`AGENT_CRASH_DIR`/`LLM_ENV_FILE`/`LLM_STATE_DIR`），`tests/test_image_payload.py`
+会与 `agent.service` 里的取值逐条对照，防止两边漂。T15-7 的 "cli 唤醒" 也会用这个入口。
+
+#### 这一轮抓到的两个坑
+
+**① 镜像里的 python3 没有 `_ssl` —— agent 根本起不来。** chroot 实测：
+
+```
+import agent.cli → agent/core/__init__ → ... → agent/net/sunshine_client.py:57
+                 → import ssl → ModuleNotFoundError: No module named '_ssl'
+```
+
+`agent/core/__init__` 会连锁 import 到它 ⇒ 板上 `agent.service` 会**一直崩溃重启**。
+厂商基座把 python3 的扩展模块全关着；我们在 buildroot defconfig 末尾打开
+`BR2_PACKAGE_PYTHON3_SSL`（一次带出 `_ssl` + `_hashlib`）与 `..._READLINE`（串口 CLI 好使）。
+守卫在 `tests/test_image_recipe.py::TestPythonModulesTheAgentNeeds`（必须 `=y`、
+必须在所有 `#include` **之后**、注释里必须写理由）。
+
+**② vendor 的 lunch（`./build.sh <defconfig>`）不会重新生成 buildroot 的 `.config`。**
+这是"改了配置却没生效"的真凶，也是差点让我误判成"片段合并器不认 python3 子选项"的地方：
+
+```
+./build.sh rk3566_rk3568:<cfg>_defconfig              → .config 纹丝不动（时间戳不变）
+cd buildroot && make O=output/<cfg> <cfg>_defconfig   → 立刻 PYTHON3_SSL=y
+```
+
+已配置过的树上，lunch 只打印 `Running within sudo(root) environment!` 就结束了；
+**整机构建（`./build.sh all` → `mk-buildroot.sh`）走的是后者那条路**，所以 2-9 的
+`.config` 是新的。→ 以后验证配置改动用 `make O=... <cfg>_defconfig`，别用 lunch。
+
+#### 状态
+
+| 步骤 | 状态 |
+| --- | --- |
+| 2-10b-1 清单 + 骨架 | ✅ `--dry-run` 三种走法（copy+gen → 0；全量 → 1 且明说"半成品"；无 `--target` → 2 拒绝猜树） |
+| 2-10b-2 python 侧 | ✅ 装进整机 target（66 个 .py、0 个 pyc、幂等、戳在 rootfs 之外、权限归一）；`_ssl`/`_hashlib`/`readline` 修好并随整机构建重建 —— chroot 里 `ssl ok: OpenSSL 3.2.1 | hashlib ok`、**`agent import ok`** |
+| 2-10b-3 native（cp311） | ✅ `Machine: AArch64`、`NEEDED` 里 moonlight 与 mpp 都在、chroot `import agent_native` RC=0 |
+| 2-10b-4 GUI（交叉编译） | ⬜ **唯一剩下的一项**（payload 表 1/12） |
+| 2-10b-5 串进 post-build | ⬜ |
+| 2-10b-6 重新打包 + 全量验证 | ⬜（python3 那次已顺带重打包过一次） |
+
+#### 途中的第四个坑：改配置**不等于**重建（两层机制）
+
+```
+./build.sh rk3566_rk3568:<cfg>_defconfig              # lunch：已配置过就什么都不做
+cd buildroot && make O=output/<cfg> <cfg>_defconfig   # 这才重新生成 .config
+make O=... python3-rebuild                            # 又**不重跑 configure**（DISABLED_EXTENSIONS 照旧）
+make O=... python3-dirclean python3                   # 只有 dirclean 才会重新 configure → _ssl 才编出来
+```
+
+三条都实测过：跳过任何一条，`.config` 里 `PYTHON3_SSL=y` 而 `lib-dynload/_ssl*.so` 依旧不存在。
+（另外：单独 `make python3` 会在收尾的 `check-bin-arch` 上报三个**厂商二进制**的架构警告
+`architecture for /usr/bin/input-event-daemon is "ARM"` —— 与我们的改动无关，
+整机构建路径（`./build.sh all`）不报，镜像正常。）
+
 ---
 
 ## 6. 板级对齐（T15-2-3，已编译验证）

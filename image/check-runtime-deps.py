@@ -144,6 +144,8 @@ PAYLOAD = [
     ("native", "usr/lib/assistant/agent_native.cpython-311-aarch64-linux-gnu.so",
      "agent 的 pybind11 扩展（懒加载，缺了输入/视觉/Moonlight 那几条走不通；"
      "仓库里现有那份是 cp38，镜像 python 是 3.11 用不了）"),
+    ("native", "usr/lib/assistant/libmoonlight-common-c.so",
+     "上面那个扩展链的库：它的 RPATH 是 $ORIGIN，必须同目录（否则 import 时报找不到）"),
     ("config", "usr/lib/assistant/config/config.example.yaml",
      "assistant-init.service 首启从这里 `cp -n` 出 /data/assistant/config/config.yaml"),
     ("config", "usr/lib/assistant/config/user_profile.example.yaml",
