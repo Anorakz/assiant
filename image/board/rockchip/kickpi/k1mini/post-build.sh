@@ -220,6 +220,36 @@ else
     echo "   = 没有本机 WiFi 凭据（tools/assistant/local/*.nmconnection）—— 镜像里不含 WiFi 配置"
 fi
 
+# ---------------------------------------------------------------------------
+#  T15-2-11：SSH —— 允许 root 密码/密钥登录 + 装现场公钥
+#  ---------------------------------------------------------------------------
+#  为什么要在 post-build 里动 sshd_config：
+#    · 现场唯一的交互通道就是网络/串口，而"改完要断电"只能靠 `poweroff`；
+#      没有 ssh 就只能拔插头（ext4 每次开机 fsck、容易留脏状态）。
+#    · 镜像里 root 密码由 defconfig 那条设置提供（T15-2-11 起是 `assistant`），
+#      但 sshd 默认可能把 `PermitRootLogin`/`PasswordAuthentication` 注释着，
+#      这时"有密码也进不去"。这里显式打开（幂等）。
+SSHD_CFG="$TARGET_DIR/etc/ssh/sshd_config"
+if [ -f "$SSHD_CFG" ]; then
+    sed -i -E 's/^[#[:space:]]*PermitRootLogin.*/PermitRootLogin yes/' "$SSHD_CFG"
+    grep -qE '^PermitRootLogin' "$SSHD_CFG" || echo 'PermitRootLogin yes' >> "$SSHD_CFG"
+    sed -i -E 's/^[#[:space:]]*PasswordAuthentication.*/PasswordAuthentication yes/' "$SSHD_CFG"
+    grep -qE '^PasswordAuthentication' "$SSHD_CFG" || echo 'PasswordAuthentication yes' >> "$SSHD_CFG"
+    echo "   + sshd_config：已允许 root 用密码登录"
+else
+    echo "   !! 没有 /etc/ssh/sshd_config（镜像里没装 openssh？）" >&2
+fi
+
+AUTHKEYS="$TOOLS/local/authorized_keys"
+if [ -f "$AUTHKEYS" ]; then
+    mkdir -p "$TARGET_DIR/root/.ssh"
+    chmod 0700 "$TARGET_DIR/root/.ssh"
+    install -m 0600 "$AUTHKEYS" "$TARGET_DIR/root/.ssh/authorized_keys"
+    echo "   + 已装 SSH 公钥（/root/.ssh/authorized_keys，0600）"
+else
+    echo "   = 没有本机 SSH 公钥（tools/assistant/local/authorized_keys）—— 只能用密码登录"
+fi
+
 # --- 2) llama-server（交叉编译）---------------------------------------------
 if [ -x "$TOOLS/build-llama.sh" ]; then
     echo "== [assistant post-build] llama.cpp"

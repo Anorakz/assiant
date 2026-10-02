@@ -753,5 +753,43 @@ class TestWpaSupplicantHasDbusControlInterface(unittest.TestCase):
             self.assertGreater(min(idx), last_inc, "%s 必须写在所有 #include 之后" % sym)
 
 
+class TestSshAccessIsBakedIn(unittest.TestCase):
+    """T15-2-11：现场必须有稳定可靠的 SSH 通道。
+
+    起因很朴素：板子改完要断电，而**正常关机**只能用 `poweroff` —— 没有 ssh
+    就只能拔插头（ext4 每次开机 fsck、容易留脏状态）。而首刷的镜像是
+    "root 空密码 + sshd 默认 `PermitEmptyPasswords no`"，等于只能靠密钥。
+    所以两件都做上：烘一个已知密码（defconfig 里那条 root 密码设置），
+    并且让 sshd 明确允许 root 用密码登录；同时支持装现场公钥。
+    """
+
+    DEFCONFIG = _ROOT / "image" / "buildroot" / "configs" / "rockchip_rk3568_kickpi_k1mini_release_defconfig"
+    POSTBUILD = _ROOT / "image" / "board" / "rockchip" / "kickpi" / "k1mini" / "post-build.sh"
+    INSTALL = _ROOT / "image" / "install-into-sdk.sh"
+    EXAMPLE = _ROOT / "image" / "local" / "authorized_keys.example"
+
+    def test_root_password_is_set_at_build_time(self):
+        text = self.DEFCONFIG.read_text(encoding="utf-8")
+        self.assertIn("BR2_TARGET_GENERIC_ROOT_PASSWD=", text)
+        self.assertNotIn('BR2_TARGET_GENERIC_ROOT_PASSWD=""', text)
+
+    def test_post_build_opens_root_password_login(self):
+        text = self.POSTBUILD.read_text(encoding="utf-8")
+        self.assertIn("PermitRootLogin yes", text)
+        self.assertIn("PasswordAuthentication yes", text)
+        self.assertIn("sshd_config", text)
+
+    def test_authorized_keys_plumbing_exists(self):
+        self.assertTrue(self.EXAMPLE.is_file(), "缺 image/local/authorized_keys.example")
+        self.assertIn("authorized_keys", self.INSTALL.read_text(encoding="utf-8"))
+        self.assertIn("authorized_keys", self.POSTBUILD.read_text(encoding="utf-8"))
+        self.assertIn("0600", self.POSTBUILD.read_text(encoding="utf-8"))
+
+    def test_recipe_records_it_is_not_the_release_form(self):
+        """把"这只是开发期便利"写在配方里，免得以后当成发行形态忘了清理。"""
+        text = self.DEFCONFIG.read_text(encoding="utf-8")
+        self.assertIn("T15-12", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

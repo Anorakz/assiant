@@ -167,6 +167,21 @@ else
     echo "   = 没有 image/local/*.nmconnection（跳过；镜像里不会有 WiFi 凭据）"
 fi
 
+# SSH 公钥（T15-2-11）：同样是"本机私有"的镜像料。板子上 root 是空密码、
+# sshd 又不允许空密码登录，装一份公钥现场就能直接 ssh（比每次敲密码方便）。
+if [ -f "$HERE/local/authorized_keys" ]; then
+    if [ -n "$DRY" ]; then
+        echo "   + (dry-run) 注入本机 SSH 公钥 → tools/assistant/local/authorized_keys"
+    else
+        mkdir -p "$SDK/tools/assistant/local"
+        cp "$HERE/local/authorized_keys" "$SDK/tools/assistant/local/authorized_keys"
+        chmod 0600 "$SDK/tools/assistant/local/authorized_keys"
+        echo "   + 已注入本机 SSH 公钥（tools/assistant/local/authorized_keys，0600）"
+    fi
+else
+    echo "   = 没有 image/local/authorized_keys（跳过；镜像里只能用密码登录）"
+fi
+
 # ---------------------------------------------------------------------------
 #  T15-2-10b-5：payload 的**源码**也要进 SDK
 #  ---------------------------------------------------------------------------

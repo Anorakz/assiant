@@ -1,0 +1,22 @@
+# ============================================================================
+#  image/local/authorized_keys.example — 把 SSH 公钥烘进镜像（T15-2-11）
+#
+#  用法（真文件 `image/local/authorized_keys` **不进仓库**，已在 .gitignore 里）：
+#      cp image/local/authorized_keys.example image/local/authorized_keys
+#      # 把要用的公钥粘进去（一行一个，就是 ~/.ssh/id_xxx.pub 的内容）
+#      bash image/install-into-sdk.sh <SDK>          # 注入 tools/assistant/local/
+#      wsl -u root bash image/build-image.sh <SDK>   # post-build 装成 /root/.ssh/authorized_keys
+#
+#  为什么需要它
+#  ---------------------------------------------------------------------------
+#  镜像里 root 是空密码、且 sshd 默认 `PermitEmptyPasswords no` ——
+#  不装公钥就只能靠密码（密码由 defconfig 里那条 root 密码设置提供）。
+#  两个都做上，现场无论"换台电脑"还是"只给密钥"都能进：
+#      密码：root / <defconfig 里那个>
+#      密钥：这里的公钥
+#
+#  ⚠ 公钥本身不是机密，但"用哪台机器的密钥"属于现场配置，所以真文件仍然
+#    放 image/local/（不进仓库），仓库只留这份模板。
+#  ⚠ 装进镜像时 post-build 会设成 0600 + root:root，目录 0700。
+# ============================================================================
+ssh-ed25519 AAAA...在这里粘公钥（一行一个）... your-name@your-host
