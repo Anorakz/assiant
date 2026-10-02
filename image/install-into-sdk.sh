@@ -82,6 +82,21 @@ install_file image/buildroot/configs/rockchip_rk3568_kickpi_k1mini_release_defco
              buildroot/configs/rockchip_rk3568_kickpi_k1mini_release_defconfig
 install_file image/buildroot/configs/rockchip/products/kickpi-k1mini-release.config \
              buildroot/configs/rockchip/products/kickpi-k1mini-release.config
+# ---------------------------------------------------------------------------
+# 开发镜像（T15-2-12）：**同一套配方 + 一个只加不改的片段**
+#  ---------------------------------------------------------------------------
+#  三个文件缺一不可：
+#    ① dev 的 buildroot defconfig（只引 release 那份 + dev 片段）
+#    ② dev 片段本身（gcc/gdb/strace/procps/pytest… 见文件里的逐条理由）
+#    ③ dev 的**板级** defconfig（lunch 用；与 release 那份只差
+#       RK_BUILDROOT_BASE_CFG 一处，tests/test_image_dev_flavor.py 会证明）
+#  ⚠ 开发镜像要用独立 SDK 树构建，理由见 image/make-dev-sdk.sh 的头部说明。
+install_file image/buildroot/configs/rockchip_rk3568_kickpi_k1mini_dev_defconfig \
+             buildroot/configs/rockchip_rk3568_kickpi_k1mini_dev_defconfig
+install_file image/buildroot/configs/rockchip/products/kickpi-k1mini-dev-assistant.config \
+             buildroot/configs/rockchip/products/kickpi-k1mini-dev-assistant.config
+install_file image/device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1mini_dev_defconfig \
+             device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1mini_dev_defconfig
 # 厂商快照的**包定义**缺件修补（T15-2-9）：libxcrypt.mk 少了 host 变体，
 # 而 systemd 的 HOST_SYSTEMD_DEPENDENCIES 要 host-libxcrypt
 # → 整机构建死在 "No rule to make target 'host-libxcrypt'"。

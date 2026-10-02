@@ -1,0 +1,36 @@
+# ============================================================================
+#  image/buildroot/configs/rockchip_rk3568_kickpi_k1mini_dev_defconfig
+#
+#  KICKPI K1 Mini（RK3568）**开发镜像**的 buildroot defconfig（T15-2-12）
+#
+#  怎么用（在 SDK 根目录）—— 两条等价的路：
+#      # 1) 直接让 buildroot 配置
+#      cd buildroot
+#      make O=output/rockchip_rk3568_kickpi_k1mini_dev \
+#           rockchip_rk3568_kickpi_k1mini_dev_defconfig
+#      # 2) 走我们自己的入口（推荐：会把 PATH/shim/时钟看门狗都处理好，并带上
+#      #    开发形态开关，让 post-build 保留 usb-gadget/adb）
+#      bash image/build-image.sh --flavor dev <开发树 SDK 根目录>
+#
+#  ⚠ 开发镜像要用**独立的一棵 SDK 树**（硬链接复制，见 image/make-dev-sdk.sh）：
+#    SDK 把输出目录 `output/` 写死在 `device/rockchip/common/scripts/build.sh`
+#    （不止一处），两套配置挤在同一棵树里会互相覆盖。T15-2-12 的方案就是
+#    "同一套配方 + 第二棵树"，不给自己挖这个坑。
+#
+#  这个文件干什么：**只做两件事** ——
+#      ① 把发行镜像那份 defconfig 原样引进来（保证两者行为一致是结构性的）；
+#      ② 再引一个只加不改的片段，把开发才需要的东西叠上去。
+#  所以本文件里**不应该**出现任何具体配置项：所有差异都在那个片段里。
+#
+#  纪律（与发行那份同款，都是踩出来的）
+#  ---------------------------------------------------------------------------
+#  · `#include` 行**必须裸写**、不能带尾注释：SDK 的片段合并器是 sed 实现的，
+#    会把尾注释也当成路径去读 → 直接报错。
+#  · 注释里不许出现构造记号的字面量（否则会被当配置行解析）。
+# ============================================================================
+
+# ① 发行镜像的全部内容（含它自己的芯片/基础/产物片段）
+#include "rockchip_rk3568_kickpi_k1mini_release_defconfig"
+
+# ② 开发专属增量（只加不改）
+#include "products/kickpi-k1mini-dev-assistant.config"
