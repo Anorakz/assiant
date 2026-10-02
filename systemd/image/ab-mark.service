@@ -1,0 +1,55 @@
+# ============================================================================
+#  systemd/image/ab-mark.service — 每次开机把**当前 A/B 槽**标记为"启动成功"
+#                                 （T15-2-11 救砖后补的关键一步）
+#
+#  为什么非它不可（板端实测，2026-10-02）
+#  ---------------------------------------------------------------------------
+#  刷完 b8 之后板子起不来，串口里是：
+#      U-Boot SPL ... No bootable slots found, use lastboot.
+#      U-Boot ... No bootable slots found.
+#      rk_avb_append_part_slot: failed to get slot suffix !
+#      FIT: No boot partition
+#      Enter fastboot...OK
+#  —— **与镜像内容无关**。SPL 与 u-boot 每次启动都会把当前槽的
+#  `tries_remaining` 减 1（`common/spl/spl_ab.c`、
+#  `lib/avb/rk_avb_user/rk_ab_ops_user.c`），而整个镜像里**没有任何东西**
+#  把 `successful_boot` 置 1（`abctl`/`bootctl` 都不存在）。于是一路扣到 0，
+#  可引导判定 `priority > 0 && (successful_boot || tries_remaining > 0)`
+#  把两个槽都判死 → 不进系统、掉 fastboot。
+#  Android 那边这一步是 userspace 做的（boot control HAL），我们缺，所以补这里。
+#
+#  它做什么：读 `/proc/cmdline` 的 `android_slotsufix=_a|_b` → 按 **AVB 格式**
+#  （`AvbABData`，magic `\0AB0`、CRC32 大端）把该槽写成
+#  `priority=15, tries_remaining=7, successful_boot=1` → 之后它再也不会被扣死。
+#  幂等：已经是 successful=1 就只打日志。细节与踩坑记在
+#  `/usr/lib/assistant/ab-mark.py` 的头部注释里。
+#
+#  ⚠ 为什么不放在更早（比如 initramfs / systemd-udev 之前）：
+#    写的是裸设备 `/dev/disk/by-partlabel/misc`，需要 udev 把 by-partlabel
+#    链接建好 —— 所以排在 local-fs.target 之后（那里已经有了），
+#    但仍然**早于 agent/gui**（它们才是"这次启动算成功"的业务方）。
+#  ⚠ 万一将来 metadata 又被写坏（比如刷机工具写了别的格式），
+#    SPL 自己有兜底：它检测到 magic/CRC 不对会 **重置并重写默认元数据**
+#    （板端实测日志：`Magic is incorrect. / Error validating A/B metadata
+#     from disk. Resetting and writing new A/B metadata to disk.`）→ 仍能启动。
+# ============================================================================
+[Unit]
+Description=标记 A/B 当前槽启动成功（写 misc 的 AVB 元数据）
+Documentation=file:///usr/lib/assistant/docs/image.md
+After=local-fs.target
+Before=agent.service agent-gui.service
+ConditionPathExists=/dev/disk/by-partlabel/misc
+ConditionPathExists=/usr/lib/assistant/ab-mark.py
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /usr/lib/assistant/ab-mark.py
+# 失败不该拖住开机（大不了这次不标记；下一次启动还会再试）
+SuccessExitStatus=0 1 2
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ab-mark
+
+[Install]
+WantedBy=assistant.target

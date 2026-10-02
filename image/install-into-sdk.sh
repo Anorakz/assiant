@@ -122,9 +122,13 @@ done
 #   ⚠ 与 systemd/ 下板端形态的单元是**两套**：板端那份指向 git checkout
 #     (/home/kickpi/...)，镜像这份指向 /usr/lib/assistant 与 /data。
 #     tests/test_image_target.py 守住"除记录在案的差异外必须一致"，防止两套漂。
-for u in assistant.target agent.service agent-gui.service assistant-init.service; do
+for u in assistant.target agent.service agent-gui.service assistant-init.service ab-mark.service; do
     install_file "systemd/image/$u" "$OVERLAY_DIR/usr/lib/systemd/system/$u"
 done
+# T15-2-11：A/B「标记启动成功」的用户态工具（ab-mark.service 调用它）
+#   为什么必须要有：SPL/u-boot 每次启动都扣一次 tries_remaining，而镜像里
+#   没有任何东西置 successful_boot → 扣完两个槽都判死、掉 fastboot（实测踩过）。
+install_file image/payload/ab-mark.py "$OVERLAY_DIR/usr/lib/assistant/ab-mark.py"
 # T15-2-11：启动画面（开机那张图）
 #  ---------------------------------------------------------------------------
 #  Rockchip 的启动图机制：`kernel-6.1/logo.bmp`（u-boot 用）与

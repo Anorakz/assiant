@@ -96,7 +96,7 @@ class TestImageTarget(unittest.TestCase):
 
     def test_the_four_units_exist(self):
         for u in ("assistant.target", "agent.service", "agent-gui.service",
-                  "assistant-init.service"):
+                  "assistant-init.service", "ab-mark.service"):
             self.assertTrue((IMG / u).is_file(), "缺镜像单元 %s" % u)
 
     def test_target_wants_only_our_units_plus_networkmanager(self):
@@ -105,8 +105,11 @@ class TestImageTarget(unittest.TestCase):
         names = {t for t in wants.split() if t.endswith(".service")}
         self.assertEqual(
             names,
-            {"agent.service", "agent-gui.service", "assistant-init.service", "NetworkManager.service"},
-            "assistant.target 的 Wants 只该有我们这三个服务 + NetworkManager（别的都别加）")
+            {"agent.service", "agent-gui.service", "assistant-init.service",
+             # T15-2-11 救砖后补：每次开机标记 A/B 当前槽"启动成功"（缺了会被扣死）
+             "ab-mark.service",
+             "NetworkManager.service"},
+            "assistant.target 的 Wants 只该有我们的服务 + NetworkManager（别的都别加）")
 
     def test_units_have_no_board_paths_or_x(self):
         """只看**解析后的键值**，不扫注释 —— 注释里会正经提到"镜像里没有 xrandr 那条链"，

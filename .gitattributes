@@ -10,3 +10,34 @@
 # （`tests/test_systemd_units.py` 里那条 LF 检查也就不会在 Windows 上假红）。
 .gitattributes text eol=lf
 systemd/*.service text eol=lf
+
+# T15-2-11 补的一条（踩过）：**构建/运行要解析的脚本也必须 LF**。
+# 实测：一次 Windows 侧编辑把 image/board/.../post-build.sh 写成了 CRLF，
+# 整机构建直接死在 target-finalize：
+#     Executing post-build script board/.../post-build.sh
+#     /bin/bash: board/.../post-build.sh: cannot execute: required file not found
+#     make: *** [Makefile:796: target-finalize] Error 127
+# 因为 shebang 成了 `#!/bin/bash\r`（解释器路径带了回车，内核找不到）。
+# `file post-build.sh` 一看就写着 "CRLF line terminators" —— 排查时先看这个。
+*.sh            text eol=lf
+*.bash          text eol=lf
+*.py            text eol=lf
+*.target        text eol=lf
+*.socket        text eol=lf
+*.conf          text eol=lf
+*.config        text eol=lf
+*.rules         text eol=lf
+*.nmconnection  text eol=lf
+*.yaml          text eol=lf
+*.yml           text eol=lf
+*.json          text eol=lf
+Makefile        text eol=lf
+*.mk            text eol=lf
+
+# 二进制：别做行尾/编码转换
+*.bmp   binary
+*.png   binary
+*.webp  binary
+*.img   binary
+*.tgz   binary
+*.dtb   binary

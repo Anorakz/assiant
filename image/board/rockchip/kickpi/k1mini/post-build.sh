@@ -99,7 +99,7 @@ echo "   + default.target -> assistant.target"
 
 # 2) assistant.target.wants/：单元自己的 [Install] WantedBy 落地形式
 mkdir -p "$ETC/assistant.target.wants"
-for u in assistant-init.service agent.service agent-gui.service; do
+for u in assistant-init.service agent.service agent-gui.service ab-mark.service; do
     if [ -f "$SYSD/$u" ]; then
         ln -sfn "/usr/lib/systemd/system/$u" "$ETC/assistant.target.wants/$u"
     else
@@ -107,7 +107,20 @@ for u in assistant-init.service agent.service agent-gui.service; do
         exit 1
     fi
 done
-echo "   + assistant.target.wants/ 已挂上我们的三个单元"
+echo "   + assistant.target.wants/ 已挂上我们的四个单元（含 ab-mark）"
+
+# 2b) **sshd 也 enable**（T15-2-11 板端：现场唯一稳定的交互/关机通道）
+#  ---------------------------------------------------------------------------
+#  没有 ssh 就只能拔插头关机（ext4 每次开机 fsck、容易留脏状态）。密码与公钥已经
+#  烘进镜像，但**服务不 enable 就进不去** —— 第一次刷 b5 时就吃过这个亏
+#  （板子起来了、IP 也有了，ssh 却 connection refused）。
+#  ⚠ 发行形态的安全清理（改密码 / 只留密钥 / 关密码认证）是 T15-12 的事。
+if [ -f "$SYSD/sshd.service" ]; then
+    ln -sfn "/usr/lib/systemd/system/sshd.service" "$ETC/assistant.target.wants/sshd.service"
+    echo "   + assistant.target.wants/sshd.service（镜像里 sshd 默认启用）"
+else
+    echo "   !! 没有 sshd.service（镜像里没装 openssh？）" >&2
+fi
 
 # 3) network-online.target 要真的"等网"：buildroot 并不启用 wait-online，
 #    而我们的 target 只在 basic.target 之外依赖它，不挂它就是个空等。
@@ -170,7 +183,7 @@ fi
 # 3d) 单元权限：**必须是 0644**（T15-2-11 板端日志：systemd 抱怨 marked executable）
 #  我们的 overlay 文件在 Windows 盘上（DrvFs）权限是 777，tar/cp 进镜像就变 0755，
 #  systemd 会对每个单元打一行警告。顺手把 overlay 里的单元统一成 0644。
-for u in assistant.target agent.service agent-gui.service assistant-init.service; do
+for u in assistant.target agent.service agent-gui.service assistant-init.service ab-mark.service; do
     [ -f "$SYSD/$u" ] && chmod 0644 "$SYSD/$u"
 done
 echo "   + 我们的 4 个单元已 chmod 0644（不再被 systemd 抱怨 executable）"

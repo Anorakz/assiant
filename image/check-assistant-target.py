@@ -43,6 +43,13 @@ OUR_UNITS = {
     "agent.service",
     "agent-gui.service",
     "assistant-init.service",
+    # T15-2-11 救砖后补的：每次开机把当前 A/B 槽标记为"启动成功"。
+    # 不带它的后果是实测出来的 —— SPL/u-boot 每次启动扣一次 tries_remaining，
+    # 而没有任何东西置 successful_boot，扣完两个槽都判死 → 掉 fastboot 不进系统。
+    "ab-mark.service",
+    # 现场唯一稳定的交互/关机通道（T15-2-11：没有 ssh 就只能拔插头关机）。
+    # 安全清理（改密码/只留密钥/关密码认证）留给 T15-12。
+    "sshd.service",
 }
 
 #: 白名单：**不是我们的**但允许出现在闭包里的 —— 每一个都要有理由

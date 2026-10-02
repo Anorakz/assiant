@@ -1,6 +1,8 @@
 # T15-2-11 首次刷板手册（K1 Mini：Ubuntu → 我们的 Buildroot 镜像）
 
-> 状态：**准备就绪，等最后一步决定**（2026-09-29 22:30 写）。本文件是**执行时照着走**的稿子。
+> 状态：**已执行完成**（首刷 2026-09-29，救砖与修复到 2026-10-02；见
+> `image/CHECKPOINT-T15-2-11.md`）。本文件保留为**照着手册**：
+> 刷机步骤 + **起不来时怎么救**（§7 是 10-02 那次真踩过的两种砖）。
 > 相关记录：`docs/image.md` §5.8（两条 output 路径 / `update.img` 是悬空软链）、
 > §5.9（刷板前验证）、§5.10（payload）；任务表见 `todo2.md` 的 2-11。
 
@@ -110,3 +112,58 @@ mount -a && df -h /data
 - **进不了系统** → 路线 B 的 loader 模式还能用（Rockusb 在 u-boot/loader 里，不依赖 rootfs）。
 - **要回 Ubuntu** → 需要厂商 KICKPI 的出厂 `update.img`（**先确认手上有**）。
 - 我们的镜像可复现：`wsl -u root bash image/build-image.sh <SDK>` + `image/preflash-check.sh <SDK>` 退出码 0。
+
+## 5. 起不来时的两种真砖（2026-10-02 各踩过一次，按症状对号入座）
+
+### 5.1 `FIT: No boot partition` / u-boot 找不到 boot 分区 → u-boot 缺 A/B 支持
+
+串口表现（掉到 `=>` 提示符）：
+```
+PartType: EFI
+FIT: No boot partition
+android_image_load_by_partname: Can't find part: boot
+```
+而 `=> part list mmc 0` 里 GPT 完全正确（`boot_a/boot_b/system_a/system_b…`）。
+根因：`RK_AB_UPDATE=y` **传不到 u-boot**，它按非 A/B 找 `boot`。
+已修：`image/uboot/rk3568-assistant-ab.config`（开 `CONFIG_ANDROID_AB`）+
+板级 defconfig 的 `RK_UBOOT_CFG_FRAGMENTS`。**别再删这两处。**
+
+### 5.2 `No bootable slots found` → A/B 元数据被"扣"光了（会掉进 fastboot）
+
+串口表现：
+```
+U-Boot SPL ... No bootable slots found, use lastboot.
+U-Boot ... No bootable slots found.
+rk_avb_append_part_slot: failed to get slot suffix !
+FIT: No boot partition
+... Android boot failed, error -1.
+Enter fastboot...OK
+```
+根因：SPL 与 u-boot 每次启动都把当前槽 `tries_remaining` **减 1**
+（`common/spl/spl_ab.c`、`lib/avb/rk_avb_user/rk_ab_ops_user.c`），而镜像里
+**没有任何东西**置 `successful_boot` → 扣到 0，两个槽都判死。
+已修：镜像里加了 `ab-mark.service`（开机早期把当前槽按 **AVB 格式**写成
+`successful_boot=1`）。
+
+**现场急救（不用重刷、不用拆机，5 分钟内）**：
+1. 让板子停在 u-boot 提示符：用 `temp/serial-ctrlc.ps1`（**持续发 Ctrl+C**，
+   这块板的 u-boot 只认 Ctrl+C，窗口只有一两秒，手动敲基本来不及），
+   脚本跑起来时给板子断电→上电；
+2. 在 `=>` 下把 `misc` 置零（= 首刷时的空状态）：
+   ```
+   part list mmc 0                 # 确认 misc 的起止 LBA（我们的是 0x6000–0x7fff）
+   mw.b 0x10000000 0 0x400000
+   mmc write 0x10000000 0x6000 0x2000
+   reset
+   ```
+3. SPL 检测到元数据无效会**自己重写默认值**（日志：`Magic is incorrect. /
+   Error validating A/B metadata from disk. Resetting and writing new A/B metadata
+   to disk.`）→ 正常启动。
+   ⚠ 如果只想标记成功而不清零，可以用镜像里的工具：
+   `python3 /usr/lib/assistant/ab-mark.py`（幂等，会打印前后状态）。
+
+### 5.3 串口**一个字符都没有**（连 SPL 都没打印）
+
+先排除时序：抓取窗口要**在断电之前**就开着。若确实静默 →
+loader 模式（按住 RECOVERY 上电，RKDevTool 能看到 LOADER）重刷整包即可。
+

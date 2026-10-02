@@ -31,7 +31,7 @@ After=basic.target
 #   静态一看就知道这个目标会拉起什么，check-assistant-target.py 也是按这里算闭包的。
 #   post-build 里同时会建 assistant.target.wants/ 的符号链接（enable 的常规形式），
 #   两条路 systemd 会取并集，不冲突。
-Wants=assistant-init.service agent.service agent-gui.service
+Wants=assistant-init.service agent.service agent-gui.service ab-mark.service
 After=agent.service agent-gui.service
 # ⚠ 唯一一个**不是我们的**直接依赖：NetworkManager
 #   为什么非要显式带上它：buildroot 的 NetworkManager 钩子只管建 dbus 别名

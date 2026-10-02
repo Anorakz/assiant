@@ -921,5 +921,105 @@ class TestBootLogoIsOurImage(unittest.TestCase):
         self.assertIn("KERNEL_LOGO_DIR", text)
 
 
+class TestAbMarkKeepsSlotsBootable(unittest.TestCase):
+    """T15-2-11 救砖的**根因修复**：开机要把当前 A/B 槽标记为"启动成功"。
+
+    板端实测（2026-10-02，刷 b8 之后起不来）：
+        U-Boot SPL ... No bootable slots found, use lastboot.
+        U-Boot ... No bootable slots found. / FIT: No boot partition
+        Enter fastboot...OK
+    与镜像内容无关：SPL 与 u-boot 每次启动都会把当前槽 `tries_remaining` 减 1
+    （`common/spl/spl_ab.c`、`lib/avb/rk_avb_user/rk_ab_ops_user.c`），而镜像里
+    **没有任何东西**置 `successful_boot` → 扣完两个槽都判死。
+    可引导判定：`priority > 0 && (successful_boot || tries_remaining > 0)`。
+
+    格式是 **AVB 的 AvbABData**（不是 u-boot 里那个 android_bootloader_control）：
+        magic "\\0AB0"、结构 32 字节、CRC32 覆盖前 28 字节且**大端存储**，
+        放在 misc 的 0x800（`spl_ab.h`: AB_METADATA_OFFSET=4 扇区）。
+    踩坑：先按 android_bootloader_control（magic "BCAB"、小端 CRC）写，
+    SPL 直接 `Magic is incorrect. / ... Resetting and writing new A/B metadata`。
+    板上验证：写好后重启，SPL 与 u-boot 都打印
+        `A/B-slot: _a, successful: 1, tries-remain: 7`，且 `No bootable slots` 0 次。
+    """
+
+    UNIT = _ROOT / "systemd" / "image" / "ab-mark.service"
+    TOOL = _ROOT / "image" / "payload" / "ab-mark.py"
+    TARGET = _ROOT / "systemd" / "image" / "assistant.target"
+    POSTBUILD = _ROOT / "image" / "board" / "rockchip" / "kickpi" / "k1mini" / "post-build.sh"
+    INSTALL = _ROOT / "image" / "install-into-sdk.sh"
+    CHECKER = _ROOT / "image" / "check-assistant-target.py"
+
+    def test_unit_exists_and_runs_the_tool(self):
+        text = self.UNIT.read_text(encoding="utf-8")
+        self.assertIn("ab-mark.py", text)
+        self.assertIn("Type=oneshot", text)
+        self.assertIn("Before=agent.service", text, "要早于业务服务（它们才是'这次算成功'的依据）")
+
+    def test_target_wants_it_and_checker_knows_it(self):
+        self.assertIn("ab-mark.service", self.TARGET.read_text(encoding="utf-8"))
+        self.assertIn('"ab-mark.service"', self.CHECKER.read_text(encoding="utf-8"))
+
+    def test_tool_writes_the_avb_format(self):
+        text = self.TOOL.read_text(encoding="utf-8")
+        self.assertIn("AVB_MAGIC = b\"\\x00AB0\"", text)
+        self.assertIn('struct.pack_into(">I"', text)      # 大端 CRC
+        self.assertIn("MISC_OFFSET = 0x800", text)
+        # 必须**不依赖 zlib**（板端 python3 没有这个模块，实测 ModuleNotFoundError）
+        self.assertNotIn("import zlib", text)
+        self.assertIn("def crc32_ieee", text)
+
+    def test_installer_and_postbuild_wire_it(self):
+        self.assertIn("ab-mark.service", self.INSTALL.read_text(encoding="utf-8"))
+        self.assertIn("ab-mark.py", self.INSTALL.read_text(encoding="utf-8"))
+        pb = self.POSTBUILD.read_text(encoding="utf-8")
+        self.assertIn("ab-mark.service", pb)
+        self.assertIn("ab-mark.service", pb.split("chmod 0644")[0][-400:],
+                      "chmod 0644 的清单里也要有它（否则 systemd 会抱怨 executable）")
+
+    def test_sshd_is_enabled_in_the_image(self):
+        """没有 ssh 就只能拔插头关机（T15-2-11 现场需求）。"""
+        pb = self.POSTBUILD.read_text(encoding="utf-8")
+        self.assertIn("assistant.target.wants/sshd.service", pb)
+
+
+class TestBuildScriptsAreLF(unittest.TestCase):
+    """构建脚本必须是 **LF**（T15-2-11 实测：CRLF 让整机构建死在 target-finalize）。
+
+        Executing post-build script board/rockchip/kickpi/k1mini/post-build.sh
+        /bin/bash: board/.../post-build.sh: cannot execute: required file not found
+        make: *** [Makefile:796: target-finalize] Error 127
+
+    原因：shebang 变成 `#!/bin/bash\\r`，内核找不到那个带回车的解释器路径。
+    一次 Windows 侧编辑（PowerShell 重写）就能造成 —— 所以钉死 `.gitattributes`
+    之外，这里再加一条"仓库里现在就是 LF"的守卫。
+    """
+
+    CRITICAL = (
+        "image/board/rockchip/kickpi/k1mini/post-build.sh",
+        "image/install-into-sdk.sh",
+        "image/build-image.sh",
+        "image/build-payload.sh",
+        "image/payload/ab-mark.py",
+        "systemd/image/ab-mark.service",
+        "systemd/image/assistant.target",
+    )
+
+    def test_no_crlf_in_critical_files(self):
+        bad = []
+        for rel in self.CRITICAL:
+            p = _ROOT / rel
+            if not p.is_file():
+                bad.append("%s（缺）" % rel)
+                continue
+            if b"\r\n" in p.read_bytes():
+                bad.append("%s（CRLF）" % rel)
+        self.assertEqual(bad, [], "这些文件必须 LF：\n" + "\n".join(bad))
+
+    def test_gitattributes_pins_lf_for_scripts(self):
+        text = (_ROOT / ".gitattributes").read_text(encoding="utf-8")
+        self.assertIn("*.sh", text)
+        self.assertIn("eol=lf", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
