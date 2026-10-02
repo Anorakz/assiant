@@ -16,9 +16,12 @@
     --asis       原样使用（只做必要缩放）；**图已经是 1080x1920 且方向正确时用这个**
     --fill       旋转 90° 后铺满（裁掉溢出）—— 想让横图占满竖屏时用
                  （--rotate-ccw 可换成逆时针）
+    --r180       再转 180°（与上面几种可叠加）—— **T15-2-11 实况**：用户把图转了 90°
+                 后刷进板子，屏上看着**上下颠倒**（说明还差 180°），于是用这个补上。
+                 记这条是因为"文件里的方向"和"屏上的方向"没有直觉关系，只能实测。
 
 用法:
-    python make-logo.py <输入> <输出.bmp> [--asis|--fill] [--rotate-ccw]
+    python make-logo.py <输入> <输出.bmp> [--asis|--fill] [--rotate-ccw] [--r180]
 """
 import sys
 from PIL import Image
@@ -84,6 +87,9 @@ def main() -> int:
     else:
         img = build_fit(src)
         how = "fit(按宽铺满居中)"
+    if "--r180" in flags:
+        img = img.transpose(Image.ROTATE_180)
+        how += "+180°"
     img.save(dst, format="BMP")
     head = open(dst, "rb").read(54)
     bpp = int.from_bytes(head[28:30], "little")
