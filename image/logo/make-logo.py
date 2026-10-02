@@ -1,28 +1,43 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""把用户的 PNG 转成 Rockchip 启动 logo 用的 BMP。
+"""把准备的图转成 Rockchip 启动 logo 用的 BMP（T15-2-11）。
 
-T15-2-11 启动画面：
-  · 屏原生 1080x1920（竖），内核按 DTB 里的 logo,width/height/offset/bpp 贴图，
-    只支持 bpp ∈ {16,24,32}（源码 rockchip_drm_logo.c 的 switch）。
-  · 所以出一张 **与屏等大的 24bpp BMP**（1080x1920）：这样"居中还是左上"都无所谓，
-    整屏就是这张图，不依赖任何摆放逻辑。
-  · 布局：原图等比缩放到宽 1080，垂直居中，其余填黑 —— 与厂商 logo（横图居中）一致的观感。
-    另有 --fill 模式：旋转 90° 铺满整屏（图像内容是躺着的，只有"机器横着用"时才合适）。
+机制（SDK 源码 + 板端双向确认）：
+  · 启动图 = 内核树根的 `logo.bmp`（u-boot 用）/ `logo_kernel.bmp`（内核用），
+    由 `mk-kernel.sh` 经 `scripts/resource_tool` 打进 `resource.img` → 进
+    boot.img 的 FIT 的 resource 子镜像；DTB 里的
+    `logo,offset/width/height/`**`bpp`** 由该工具按 BMP 头写入，
+    内核 `rockchip_drm_logo.c` 按它贴图，**bpp 只支持 16/24/32**；路由是
+    `logo,mode = "center"`。
+  · 所以：BMP 做成**与屏等大 1080x1920、24bpp**，居中即整屏，不依赖摆放逻辑。
+
+三种摆放方式（按需选）：
+    （默认）     等比缩到宽度铺满、垂直居中、其余黑 —— 横图居中的观感
+    --asis       原样使用（只做必要缩放）；**图已经是 1080x1920 且方向正确时用这个**
+    --fill       旋转 90° 后铺满（裁掉溢出）—— 想让横图占满竖屏时用
+                 （--rotate-ccw 可换成逆时针）
 
 用法:
-    python make-logo.py <输入.png> <输出.bmp> [--fill] [--rotate-ccw]
+    python make-logo.py <输入> <输出.bmp> [--asis|--fill] [--rotate-ccw]
 """
 import sys
-import pathlib
 from PIL import Image
 
 PANEL_W, PANEL_H = 1080, 1920
 
 
+def _flatten(img: Image.Image) -> Image.Image:
+    """带透明通道的先合成到黑底（BMP 没有 alpha，透明区域不该变成垃圾像素）。"""
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGBA")
+        bg = Image.new("RGBA", img.size, (0, 0, 0, 255))
+        img = Image.alpha_composite(bg, img)
+    return img.convert("RGB")
+
+
 def build_fit(path_in: str) -> Image.Image:
     """等比缩到宽度铺满，垂直居中，黑底。"""
-    src = Image.open(path_in).convert("RGB")
+    src = _flatten(Image.open(path_in))
     scale = PANEL_W / src.width
     new = (PANEL_W, max(1, round(src.height * scale)))
     src = src.resize(new, Image.LANCZOS)
@@ -31,9 +46,17 @@ def build_fit(path_in: str) -> Image.Image:
     return canvas
 
 
+def build_asis(path_in: str) -> Image.Image:
+    """原样使用（尺寸不符时才缩放，不旋转、不裁切）。"""
+    src = _flatten(Image.open(path_in))
+    if src.size != (PANEL_W, PANEL_H):
+        src = src.resize((PANEL_W, PANEL_H), Image.LANCZOS)
+    return src
+
+
 def build_fill(path_in: str, ccw: bool = False) -> Image.Image:
-    """旋转 90° 后铺满整屏（会裁掉溢出部分）。"""
-    src = Image.open(path_in).convert("RGB")
+    """旋转 90° 后铺满整屏（裁掉溢出）。"""
+    src = _flatten(Image.open(path_in))
     src = src.rotate(90 if ccw else -90, expand=True)
     scale = max(PANEL_W / src.width, PANEL_H / src.height)
     new = (max(PANEL_W, round(src.width * scale)), max(PANEL_H, round(src.height * scale)))
@@ -50,15 +73,28 @@ def main() -> int:
         print(__doc__)
         return 2
     src, dst = args
-    img = build_fill(src, ccw="--rotate-ccw" in flags) if "--fill" in flags else build_fit(src)
-    img.save(dst, format="BMP")     # PIL 对 RGB 图存 24bpp BMP
-    out = pathlib.Path(dst)
-    head = out.read_bytes()[:54]
+    with Image.open(src) as probe:
+        print("输入: %s  %s %sx%s" % (src, probe.format, probe.width, probe.height))
+    if "--fill" in flags:
+        img = build_fill(src, ccw="--rotate-ccw" in flags)
+        how = "fill(旋转铺满)"
+    elif "--asis" in flags:
+        img = build_asis(src)
+        how = "asis(原样)"
+    else:
+        img = build_fit(src)
+        how = "fit(按宽铺满居中)"
+    img.save(dst, format="BMP")
+    head = open(dst, "rb").read(54)
     bpp = int.from_bytes(head[28:30], "little")
     w = int.from_bytes(head[18:22], "little")
     h = int.from_bytes(head[22:26], "little")
-    print("写出 %s: %dx%d %dbpp, %d 字节" % (out, w, h, bpp, out.stat().st_size))
-    return 0 if bpp == 24 else 1
+    import os
+    print("写出 %s: %dx%d %dbpp, %.2f MB  [%s]" % (dst, w, h, bpp, os.path.getsize(dst) / 1048576, how))
+    ok = (w, h) == (PANEL_W, PANEL_H) and bpp == 24
+    if not ok:
+        print("!! 期望 %dx%d 24bpp" % (PANEL_W, PANEL_H))
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
