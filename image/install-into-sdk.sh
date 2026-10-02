@@ -146,6 +146,11 @@ install_file image/logo/logo-kernel.bmp "$KERNEL_LOGO_DIR/logo.bmp"
 # 通用 evdev 插件的环境变量完全无效 —— 板端实测）。见规则文件里的推导过程。
 install_file image/board/rockchip/kickpi/k1mini/udev/99-assistant-touch.rules \
              "$OVERLAY_DIR/etc/udev/rules.d/99-assistant-touch.rules"
+# T15-2-11：NTP 源换成国内（默认的 Google 池在国内不通，板子时间会停在旧值）
+#   ⚠ 这个文件**必须显式列在这里**：注入是"逐个文件"拷的，不在清单里就等于没建
+#     （实测踩过：文件写好了、post-build 里那段也执行了，却在全 SDK 里找不到它）。
+install_file image/board/rockchip/kickpi/k1mini/rootfs-overlay/etc/systemd/timesyncd.conf.d/assistant-ntp.conf \
+             "$OVERLAY_DIR/etc/systemd/timesyncd.conf.d/assistant-ntp.conf"
 install_file image/board/rockchip/kickpi/k1mini/post-build.sh \
              buildroot/board/rockchip/kickpi/k1mini/post-build.sh
 install_file image/build-llama.sh tools/assistant/build-llama.sh

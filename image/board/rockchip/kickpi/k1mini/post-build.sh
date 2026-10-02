@@ -155,14 +155,15 @@ echo "   + NetworkManager-wait-online.service.d/timeout.conf（等网限时 5s�
 #  时间不对会连带影响 TLS 证书校验（云端 LLM / OTA）和日志排序。
 #  实测这三家都回包且服务器时间正确：ntp.aliyun.com / cn.pool.ntp.org / ntp.tencent.com。
 #  换成配置片段（drop-in）而不是改主配置：不覆盖 buildroot 那份，升级也好对照。
-mkdir -p "$ETC/systemd/timesyncd.conf.d"
-cat > "$ETC/systemd/timesyncd.conf.d/assistant-ntp.conf" <<'EOF'
-# assistant: 默认的 Google NTP 池在国内网络下不通（UDP 123 超时），换国内源
-[Time]
-NTP=ntp.aliyun.com cn.pool.ntp.org ntp.tencent.com
-FallbackNTP=ntp.aliyun.com cn.pool.ntp.org
-EOF
-echo "   + systemd/timesyncd.conf.d/assistant-ntp.conf（NTP 换国内源）"
+#  ⚠ 文件放 **rootfs-overlay**（`etc/systemd/timesyncd.conf.d/assistant-ntp.conf`），
+#    不在这里 heredoc —— T15-2-11 实测：同一次 post-build 里 nm-online 的 drop-in
+#    建出来了、这一份却没有（全 SDK 都找不到该文件），而它之后的步骤都正常执行。
+#    overlay 是直接拷文件，没有 here-doc 这类解释器坑（udev 规则那条路已验证）。
+if [ -f "$ETC/systemd/timesyncd.conf.d/assistant-ntp.conf" ]; then
+    echo "   + systemd/timesyncd.conf.d/assistant-ntp.conf（NTP 换国内源，来自 overlay）"
+else
+    echo "   !! NTP drop-in 没铺上（overlay 缺 etc/systemd/timesyncd.conf.d/assistant-ntp.conf）" >&2
+fi
 
 # 3c) **mask 掉 networkd 的等网器**（T15-2-11 板端实测：这才是"启动很久"的真凶）
 #  ---------------------------------------------------------------------------

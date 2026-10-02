@@ -803,12 +803,32 @@ class TestNtpUsesReachableServers(unittest.TestCase):
     """
 
     POSTBUILD = _ROOT / "image" / "board" / "rockchip" / "kickpi" / "k1mini" / "post-build.sh"
+    INSTALL = _ROOT / "image" / "install-into-sdk.sh"
+
+    def test_installer_injects_the_ntp_dropin(self):
+        """⚠ 注入是**逐个文件**拷的：overlay 里放好了但没列进 install-into-sdk 的清单，
+        就等于没建（T15-2-11 实测踩过：文件写好了、post-build 也执行了，全 SDK 找不到）。
+        """
+        text = self.INSTALL.read_text(encoding="utf-8")
+        self.assertIn("timesyncd.conf.d/assistant-ntp.conf", text)
+        self.assertIn("$OVERLAY_DIR/etc/systemd/timesyncd.conf.d/assistant-ntp.conf", text)
 
     def test_post_build_writes_a_china_ntp_dropin(self):
-        text = self.POSTBUILD.read_text(encoding="utf-8")
-        self.assertIn("timesyncd.conf.d", text)
+        """NTP drop-in 走 **overlay 直投文件**（不是 post-build 里 heredoc）。
+
+        T15-2-11 实测：同一次 post-build 里 nm-online 的 drop-in 建出来了、
+        这一份却没有（全 SDK 都找不到该文件），而它之后的步骤都正常执行 ——
+        所以改成 overlay 直拷（udev 那条路已验证可行），post-build 只做存在性断言。
+        """
+        overlay = (_ROOT / "image" / "board" / "rockchip" / "kickpi" / "k1mini" /
+                   "rootfs-overlay" / "etc" / "systemd" / "timesyncd.conf.d" / "assistant-ntp.conf")
+        self.assertTrue(overlay.is_file(), "NTP drop-in 应该在 overlay 里")
+        text = overlay.read_text(encoding="utf-8")
         self.assertIn("ntp.aliyun.com", text)
         self.assertIn("cn.pool.ntp.org", text)
+        self.assertIn("[Time]", text)
+        pb = self.POSTBUILD.read_text(encoding="utf-8")
+        self.assertIn("timesyncd.conf.d", pb)
 
     def test_google_pool_is_not_the_only_one(self):
         """别把 Google 池写成唯一来源（那正是踩过的坑）。"""

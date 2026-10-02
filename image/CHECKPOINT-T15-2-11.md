@@ -303,7 +303,71 @@ buildroot 编译进的默认池是 Google 的 time1..4；实测 `ntp.aliyun.com`
 
 ---
 
-## 12. 本轮涉及的文件
+## 12. b8 那次"起不来"的真相：A/B 元数据被扣光（已修，附急救流程）
+
+**症状**（串口，掉进 fastboot）：
+```
+U-Boot SPL ... No bootable slots found, use lastboot.
+U-Boot ... No bootable slots found. / rk_avb_append_part_slot: failed to get slot suffix !
+FIT: No boot partition / Android boot failed, error -1. / Enter fastboot...OK
+```
+**与镜像内容无关**（b7 能起、b8 只差启动图像素）：SPL 与 u-boot 每次启动都把当前槽
+`tries_remaining` 减 1（`common/spl/spl_ab.c`、`lib/avb/rk_avb_user/rk_ab_ops_user.c`），
+而镜像里**没有任何东西**置 `successful_boot`（`abctl`/`bootctl` 都不存在）。可引导判定
+`priority > 0 && (successful_boot || tries_remaining > 0)` → 扣到 0 两个槽都判死。
+Android 那边这一步由 userspace（boot control HAL）做 —— 我们缺，于是**每次开机都在
+向变砖靠近**。修法：`ab-mark.service`（开机早期按 AVB 格式把当前槽写成
+`successful_boot=1`）。
+
+**b9 板端证据**（journal）：
+```
+ab-mark[445]: 当前槽 = _b
+ab-mark[445]:   槽1(_b): {'priority': 14, 'tries_remaining': 5, 'successful_boot': 0}   ← 已被扣到 5
+ab-mark[445]: 写入后: 槽1(_b)={'priority': 15, 'tries_remaining': 7, 'successful_boot': 1}
+ab-mark[445]: 已写回 /dev/disk/by-partlabel/misc@0x800
+```
+→ **如果没有它，再开 5 次机就又是一块砖。**
+
+**格式是 AVB 的 `AvbABData`**（不是 u-boot 里的 `android_bootloader_control`）：
+magic `"\0AB0"`、32 字节、CRC32 覆盖前 28 字节且**大端**、位置 `misc` 0x800
+（`spl_ab.h`: `AB_METADATA_OFFSET = 4` 扇区）。踩坑记录：先按 `android_bootloader_control`
+（magic `BCAB`、小端 CRC）写，SPL 直接 `Magic is incorrect.` 又重写了一遍。
+
+**急救流程**已写进 `image/FLASH-RUNBOOK.md` §5：持续发 Ctrl+C 抢 u-boot 提示符 →
+`mw.b`+`mmc write` 把 `misc` 置零 → SPL 自己重写默认元数据 → 正常启动。
+
+## 13. 其它两条经验（都写进了代码/测试注释）
+
+1. **CRLF 会让整机构建死在 target-finalize**：`post-build.sh: cannot execute:
+   required file not found` + `target-finalize Error 127` —— shebang 成了
+   `#!/bin/bash\r`。一次 Windows 侧编辑即可造成。→ `.gitattributes` 扩大钉死
+   `eol=lf`，并加守卫 `TestBuildScriptsAreLF`。
+2. **`install-into-sdk.sh` 是逐个文件注入**：overlay 里放好但没列进清单 = 没建
+   （NTP drop-in 就这样丢过一次；`post-build` 里那段的 heredoc 也没生成它）。
+   → 改成 overlay 直投 + 显式列进清单 + 守卫 `test_installer_injects_the_ntp_dropin`。
+
+## 14. b9 基线复测（与 b3 同口径）
+
+| 项 | b3 | b9 |
+| --- | --- | --- |
+| `assistant.target` 到达 | 8.341 s（用户态） | **4.693 s**（方案 A 生效） |
+| 总启动 | 10.198 s | 10.403 s（其中 5 s 是 `NetworkManager-wait-online` 上限，**不再阻塞我们**） |
+| NPU（mobilenet_v1） | 7.1 ms/帧 | 9.5 ms/帧 |
+| SigLIP 加载 | load/init = 0 | load/init = 0 |
+| 硬解（720p×120 帧） | 1.465 s | 1.509 s |
+| 内存空闲 | 148 MB | 145 MB |
+| 温度空闲 | 31.9 ℃ | 35.6 ℃ |
+| NTP | 手工修好 | 配方里带（b9 那次没进镜像 → b11 修好；板上已运行期补上，`synchronized: yes`） |
+| A/B | 从 `_b` 槽启动 | 当前 `_b`，`successful_boot=1` 已被 ab-mark 写好 |
+| `/data` | 手工 resize | 自动 22.7 GB（`x-systemd.growfs`） |
+| 模型 | 4.9 GB 已铺 | **刷 h 会覆盖 userdata → 已重铺 4.9 GB（151 s）** |
+
+⚠ 记一条：**整包刷 h 会覆盖 `userdata`**（package-file 里有 `userdata`）→ 每次刷完
+都要重铺模型（151 s）。OTA（T15-8）只换系统槽，不会碰 `/data`。
+
+---
+
+## 15. 本轮涉及的文件
 
 | 文件 | 作用 |
 | --- | --- |
