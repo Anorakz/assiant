@@ -174,3 +174,7 @@ image/local/*
 # GUI 的 ConfigStore 保存时会在原文件旁留一份 .bak（config/config.yaml.bak、
 # llm/config/llm.env.bak），那是运行期产物，不入库。
 *.bak
+
+# �ű�������ʱ����ʱ���ݣ�image �Ǳߵ� sed �ű�����һ�ݣ�
+config/*.bak-*
+
