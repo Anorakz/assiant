@@ -133,6 +133,24 @@ ExecStart=/usr/bin/nm-online -s -q -t 5
 EOF
 echo "   + NetworkManager-wait-online.service.d/timeout.conf（等网限时 5s）"
 
+# 3b-2) **NTP 源换成能通的**（T15-2-11 板端实测）
+#  ---------------------------------------------------------------------------
+#  buildroot 编译进的默认 NTP 池是 Google 的 time1..4.google.com；在这个（以及
+#  大多数国内）网络下 **UDP 123 无回包**，timesyncd 日志里全是
+#      Timed out waiting for reply from 216.239.35.4:123 (time2.google.com).
+#  于是板子时间一直停在 RTC 里的旧值（实测停在 2024-01-25，差两年多）——
+#  时间不对会连带影响 TLS 证书校验（云端 LLM / OTA）和日志排序。
+#  实测这三家都回包且服务器时间正确：ntp.aliyun.com / cn.pool.ntp.org / ntp.tencent.com。
+#  换成配置片段（drop-in）而不是改主配置：不覆盖 buildroot 那份，升级也好对照。
+mkdir -p "$ETC/systemd/timesyncd.conf.d"
+cat > "$ETC/systemd/timesyncd.conf.d/assistant-ntp.conf" <<'EOF'
+# assistant: 默认的 Google NTP 池在国内网络下不通（UDP 123 超时），换国内源
+[Time]
+NTP=ntp.aliyun.com cn.pool.ntp.org ntp.tencent.com
+FallbackNTP=ntp.aliyun.com cn.pool.ntp.org
+EOF
+echo "   + systemd/timesyncd.conf.d/assistant-ntp.conf（NTP 换国内源）"
+
 # 3c) **mask 掉 networkd 的等网器**（T15-2-11 板端实测：这才是"启动很久"的真凶）
 #  ---------------------------------------------------------------------------
 #  `90-systemd.preset` 第 21 行是 `enable systemd-networkd-wait-online.service` ——

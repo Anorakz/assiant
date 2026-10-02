@@ -791,5 +791,60 @@ class TestSshAccessIsBakedIn(unittest.TestCase):
         self.assertIn("T15-12", text)
 
 
+class TestNtpUsesReachableServers(unittest.TestCase):
+    """T15-2-11 板端实测：buildroot 编译进的默认 NTP 池是 Google 的
+    time1..4.google.com，在国内网络下 **UDP 123 无回包**：
+
+        Timed out waiting for reply from 216.239.35.4:123 (time2.google.com).
+
+    于是板子时间一直停在 RTC 里的旧值（实测停在 2024-01-25，差两年多）——
+    时间不对会连带影响 TLS 证书校验（云端 LLM / OTA）和日志排序。
+    实测 ntp.aliyun.com / cn.pool.ntp.org / ntp.tencent.com 都回包且时间正确。
+    """
+
+    POSTBUILD = _ROOT / "image" / "board" / "rockchip" / "kickpi" / "k1mini" / "post-build.sh"
+
+    def test_post_build_writes_a_china_ntp_dropin(self):
+        text = self.POSTBUILD.read_text(encoding="utf-8")
+        self.assertIn("timesyncd.conf.d", text)
+        self.assertIn("ntp.aliyun.com", text)
+        self.assertIn("cn.pool.ntp.org", text)
+
+    def test_google_pool_is_not_the_only_one(self):
+        """别把 Google 池写成唯一来源（那正是踩过的坑）。"""
+        text = self.POSTBUILD.read_text(encoding="utf-8")
+        if "google.com" in text:
+            self.assertIn("ntp.aliyun.com", text)
+
+
+class TestShippedConfigUsesImageLayout(unittest.TestCase):
+    """配置里的默认路径必须是**镜像布局**（D7）。
+
+    板端实测：`/data/assistant/config/config.yaml`（从模板铺出来的）里
+    `llm.model_path` / `vision.model_path` / `tokenizer_path` 还是厂商 Ubuntu 的
+    `/home/kickpi/model/...`，而镜像里模型在 **/data/model**（rootfs 只有 633 MB、
+    剩 58 MB，根本放不下 4.9 GB 模型）。照旧模板跑，Agent 找不到模型。
+    壁纸目录同理（`/data/assistant/wallpapers`），证书在 `/data/assistant/creds`。
+    """
+
+    CONFIG = _ROOT / "config" / "config.example.yaml"
+
+    def test_no_vendor_home_paths_left(self):
+        text = self.CONFIG.read_text(encoding="utf-8")
+        bad = [ln.strip() for ln in text.splitlines()
+               if "/home/kickpi" in ln and not ln.strip().startswith("#")]
+        self.assertEqual(bad, [], "配置里还有厂商老路径:\n" + "\n".join(bad))
+
+    def test_models_point_at_the_data_partition(self):
+        text = self.CONFIG.read_text(encoding="utf-8")
+        self.assertIn("/data/model/", text)
+        self.assertIn("siglip_tokenizer", text)
+
+    def test_wallpapers_and_creds_live_on_data(self):
+        text = self.CONFIG.read_text(encoding="utf-8")
+        self.assertIn("/data/assistant/wallpapers", text)
+        self.assertIn("/data/assistant/creds/", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

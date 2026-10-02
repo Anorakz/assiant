@@ -40,7 +40,7 @@ ExecStart=/bin/sh -c '\
   mkdir -p /data/assistant/config /data/assistant/logs/crash /data/assistant/run \
            /data/assistant/env \
            /data/assistant/llm/config /data/assistant/llm/run /data/assistant/llm/logs \
-           /data/assistant/llm/logs /data/model && \
+           /data/assistant/wallpapers /data/assistant/creds /data/model && \
   for f in config user_profile; do \
     if [ ! -f "/data/assistant/config/$f.yaml" ] && [ -f "/usr/lib/assistant/config/$f.example.yaml" ]; then \
       cp -n "/usr/lib/assistant/config/$f.example.yaml" "/data/assistant/config/$f.yaml"; \

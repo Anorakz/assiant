@@ -36,7 +36,7 @@ llm:
 
   # ---- mode=edge: 本地模型 ----
   # GGUF 路径 —— **由 llama-server 加载**; Agent 只把它打进日志 (不自己读模型文件)
-  model_path: /home/kickpi/model/Qwen3-0.6B-Q4_K_M.gguf
+  model_path: /data/model/Qwen3-0.6B-Q4_K_M.gguf
   # 单次回复的 token 上限 —— **不是**上下文长度 (上下文由 llama-server 的 --ctx-size 决定)
   # ⚠ 设太小会把 Qwen3 的思考内容截断成"正文为空"(finish_reason=length); 详见 local_api_key 下面的说明
   max_tokens: 512
@@ -112,10 +112,10 @@ llm:
 #    不同文本得到几乎相同的 embedding; 别指到这里。
 vision:
   # 完整双塔 rknn (图像塔 + 文本塔)。板端文件, 不入库。
-  model_path: /home/kickpi/model/siglip_full.rknn
+  model_path: /data/model/siglip_full.rknn
   # tokenizer.json (HF google/siglip-base-patch16-256)。板端需要 tokenizers 库:
   #   pip3 install --no-deps tokenizers==0.20.3
-  tokenizer_path: /home/kickpi/model/siglip_tokenizer/tokenizer.json
+  tokenizer_path: /data/model/siglip_tokenizer/tokenizer.json
   # 仅用于日志/排障: 模型加载失败时要知道是哪个 librknnrt (实测需 >= 1.6.0)
   runtime_lib: /usr/lib/librknnrt.so
   # rknnlite 自己的日志 (排障时打开)
@@ -364,8 +364,8 @@ wallpaper:
   #   · 每次"下一张"都重新列一遍目录 —— 随时丢新图进去, 不用重启 Agent
   #   · 目录不存在/是空的: 换壁纸会失败并回一句说明; **不影响 Agent 启动**
   # ⚠ 图片能不能解码是 GUI 的事: 读不到时 GUI 给兜底底色 + 橙字提示, 不崩。
-  # ⚠ 目录在仓库外面 (板端 /home/kickpi/wallpapers), 所以图片不入库。
-  dir: /home/kickpi/wallpapers
+  # ⚠ 目录在仓库外面 (板端 /data/assistant/wallpapers), 所以图片不入库。
+  dir: /data/assistant/wallpapers
 
   # ---- 三格窗口 (T10: 上一个 / 当前 / 下一个) ----
   # 窗口本身固定三格 (`agent/core/wallpaper.py::WINDOW_SIZE`), 没有可调的;
@@ -420,8 +420,8 @@ sunshine:
   fps: 60
 
   # 客户端证书 (配对时生成, 必须两个文件都在)
-  cert: /home/kickpi/myproject/assitant/creds/client.pem
-  key: /home/kickpi/myproject/assitant/creds/client.key
+  cert: /data/assistant/creds/client.pem
+  key: /data/assistant/creds/client.key
 
 # ---------------------------------------------------------------------------
 # 进程间通信 (Agent 是 server, GUI 是 client)

@@ -225,7 +225,85 @@ NM 只能走**新** D-Bus API。
 
 ---
 
-## 9. 本轮涉及的文件
+## 10. b5 镜像（第二批修复）板端验收 —— 2026-10-02 16:4x
+
+b5 = b4 的全部修复 + SSH 密码/公钥烘进镜像。刷完之后**逐项在板上核对**：
+
+| 项 | 证据 |
+| --- | --- |
+| 串口要密码了 | `rk3568-buildroot login: root` → `Password:` → 进（密码 `assistant`） |
+| SSH 免密可用 | `ssh rk3568` → `uid=0(root)`、`hostname=rk3568-buildroot` |
+| **WiFi 自己连上** | `nmcli device status` → `wlan0 wifi connected assistant-wifi`；`ip addr` → `inet 192.168.137.30/24`；`dmesg` → `SKWIFI6621S … ASSOCED -> COMPLETED` |
+| agent 也认了网 | `agent.log`：`net: WiFi 就绪 (wlan0, connected, ssid=Anorak_host, ip=192.168.137.30)；每 30.0s 体检一次` |
+| **DNS 通了** | `ping www.baidu.com` 0% 丢包 18 ms（`resolv.conf` → `nameserver 192.168.137.1`） |
+| **`/data` 自动长大** | `df -h /data` → **22.7 G**；`systemd-analyze blame` 里有 `196ms systemd-growfs@data.service` |
+| 触摸 | 用户确认"点哪准哪"（`LIBINPUT_CALIBRATION_MATRIX` 那条 udev 规则） |
+| 启动 | `1.860s 内核 + 8.556s 用户态 = 10.417s`（其中 `NetworkManager-wait-online` 占 5.05s，见 §11） |
+
+### 10.1 首次开机收尾：模型落位 + 真加载
+
+| 项 | 证据 |
+| --- | --- |
+| 模型搬进 `/data/model` | 4.86 GB / **18 个文件**，`scp` 用时 **131 秒**（≈ **37 MB/s**，WiFi 实测）→ `/data` 用 21% |
+| **本地 LLM 真跑** | `llama-server -m /data/model/Qwen3-0.6B-Q4_K_M.gguf -c 2048 -t 4` → `model loaded` + `listening on http://127.0.0.1:8080`；一次生成：**9.3 tok/s**（prompt 31.2 tok/s，48 token / 5.73 秒） |
+| 推理时资源 | 内存 148 MB → **804 MB**；soc 温度 31 ℃ → **44.4 ℃**（余量足） |
+| **视觉塔（SigLIP）在 NPU 上加载** | `rknnlite.load_rknn(/data/model/siglip_full.rknn)` → `0`、`init_runtime()` → `0`（403 MB，toolkit 2.3.2，target rk3568） |
+| agent 健康 | `agent.log`：`LLMProvider 就绪 (mode=disabled)`、`IPC server 就绪 /tmp/agent.sock`、`GUI 已连接`；唯一 WARNING 是 `native(客户端证书不存在: /data/assistant/creds/client.pem —— 配对时生成)`（预期内，配对后才有） |
+
+### 10.2 b5 阶段又挖出的两个真问题（都已修进配方）
+
+**① NTP 默认源在国内网络下不通**
+
+```
+systemd-timesyncd: Timed out waiting for reply from 216.239.35.4:123 (time2.google.com).
+System clock synchronized: no        ← 板子时间停在 2024-01-25（差两年多）
+```
+buildroot 编译进的默认池是 Google 的 time1..4；实测 `ntp.aliyun.com` / `cn.pool.ntp.org` /
+`ntp.tencent.com` **都回包**。修法：post-build 写
+`/etc/systemd/timesyncd.conf.d/assistant-ntp.conf`（不覆盖 buildroot 那份）。
+板上验证：`Contacted time server 203.107.6.88:123 (ntp.aliyun.com)` →
+`Initial clock synchronization to Fri 2026-10-02 16:40:21 CST` → `synchronized: yes`，
+并 `hwclock -w` 写回 RTC。
+（时间不对会连带影响 TLS 证书校验 —— 云端 LLM / OTA 都要用它。）
+
+**② 配置里的默认路径还是厂商老路径**
+
+板端 `/data/assistant/config/config.yaml`（从我们的模板铺出来的）里
+`llm.model_path` / `vision.model_path` / `tokenizer_path` 仍写着
+`/home/kickpi/model/...`，而镜像布局（D7）里模型在 **`/data/model`**（rootfs 只有
+633 MB、剩 57 MB，放不下 4.9 GB）。照旧模板跑 = Agent 找不到模型。
+修法：`config/config.example.yaml` 改成 `/data/model/…`、壁纸 `/data/assistant/wallpapers`、
+证书 `/data/assistant/creds/`；`assistant-init` 补建这两个目录；板上同步改了一份。
+
+### 10.3 顺手记下的两个"环境事实"
+
+- **镜像里没有 `pgrep` / `pkill`**（busybox 只给 `ps`/`kill`）—— 我的测试脚本第一版
+  因此把"在跑的服务"误判成"已退出"（`pgrep` 返回 127 被当成"没进程"）。
+- 这块板子的无线模块是 **Seekwave SV6160LITE**；`setup TXBA failed, ret: -1` 是聚合
+  告警（**不影响连通性**：ping 网关 0% 丢包、37 MB/s 传输、ssh 都正常），
+  NV 校准文件缺失留作专项（§8.3）。
+
+---
+
+## 11. 待你决定的启动耗时优化（不改，先提方案）
+
+现在的 10.417 s 里，**5.05 s** 是 `NetworkManager-wait-online` 撞了我们限的 5 秒上限：
+
+- 板子起来后 WiFi 要 **~11 s** 才关联完成（`wifibt-init` 0.8 s + 驱动扫描/关联），
+  而 `agent.service` 是 `After=network-online.target` → 它必须等；
+- 我们给 `nm-online` 设了 `-t 5`，所以最多等 5 s 就放行（超时会留下一个 `failed` 状态）。
+
+三个选项（等你选）：
+
+| 方案 | 效果 | 代价 |
+| --- | --- | --- |
+| **A（推荐）**：`agent.service` 去掉 `After=network-online.target`（保留 `Wants=`） | 开机 ~5 s 到 agent/gui；网络 ~11 s 到位后由 agent 自己的 LinkGuard 接管 | 改 T15-2-8 的"起来时网络已就绪"约定 |
+| B：把等网上限从 5 s 提到 15 s | 我们的服务起来时网络**确实**已就绪 | 总启动变成 ~13–15 s（更慢），且没网时更慢 |
+| C：维持现状（5 s 上限） | 折中；`NetworkManager-wait-online` 每次开机显示 `failed`（无害但难看） | 不改 |
+
+---
+
+## 12. 本轮涉及的文件
 
 | 文件 | 作用 |
 | --- | --- |
