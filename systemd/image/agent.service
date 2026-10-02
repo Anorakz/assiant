@@ -28,7 +28,17 @@
 [Unit]
 Description=板端助手 Agent（Python / asyncio）
 Documentation=file:///usr/lib/assistant/Readme.md
-After=network-online.target assistant-init.service
+# ⚠ **不阻塞等网**（T15-2-11 板端定稿，方案 A）
+#  ---------------------------------------------------------------------------
+#  原来这里是 `After=network-online.target`，于是整条启动链要等"网络在线"：
+#  实测冷启动 `NetworkManager-wait-online` 要 5.05s（WiFi 关联本身要约 11s，
+#  等不到就撞我们给 nm-online 设的 5s 上限），这 5 秒白等。
+#  现在改成：**只 Wants（把 network-online 拉起来）但不 After（不等它）**。
+#  Agent 自己每 30s 体检一次链路（`net: WiFi 就绪 … 每 30.0s 体检一次，
+#  连续 3 次探不到网关才主动重连`），网络晚到几秒它完全能处理 ——
+#  这比"整机启动被网络拖住"更符合这台会睡眠/漫游的设备的实际。
+#  等网那一步仍然有 5s 上限兜底（NetworkManager-wait-online.service.d/timeout.conf）。
+After=assistant-init.service
 Wants=network-online.target
 # systemd 245（板端 Ubuntu 20.04）里 StartLimit* 属 [Unit]；写在 [Service] 会被
 # "Unknown key name ... ignoring" 静默丢掉 —— 2026-09-27 T14-7 取证发现，已改正。

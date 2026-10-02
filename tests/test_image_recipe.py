@@ -846,5 +846,80 @@ class TestShippedConfigUsesImageLayout(unittest.TestCase):
         self.assertIn("/data/assistant/creds/", text)
 
 
+class TestAgentDoesNotBlockOnNetwork(unittest.TestCase):
+    """T15-2-11 板端定稿（方案 A）：agent 只 **Wants** network-online，不 **After** 它。
+
+    原来 `After=network-online.target` 让整条启动链等网：实测冷启动
+    `NetworkManager-wait-online` 占 **5.05s**（WiFi 关联本身约 11s，等不到就撞我们给
+    nm-online 设的 5s 上限），这 5 秒纯白等。现在：
+      · agent 起来就干活；链路晚到几秒由它自己每 30s 的体检 + 连续 3 次探不到网关
+        才重连的逻辑兜住（板端日志原话：`net: WiFi 就绪 … 每 30.0s 体检一次`）。
+      · `Wants=` 仍留着（network-online 照样被拉起来），只是**不等**。
+    """
+
+    UNIT = _ROOT / "systemd" / "image" / "agent.service"
+
+    def test_unit_wants_but_does_not_wait_for_network(self):
+        text = self.UNIT.read_text(encoding="utf-8")
+        after = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("After=")]
+        wants = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("Wants=")]
+        self.assertTrue(any("assistant-init.service" in a for a in after),
+                        "agent 仍然要有序在 assistant-init 之后（/data 挂好、目录建好）")
+        self.assertFalse(any("network-online" in a for a in after),
+                         "agent 不该再 After=network-online.target（那会白等 5 秒）")
+        self.assertTrue(any("network-online" in w for w in wants),
+                        "Wants=network-online.target 要留着（还是把等网拉起来）")
+
+    def test_decision_is_recorded_in_the_unit(self):
+        """以后有人想加回去，得先看到这里的理由与实测数字。"""
+        text = self.UNIT.read_text(encoding="utf-8")
+        self.assertIn("5.05", text)
+        self.assertIn("方案 A", text)
+
+
+class TestBootLogoIsOurImage(unittest.TestCase):
+    """T15-2-11：开机那张图换成我们自己的（`image/logo/logo-kernel.bmp`）。
+
+    机制（板端/SDK 双向核对过）：
+      · Rockchip 的启动图是内核树根的 `logo.bmp`（u-boot 用）与 `logo_kernel.bmp`
+        （内核用），由 `mk-kernel.sh` 经 `scripts/resource_tool` 打进 `resource.img`
+        → 进 boot.img 的 FIT 里的 resource 子镜像；
+      · DTB 的 `logo,offset/width/height/`**`bpp`** 由 resource_tool 按 BMP 头写，
+        内核 `rockchip_drm_logo.c` 按它贴图，**只支持 bpp ∈ {16,24,32}**（8 不行）；
+        路由里是 `logo,mode = "center"`。
+      · 所以：把 BMP 做成**与屏等大 1080x1920、24bpp**，居中即整屏，不依赖摆放逻辑。
+      实测（不刷机）：resource_tool 接受该 BMP → `Pack to resource.img successed!`
+    """
+
+    LOGO = _ROOT / "image" / "logo" / "logo-kernel.bmp"
+    MAKER = _ROOT / "image" / "logo" / "make-logo.py"
+    SOURCE = _ROOT / "image" / "logo" / "source.png"
+    INSTALL = _ROOT / "image" / "install-into-sdk.sh"
+
+    PANEL_W, PANEL_H = 1080, 1920
+
+    def test_logo_is_a_bmp_of_panel_size_at_24bpp(self):
+        self.assertTrue(self.LOGO.is_file(), "缺 image/logo/logo-kernel.bmp")
+        head = self.LOGO.read_bytes()[:54]
+        self.assertEqual(head[:2], b"BM", "不是 BMP")
+        w = int.from_bytes(head[18:22], "little")
+        h = int.from_bytes(head[22:26], "little")
+        bpp = int.from_bytes(head[28:30], "little")
+        self.assertEqual((w, h), (self.PANEL_W, self.PANEL_H),
+                         "启动图必须与屏等大（1080x1920），否则要依赖居中/偏移逻辑")
+        self.assertIn(bpp, (16, 24, 32), "内核只支持 bpp 16/24/32（8bpp 会不显示）")
+
+    def test_converter_and_source_are_kept(self):
+        """留着生成脚本与原图：以后想换图/改摆放方式（--fill 旋转铺满）能一键重做。"""
+        self.assertTrue(self.MAKER.is_file(), "缺 make-logo.py")
+        self.assertTrue(self.SOURCE.is_file(), "缺原图 source.png")
+
+    def test_installer_wires_both_kernel_logo_names(self):
+        text = self.INSTALL.read_text(encoding="utf-8")
+        self.assertIn("logo_kernel.bmp", text)
+        self.assertIn("$KERNEL_LOGO_DIR/logo.bmp", text)
+        self.assertIn("KERNEL_LOGO_DIR", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -41,6 +41,15 @@ fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DTS_DIR="kernel-6.1/arch/arm64/boot/dts/rockchip"
+# 启动图（logo.bmp / logo_kernel.bmp）在**内核树根**下，mk-kernel.sh 从那儿取。
+# 树名可能是 kernel-6.1 或 kernel，探测一下（不写死）。
+if [ -d "$SDK/kernel-6.1" ]; then
+    KERNEL_LOGO_DIR="kernel-6.1"
+elif [ -d "$SDK/kernel" ]; then
+    KERNEL_LOGO_DIR="kernel"
+else
+    KERNEL_LOGO_DIR="kernel-6.1"     # 兜底：报错信息里也能看出预期路径
+fi
 FAILED=0
 
 # install_file <本仓库相对路径> <SDK 相对路径>
@@ -116,6 +125,19 @@ done
 for u in assistant.target agent.service agent-gui.service assistant-init.service; do
     install_file "systemd/image/$u" "$OVERLAY_DIR/usr/lib/systemd/system/$u"
 done
+# T15-2-11：启动画面（开机那张图）
+#  ---------------------------------------------------------------------------
+#  Rockchip 的启动图机制：`kernel-6.1/logo.bmp`（u-boot 用）与
+#  `logo_kernel.bmp`（内核用）由 `mk-kernel.sh` 经 `scripts/resource_tool` 打进
+#  `resource.img` → 再进 boot.img 的 FIT 的 resource 子镜像；DTB 里的
+#  `logo,offset/width/height/bpp` 就是由 resource_tool 按 BMP 头写进去的，
+#  内核按这些属性贴图（`rockchip_drm_logo.c`，bpp 只支持 16/24/32），
+#  路由里写着 `logo,mode = "center"`（居中）。
+#  所以只要把这两张 BMP 换成我们的即可 —— 尺寸做成**与屏等大 1080x1920**，
+#  居中/偏移怎么写都是整屏一张图。
+#  ⚠ 只提交一份 BMP，这里复制成两个名字（两份内容相同）。
+install_file image/logo/logo-kernel.bmp "$KERNEL_LOGO_DIR/logo_kernel.bmp"
+install_file image/logo/logo-kernel.bmp "$KERNEL_LOGO_DIR/logo.bmp"
 # T15-2-11：触摸旋转必须做在 **libinput** 这一层（eglfs_kms 用 libinput 处理输入，
 # 通用 evdev 插件的环境变量完全无效 —— 板端实测）。见规则文件里的推导过程。
 install_file image/board/rockchip/kickpi/k1mini/udev/99-assistant-touch.rules \
