@@ -73,3 +73,39 @@
 # ---------------------------------------------------------------------------
 BR2_PACKAGE_PYTHON3_SSL=y
 BR2_PACKAGE_PYTHON3_READLINE=y
+
+# ---------------------------------------------------------------------------
+#  T15-2-11：wpa_supplicant 的 **D-Bus 控制接口**（不开就没有 WiFi）
+#  ---------------------------------------------------------------------------
+#  板端实测的现象：NetworkManager 把 wlan0 判成 `unavailable`，日志里是
+#      device (wlan0): Couldn't initialize supplicant interface:
+#                      Failed to D-Bus activate wpa_supplicant service
+#      device (wlan0): supplicant interface keeps failing, giving up
+#  原因是两条同时缺：
+#    · 厂商的 `wireless.config` 片段开了 WPA_SUPPLICANT/AP/AUTOSCAN/EAP/CLI/...
+#      **唯独没开 DBUS/DBUS_NEW** —— 于是 `/usr/sbin/wpa_supplicant -u` 直接把
+#      用法打出来就退出（`-u` 不被识别），而我们那份
+#      `wpa_supplicant.service`（Type=dbus / BusName=fi.w1.wpa_supplicant1）
+#      因此起不来。
+#    · `/usr/share/dbus-1/system-services/` 里也没有
+#      `fi.w1.wpa_supplicant1.service` 这个激活文件（同样由 DBUS 选项带来）。
+#  NM 只能通过 **新** D-Bus API 驱动 wpa_supplicant（`fi.w1.wpa_supplicant1`），
+#  所以这个开关是必须的。
+#  板上验证：手工 `wpa_supplicant -B -i wlan0 -c ...` + `udhcpc` 能拿到
+#  192.168.137.30（关联状态机走完 COMPLETED）—— 也就是说 WiFi 硬件/驱动没问题，
+#  缺的只是这条 D-Bus 通路。
+#
+#  ⚠ **踩过的坑**：别顺手再补一行"NEW 版"的那个开关（`..._DBUS_NEW`）。
+#     在 buildroot 2024.02 里它已经是 **legacy 符号**（2019.08 把 new/old 两套合并成
+#     一个 DBUS 开关），写了会去 select "legacy" 那个总开关，于是整机构建直接死在：
+#         Makefile.legacy:9: *** "You have legacy configuration in your .config!"
+#         ...br-rockchip_...log: Buildroot config changed! You might need to clean it
+#     现在"新 API"就是唯一实现，单写这个 DBUS 开关即可（dbus 激活文件
+#     `fi.w1.wpa_supplicant1.service` 就是由它带来的）。
+#
+#  ⚠ 注释里**不许出现配置记号**（本文件被 SDK 的 sed 片段合并器读；那条守卫测试
+#     TestNoSymbolNamesInComments 就是拦这个的）——所以上面只写"DBUS 开关"这种说法。
+#
+#  写在 defconfig 末尾（所有 include 之后）：顺序上必胜，理由同上面 PYTHON3 那段。
+# ---------------------------------------------------------------------------
+BR2_PACKAGE_WPA_SUPPLICANT_DBUS=y

@@ -36,18 +36,39 @@ mkdir -p "$TARGET_DIR/data"
 
 FSTAB="$TARGET_DIR/etc/fstab"
 DATA_LINE='# assistant: 共享数据分区（模型/配置/日志都在这；A/B OTA 只换系统槽）'
-DATA_MNT='/dev/disk/by-partlabel/userdata  /data  ext4  defaults,noatime  0  2'
+# ⚠ `x-systemd.growfs`（T15-2-11 板端踩到的）：userdata 分区在 eMMC 上有 **22.8 GiB**
+#   （`userdata:grow` 由刷机工具展开，GPT 是对的），但烧进去的文件系统还是
+#   userdata.img 那个 **3.5 MB** 的小 ext4 —— 没人长大它。首刷之后 `/data` 只有
+#   3.5 MB，模型（4.9 GB）根本放不下。让 systemd 在挂载时按分区大小把文件系统扩到底
+#   （等价于一次 resize2fs，但每次开机幂等）。
+DATA_MNT='/dev/disk/by-partlabel/userdata  /data  ext4  defaults,noatime,x-systemd.growfs  0  2'
 
 if [ -f "$FSTAB" ]; then
+    # 厂商那份 fstab 里还有一行 `PARTLABEL=userdata /userdata ...`：
+    # 同一个文件系统被挂两次（板端 `df` 里 /data 和 /userdata 指向同一个 mmcblk0p9），
+    # 纯冗余且容易让人误判"哪个才是数据分区"。我们只用 /data，删掉它。
+    if grep -qE '^PARTLABEL=userdata[[:space:]]+/userdata' "$FSTAB"; then
+        sed -i -E '\#^PARTLABEL=userdata[[:space:]]+/userdata#d' "$FSTAB"
+        echo "   - 已删掉厂商那行重复的 /userdata 挂载（同一个分区被挂两次）"
+    fi
     if grep -q "by-partlabel/userdata" "$FSTAB"; then
-        echo "   = /etc/fstab 里已经有 userdata（跳过）"
+        # ⚠ target 树是**跨次构建复用**的：老树上那行是旧选项（没有 growfs），
+        #   只判断"有没有"就跳过 → 新选项永远进不去（T15-2-11 实测踩到：
+        #   target 里那行还是 defaults,noatime，而源里已经加了 growfs）。
+        #   所以这里做**修补**：有行但缺 growfs 就重写选项部分。
+        if ! grep -q 'by-partlabel/userdata.*x-systemd.growfs' "$FSTAB"; then
+            sed -i -E 's#^(/dev/disk/by-partlabel/userdata[[:space:]]+/data[[:space:]]+ext4[[:space:]]+)[^[:space:]]+#\1defaults,noatime,x-systemd.growfs#' "$FSTAB"
+            echo "   ~ /data 那行缺 x-systemd.growfs，已补上"
+        else
+            echo "   = /etc/fstab 里已经有 userdata（含 growfs，跳过）"
+        fi
     else
         {
             echo ""
             echo "$DATA_LINE"
             echo "$DATA_MNT"
         } >> "$FSTAB"
-        echo "   + 已往 /etc/fstab 追加 userdata -> /data"
+        echo "   + 已往 /etc/fstab 追加 userdata -> /data（带 x-systemd.growfs）"
     fi
 else
     printf '%s\n%s\n' "$DATA_LINE" "$DATA_MNT" > "$FSTAB"

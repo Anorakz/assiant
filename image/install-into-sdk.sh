@@ -116,6 +116,10 @@ done
 for u in assistant.target agent.service agent-gui.service assistant-init.service; do
     install_file "systemd/image/$u" "$OVERLAY_DIR/usr/lib/systemd/system/$u"
 done
+# T15-2-11：触摸旋转必须做在 **libinput** 这一层（eglfs_kms 用 libinput 处理输入，
+# 通用 evdev 插件的环境变量完全无效 —— 板端实测）。见规则文件里的推导过程。
+install_file image/board/rockchip/kickpi/k1mini/udev/99-assistant-touch.rules \
+             "$OVERLAY_DIR/etc/udev/rules.d/99-assistant-touch.rules"
 install_file image/board/rockchip/kickpi/k1mini/post-build.sh \
              buildroot/board/rockchip/kickpi/k1mini/post-build.sh
 install_file image/build-llama.sh tools/assistant/build-llama.sh

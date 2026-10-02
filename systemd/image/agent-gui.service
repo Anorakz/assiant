@@ -17,12 +17,14 @@
 #    QT_QPA_PLATFORM=eglfs           无 X 的平台插件（镜像里 libqeglfs.so 在，链到 libmali.so.1）
 #    QT_QPA_EGLFS_INTEGRATION=eglfs_kms  走 KMS/GBM（libqeglfs-kms-integration.so）
 #    QT_QPA_EGLFS_ROTATION=90        竖屏面板
-#    QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS=rotate=90
-#                                    触摸也要跟着转（T15-2-11 板端实测：只转屏幕不转触摸，
-#                                    点哪都不对）。**它是可以在 /data 里改的**：
-#                                    下面有一行 EnvironmentFile=-/data/assistant/env/gui.env，
-#                                    改那个文件再 `systemctl restart agent-gui` 就能试
-#                                    90/180/270（外加 invertx/inverty），不用重刷镜像。
+#    ⚠ **触摸旋转不在这个单元里**（T15-2-11 板端定标）
+#      这套 eglfs_kms **自己用 libinput 处理输入**（进程里加载的是 libinput.so.10，
+#      没有 libqevdevtouchplugin.so），所以 `QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS`
+#      这类设置**完全无效** —— 一度改成 90/180/270/invertx 都一样，白折腾。
+#      真正的开关是 **udev + libinput 校准矩阵**：
+#          /etc/udev/rules.d/99-assistant-touch.rules
+#              ENV{LIBINPUT_CALIBRATION_MATRIX}="0 -1 1 1 0 0 0 0 1"
+#      （矩阵由板上实测四角坐标反推，推导写在那个规则文件的注释里。）
 #    QT_QUICK_BACKEND=software       软键盘面板的 scenegraph 后端（libQt5Quick 里那套 software
 #                                    适配仍在；T15-2-11 会在板上对比 GL 后端再定稿）
 #    QT_IM_MODULE=qtvirtualkeyboard  软键盘输入法
@@ -44,7 +46,6 @@ Environment=AGENT_CONFIG_DIR=/data/assistant/config
 Environment=QT_QPA_PLATFORM=eglfs
 Environment=QT_QPA_EGLFS_INTEGRATION=eglfs_kms
 Environment=QT_QPA_EGLFS_ROTATION=90
-Environment=QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS=rotate=90
 Environment=QT_QUICK_BACKEND=software
 Environment=QT_IM_MODULE=qtvirtualkeyboard
 Environment=GST_PLUGIN_FEATURE_RANK=souphttpsrc:0

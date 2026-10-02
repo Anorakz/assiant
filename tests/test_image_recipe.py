@@ -648,5 +648,110 @@ class TestLocalWifiCredentialPlumbing(unittest.TestCase):
         self.assertIn("chmod 0644", text)
 
 
+class TestTouchRotationIsDoneInLibinput(unittest.TestCase):
+    """T15-2-11 板上定标：触摸旋转**不能**用 Qt 的 evdev 环境变量，必须用 libinput 矩阵。
+
+    板端实测（`grep <gui pid>/maps`）：跑的是 `QT_QPA_PLATFORM=eglfs` +
+    `QT_QPA_EGLFS_INTEGRATION=eglfs_kms`，进程里**没有** `libqevdevtouchplugin.so`，
+    却有 `libinput.so.10` —— eglfs_kms 自己用 libinput 处理输入。于是
+    `QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS=rotate=90` 这类设置**完全无效**：
+    90/180/270/invertx/inverty 改了一圈都"差 90°"，白折腾好几轮。
+
+    真正生效的是 udev 属性 `LIBINPUT_CALIBRATION_MATRIX`（见规则文件里的推导）：
+    实测四角坐标反推出 (x,y) -> (1-y, x)，即矩阵 [0 -1 1; 1 0 0; 0 0 1]；
+    板上加规则 + 重启 GUI 后用户确认"手指点哪，界面就反应在哪"。
+    """
+
+    RULE = _ROOT / "image" / "board" / "rockchip" / "kickpi" / "k1mini" / "udev" / "99-assistant-touch.rules"
+    INSTALL = _ROOT / "image" / "install-into-sdk.sh"
+    MATRIX = "0 -1 1 1 0 0 0 0 1"
+
+    def test_rule_file_exists_with_the_measured_matrix(self):
+        self.assertTrue(self.RULE.is_file(), "缺 udev 触摸校准规则文件")
+        text = self.RULE.read_text(encoding="utf-8")
+        self.assertIn('LIBINPUT_CALIBRATION_MATRIX}="%s"' % self.MATRIX, text)
+        self.assertIn('ATTRS{name}=="goodix-ts"', text)
+
+    def test_rule_file_records_why_not_the_qt_env_var(self):
+        text = self.RULE.read_text(encoding="utf-8")
+        self.assertIn("libinput", text.lower())
+        self.assertIn("QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS", text)
+
+    def test_installer_injects_the_rule(self):
+        text = self.INSTALL.read_text(encoding="utf-8")
+        self.assertIn("99-assistant-touch.rules", text)
+        self.assertIn("etc/udev/rules.d", text)
+
+    def test_units_do_not_pretend_to_rotate_touch(self):
+        """单元里**不许**再留 `QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS`：
+        它在这套 eglfs_kms+libinput 组合下无效，留着只会让下一个人继续白折腾。"""
+        for rel in ("systemd/image/agent-gui.service", "systemd/agent-gui-nox.service"):
+            text = (_ROOT / rel).read_text(encoding="utf-8")
+            for line in text.splitlines():
+                if line.strip().startswith("#"):
+                    continue
+                self.assertNotIn("QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS", line,
+                                 "%s 里还有那条无效的触摸环境变量" % rel)
+
+
+class TestUserdataGrowsAndIsNotMountedTwice(unittest.TestCase):
+    """T15-2-11 板端：`/data` 首刷后只有 **3.5 MB**（分区却有 22.8 GiB）。
+
+    `/proc/partitions` 证明 GPT 是对的（`userdata:grow` 让 p9 有 23,932,911 KB），
+    但烧进去的文件系统还是 userdata.img 那个小 ext4，没人长大它 → 模型（4.9 GB）
+    根本放不下。修法：fstab 上 `x-systemd.growfs`（挂载时按分区扩到底，幂等）。
+    另外厂商那份 fstab 里还有 `PARTLABEL=userdata /userdata`，同一个文件系统被挂两次
+    （板端 `df` 里 /data 和 /userdata 指向同一个 mmcblk0p9），我们的配方把它删掉。
+    """
+
+    POSTBUILD = _ROOT / "image" / "board" / "rockchip" / "kickpi" / "k1mini" / "post-build.sh"
+
+    def test_fstab_line_has_growfs(self):
+        text = self.POSTBUILD.read_text(encoding="utf-8")
+        self.assertIn("x-systemd.growfs", text)
+
+    def test_vendor_duplicate_userdata_mount_is_removed(self):
+        text = self.POSTBUILD.read_text(encoding="utf-8")
+        self.assertIn("/userdata", text)          # 删它的那几行得在
+        self.assertIn("sed -i", text)
+
+
+class TestWpaSupplicantHasDbusControlInterface(unittest.TestCase):
+    """T15-2-11 板端：NM 起不了 supplicant（`Failed to D-Bus activate wpa_supplicant
+    service`）→ wlan0 一直 `unavailable`，两份 WiFi 凭据都没机会用。
+
+    厂商的 wireless.config 开了 WPA_SUPPLICANT 一堆选项，**唯独没开 DBUS/DBUS_NEW**；
+    于是 `wpa_supplicant -u` 直接打用法退出，`wpa_supplicant.service`（Type=dbus）
+    起不来，dbus 激活文件也不存在。NM 只认**新** API，所以两个开关都要。
+    """
+
+    DEFCONFIG = _ROOT / "image" / "buildroot" / "configs" / "rockchip_rk3568_kickpi_k1mini_release_defconfig"
+
+    def test_dbus_switch_is_on(self):
+        text = self.DEFCONFIG.read_text(encoding="utf-8")
+        self.assertIn("BR2_PACKAGE_WPA_SUPPLICANT_DBUS=y", text)
+
+    def test_legacy_dbus_new_symbol_is_not_written(self):
+        """**别写 `..._DBUS_NEW`**：buildroot 2024.02 里它是 legacy 符号
+        （2019.08 把 new/old 合并成一个 `DBUS`），写了会 `select BR2_LEGACY`
+        → 整机构建直接死：
+            Makefile.legacy:9: *** "You have legacy configuration in your .config!"
+        这条守卫就是防止以后有人"顺手补上"再踩一次。
+        """
+        lines = self.DEFCONFIG.read_text(encoding="utf-8").splitlines()
+        bad = [ln for ln in lines
+               if ln.strip() == "BR2_PACKAGE_WPA_SUPPLICANT_DBUS_NEW=y"]
+        self.assertEqual(bad, [], "DBUS_NEW 是 legacy 符号，写了构建会失败")
+
+    def test_they_are_after_every_include(self):
+        """必须在所有 `#include` 之后（同 PYTHON3_SSL 那条教训：最后一个赋值说了算）。"""
+        lines = self.DEFCONFIG.read_text(encoding="utf-8").splitlines()
+        last_inc = max((i for i, ln in enumerate(lines) if ln.lstrip().startswith("#include")), default=-1)
+        for sym in ("BR2_PACKAGE_WPA_SUPPLICANT_DBUS=y",):
+            idx = [i for i, ln in enumerate(lines) if ln.strip() == sym]
+            self.assertTrue(idx, "%s 不在 defconfig 里" % sym)
+            self.assertGreater(min(idx), last_inc, "%s 必须写在所有 #include 之后" % sym)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
