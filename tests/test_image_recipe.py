@@ -1020,6 +1020,8 @@ class TestBuildScriptsAreLF(unittest.TestCase):
         "image/build-image.sh",
         "image/build-payload.sh",
         "image/payload/ab-mark.py",
+        "image/make-dev-sdk.sh",
+        "image/dev-image-acceptance.sh",
         "systemd/image/ab-mark.service",
         "systemd/image/assistant.target",
     )

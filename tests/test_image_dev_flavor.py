@@ -31,6 +31,7 @@ REL_BOARD = BOARD / "rockchip_rk3568_kickpi_k1mini_release_defconfig"
 INSTALL = IMG / "install-into-sdk.sh"
 BUILD_IMAGE = IMG / "build-image.sh"
 MAKE_DEV_SDK = IMG / "make-dev-sdk.sh"
+ACCEPTANCE = IMG / "dev-image-acceptance.sh"
 
 
 def config_lines(path: pathlib.Path):
@@ -203,6 +204,47 @@ class TestDevEntryPoints(unittest.TestCase):
         self.assertIn("BR2_CCACHE=y", dev)
         rel = REL_BC_DEFCONFIG.read_text(encoding="utf-8")
         self.assertNotIn("BR2_CCACHE=y", rel, "发行树这轮不动它（会触发全量重编）")
+
+
+class TestDevAcceptanceScript(unittest.TestCase):
+    """板端验收脚本（2-12-5 用）：它检查的就是用户批过的出口判据。
+
+    ⚠ 它要能在**最小镜像**上跑（不能假定有 bash/数组/GNU 扩展），所以是 POSIX sh。
+    """
+
+    def test_is_posix_sh_and_fails_loudly(self):
+        text = ACCEPTANCE.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("#!/bin/sh"), "必须是 POSIX sh（板上可能没有 bash）")
+        self.assertIn("FAIL=$((FAIL + 1))", text)
+        self.assertIn('if [ "$FAIL" -eq 0 ]', text, "有失败项时退出码必须非 0")
+        self.assertNotIn("#!/usr/bin/env bash", text)
+
+    def test_checks_the_agreed_toolchain(self):
+        text = ACCEPTANCE.read_text(encoding="utf-8")
+        for tool in ("gcc", "make", "pkgconf", "ctest", "gdb", "gdbserver",
+                     "strace", "pgrep", "pkill", "top", "vim", "tcpdump", "iperf3", "git"):
+            self.assertIn('have %s' % tool, text, "验收项缺 %s" % tool)
+
+    def test_cxx_and_cmake_are_known_differences_not_failures(self):
+        """用户 2026-10-02 选方案 A：板上没有 g++/C++ 与 cmake 驱动，记为已知差异。
+
+        证据（2-12-4 实测）：target 里只有 cc1（无 cc1plus、无 g++ 驱动），
+        `gcc -x c++` 直接失败；cmake 只装了 ctest + share/cmake-3.28。
+        所以这两项必须走 have_or_diff / diff 分支 —— 不能判失败，
+        否则验收脚本永远红，等于把"已知取舍"伪装成回归。
+        """
+        text = ACCEPTANCE.read_text(encoding="utf-8")
+        self.assertIn("have_or_diff g++", text)
+        self.assertIn("have_or_diff cmake", text)
+        self.assertIn("已知差异", text)
+        self.assertIn("DIFF=0", text, "差异要计数，最后单独报出来")
+
+    def test_actually_runs_pytest_and_a_compiler(self):
+        """出口判据是"能在板上跑 pytest 与验收脚本"，所以必须**真跑**，不能只看 --version。"""
+        text = ACCEPTANCE.read_text(encoding="utf-8")
+        self.assertIn("python3 -m pytest -q", text)
+        self.assertIn("gcc -O2 -o", text)
+        self.assertIn("import zlib", text, "顺带验 zlib（发行镜像缺它）")
 
 
 if __name__ == "__main__":
