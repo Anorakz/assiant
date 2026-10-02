@@ -175,6 +175,5 @@ image/local/*
 # llm/config/llm.env.bak），那是运行期产物，不入库。
 *.bak
 
-# �ű�������ʱ����ʱ���ݣ�image �Ǳߵ� sed �ű�����һ�ݣ�
+# 脚本改配置时的临时备份（image 里那些 sed 脚本会留一份 *.bak-<时间戳>）
 config/*.bak-*
-
