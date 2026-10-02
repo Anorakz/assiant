@@ -95,6 +95,64 @@ ln -sfn "/usr/lib/systemd/system/NetworkManager-wait-online.service" \
         "$ETC/network-online.target.wants/NetworkManager-wait-online.service" 2>/dev/null || true
 echo "   + network-online.target.wants/NetworkManager-wait-online.service"
 
+# 3b) **把"等网"限时**（T15-2-11 板端：没网时每次开机白等）
+#  ---------------------------------------------------------------------------
+#  buildroot 那份 `NetworkManager-wait-online.service` 跑的是 `nm-online -s -q`，
+#  没有 `-t` → 用默认超时。板子没网时会等到超时，而 `agent.service` 是
+#  `After=network-online.target` → 整条启动链被拖着等。
+#  这里加 drop-in 把它限到 5 秒：保留 T15-2-8 的意图（"agent 起来时网络尽量已经就绪"），
+#  但不再让"网永远不来"拖死开机（Agent 自己有 LinkGuard 处理链路变化）。
+#  注意 `ExecStart=` 空一行是 systemd 的标准手法：先把原值清空，再给新值。
+mkdir -p "$ETC/NetworkManager-wait-online.service.d"
+cat > "$ETC/NetworkManager-wait-online.service.d/timeout.conf" <<'EOF'
+# assistant: 限时等网（没网时不该拖住 agent/gui 的启动）
+[Service]
+ExecStart=
+ExecStart=/usr/bin/nm-online -s -q -t 5
+EOF
+echo "   + NetworkManager-wait-online.service.d/timeout.conf（等网限时 5s）"
+
+# 3c) **mask 掉 networkd 的等网器**（T15-2-11 板端实测：这才是"启动很久"的真凶）
+#  ---------------------------------------------------------------------------
+#  `90-systemd.preset` 第 21 行是 `enable systemd-networkd-wait-online.service` ——
+#  buildroot 把 **networkd 的等待器**打开了，而这个镜像里 networkd **没有任何 link 可管**
+#  （`/etc/systemd/network/` 是空的；网络全归 NetworkManager）。于是它的启动任务
+#  **无超时地干等**，把 `network-online.target` 顶住，而我们的
+#  `assistant.target` / `agent.service` 都挂在那上面 → agent/gui 一直不启动。
+#  实测日志（冷启动）：
+#      [  8.0] Finished Network Manager Wait Online.        ← NM 自己这个 8 秒就过了
+#      [ 11s–19s+] A start job is running for "Wait for Network to be Configured" (no limit)
+#  所以：mask 它（`/dev/null`）。networkd 本体留着（无害；T15-12 收最小镜像时再议）。
+if [ -f "$SYSD/systemd-networkd-wait-online.service" ]; then
+    ln -sfn /dev/null "$ETC/systemd-networkd-wait-online.service"
+    echo "   - 已 mask systemd-networkd-wait-online.service（networkd 等待器，无超时会拖死启动）"
+fi
+
+# 3d) 单元权限：**必须是 0644**（T15-2-11 板端日志：systemd 抱怨 marked executable）
+#  我们的 overlay 文件在 Windows 盘上（DrvFs）权限是 777，tar/cp 进镜像就变 0755，
+#  systemd 会对每个单元打一行警告。顺手把 overlay 里的单元统一成 0644。
+for u in assistant.target agent.service agent-gui.service assistant-init.service; do
+    [ -f "$SYSD/$u" ] && chmod 0644 "$SYSD/$u"
+done
+echo "   + 我们的 4 个单元已 chmod 0644（不再被 systemd 抱怨 executable）"
+
+# 4) **串口控制台要有 shell**（T15-2-11 板端实测）
+#  ---------------------------------------------------------------------------
+#  镜像里 cmdline 是 `console=ttyFIQ0`，但 systemd 的 getty 生成器**不给 ttyFIQ0 建 getty**
+#  （它是 Rockchip 的 fiq_debugger tty，不是标准串口）—— 于是板子起来之后串口上
+#  只有内核日志、没有登录提示：出问题时"看不见、也没法敲命令"。首刷那天就是被这个
+#  卡住的（明明起来了，却只能在串口干瞪眼）。
+#  这里显式 enable 一份 serial-getty（`%I` 就是设备名 → /dev/ttyFIQ0）。
+#  ⚠ 这条通道也是 T15-7 的 "cli 唤醒" 要用的（睡眠关屏后靠触摸 + 串口两条路唤醒）。
+mkdir -p "$ETC/getty.target.wants"
+if [ -f "$SYSD/serial-getty@.service" ]; then
+    ln -sfn "/usr/lib/systemd/system/serial-getty@.service" \
+            "$ETC/getty.target.wants/serial-getty@ttyFIQ0.service"
+    echo "   + getty.target.wants/serial-getty@ttyFIQ0.service（串口 shell）"
+else
+    echo "   !! 没有 serial-getty@.service —— 串口不会有 shell" >&2
+fi
+
 echo "   ---- /etc/systemd/system 现在长这样："
 ls -la "$ETC" | sed 's/^/     /'
 
@@ -120,6 +178,26 @@ for u in $MASK_UNITS; do
         echo "   - 已屏蔽厂商常驻服务 $u（$ETC/$u -> /dev/null）"
     fi
 done
+
+# ---------------------------------------------------------------------------
+#  T15-2-11：把本机 WiFi 凭据装进镜像（有就装、没有就跳过）
+#  ---------------------------------------------------------------------------
+#  板子只有 wlan0 能通；镜像里没有网络配置的话，首刷后"起来了但没网也没 shell"。
+#  凭据由 image/install-into-sdk.sh 从 image/local/*.nmconnection（不进仓库）
+#  注入到 tools/assistant/local/，NetworkManager 的 keyfile 格式。
+#  ⚠ 支持**多份**：现场可能把 SSID 记错（这次就是 Anorak_host / Anroak_host 差两个字母），
+#    多装一份 autoconnect 的配置不影响任何事，谁对连谁。
+NMSRC="$TOOLS/local"
+if [ -d "$NMSRC" ] && ls "$NMSRC"/*.nmconnection >/dev/null 2>&1; then
+    NMDIR="$TARGET_DIR/etc/NetworkManager/system-connections"
+    mkdir -p "$NMDIR"
+    for f in "$NMSRC"/*.nmconnection; do
+        install -m 0600 "$f" "$NMDIR/$(basename "$f")"
+        echo "   + WiFi 凭据：$(basename "$f")（0600）"
+    done
+else
+    echo "   = 没有本机 WiFi 凭据（tools/assistant/local/*.nmconnection）—— 镜像里不含 WiFi 配置"
+fi
 
 # --- 2) llama-server（交叉编译）---------------------------------------------
 if [ -x "$TOOLS/build-llama.sh" ]; then

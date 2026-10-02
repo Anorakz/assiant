@@ -138,6 +138,32 @@ for f in assistant assistant.sh; do
 done
 
 # ---------------------------------------------------------------------------
+#  T15-2-11：**本机私有**的镜像料（WiFi 凭据等）
+#  ---------------------------------------------------------------------------
+#  板子只有 wlan0 能通，而镜像里没有任何网络配置 → 首刷之后"起来了但没网"。
+#  把现场凭据（用 image/local/wifi.nmconnection.example 做模板）烘进镜像，
+#  板子开机就自己连上，之后 ssh 进去干活。
+#  ⚠ 真凭据**不进仓库**（.gitignore 里忽略 image/local/*，只留 *.example）；
+#    这里只是"有就注入、没有就跳过"，所以没凭据的构建也照常能出镜像。
+#    支持**多份** *.nmconnection：现场 SSID 记不准时两个都写，谁对连谁
+#    （这次就是 Anorak_host / Anroak_host 差两个字母）。
+NMLOCAL="$HERE/local"
+if ls "$NMLOCAL"/*.nmconnection >/dev/null 2>&1; then
+    if [ -n "$DRY" ]; then
+        echo "   + (dry-run) 注入本机 WiFi 凭据：$(cd "$NMLOCAL" && ls *.nmconnection | tr '\n' ' ')"
+    else
+        mkdir -p "$SDK/tools/assistant/local"
+        for f in "$NMLOCAL"/*.nmconnection; do
+            cp "$f" "$SDK/tools/assistant/local/$(basename "$f")"
+            chmod 0600 "$SDK/tools/assistant/local/$(basename "$f")"
+            echo "   + 已注入 WiFi 凭据：$(basename "$f")（0600）"
+        done
+    fi
+else
+    echo "   = 没有 image/local/*.nmconnection（跳过；镜像里不会有 WiFi 凭据）"
+fi
+
+# ---------------------------------------------------------------------------
 #  T15-2-10b-5：payload 的**源码**也要进 SDK
 #  ---------------------------------------------------------------------------
 #  理由与 llm/scripts 那次一样：post-build 是在 **SDK 里**跑的，够不到我们的仓库。

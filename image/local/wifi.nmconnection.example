@@ -1,0 +1,40 @@
+# ============================================================================
+#  image/local/wifi.nmconnection.example — 把 WiFi 凭据烘进镜像（T15-2-11）
+#
+#  用法（**不要把这个文件本身提交**，真正的凭据放 image/local/wifi.nmconnection）：
+#      cp image/local/wifi.nmconnection.example image/local/wifi.nmconnection
+#      # 改成现场那个热点的 SSID/密码，然后：
+#      bash image/install-into-sdk.sh <SDK>      # 注入到 tools/assistant/local/
+#      wsl -u root bash image/build-image.sh <SDK>   # post-build 会装进镜像
+#
+#  为什么需要它
+#  ---------------------------------------------------------------------------
+#  这块板子**只有 wlan0 能通**（eth 是坏的），而我们的镜像里没有任何网络配置 ——
+#  首刷之后板子起来了却"没有网络、也没有 shell"（串口 getty 那次也还没加），
+#  于是只能干瞪眼。把凭据烘进来，板子首次开机就自己连上，然后就能 ssh 进去干活。
+#
+#  ⚠ 这是**明文凭据**（NetworkManager 的 keyfile 格式，PSK 可读）。
+#    所以：真文件放 image/local/（已在 .gitignore 里），仓库只留这份模板。
+#    装进镜像时 post-build 会设成 0600 + root:root，不让普通用户读。
+#
+#  ⚠ `interface-name` 先留空（不写）；`autoconf`/IPv4 用 dhcp，热点会分配 IP。
+# ============================================================================
+[connection]
+id=assistant-wifi
+type=wifi
+autoconnect=true
+autoconnect-priority=10
+
+[wifi]
+mode=infrastructure
+ssid=在这里填热点名
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk=在这里填密码
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=ignore

@@ -45,6 +45,10 @@ ALLOWED_DIFF_KEYS = {
     ("Service", "StandardOutput"),
     ("Service", "StandardError"),
     ("Service", "Environment"),  # 镜像加了 D7 的那几个覆盖点
+    # T15-2-11：镜像那份多一行 `EnvironmentFile=-/data/assistant/env/gui.env`
+    # （现场调触摸旋转/渲染后端用，不用重刷镜像）。板端那份跑在 git 工作区里，
+    # 直接改单元即可，不需要这个覆盖点 —— 所以这里如实记成"允许的差异"。
+    ("Service", "EnvironmentFile"),
     ("Install", "WantedBy"),
 }
 

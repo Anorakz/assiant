@@ -50,6 +50,7 @@ WorkingDirectory=/home/kickpi/myproject/assitant
 Environment=QT_QPA_PLATFORM=eglfs
 Environment=QT_QPA_EGLFS_INTEGRATION=eglfs_kms
 Environment=QT_QPA_EGLFS_ROTATION=90
+Environment=QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS=rotate=90
 Environment=QT_QUICK_BACKEND=software
 Environment=QT_IM_MODULE=qtvirtualkeyboard
 # 板端 souphttpsrc 是坏的（B 站取流走别处），沿用 X 形态那份的设置

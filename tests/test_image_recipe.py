@@ -584,5 +584,69 @@ class TestUbootHasAbSupport(unittest.TestCase):
         self.assertIn("u-boot/configs/rk3568-assistant-ab.config", install)
 
 
+class TestLocalWifiCredentialPlumbing(unittest.TestCase):
+    """T15-2-11：板子**只有 wlan0 能通**，所以镜像得能把现场 WiFi 凭据带进去。
+
+    这条链是三段，少一段都白搭（而且都是"没网时才发现"的那类）：
+
+        仓库 image/local/wifi.nmconnection（**不进 git**，只留 .example 模板）
+          → install-into-sdk.sh 注入 <SDK>/tools/assistant/local/
+          → post-build 装成 <target>/etc/NetworkManager/system-connections/…（0600）
+
+    这里只钉"三段都在、权限是 0600、模板不许带真凭据"。真凭据不进仓库由
+    .gitignore 的 `image/local/*` + `!image/local/*.example` 保证（也在下面钉住）。
+    """
+
+    INSTALL = _ROOT / "image" / "install-into-sdk.sh"
+    POSTBUILD = _ROOT / "image" / "board" / "rockchip" / "kickpi" / "k1mini" / "post-build.sh"
+    EXAMPLE = _ROOT / "image" / "local" / "wifi.nmconnection.example"
+    GITIGNORE = _ROOT / ".gitignore"
+
+    def test_example_template_exists_and_is_a_template(self):
+        self.assertTrue(self.EXAMPLE.is_file(), "缺 image/local/wifi.nmconnection.example")
+        text = self.EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("[wifi]", text)
+        self.assertIn("ssid=", text)
+        self.assertIn("psk=", text)
+        # 模板里必须是占位符，不能是真凭据
+        self.assertIn("在这里填", text)
+
+    def test_gitignore_keeps_the_real_file_out_but_tracks_the_example(self):
+        text = self.GITIGNORE.read_text(encoding="utf-8")
+        self.assertIn("image/local/*", text)
+        self.assertIn("!image/local/*.example", text)
+
+    def test_installer_injects_it_and_marks_it_private(self):
+        text = self.INSTALL.read_text(encoding="utf-8")
+        self.assertIn("*.nmconnection", text)
+        self.assertIn("chmod 0600", text)
+
+    def test_post_build_installs_every_keyfile_0600(self):
+        """支持**多份** keyfile：现场 SSID 记错时两个都写、谁对连谁
+        （T15-2-11 实况：用户口头 `Anroak_host`，PC 侧实际是 `Anorak_host`）。"""
+        text = self.POSTBUILD.read_text(encoding="utf-8")
+        self.assertIn("NetworkManager/system-connections", text)
+        self.assertIn("install -m 0600", text)
+        self.assertIn("*.nmconnection", text)
+
+    def test_post_build_masks_networkds_online_waiter(self):
+        """T15-2-11 实测：`90-systemd.preset` 把 networkd 的等网器打开了，而这个镜像里
+        networkd **没有 link 可管** → 它的启动任务**无超时**地干等，把
+        `network-online.target` 顶住，我们的 agent/gui 全被拖着起不来：
+            [ 8.0] Finished Network Manager Wait Online.        ← NM 这个 8 秒就过了
+            [11–19s+] A start job is running for "Wait for Network to be Configured" (no limit)
+        所以必须 mask 掉它。
+        """
+        text = self.POSTBUILD.read_text(encoding="utf-8")
+        self.assertIn("systemd-networkd-wait-online.service", text)
+        self.assertIn("/dev/null", text)
+
+    def test_our_units_get_mode_0644(self):
+        """systemd 会对每个 0755 的单元打一行 `marked executable` 警告
+        （DrvFs 带进来的权限），post-build 里统一 chmod 0644。"""
+        text = self.POSTBUILD.read_text(encoding="utf-8")
+        self.assertIn("chmod 0644", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

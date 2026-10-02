@@ -17,6 +17,12 @@
 #    QT_QPA_PLATFORM=eglfs           无 X 的平台插件（镜像里 libqeglfs.so 在，链到 libmali.so.1）
 #    QT_QPA_EGLFS_INTEGRATION=eglfs_kms  走 KMS/GBM（libqeglfs-kms-integration.so）
 #    QT_QPA_EGLFS_ROTATION=90        竖屏面板
+#    QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS=rotate=90
+#                                    触摸也要跟着转（T15-2-11 板端实测：只转屏幕不转触摸，
+#                                    点哪都不对）。**它是可以在 /data 里改的**：
+#                                    下面有一行 EnvironmentFile=-/data/assistant/env/gui.env，
+#                                    改那个文件再 `systemctl restart agent-gui` 就能试
+#                                    90/180/270（外加 invertx/inverty），不用重刷镜像。
 #    QT_QUICK_BACKEND=software       软键盘面板的 scenegraph 后端（libQt5Quick 里那套 software
 #                                    适配仍在；T15-2-11 会在板上对比 GL 后端再定稿）
 #    QT_IM_MODULE=qtvirtualkeyboard  软键盘输入法
@@ -38,9 +44,12 @@ Environment=AGENT_CONFIG_DIR=/data/assistant/config
 Environment=QT_QPA_PLATFORM=eglfs
 Environment=QT_QPA_EGLFS_INTEGRATION=eglfs_kms
 Environment=QT_QPA_EGLFS_ROTATION=90
+Environment=QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS=rotate=90
 Environment=QT_QUICK_BACKEND=software
 Environment=QT_IM_MODULE=qtvirtualkeyboard
 Environment=GST_PLUGIN_FEATURE_RANK=souphttpsrc:0
+# 运行期可覆盖（- = 文件不存在也不报错）：现场调旋转/后端不用重刷镜像。
+EnvironmentFile=-/data/assistant/env/gui.env
 ExecStartPre=/bin/mkdir -p /data/assistant/logs
 ExecStart=/usr/lib/assistant/gui/agent_gui --config config/config.yaml
 # kiosk：正常退出（窗口被关/被杀）也要回来；真起不来由 [Unit] 的 StartLimit 兜底

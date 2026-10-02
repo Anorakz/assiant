@@ -163,6 +163,12 @@ creds/
 *.key
 # ---- GUI 运行期产物 / 验收证据 ----
 temp/
+# ---- 本机私有的镜像料（T15-2-11）----
+# 现场用的 WiFi 凭据等**不该进仓库**的东西放这里（例：image/local/wifi.nmconnection）。
+# install-into-sdk.sh 会把它注入 SDK 的 tools/assistant/local/，post-build 再装进镜像；
+# 仓库里只留 *.example 模板（所以忽略整个目录、但放行 example）。
+image/local/*
+!image/local/*.example
 # 注: GUI 已经**没有**自己的配置文件了（归一化 D 系列把界面参数并进 config/config.yaml
 # 的 gui: 段，gui/config/ 目录连同 gui.yaml.example 一起删除）。这里不再需要 gui 配置规则。
 # GUI 的 ConfigStore 保存时会在原文件旁留一份 .bak（config/config.yaml.bak、

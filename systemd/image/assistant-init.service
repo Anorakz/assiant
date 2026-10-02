@@ -38,6 +38,7 @@ RemainAfterExit=yes
 User=root
 ExecStart=/bin/sh -c '\
   mkdir -p /data/assistant/config /data/assistant/logs/crash /data/assistant/run \
+           /data/assistant/env \
            /data/assistant/llm/config /data/assistant/llm/run /data/assistant/llm/logs \
            /data/assistant/llm/logs /data/model && \
   for f in config user_profile; do \
