@@ -518,5 +518,71 @@ class TestPythonModulesTheAgentNeeds(unittest.TestCase):
         self.assertIn("sunshine_client", self.text)
 
 
+class TestUbootHasAbSupport(unittest.TestCase):
+    """T15-2-11 救砖：**分区表是 A/B 的，u-boot 也必须开 A/B**。
+
+    首刷之后的串口日志（真事）：
+
+        U-Boot next-dev (Sep 29 2026 - 22:02:18 +0800)   ← 我们编的 u-boot 起来了
+        PartType: EFI
+        FIT: No boot partition                           ← 它在找名叫 boot 的分区
+        android_image_load_by_partname: Can't find part: boot
+        Could not find userdata part
+        =>                                               ← 掉到 u-boot 命令行
+
+    而板上 `part list mmc 0` 证明 GPT 完全正确（boot_a/boot_b/system_a/system_b…）。
+    根因：SDK 的 `RK_AB_UPDATE=y` 只影响**分区表模板与打包**，**传不到 u-boot**；
+    厂商给 rk3588/rv1126/rk3576 都带了 A/B 片段，**rk3568 没有**。
+
+    这一组把四件事钉住：片段存在且真的开了那个开关、注释干净、板级 defconfig 指过来、
+    注入脚本把它拷进 SDK。
+    """
+
+    UBOOT_FRAGMENT = _ROOT / "image" / "uboot" / "rk3568-assistant-ab.config"
+    FRAGMENT_NAME = "rk3568-assistant-ab"
+
+    def test_fragment_exists_and_enables_ab(self):
+        self.assertTrue(self.UBOOT_FRAGMENT.is_file(),
+                        "缺 image/uboot/rk3568-assistant-ab.config（u-boot 的 A/B 支持）")
+        text = self.UBOOT_FRAGMENT.read_text(encoding="utf-8")
+        self.assertIn("CONFIG_ANDROID_AB=y", text)
+
+    def test_fragment_comments_have_no_config_tokens(self):
+        """片段里的注释**不许出现 `CONFIG_xxx` 记号**。
+
+        u-boot 的 make.sh 会去片段里找"基础 defconfig"那一行，而它的解析不认注释。
+        第一版在注释里举例写了那行符号，整个 u-boot 构建 4 秒就死：
+            sed: can't read configs/#: No such file or directory
+            ## make  #      rk3588_defconfig
+            /bin/sh: 3: Syntax error: word unexpected (expecting "do")
+
+        （同一类坑在 buildroot 的 products 片段上也踩过一次：合并器把一句中文注释
+          当成了某个开关的一次赋值。凡是被脚本 grep 的片段，注释都要干净。）
+        """
+        bad = []
+        off_re = re.compile(r"^#\s*CONFIG_[A-Za-z0-9_]+ is not set\s*$")   # 真配置行，允许
+        for i, raw in enumerate(self.UBOOT_FRAGMENT.read_text(encoding="utf-8").splitlines(), 1):
+            line = raw.strip()
+            if not line.startswith("#"):
+                continue
+            if off_re.match(line):
+                continue
+            if re.search(r"CONFIG_[A-Za-z0-9_]+", line):
+                bad.append("第 %d 行: %s" % (i, line[:90]))
+        self.assertEqual(bad, [],
+                         "u-boot 片段的注释里出现了 CONFIG_ 记号（解析器会当成配置）:\n"
+                         + "\n".join(bad))
+
+    def test_board_defconfig_points_at_the_fragment(self):
+        text = BOARD_DEFCONFIG.read_text(encoding="utf-8")
+        self.assertIn('RK_UBOOT_CFG_FRAGMENTS="%s"' % self.FRAGMENT_NAME, text,
+                      "板级 defconfig 必须用 RK_UBOOT_CFG_FRAGMENTS 指到我们的 A/B 片段")
+
+    def test_installer_injects_the_fragment(self):
+        install = INSTALL_SDK.read_text(encoding="utf-8")
+        self.assertIn("image/uboot/rk3568-assistant-ab.config", install)
+        self.assertIn("u-boot/configs/rk3568-assistant-ab.config", install)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

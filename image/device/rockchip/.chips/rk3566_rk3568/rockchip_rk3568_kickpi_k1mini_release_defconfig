@@ -29,6 +29,23 @@ RK_BUILDROOT_BASE_CFG="rk3568_kickpi_k1mini_release"
 RK_AB_UPDATE=y
 
 # ---------------------------------------------------------------------------
+#  u-boot 的 A/B 片段（T15-2-11 救砖：首刷起不来的真正原因）
+#  ---------------------------------------------------------------------------
+#  ⚠ `RK_AB_UPDATE=y` 只影响**分区表模板与打包**（Config.in.firmware、
+#    common/scripts/mk-updateimg.sh），**传不到 u-boot**。首刷后的串口日志是：
+#        FIT: No boot partition / Can't find part: boot / Could not find userdata part
+#        =>                                    ← 掉到 u-boot 命令行
+#    而 `part list mmc 0` 证明 GPT 完全正确（boot_a/boot_b/system_a/system_b…）——
+#    也就是"分区表是 A/B 的，u-boot 却按非 A/B 找 boot"。
+#  修法：给 u-boot 一份片段，把 `CONFIG_ANDROID_AB` 打开（它会让启动链走
+#  `cmd/bootfit.c` 那条 A/B 路径，用 `ab_get_slot_suffix()` 拼出 `boot_a`）。
+#  厂商给 rk3588/rv1126/rk3576 都带了 `-ab.config`，**rk3568 没有** → 我们补一份
+#  （image/uboot/rk3568-assistant-ab.config，由 install-into-sdk.sh 注入）。
+#  这个符号（Config.in.loader）要的是**不带 .config 后缀**的片段名。
+# ---------------------------------------------------------------------------
+RK_UBOOT_CFG_FRAGMENTS="rk3568-assistant-ab"
+
+# ---------------------------------------------------------------------------
 #  关掉 recovery 镜像（T15-2-9 实测：不关就整机构建失败，而且我们也不需要它）
 #  ---------------------------------------------------------------------------
 #  两个理由，缺一不可：

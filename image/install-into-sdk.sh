@@ -84,6 +84,10 @@ install_file image/device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k
              device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1mini_release_defconfig
 install_file image/device/rockchip/.chips/rk3566_rk3568/parameter-assistant-ab.txt \
              device/rockchip/.chips/rk3566_rk3568/parameter-assistant-ab.txt
+# u-boot 的 A/B 片段（T15-2-11 救砖）：厂商只给 rk3588/rv1126/rk3576 带了 -ab.config，
+# rk3568 没有 → 我们补一份；板级 defconfig 里用 RK_UBOOT_CFG_FRAGMENTS 指过来。
+install_file image/uboot/rk3568-assistant-ab.config \
+             u-boot/configs/rk3568-assistant-ab.config
 # 内核：我们的板级 dts/dtsi（全部 -assistant 后缀，不动厂商同名文件）
 install_file image/kernel/rk3568-kickpi-k1Mini-assistant.dts "$DTS_DIR/rk3568-kickpi-k1Mini-assistant.dts"
 install_file image/kernel/rk3568-kickpi-k1Mini-assistant.dtsi "$DTS_DIR/rk3568-kickpi-k1Mini-assistant.dtsi"
