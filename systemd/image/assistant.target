@@ -43,6 +43,14 @@ After=agent.service agent-gui.service
 #   除此之外**任何**非我们的单元出现在闭包里都算失败。
 Wants=NetworkManager.service
 After=NetworkManager.service
+# ⚠ 第二个**不是我们的**直接依赖：getty.target（串口控制台）
+#   T15-2-11 板端实测踩到的：我们把 default.target 指到 assistant.target，
+#   `getty.target` 就**没有人拉**了（普通系统是 multi-user.target 拉它），
+#   于是 post-build 里那份 serial-getty@ttyFIQ0.service 的软链永远到不了 ——
+#   表现是"板子起来了、屏上有界面，但串口一个字符都不回"，出问题时既看不见也没法敲命令。
+#   而且 T15-7 的 "cli 唤醒" 就走这条串口，所以它必须真的起来。
+Wants=getty.target
+After=getty.target
 # 允许 `systemctl isolate assistant.target` 手动切过来（排查时有用）
 AllowIsolate=yes
 

@@ -58,6 +58,15 @@ INFRA_UNITS = {
     # —— T15-2-10 才发现它在我们的启动链里：2-8 那次检查看的是**单包构建**那棵树
     # （那时还没装到这一步），整机构建的树里它在 `sysinit.target.wants/`。
     "wifibt-init.service",
+    # T15-2-11 板端实测：把 default.target 指到 assistant.target 之后，**没有人拉
+    # getty.target**（普通系统靠 multi-user.target 拉）。于是 post-build 里那份
+    # serial-getty@ttyFIQ0 的软链永远到不了 —— 表现是"板子起来了、屏上有界面，
+    # 但串口一个字符都不回"：出问题时既看不见、也没法敲命令。
+    # 所以 assistant.target 显式 Wants 它，这份 getty 也就算我们启动链的一部分
+    # （T15-7 的 "cli 唤醒" 也走这条串口，所以它必须真的起来）。
+    "getty.target",
+    "serial-getty@ttyFIQ0.service",
+    "serial-getty@.service",
 }
 
 #: 被我们**主动 mask** 掉的厂商服务（`/etc/systemd/system/<unit> -> /dev/null`）。
