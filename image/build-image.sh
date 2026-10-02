@@ -23,20 +23,38 @@
 #
 #  用法
 #  ---------------------------------------------------------------------------
-#      wsl -u root bash image/build-image.sh <SDK 根目录> [目标...]
+#      wsl -u root bash image/build-image.sh [--flavor release|dev] <SDK 根目录> [目标...]
 #
 #    目标就是 vendor 的那些 hook 名（不给 = `all`）：
 #      all / kernel / loader / rootfs / firmware / updateimg / recovery ...
+#
+#    形态（--flavor，等价环境变量 IMG_FLAVOR）：
+#      release（默认）：发行镜像。板级 defconfig = ..._k1mini_release_defconfig
+#      dev            ：开发镜像。板级 defconfig = ..._k1mini_dev_defconfig，
+#                       并 export ASSISTANT_FLAVOR=dev 给 post-build
+#                       （保留 usb-gadget/adb；发行镜像会 mask 掉它）。
+#                       ⚠ dev 要用**独立的 SDK 树**（bash image/make-dev-sdk.sh 造），
+#                         两套配置挤在一棵树里会互相覆盖（T15-2-12 预研结论）。
 #
 #  它做两件事：先按板级 defconfig **lunch 一次**（`chip:defconfig` 形式），
 #  再按目标构建。
 # ============================================================================
 set -euo pipefail
 
+FLAVOR="release"
+if [ "${1:-}" = "--flavor" ]; then
+    FLAVOR="${2:-}"
+    shift 2 || true
+fi
+case "$FLAVOR" in
+    release|dev) : ;;
+    *) echo "!! 不认识的形态: '$FLAVOR'（只支持 release / dev）" >&2; exit 2 ;;
+esac
+
 SDK="${1:-}"
 shift || true
 if [ -z "$SDK" ]; then
-    echo "用法: [sudo|wsl -u root] bash image/build-image.sh <SDK 根目录> [目标...]" >&2
+    echo "用法: [sudo|wsl -u root] bash image/build-image.sh [--flavor release|dev] <SDK 根目录> [目标...]" >&2
     exit 2
 fi
 TARGETS=("$@")
@@ -44,7 +62,20 @@ if [ ${#TARGETS[@]} -eq 0 ]; then
     TARGETS=("all")
 fi
 
-DEFCONFIG="${IMG_CHIP_DEFCONFIG:-rk3566_rk3568:rockchip_rk3568_kickpi_k1mini_release_defconfig}"
+if [ "$FLAVOR" = "dev" ]; then
+    DEFCONFIG="${IMG_CHIP_DEFCONFIG:-rk3566_rk3568:rockchip_rk3568_kickpi_k1mini_dev_defconfig}"
+    # 传给 post-build：开发形态保留 usb-gadget/adb（发行形态 mask 掉它）
+    export ASSISTANT_FLAVOR=dev
+    # dev 树的约定：默认就是 `<SDK>-dev`；给了别的路径也允许，只提醒一句
+    case "$(basename "$SDK")" in
+        *-dev) : ;;
+        *) echo "⚠ 形态是 dev，但 SDK 路径不是 '*-dev'：$SDK"
+           echo "  开发镜像建议用独立树（bash image/make-dev-sdk.sh <发行树 SDK>），否则两套配置会互相覆盖。" >&2 ;;
+    esac
+else
+    DEFCONFIG="${IMG_CHIP_DEFCONFIG:-rk3566_rk3568:rockchip_rk3568_kickpi_k1mini_release_defconfig}"
+    export ASSISTANT_FLAVOR=release
+fi
 
 if [ ! -x "$SDK/build.sh" ]; then
     echo "!! $SDK/build.sh 不存在或不可执行" >&2
@@ -71,11 +102,12 @@ CLEAN_PATH="$SHIM:$CLEAN_PATH"
 
 echo "== 整机构建"
 echo "   SDK      : $SDK"
+echo "   形态     : $FLAVOR$([ "$FLAVOR" = dev ] && echo '（开发镜像：post-build 里 ASSISTANT_FLAVOR=dev，保留 usb-gadget/adb）' || echo '（发行镜像）')"
 echo "   板级配置 : $DEFCONFIG"
 echo "   目标     : ${TARGETS[*]}"
 echo "   uid      : $(id -u)（必须是 0，否则 build.sh 会交互要 sudo 密码）"
 if [ "$(id -u)" != "0" ]; then
-    echo "!! 请用 root 跑：sudo bash $0 $SDK ${TARGETS[*]}" >&2
+    echo "!! 请用 root 跑：sudo bash $0 --flavor $FLAVOR $SDK ${TARGETS[*]}" >&2
     exit 2
 fi
 
@@ -119,5 +151,30 @@ SESSION_DIR="$(ls -dt "$SDK"/output/sessions/*/ 2>/dev/null | head -1 || true)"
 echo
 echo "== 完成。产物在 $SDK/output/firmware/"
 echo "   本次会话日志: ${SESSION_DIR:-$SDK/output/sessions/}"
+
+# ---- 开发镜像：把产物按形态命名拷出去（不覆盖发行镜像的产物）----------------
+#  发行镜像的命名是人工的（b1…b11），这里不动；开发镜像按**日期**命名，
+#  并且**只在开发形态**做，避免误改发行流程。
+#  目标目录可用 IMG_OUT_DIR 指定；默认用 WSL 里能看到的 Windows 刷机目录。
+if [ "$FLAVOR" = "dev" ]; then
+    IMG_OUT_DIR="${IMG_OUT_DIR:-/mnt/e/rk3568/flash}"
+    SRC_IMG="$SDK/output/update-ab/Image/update.img"
+    if [ ! -f "$SRC_IMG" ]; then
+        echo "⚠ 没找到 $SRC_IMG（这次没构建 updateimg 目标？）"
+    elif [ -d "$IMG_OUT_DIR" ]; then
+        STAMP="$(date +%Y-%m-%d)"
+        DST_IMG="$IMG_OUT_DIR/update-assistant-dev-$STAMP.img"
+        cp -f "$SRC_IMG" "$DST_IMG"
+        echo "   开发镜像已拷出: $DST_IMG"
+        echo "   sha256: $(sha256sum "$DST_IMG" | cut -d' ' -f1)"
+        if [ -f "$SDK/output/update-ab/Image/update.raw.img" ]; then
+            cp -f "$SDK/output/update-ab/Image/update.raw.img" \
+                  "$IMG_OUT_DIR/update-assistant-dev-$STAMP.raw.img"
+        fi
+    else
+        echo "⚠ 目标目录不存在，跳过拷贝: $IMG_OUT_DIR（可用 IMG_OUT_DIR 指定）"
+    fi
+fi
+
 echo "⚠ root 跑过之后，把属主改回来再跑非 root 的活（例如 2-10 的 chroot 测试）："
 echo "     chown -R anorak:anorak $SDK/output $SDK/buildroot/output"

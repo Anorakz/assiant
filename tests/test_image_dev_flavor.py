@@ -29,6 +29,8 @@ DEV_FRAGMENT = BC / "rockchip" / "products" / "kickpi-k1mini-dev-assistant.confi
 DEV_BOARD = BOARD / "rockchip_rk3568_kickpi_k1mini_dev_defconfig"
 REL_BOARD = BOARD / "rockchip_rk3568_kickpi_k1mini_release_defconfig"
 INSTALL = IMG / "install-into-sdk.sh"
+BUILD_IMAGE = IMG / "build-image.sh"
+MAKE_DEV_SDK = IMG / "make-dev-sdk.sh"
 
 
 def config_lines(path: pathlib.Path):
@@ -158,6 +160,49 @@ class TestInstallerInjectsDevFlavor(unittest.TestCase):
         ):
             self.assertIn(rel, text, "注入源缺 %s" % rel)
             self.assertIn(dst, text, "注入目标缺 %s" % dst)
+
+
+class TestDevEntryPoints(unittest.TestCase):
+    """2-12-3：入口脚本（造开发树 + 按形态构建），以及"别覆盖发行产物"。"""
+
+    def test_make_dev_sdk_uses_hardlink_copy_with_fallback(self):
+        text = MAKE_DEV_SDK.read_text(encoding="utf-8")
+        self.assertIn("cp -al", text, "默认走硬链接复制（省空间 + 继承已编译产物）")
+        self.assertIn("cp -a ", text, "要留一条真复制的兜底（--copy）")
+        self.assertIn("install-into-sdk.sh", text, "造完树要顺带注入配方")
+
+    def test_make_dev_sdk_has_delete_safety_rails(self):
+        """脚本里有 rm -rf：删除前必须确认那是"我们的开发树"。"""
+        text = MAKE_DEV_SDK.read_text(encoding="utf-8")
+        self.assertIn("*-dev)", text, "目录名必须以 -dev 结尾才允许动")
+        self.assertIn('"$DEV" = "/"', text)
+        self.assertIn("--force", text)
+
+    def test_build_image_supports_flavor_and_maps_to_dev_defconfig(self):
+        text = BUILD_IMAGE.read_text(encoding="utf-8")
+        self.assertIn("--flavor", text)
+        self.assertIn('rk3566_rk3568:rockchip_rk3568_kickpi_k1mini_dev_defconfig', text)
+        self.assertIn('rk3566_rk3568:rockchip_rk3568_kickpi_k1mini_release_defconfig', text)
+        self.assertIn("ASSISTANT_FLAVOR=dev", text, "dev 形态要传给 post-build（保留 usb-gadget）")
+        self.assertIn("ASSISTANT_FLAVOR=release", text)
+
+    def test_dev_products_are_named_separately(self):
+        """开发产物按日期命名拷出，绝不覆盖发行镜像的人工命名（b1…b11）。"""
+        text = BUILD_IMAGE.read_text(encoding="utf-8")
+        self.assertIn("update-assistant-dev-$STAMP.img", text)
+        self.assertIn('if [ "$FLAVOR" = "dev" ]', text)
+
+    def test_dev_tree_path_is_warned_about(self):
+        """形态是 dev 但 SDK 不是 *-dev 时要提醒（两套配置会互相覆盖）。"""
+        text = BUILD_IMAGE.read_text(encoding="utf-8")
+        self.assertIn("*-dev)", text)
+
+    def test_ccache_is_enabled_for_dev_only(self):
+        """用户 2026-10-02 批准开 ccache；先只给开发树开（发行树开要全量重编）。"""
+        dev = DEV_FRAGMENT.read_text(encoding="utf-8")
+        self.assertIn("BR2_CCACHE=y", dev)
+        rel = REL_BC_DEFCONFIG.read_text(encoding="utf-8")
+        self.assertNotIn("BR2_CCACHE=y", rel, "发行树这轮不动它（会触发全量重编）")
 
 
 if __name__ == "__main__":
