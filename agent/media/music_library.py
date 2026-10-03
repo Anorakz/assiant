@@ -48,6 +48,8 @@ import re
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from agent.core.paths import resolve_config_path
+
 __all__ = [
     "MusicLibraryError",
     "RECORD_VERSION",
@@ -115,12 +117,7 @@ def resolve_library_file(configured: Optional[str] = None) -> str:
     @note 一律过 `normpath`：`os.path.join` 遇到带 `/` 的相对路径会混出
           `…/assitant\\config/music_library.jsonl` 这种两种分隔符都在的串。
     """
-    text = configured.strip() if isinstance(configured, str) else ""
-    if not text:
-        return default_library_file()
-    if os.path.isabs(text):
-        return os.path.normpath(text)
-    return os.path.normpath(os.path.join(repo_root(), text))
+    return resolve_config_path(configured, default_library_file, repo_root())
 
 
 # ---------------------------------------------------------------------------

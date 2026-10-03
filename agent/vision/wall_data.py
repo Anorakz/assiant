@@ -62,6 +62,8 @@ import struct
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from agent.core.paths import resolve_config_path
+
 __all__ = [
     "WallDataError",
     "RECORD_VERSION",
@@ -147,12 +149,7 @@ def resolve_data_file(configured: Optional[str] = None) -> str:
           `.../assitant\\config/wall_data.jsonl` 这种两种分隔符都在的串，
           打印/比对/写日志时都不好看。
     """
-    text = configured.strip() if isinstance(configured, str) else ""
-    if not text:
-        return default_data_file()
-    if os.path.isabs(text):
-        return os.path.normpath(text)
-    return os.path.normpath(os.path.join(repo_root(), text))
+    return resolve_config_path(configured, default_data_file, repo_root())
 
 
 # ---------------------------------------------------------------------------

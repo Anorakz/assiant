@@ -31,6 +31,8 @@ import os
 import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from agent.core import similarity
+
 from agent.core.paths import resolve_config_path
 
 __all__ = ["GameAnchors", "AnchorError", "cosine", "DEFAULT_ANCHOR_FILE", "DEFAULT_SHOT_DIR"]
@@ -59,16 +61,7 @@ def resolve_anchor_file(configured: Optional[str] = None) -> str:
 
 def cosine(a: Sequence[float], b: Sequence[float]) -> float:
     """两向量的余弦（纯 Python）。**长度不一致或全零 -> 0.0**（不当成相似）。"""
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = norm_a = norm_b = 0.0
-    for left, right in zip(a, b):
-        dot += left * right
-        norm_a += left * left
-        norm_b += right * right
-    if norm_a <= 0.0 or norm_b <= 0.0:
-        return 0.0
-    return float(dot / math.sqrt(norm_a * norm_b))
+    return similarity.cosine(a, b)
 
 
 class GameAnchors(object):

@@ -550,16 +550,20 @@ class SunshineClient:
             result.status_message or result.raw.strip()[:200],
         )
 
+    def _launch_like(self, action: str, app_id: str, mode: str) -> LaunchResult:
+        """launch / resume 只差一个动作名，逻辑同一份（T15-3 / 3-6b）。"""
+        result = self._session_request(action, app_id, mode)
+        if not result.ok:
+            raise SunshineError(self._session_failure(action, result))
+        return result
+
     def launch(self, app_id: str, mode: str) -> LaunchResult:
         """GET /launch —— 启动应用, 拿 sessionUrl0 (就是 moonlight 的 rtspSessionUrl)。
 
         ⚠ 主机上已有应用在跑时这里必然失败 (实测 status_code=400)。要共存请用
           start_session(), 它会自动退到 /resume。
         """
-        result = self._session_request("launch", app_id, mode)
-        if not result.ok:
-            raise SunshineError(self._session_failure("launch", result))
-        return result
+        return self._launch_like("launch", app_id, mode)
 
     def resume(self, app_id: str, mode: str) -> LaunchResult:
         """GET /resume —— 主机上已有应用在跑时**加入**那个会话 (与别的客户端共存)。
@@ -567,10 +571,7 @@ class SunshineClient:
         实测 Sunshine 在 appid 对不上时也返回同一个会话 (响应里带 <resume>1</resume>),
         所以 app_id 给 0 也能用; 这里仍然把真实 appid 带上, 语义更清楚。
         """
-        result = self._session_request("resume", app_id, mode)
-        if not result.ok:
-            raise SunshineError(self._session_failure("resume", result))
-        return result
+        return self._launch_like("resume", app_id, mode)
 
     def start_session(self, app_id: str, mode: str) -> SessionStart:
         """启动**或**加入会话: 先 /launch, 主机已在运行就退到 /resume。

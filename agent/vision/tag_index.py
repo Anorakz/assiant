@@ -44,6 +44,8 @@ import math
 import os
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from agent.core import similarity
+
 from ..core import label_spec
 from . import wall_data
 
@@ -123,10 +125,7 @@ def cosine(a: Sequence[float], b: Sequence[float]) -> float:
           这里仍然除一遍模长: 万一哪天向量来源变了（或有人手改了文件），
           "排序悄悄变了"比"多算一次开方"贵得多。
     """
-    na, nb = _norm(a), _norm(b)
-    if na <= 0.0 or nb <= 0.0:
-        return 0.0
-    return _dot(a, b) / (na * nb)
+    return similarity.cosine(a, b)
 
 
 def normalise(vector: Sequence[float]) -> List[float]:
