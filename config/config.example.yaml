@@ -550,7 +550,6 @@ gui:
     idle_ms: 3000          # 只作用于内嵌控制条
 
   # ---- 对话 / 输入 ----
-  chat_channel: via_agent  # 主页面对话只走 agent (chat_input -> llm)
   input_source: keyboard   # keyboard | terminal (只有 keyboard 会真控 onboard)
                            # 原来的 "pc"(用宿主机键盘当输入源) 已随主机输入方向一起移除
   onboard_auto: true       # 选"键盘"时，**点输入框才弹** onboard，输入框失焦自动关

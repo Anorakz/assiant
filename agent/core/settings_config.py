@@ -213,21 +213,6 @@ class _Template(object):
             break
         return start, end
 
-    def block_text(self, path: str) -> List[str]:
-        """段（或键）在模板里的**原文行**（含紧贴着它的那段说明注释）。
-
-        @note 段的末尾**遇到下一个段的横幅（`# ----`）就停** —— 否则会把下一个段的
-              说明注释也搬过来（T13-8 本地冒烟抓到）。段内的顶层注释照带。
-        """
-        if path in self.segments:
-            start, end = self.segment_span(path)
-            return self.lines[start:end]
-        if path in self.leaves:
-            info = self.leaves[path]
-            start = min(info["comments"]) if info["comments"] else info["line"]
-            return self.lines[start:info["line"] + 1]
-        raise SettingsConfigError("模板里没有 %s（能改的键 = 模板里有的键）" % path)
-
 
 def _template_path(name: Optional[str] = None) -> Path:
     return Path(name) if name else (config_dir() / TEMPLATE_NAME)

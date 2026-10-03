@@ -144,10 +144,6 @@ class Proc:
                 pass
         self._thread.join(timeout=1.0)
 
-    def log_tail(self, n: int = 8) -> str:
-        lines = self.log().splitlines()
-        return "\n".join(lines[-n:])
-
 
 # ---------------------------------------------------------------------------
 #  工具

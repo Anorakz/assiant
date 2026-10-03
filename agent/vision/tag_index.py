@@ -272,10 +272,6 @@ class TagIndex(object):
     def has_vector(self, path: str) -> bool:
         return path in self._vectors
 
-    def vector_of(self, path: str) -> Optional[List[float]]:
-        vector = self._vectors.get(path)
-        return list(vector) if vector is not None else None
-
     def tags_of(self, path: str) -> Dict[str, List[List[Any]]]:
         """这张图存下来的 top-k 标签 {轴: [[标签, 分数], …]}。"""
         record = self._by_path.get(path)

@@ -187,13 +187,6 @@
     "same_name_prod|site_packages|image/check-runtime-deps.py + image/imagelib.py",
     "same_name_prod|summarise|agent/media/music_library.py + agent/vision/wall_data.py",
     "unused_defs|agent/core/bilibili_buffer.py Handler.do_HEAD",
-    "unused_defs|agent/core/settings_config.py _Template.block_text",
-    "unused_defs|agent/core/study_watch.py StudyWatcher.adapt_on",
-    "unused_defs|agent/net/bilibili_api.py _now",
-    "unused_defs|agent/vision/siglip/config.py SiglipConfig.as_dict",
-    "unused_defs|agent/vision/tag_index.py TagIndex.vector_of",
-    "unused_defs|gui/tests/e2e_ipc.py Proc.log_tail",
-    "unused_defs|image/check-runtime-deps.py target_dir",
     "unused_defs|scripts/audit-code.py BodyNormalizer.visit_Constant",
     "unused_defs|scripts/audit-code.py BodyNormalizer.visit_Name"
   ]

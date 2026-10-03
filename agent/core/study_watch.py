@@ -960,13 +960,6 @@ class StudyWatcher(object):
         self.adapt_enabled = True
         self._notes.append("阈值自适应已解冻")
 
-    def adapt_on(self, enabled: bool = True) -> None:
-        """`adapt(False)` = `freeze()`（配置开关那条路）。"""
-        if enabled:
-            self.unfreeze()
-        else:
-            self.freeze()
-
     def reset_learning(self) -> Dict[str, Any]:
         """把**学到的**清掉, 回到配置里的初值（锚点不动 —— 那是另一个开关）。"""
         if self.stats is not None:

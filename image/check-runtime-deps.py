@@ -113,11 +113,6 @@ PY_IN_IMAGE = {
 }
 
 
-def target_dir(sdk: Path) -> Path:
-    """兼容旧调用：按 imagelib 的规则选树（整机构建优先）。"""
-    t, _why = imagelib.resolve_target(sdk)
-    return t if t else (sdk / "buildroot" / "output" / CFG / "target")
-
 
 def site_packages(target: Path) -> Path:
     return imagelib.site_packages(target)

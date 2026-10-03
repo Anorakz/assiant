@@ -606,5 +606,3 @@ def _quote(text: str) -> str:
     return urllib.parse.quote(str(text), safe="")
 
 
-def _now() -> float:
-    return time.time()

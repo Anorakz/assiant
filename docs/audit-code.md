@@ -62,7 +62,7 @@ ruff check . --statistics        # 0.6.9；本轮基线见 §4
 | 重复实现：测试 | 46 组（通常不收敛） |
 | 同名不同体（生产模块级） | **15** |
 | 疑似死代码：从未被 import / 未被提到 | **0** |
-| 疑似死代码：全仓库零引用 | **10** |
+| 疑似死代码：全仓库零引用 | **3**（全是框架钩子假阳性，见 §8.2） |
 | 仅测试引用（需人工确认） | 22 |
 | 规范启发式合计 | 171 条 |
 
@@ -171,3 +171,56 @@ ruff check . --statistics        # 0.6.9；本轮基线见 §4
 
 低风险先行（1→2→3→4→5→6→7），再中风险（8→9→10→11）；每完成一项就刷新
 `scripts/audit-baseline.json`，让棘轮把"已收敛"这件事记下来。
+
+## 8. 3-3 死代码普查（用户授权：直接删）
+
+### 8.1 删掉的（7 处零引用 + 1 个孤儿配置项 + 对应文档行）
+
+| 位置 | 是什么 | 为什么确实是死的 |
+| --- | --- | --- |
+| `agent/core/settings_config.py` `_Template.block_text` | 取模板里某段的原文行 | **连测试都不用**（15 行）；`segment_span` / `lines` 才是被调的那对 |
+| `agent/core/study_watch.py` `StudyWatcher.adapt_on` | `adapt(False)` == `freeze()` 的糖 | 零引用；实际调的是 `freeze()` / `unfreeze()` |
+| `agent/net/bilibili_api.py` `_now()` | `return time.time()` | 零引用（两行的包装，没人要） |
+| `agent/vision/tag_index.py` `TagIndex.vector_of` | 取某张图的向量 | 零引用；被用的是 `has_vector` |
+| `agent/vision/siglip/config.py` `SiglipConfig.as_dict` | 给日志看的摘要 dict | 零引用；`describe()` / `__repr__` 才是出口 |
+| `gui/tests/e2e_ipc.py` `Proc.log_tail` | 取日志尾部若干行 | 零引用（测试辅助也要算死代码） |
+| `image/check-runtime-deps.py` `target_dir()` | "兼容旧调用"的选树包装 | 零引用；`site_packages` 现在直接委托 `imagelib` |
+| `config/config.example.yaml` `chat_channel` + `docs/gui.md` 对应表项 | 对话通道开关 | **全仓库唯一真孤儿键**：agent 不读、GUI 不读（`gui/` 里 grep 不到），只有 example 与 gui.md 提它 —— 是"原来的 `pc` 输入源被移除"那次留下的残渣 |
+
+删除后：**全量套件 59 files 仍然 OK**（没有任何测试引用它们 —— 这是"确实没人用"的最强证据），
+`scripts/test-python.sh` 的棘轮显示"已消掉 7 条，没有新增"。
+
+### 8.2 假阳性：两类"零引用但不是死代码"
+
+| 类别 | 例子 | 为什么不是死的 |
+| --- | --- | --- |
+| **框架/基类按名派发** | `agent/core/bilibili_buffer.py` `Handler.do_HEAD`（`http.server` 按方法名派发）；`agent/core/bilibili_buffer.py` `Handler.log_message`（同上，仅测试引用） | 调用方不在我们代码里，是标准库按名字找 |
+| **访问器/访问者钩子** | `scripts/audit-code.py` 自己的 `BodyNormalizer.visit_Name` / `visit_Constant` | `ast.NodeTransformer` 按 `visit_<Type>` 命名约定回调 |
+
+⚠ 有意思的是：**审计器把自己的钩子报成了死代码** —— 这正是"零引用只能当线索、
+不能当判决"的最好例子。剩下的 3 条零引用全是这一类，保留。
+
+### 8.3 仅测试引用（22 条）：判定为"测试锁定的契约"，保留
+
+这 22 条是 public API（`can_transition`、`remove_callback`、`callback_count`、
+`is_allowed`、`unregister`、`last_rule`、`remove_rule`、`subscriber_count`、
+`class_names`、`last_sample`、`cached_count`、`has_vector`、`media_headers`、
+`playlist_detail/list`、`auth_check`、`encode_batch`、`load_image`、
+`update_thresholds`、`run_derivation_check`、`log_message` …）。
+
+**处理**：保留。理由 —— 它们是**测试锁定的行为契约**（改坏了测试会红），删掉等于
+把测试的观测面一起拆掉；真要缩，应该"删取值器 + 删对应测试"成对进行，而不是单删。
+其中 `Handler.log_message` 属 §8.2 的框架钩子类。
+
+### 8.4 另外两类孤儿（任务表点名的）
+
+| 类别 | 结果 |
+| --- | --- |
+| **CLI 子命令孤儿**（定义了但进不了派发表） | **0**：按零引用口径，`agent/cli.py` 里没有"定义了却没人引用"的命令函数 |
+| **配置项孤儿**（example 里有、没人读） | 初筛 14 个"`agent/*.py` 里一次都没出现"的键，逐个到 `gui/` 复核后：**13 个是 GUI 在读**（`theme`/`fullscreen`/`wake`/`idle_ms`/`speed`/`start_page`/`video_overlay`/`max_rows`/`bottom`/`input_source`/`onboard_auto`/`monitor_interval_ms`/`api_base`）—— 这是**跨语言配置契约**，不是孤儿；**1 个（`chat_channel`）谁都不读 → 已删** |
+
+### 8.5 顺带学到的（写进工具注释）
+
+删代码这件事，**"零引用"是线索不是判决**：
+· 框架钩子、`getattr`/字符串注册、跨语言契约都会让"没人引用"成立而实际上必须保留；
+· 所以流程是：机械普查 → 人工判定 → 小步删 → **套件绿 + 棘轮"已消掉、无新增"** 才算完成。

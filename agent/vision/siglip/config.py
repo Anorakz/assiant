@@ -232,16 +232,5 @@ class SiglipConfig(object):
                    self.image_layout, self.image_dtype, self.text_len, self.text_pad_id,
                    self.embed_dim, self.output_dtype, self.npu_core))
 
-    def as_dict(self) -> Dict[str, Any]:
-        """给人/日志看的摘要（不含常量全集）。"""
-        return {
-            "model_path": self.model_path,
-            "tokenizer_path": self.tokenizer_path,
-            "runtime_lib": self.runtime_lib,
-            "verbose": self.verbose,
-            "warmup_runs": self.warmup_runs,
-            "source": self.source,
-        }
-
     def __repr__(self) -> str:
         return "<SiglipConfig %s>" % self.describe()

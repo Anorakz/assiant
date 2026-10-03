@@ -159,7 +159,6 @@ GUI 读写 `config/config.yaml` 的两个段：
 | `gui.wake.top/bottom/left/right` | GUI | 四区域 `active` 或 `locked` |
 | `gui.wake.idle_ms` | GUI | **四区域共用**的休眠时间 |
 | `gui.video_overlay.mode` / `gui.video_overlay.idle_ms` | GUI | 视频内嵌控制条的活动/锁定与**独立**休眠时间 |
-| `gui.chat_channel` / `gui.input_source` / `gui.onboard_auto` | GUI | 对话通道 / 输入源（`keyboard`｜`terminal`）/ 是否真控 onboard（**点输入框才弹**，失焦收起） |
 | `gui.monitor_interval_ms` | GUI | 系统页刷新间隔 |
 | `gui.schedule.max_rows` | GUI | 日程区最多显示几行（今天+明天**合计**，默认 6） |
 | `llm.*` | GUI 写、Agent 读 | 推理位置（`edge`／`cloud`／`disabled`）与参数 |
