@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import hashlib
 import json
 import os
@@ -172,8 +173,21 @@ class FuncInfo:
 
 
 def fingerprint(node: ast.AST) -> str:
-    copy = BodyNormalizer().visit(ast.parse(ast.unparse(node)))
+    """归一化后的结构指纹。
+
+    ⚠ **不能用 `ast.unparse`**：那是 Python 3.9 才有的 API，而本仓库 CI 与**板端
+    解释器都是 3.8**（CI 特意用 3.8 就是"与板端同版本"）。实测第一版用了它，CI 直接红。
+    ⚠ **必须先 `deepcopy`**：`NodeTransformer` 是**就地修改** —— 直接归一化原节点会把
+    函数名/参数名改成 `_`、把 docstring 删掉，后续分析（同名不同体、死代码）读到的
+    就是被改坏的树（实测：去掉 unparse 后"零引用定义"直接从 10 变 0）。
+    """
+    copy = BodyNormalizer().visit(copy_module(node))
     return hashlib.sha1(ast.dump(copy).encode("utf-8")).hexdigest()[:16]
+
+
+def copy_module(node: ast.AST) -> ast.AST:
+    """深拷贝一个 AST 节点（3.8 兼容；不用 `ast.unparse` 那种 3.9+ 的绕法）。"""
+    return copy.deepcopy(node)
 
 
 class Corpus:
