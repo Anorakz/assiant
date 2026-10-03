@@ -12,12 +12,15 @@
 `cp config/config.example.yaml config/config.yaml`。
 
 ```bash
-# 板端依赖：Qt 5.12（本来就有）+ yaml-cpp（日程区读配置用，只读）
-sudo apt-get install -y libyaml-cpp-dev
+# 宿主依赖（T15-4 任务 12 实测）：Qt5 5.15 的 Core/Network/Widgets/Multimedia/MultimediaWidgets
+#   + yaml-cpp（日程区读配置用，只读）。Ubuntu 一条命令：
+sudo apt-get install -y qtmultimedia5-dev libyaml-cpp-dev
+# ⚠ 镜像里是 **Qt 5.15.11**（buildroot 那份），不是 5.12 —— 见 §1.0 的门禁表
 
 cd gui && cmake -S . -B build && cmake --build build -j4
 ./build/agent_gui                       # 自动向上找 config/config.yaml，全屏 kiosk
-./build/agent_gui --config /tmp/g/config.yaml   # 显式指定配置（验收/沙箱用）
+./build/agent_gui --config /tmp/g/config.yaml   # 显式指定配置（验收/沙箱用；⚠ 只影响**读**，
+                                                #   保存走 IPC，落盘路径由 Agent 侧决定）
 ./build/agent_gui --windowed --page system
 ./build/agent_gui --socket /tmp/agent.sock
 ./build/agent_gui --stdio               # 纯终端模式（e2e_ipc 测试依赖）
@@ -32,8 +35,34 @@ cd gui && cmake -S . -B build && cmake --build build -j4
 
 测试：`cd gui/build && ctest --output-on-failure`（**25 个测试**：核心逻辑 + 控件级 + 图标守卫
 + 面板尺寸守卫 `test_page_heights` + 虚拟键盘让位守卫 `test_keyboard_inset` + e2e IPC）。
-⚠ GUI 只能在**板端**编（PC 没有 Qt），
-所以"源码树自洽"另有一条 PC 侧守卫 `tests/test_gui_includes.py`（悬空 include 见 §2.1）。
+
+### 1.0 GUI 的门禁到底在哪（T15-4 任务 12 实测改正）
+
+旧版这里写的是"GUI 只能在**板端**编（PC 没有 Qt）"—— **这条是错的**，2026-10-04 两条都实测过：
+
+| 路 | 命令 | 实测 |
+| --- | --- | --- |
+| **A. 宿主原生**（快，日常用这条） | `apt-get install qtmultimedia5-dev` 后 `cmake -S gui -B build-gui-host -DGUI_BUILD_TESTS=ON && ctest --test-dir build-gui-host` | 宿主 Qt **5.15.13**（与镜像的 5.15.11 同小版本）：配置 + 编译 rc=0，**25/25 全过**（15 s） |
+| **B. PC 交叉 + 板端跑**（发布前的真门禁） | `bash image/build-gui.sh --target <target 树>`（它固定 `GUI_BUILD_TESTS=OFF`）；要跑测试就照抄它的 cmake 参数、把 `-DGUI_BUILD_TESTS=ON`，再把 `tests/test_*` 拷到板上执行 | 板端（aarch64，Qt 5.15.11 运行时 + `libQt5Test` + `libqoffscreen.so`）：**24 个测试二进制、278 项通过**（明细与两处板端环境差异见 §1.0.1） |
+
+⚠ **板子上编不了 C++**：这块 buildroot 镜像里**没有 `g++`/`cc1plus`、也没有 `cmake`**
+（只有 `make`/`gcc`(C)/`ctest`）—— 所以"在板上 cmake + ctest"这条路不存在；
+`scripts/sync-gui.ps1 -Test` 的头部假设是**另一块**装了 Ubuntu Qt 5.12 + cmake/g++ 的开发板，
+对这块板不适用。交付物一律 **PC 侧交叉编译**（与 `docs/image.md` §5.10 的"方案 A"一致）。
+
+**测试里写死的绝对路径**：`test_settings_page`（仓库那份 `config/config.example.yaml`）、
+`test_icons`（`gui/resources/icons`）、`test_schedule_model`（`tests/data/schedule_parity`）、
+`test_local_client`（`gui/tests/local_server.py` + `agent/` 包）都是**编译期**写死的路径。
+在另一台机器上跑这些二进制时，要么把这几样按同样的绝对路径铺好，要么把测试当"同机门禁"用。
+
+#### 1.0.1 板端跑出来的两处环境差异（与本次改动无关）
+
+| 测试 | 现象 | 判定 |
+| --- | --- | --- |
+| `test_bench_runner` | 2/6 失败：假 bench 脚本的输出没出现在日志视图里（`[fake-qwen] 预检完成` / `长跑开始`） | 宿主上同一份二进制全过；这个测试不碰设置页，与环境（QProcess + 板端 python）有关 |
+| `e2e_ipc` | C++ GUI 日志为空、断言走不下去（Python 侧 `LISTENING`/`CONNECTED` 正常） | **旧二进制逐字一样**（用 `.pre-t154b` 对照跑过）⇒ 板上环境差异，不是回归 |
+
+"源码树自洽"另有一条 PC 侧守卫 `tests/test_gui_includes.py`（悬空 include 见 §2.1）。
 
 ### 1.1 无 X 形态（路线 B：极小镜像，T15-1）
 

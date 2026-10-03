@@ -77,6 +77,12 @@ build-rk3568/
 # T15-2-10b：payload 的交叉编译目录（native 扩展 / GUI），由 image/build-*.sh 生成
 build-rk3568-native-payload/
 build-rk3568-gui-payload/
+# T15-4 任务 12：宿主（x86）原生构建 GUI + ctest 的目录
+#   `cmake -S gui -B build-gui-host -DGUI_BUILD_TESTS=ON && ctest --test-dir build-gui-host`
+build-gui-host/
+# T15-4 任务 12：交叉（aarch64）构建 GUI + 测试的目录（跑板端 ctest 用）
+#   见 docs/gui.md §2 的门禁两条路
+build-gui-arm/
 dist/
 *.so
 *.pyd
