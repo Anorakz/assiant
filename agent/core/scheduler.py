@@ -64,6 +64,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
+from ..async_util import log_task_exception
 from . import schedule_config
 from .state_machine import State, StateMachine
 
@@ -122,12 +123,12 @@ class SkippedScheduleEntry(SchedulerError):
 
 
 def _log_task_exception(task: "asyncio.Task") -> None:
-    """吃掉订阅者协程的异常并记下来 (没有它会有 "Task exception was never retrieved")。"""
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        print("Scheduler: background action raised: %r" % (exc,))
+    """吃掉订阅者协程的异常并记下来 (没有它会有 "Task exception was never retrieved")。
+
+    @note 公共实现在 `agent/async_util.py`（T15-3 第 7 项收敛）；`Scheduler` /
+          `background action` 这两个词是**本模块的口径** —— 打出来的那句与收敛前逐字相同。
+    """
+    log_task_exception(task, "Scheduler", "background action")
 
 
 # ---------------------------------------------------------------------------

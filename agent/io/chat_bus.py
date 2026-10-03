@@ -52,6 +52,8 @@ import inspect
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from ..async_util import log_task_exception
+
 __all__ = ["ChatInputBus", "EVENT_FIELDS"]
 
 #: 事件字段 —— 顺序即文档
@@ -201,9 +203,9 @@ class ChatInputBus:
 
 
 def _log_task_exception(task: "asyncio.Task") -> None:
-    """吃掉订阅者协程的异常并打印 (没有它会有 "Task exception was never retrieved")。"""
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        print("ChatInputBus: subscriber task raised: %r" % (exc,))
+    """吃掉订阅者协程的异常并打印 (没有它会有 "Task exception was never retrieved")。
+
+    @note 公共实现在 `agent/async_util.py`（T15-3 第 7 项收敛）；`ChatInputBus` /
+          `subscriber task` 这两个词是**本模块的口径** —— 打出来的那句与收敛前逐字相同。
+    """
+    log_task_exception(task, "ChatInputBus", "subscriber task")

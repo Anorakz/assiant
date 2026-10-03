@@ -91,7 +91,7 @@ ruff check . --statistics        # 0.6.9；本轮基线见 §4
 棘轮基线：`scripts/audit-baseline.json`（**151 条**发现，行号已归一化；随每次收敛刷新）。
 
 ⚠ 上面这张表是 **3-1 当时**的数字，留在这里当"起点"。3-6 收敛之后的数字见 §11.3
-（重复实现 生产 11 -> **3** 组；棘轮 151 -> **147** 条）。
+（重复实现 生产 11 -> **2** 组；棘轮 151 -> **147** 条）。
 
 棘轮**双向验证过**：基线刷新后立刻复跑 = 0；故意注入一条新发现 = 退出码 2；清理后回到 0。
 
@@ -150,9 +150,9 @@ ruff check . --statistics        # 0.6.9；本轮基线见 §4
 | 10 | `vectors()` / `_save_shot()`：锚点库的"解码 + 跳过并记一条"与截图落盘 | `core/game_anchors.py:130,198`、`core/study_anchors.py:298,615` | 两个类抽公共基类 `core/anchors_base.py` | 改动最大，放最后；行为不变，只有日志措辞差异要统一 | 中 |
 | 11 | `_int`-类"参数归一化"模式 | `tools/{bilibili,music,schedule,wallpaper}.py` 的 `normalize()` | `tools/_common.py`（与 #3 同一处） | 只收敛**共用小步骤**（别名取值、空值清洗、数值夹取），各工具的业务归一化留在原地 | 中 |
 
-⚠ **第 6、7 项在执行时重新判定为"保留"**：动手前复核发现原计划会把 **11 处调用点**
-（对着真机握手、且一条测试都没有的配对脚本）搅在一起，或者新增仓库里今天不存在的一条
-**跨层依赖**。证据与替代方案见 §11.2 —— 这两条要你复核。
+⚠ **第 6 项按你的决定保留不动**（复核发现原计划要把 **11 处调用点**——对着真机握手、
+且一条测试都没有的配对脚本——搅在一起）；**第 7 项按你的决定合并**，走的是替代方案
+（新建顶层 `agent/async_util.py`，不新增跨层依赖）。两项的证据与落地方式见 §11.2。
 
 ### 7.2 判定为"不是重复、保留"的（写明理由，避免下次又被当成问题）
 
@@ -334,16 +334,17 @@ ruff check . --statistics        # 0.6.9；本轮基线见 §4
    改完用同一条 `-Wall -Wextra` 构建 + ctest 172 项验证）；
 2. 1 条待办标记 → 与 Python 侧那 5 条一起在 3-4b 归类。
 
-## 11. 3-6 收敛实施（11 项：9 项落地 / 2 项重新判定为"保留"）
+## 11. 3-6 收敛实施（11 项：10 项落地 / 1 项按你的决定保留）
 
 口径：每项先出"改哪里、怎么改、风险"，你确认后按 §7.4 的顺序做（低风险先行）；
 每做完一项跑该模块的单测，一批做完刷新一次棘轮基线。本节数字都是**改完后**用
 CI 同一条命令（`python3 scripts/audit-code.py --baseline scripts/audit-baseline.json
 --quiet`）取的。
 
-分三轮做：`59bab14`（3-6a 第 1 批）→ `fd02085` + `c7b76a5`（3-6b）→ 本轮（3-6 收尾）。
+分三轮做：`59bab14`（3-6a 第 1 批）→ `fd02085` + `c7b76a5`（3-6b）→ 本轮（3-6 收尾）；
+第 7 项按你 2026-10-03 的决定（**合并**）补做，第 6 项按同一次决定**不处理**。
 
-### 11.1 落地的 9 项
+### 11.1 落地的 10 项
 
 | # | 收敛到 | 动作 | 验证 |
 | --- | --- | --- | --- |
@@ -352,41 +353,46 @@ CI 同一条命令（`python3 scripts/audit-code.py --baseline scripts/audit-bas
 | 3 | `tools/_common.py` 的 `clean_text()` | `tools/music.py` 删掉自己的 `_clean_text` + `_EMPTY_VALUES`；`tools/schedule.py` 保留一个 **2 行包装**（它多认一个「不填」） | `test_tool_normalize` 16 项 + `test_merged_tools` 47 项绿 |
 | 4 | `llm/provider.py::EdgeBackend.from_config` 内的 `_num(key, cast)` | `_int` / `_float` 两份**逐字相同**的实现合一；顺带修掉 `timeout_s` 被读两遍 | `test_llm` / `test_llm_service` 绿 |
 | 5 | `image/imagelib.py::site_packages` | `image/check-runtime-deps.py` 不再自带副本（也不再需要"兼容旧调用"的 `target_dir` 包装，已按 3-3 删掉） | 镜像侧脚本单测绿 |
+| 7 | 新增**顶层** `agent/async_util.py::log_task_exception(task, prefix, what)` | `core/scheduler.py` 与 `io/chat_bus.py` 各自保留一个 **1 行包装**（它们自己的 `Scheduler`/`background action` 与 `ChatInputBus`/`subscriber task` 就是打印口径），打出来的两句**逐字不变** | 证据脚本 `temp/t15-3-logtask-check.py`：两句输出与原实现**逐字节相同**、取消掉的 task 仍静默；`test_scheduler` 109 + `test_chat_bus` 18 + `test_io` 45 + `test_ipc_local_server` 131 绿 |
 | 8 | `net/sunshine_client.py::_launch_like(action, app_id, mode)` | `launch()` / `resume()` 变成两行（对外 API **不变**） | `test_sunshine_client` 绿 |
 | 9 | 新增 `core/similarity.py::cosine` | `core/game_anchors.py`（原实现）与 `vision/tag_index.py`（**原来是 `zip` 静默截断**）都改用它 —— 取**更严格**那版：长度不一致 -> 0.0 | `test_tag_index` 65 + `test_study_anchors` 96 绿；`test_audit_script.py` 里那条"两个 crc32 实现必须一致"的同款断言也钉住了余弦 |
 | 10 | 新增 `core/anchor_io.py` 的 `decode_rows()` + `save_shot()` | `core/game_anchors.py` 与 `core/study_anchors.py` 的 `vectors()` / `_save_shot()` 改调助手（**不是**计划里写的"公共基类" —— 见 §11.3 的理由） | `test_study_anchors` 96 项绿；重复(生产) 又少 2 组 |
 | 11 | `tools/_common.py` 的 `EMPTY_VALUES` / `action_of()` | 四个 `tools/*.py` 的 `normalize()` 只留**各自的语义规则**；空值表与 action 改写改成导入 | `test_tool_normalize` 16 + `test_bilibili_tool` 19 + `test_schedule_tool` 46 + `test_wallpaper` 132 绿 |
 
-### 11.2 两处**重新判定为"保留"**（计划里写的是"收敛"，动手前复核后改了判定）
+### 11.2 第 6 项：按你的决定**保留两份**（不动）
 
 | # | 原计划 | 复核后的事实 | 判定 |
 | --- | --- | --- | --- |
-| 6 | 把 `pair_ref.py` 与 `pair_sunshine.py` 的 `http_get()` 并成 `scripts/_common.py` 一份（"签名取并集：`url, timeout`"） | 两者**不是同一件事**：`pair_ref` 的收 **URL**、返回 **body**（`urllib.request`，4 处调用）；`pair_sunshine` 的收 **host/port/path**、返回 **(status, body)**（`http.client.HTTPConnection`，4 处调用 + `pair_probe.py` 另外 3 处**import 它**）。"取并集"要改 **11 处调用点 + 1 条 import**，而这些是**对着真机握手**的配对脚本、**一条测试都没有** | **保留两份**，与 §7.2 里 `decode`/`encode`（名字撞车、语义不同）同款处理；`pair_sunshine` 那份本来就已经被 `pair_probe` 复用，共享面没有再压缩的余地 |
-| 7 | 把 `core/scheduler.py` 与 `io/chat_bus.py` 的 `_log_task_exception()` 并成一个共享助手 | 两份**逐字相同**（只差打印前缀），但它们分处两层：`agent/io/*` 今天**一个 `agent.core` 都不 import**（它是有意的叶子层），`agent/core/*` 也只在一处**惰性**碰 `io`。合并要么新增首个 `io -> core` 依赖（会把整个 `agent.core` 包拉进 `io` 的 import 路径），要么为一个 5 行函数新开一个顶层工具模块 | **保留两份**：5 行代码换一条新的跨层依赖不划算；而且 §9.2 已经判定这两处 `print` 出口是**有意为之**（后台协程报错时日志系统可能正在初始化/重入），合并会让这条判定与代码位置脱钩 |
+| 6 | 把 `pair_ref.py` 与 `pair_sunshine.py` 的 `http_get()` 并成 `scripts/_common.py` 一份（"签名取并集：`url, timeout`"） | 两者**不是同一件事**：`pair_ref` 的收 **URL**、返回 **body**（`urllib.request`，4 处调用）；`pair_sunshine` 的收 **host/port/path**、返回 **(status, body)**（`http.client.HTTPConnection`，4 处调用 + `pair_probe.py` 另外 3 处**import 它**）。"取并集"要改 **11 处调用点 + 1 条 import**，而这些是**对着真机握手**的配对脚本、**一条测试都没有** | **保留两份**（你 2026-10-03 定"不处理"），与 §7.2 里 `decode`/`encode`（名字撞车、语义不同）同款；`pair_sunshine` 那份本来就被 `pair_probe` 复用，共享面没有再压缩的余地。两条 `http_get` 会一直出现在"同名不同体"的 15 条里 —— **那是账，不是漏** |
 
-⚠ 这两条都由你复核：**要合并就说一句**，我按上面的"事实"栏改（第 6 项建议只做**改名**
-消掉同名——`pair_sunshine::http_get -> http_request`，6 行；第 7 项建议新开
-`agent/async_util.py` 让两边都 import 中立的兄弟模块，避免跨层）。
+第 7 项同一次复核里也一度改判"保留"（理由：合并要么新增首个 `io -> core` 依赖、
+要么为 5 行函数新开顶层模块），**你定"合并"** → 已按替代方案落地：
+新建**顶层** `agent/async_util.py`（两边 import 中立的兄弟模块，不新增跨层依赖），
+`core/scheduler.py` 与 `io/chat_bus.py` 各留一个 **1 行包装**装着各自的两个词
+（打印口径）。为什么保留 `print`、不改日志见 §9.2 与那个模块的注释。
 
 ### 11.3 收敛后的数字（可复现）
 
 | 项 | 3-1 基线（§4） | 3-6 之后 | 说明 |
 | --- | --- | --- | --- |
-| 重复实现：**生产** | 11 组 | **3 组** | 剩下 3 组见下 |
+| 重复实现：**生产** | 11 组 | **2 组** | 剩下 2 组见下 |
 | 重复实现：测试 | 46 组 | 46 组 | 测试里的重复"通常是刻意铺开的分支覆盖"，不收敛 |
-| 同名不同体（生产模块级） | 15 | **15** | 四个 `normalize()` 与五个 `build()` **故意仍同名**（各自的规则表 / 依赖检查就是它们的语义）；`vectors` / `_save_shot` 是类方法, 本来就不进这条统计 |
+| 同名不同体（生产模块级） | 15 | **15** | 四个 `normalize()` 与五个 `build()` **故意仍同名**（各自的规则表 / 依赖检查就是它们的语义）；两条 `http_get()` 按 §11.2 保留；`vectors` / `_save_shot` 是类方法, 本来就不进这条统计 |
 | 零引用定义 | 3 | 3 | 全是框架钩子假阳性（§8.2） |
 | 仅测试引用 | 22 | 22 | 测试锁定的契约（§8.3） |
-| 规范启发式 | 101 | 101 | 深嵌套 / 超长函数 / 待办标记那几类留给 3-4b 与专门的重构任务 |
-| **棘轮基线** | 151 条 | **147 条** | `--write-baseline` 刷新；刷新后立刻复跑 = "没有新增 ✓" |
+| 规范启发式 | 101 | **100** | 第 7 项把两处 `print` 收进 `agent/async_util.py`（启发式按**文件**计，所以只少一条）；深嵌套 / 超长函数 / 待办标记留给 3-4b 与专门的重构任务 |
+| **棘轮基线** | 151 条 | **147 条** | `--write-baseline` 刷新；刷新后立刻复跑 = "没有新增 ✓"。第 7 项那次刷新是**一进一出**（少一组重复、多一条新模块的 print 归口），条数不变、内容变了 |
 
-**剩下的 3 组重复（都写明为什么留着）**：
+**剩下的 2 组重复（都写明为什么留着）**：
 
 | 组 | 判定 |
 | --- | --- |
 | `image/make-misc-img.py` / `image/payload/ab-mark.py` 的 `crc32_ieee` | 反例，**保留两份**（§7.3）：一份在构建侧、一份要进板端 payload（板端 python3 没有 zlib） |
-| `core/scheduler.py` / `io/chat_bus.py` 的 `_log_task_exception` | §11.2 第 7 项，保留 |
 | `ipc/local_client.py::LocalClient.on_message` / `ipc/local_server.py::LocalServer.on_command` | **不该合并**：一个在客户端、一个在服务端，分别是**收**和**发**方向的消息处理；形状像是因为两边都用"取出 envelope -> 分派"这个套路 |
+
+⚠ 第 7 项（`_log_task_exception`）原来也是这一组的成员，**你定"合并"之后它已经消掉**：
+现在两份实现共用一个 `agent/async_util.py`，两个模块里只剩 **1 行包装**（各装各自的两个词），
+语句数不足重复比较的 3 条门槛，所以不再计为一组。
 
 **同名不同体里那 3 个 `cosine`（收敛的尾部）**：第 9 项之后，
 `core/game_anchors.py` 与 `vision/tag_index.py` 各自留了一个**只做转发的同名函数**
@@ -396,8 +402,8 @@ CI 同一条命令（`python3 scripts/audit-code.py --baseline scripts/audit-bas
 
 ⚠ 这里有个**口径局限**值得记下来：重复比较用的指纹会把**字符串常量与标识符都抹平**
 （`scripts/audit-code.py::BodyNormalizer`），所以"两处都改成调用同一个助手"之后，
-剩下的**同形调用**仍然会被算成一组 —— 数字从 11 掉到 3 是**实打实消掉的实现**，
-但它也不是"还剩 3 组就还有 3 坨重复代码"。
+剩下的**同形调用**仍然可能被算成一组 —— 数字从 11 掉到 2 是**实打实消掉的实现**，
+但它也不是"还剩 2 组就还有 2 坨重复代码"。
 
 ### 11.4 顺带修掉：3-6 自己引进来的 3 条 ruff 发现
 
@@ -424,7 +430,7 @@ CI 同一条命令（`python3 scripts/audit-code.py --baseline scripts/audit-bas
 | --- | --- |
 | 3-3 | 删掉 7 处零引用（板上那份还带着，无害） |
 | 3-4 | 89 处规范修正（ruff 安全修复 + 未用变量 + 文本 `open()` 补 `encoding="utf-8"`） |
-| 3-6 | 9 项收敛；其中 **5 个新模块**（`core/notes.py`、`core/paths.py`、`core/similarity.py`、`core/anchor_io.py`、`tools/_common.py`）—— `agent/` 下的 `.py` 从 **66 变 71** |
+| 3-6 | 10 项收敛；其中 **6 个新模块**（`core/notes.py`、`core/paths.py`、`core/similarity.py`、`core/anchor_io.py`、`tools/_common.py`、`async_util.py`）—— `agent/` 下的 `.py` 从 **66 变 72** |
 
 **不必为 T15-3 重新刷板**：这一轮全是等价改写 + 删零引用，**行为不变**（板上那版
 自洽，能跑）。但**下次刷板 / 做 OTA 之前必须先重打包**

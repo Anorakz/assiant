@@ -122,7 +122,7 @@ buildroot 2024.02、Qt 5.15.11（联网拉）；**K1Mini 是一等目标**（`.c
 | 3-3 ✅ | 死代码普查（你定的：**直接删**）：删 7 处零引用 + 1 个孤儿配置键（`chat_channel`）+ 对应文档行；保留 3 条框架钩子假阳性与 22 条"仅测试引用" | §8；删完套件仍全绿 = "确实没人用"的最强证据 |
 | 3-4 ✅ | 规范一致性：机械批 **89 处**已修（ruff 安全修复 63 + 未用变量 13 + 文本 `open()` 补 encoding 13），判断批成清单（深嵌套 65 / 超长函数 16 / 待办标记 5 / ruff 杂项 14） | §9 |
 | 3-5 ✅ | 原生侧（C/C++）告警与重复：**0 重复函数体 / 0 高危函数 / 0 头文件 `using namespace`**；8 条告警 = 4 个参数被编两遍 | §10；修完 `-Wall -Wextra -Wpedantic` **告警 0 / 错误 0**、ctest **172/172** |
-| 3-6 ✅ | 收敛实施：**11 项里 9 项落地**（`notes`×3 / 五个 `resolve_*` / `site_packages` / `launch-resume` / `cosine`×2 / 锚点两库抽 `core/anchor_io.py` / 四工具归一化抽 `tools/_common.py` / `_int`+`_float`）；**2 项复核后改判"保留"**（`scripts` 的 `http_get` 两份、`scheduler`+`chat_bus` 的 `_log_task_exception` 两份 —— 证据与替代方案在 §11.2，**等你复核**） | §11；重复(生产) **11 → 3 组**、棘轮 **151 → 147 条**（刷新后立刻复跑 = 0 新增） |
+| 3-6 ✅ | 收敛实施：**11 项里 10 项落地**（`notes`×3 / 五个 `resolve_*` / `site_packages` / `launch-resume` / `cosine`×2 / 锚点两库抽 `core/anchor_io.py` / 四工具归一化抽 `tools/_common.py` / `_int`+`_float` / 回调抽顶层 `agent/async_util.py`）；**1 项按你的决定保留**（`scripts` 的两条 `http_get` —— 复核发现"取并集"要动 11 处**无测试**的真机配对脚本，你 2026-10-03 定"不处理"）。证据与替代方案见 §11.2 | §11；重复(生产) **11 → 2 组**、棘轮 **151 → 147 条**（刷新后立刻复跑 = 0 新增） |
 | 3-7 ✅ | 文档 + 提交 + CI | 本节 + `docs/audit-code.md` §11；提交 `cf7ae68`（代码收敛）与紧随其后的文档提交，**host-ci 在每个 tip 都 success**。⚠ 本地全量套件只有 `tests/test_main.py` 报 FAILED —— 那是 `scripts/test-python.sh` 自带的 `timeout 300`（它单独跑 **95 项 OK / 797 s**，CI 机器快所以绿）。⚠ 镜像里的 Python payload 还停在 T15-2 那版（见 §11.5） |
 
 **留给后续的（不属于 3-6）：** 深嵌套 65 处 / 超长函数 16 处（按文件聚类的重构任务）、
