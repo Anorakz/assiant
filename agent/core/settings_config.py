@@ -134,6 +134,11 @@ class _Template(object):
         self.segments: Dict[str, Dict[str, Any]] = {}
         #: 键名里带点的映射条目（例如 `study.process_names.code.exe`）—— 不可寻址, 只记一笔
         self.dotted: List[str] = []
+        #: **结构级**的键：模板里写成 `[]` / `{}` 的那种（`scheduler.recurring`、
+        #: `wallpaper.tagging.vocab` …）—— 它们看起来是"一行标量", 其实是个序列/映射,
+        #: 文本级替换会把整份列表覆盖成一个字符串（T15-4 任务 1 实测到：写入器原来**接受**
+        #: `scheduler.recurring = "abc"`）。所以：不进 `leaves`（改不了）+ 拒绝时给清楚话。
+        self.structured: Dict[str, Dict[str, Any]] = {}
         self._parse()
 
     def _comment_run(self, pending: List[int]) -> List[int]:
@@ -188,6 +193,13 @@ class _Template(object):
                 #   没法用点号路径寻址（`a.code.exe` 会被拆成四段）—— 不进键清单,
                 #   也不给改（它是映射的一部分, 结构级的东西本来就该手改）。
                 self.dotted.append(path)
+                pending_comments = []
+                continue
+            if value[:1] in ("[", "{"):
+                # 结构级（序列 / 映射）：见 `self.structured` 的说明 —— 不给改
+                self.structured[path] = {"line": index, "indent": indent, "value": value,
+                                         "kind": "序列" if value[:1] == "[" else "映射",
+                                         "segment": path_parts[0]}
                 pending_comments = []
                 continue
             self.leaves[path] = {"line": index, "indent": indent, "value": value,
@@ -399,6 +411,12 @@ def _plan_one(lines: List[str], path: str, value: Any, template: _Template,
     """把一次改动算成"新的行列表 + 说明"（**不改文件**）。"""
     entry = template.leaves.get(path)
     if entry is None:
+        structured = template.structured.get(path)
+        if structured is not None:
+            raise SettingsConfigError(
+                "%s 是**结构级**（%s，模板里写成 %s）—— `assistant set` 只改标量键, "
+                "这一项要**手改文件**（整份列表/映射被替换成一行字符串是灾难）"
+                % (path, structured["kind"], structured["value"]))
         if path in template.segments:
             raise SettingsConfigError(
                 "%s 是**一整段**（不是单个设置项）—— 段里的键一个个来（能改的键 = 模板里"

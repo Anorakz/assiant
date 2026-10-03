@@ -99,6 +99,50 @@ class TestTemplate(TempCase):
 
 
 # ===========================================================================
+#  结构级键（模板里写成 [] / {} 的那种）
+# ===========================================================================
+class TestStructuredKeys(TempCase):
+    """`scheduler.recurring` / `wallpaper.tagging.vocab` 这类**不能**被文本级改。
+
+    T15-4 任务 1 实测到的真问题：它们长得像"一行标量"，于是写入器原来**接受**
+    `scheduler.recurring = "abc"` —— 那会把整份日程列表替换成一个字符串。
+    """
+
+    STRUCTURED = ("scheduler.recurring", "scheduler.oneoff",
+                  "scheduler.commands", "wallpaper.tagging.vocab")
+
+    def test_they_are_not_in_the_settable_key_list(self):
+        paths = set(sc.known_paths(str(self.template)))
+        for path in self.STRUCTURED:
+            self.assertNotIn(path, paths, "%s 是结构级, 不该出现在可设置的键清单里" % path)
+
+    def test_planning_them_is_refused_with_a_clear_reason(self):
+        self.full_config()
+        for path in self.STRUCTURED:
+            with self.assertRaises(sc.SettingsConfigError) as caught:
+                self.plan({path: "abc"})
+            message = str(caught.exception)
+            self.assertIn("结构级", message, message)
+            self.assertIn(path, message, message)
+
+    def test_nothing_is_written_when_refused(self):
+        self.full_config()
+        before = self.target.read_text(encoding="utf-8")
+        with self.assertRaises(sc.SettingsConfigError):
+            self.apply({"scheduler.recurring": "abc"})
+        self.assertEqual(self.target.read_text(encoding="utf-8"), before,
+                         "被拒的改动一个字节都不该落盘")
+
+    def test_the_refusal_is_not_vacuous(self):
+        """反空转：同一个模板里**标量键**照旧能改 —— 拒的是结构级那一类，不是全拒。"""
+        self.full_config()
+        plans = self.plan({"scheduler.window_min": "2"})
+        self.assertEqual([plan["action"] for plan in plans], ["set"])
+        with self.assertRaises(sc.SettingsConfigError):
+            self.plan({"scheduler.recurring": "abc"})
+
+
+# ===========================================================================
 #  值的类型与渲染
 # ===========================================================================
 class TestRenderScalar(unittest.TestCase):
