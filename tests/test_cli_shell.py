@@ -81,6 +81,42 @@ class ShellCase(unittest.TestCase):
         return " ".join(["set", "study", "--config", self.config] + list(flags))
 
 
+class TestAuditTrail(ShellCase):
+    """root 层的实写要留审计行（T15-4 任务 5）—— 而它是**旁路**，坏了不许影响写入。"""
+
+    def setUp(self):
+        super().setUp()
+        self.logs = self.tmp / "logs"
+        os.environ["AGENT_LOG"] = str(self.logs / "agent.log")
+        self.addCleanup(os.environ.pop, "AGENT_LOG", None)
+
+    def audit_text(self) -> str:
+        path = self.logs / "config-audit.log"
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+    def test_a_root_write_leaves_a_line(self):
+        self.drive(["mode root", self.set_line("--no-adapt", "--apply")])
+        text = self.audit_text()
+        self.assertIn("tier=root", text)
+        self.assertIn("study.adapt", text)
+        self.assertIn("true -> false", text)
+
+    def test_a_user_tier_write_leaves_nothing(self):
+        """反空转：user 级键的写入**不进**审计（审计盯的是 root 级那批）。"""
+        code, _out, err, _session = self.drive([self.set_line("--relative-band", "0.07", "--apply")])
+        self.assertEqual(code, cli.EXIT_OK, err)
+        self.assertEqual(self.audit_text(), "")
+
+    def test_an_unwritable_audit_path_does_not_break_the_write(self):
+        """审计是旁路：落点写不了 -> 配置照样写成功 + 只多一条 warning。"""
+        (self.tmp / "logs").write_text("我不是目录", encoding="utf-8")   # mkdir 会失败
+        code, _out, err, _session = self.drive(["mode root",
+                                                self.set_line("--no-adapt", "--apply")])
+        self.assertEqual(code, cli.EXIT_OK, err)
+        self.assertIn("adapt: false", self.text(), "配置必须照旧写进去")
+        self.assertIn("审计行没写进去", err)
+
+
 class TestTierGate(ShellCase):
     def test_user_tier_refuses_a_root_key_and_writes_nothing(self):
         before = self.text()

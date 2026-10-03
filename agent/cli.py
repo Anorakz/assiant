@@ -1725,6 +1725,35 @@ def _config_target(args: argparse.Namespace) -> str:
     return config_path("config")
 
 
+def _audit_path() -> Path:
+    """审计文件的落点：与 `AGENT_LOG` 同目录（板上 = /data/assistant/logs），否则仓库 `logs/`。"""
+    log_env = os.environ.get("AGENT_LOG")
+    if log_env:
+        return Path(log_env).parent / "config-audit.log"
+    return Path("logs") / "config-audit.log"
+
+
+def _audit_root_writes(target: Any, plans: List[Dict[str, Any]], session_tier: str) -> None:
+    """root 层里的实写留一行痕（T15-4 任务 5）。
+
+    @note **旁路**：写不进去只记一条 warning，**绝不影响**"配置已经写成功了"这件事。
+          格式固定成一行一条（UTC / uid / tier / 键 / 旧 -> 新），便于 grep 与将来做界面。
+    """
+    if session_tier != config_tiers.ROOT_TIER:
+        return
+    try:
+        uid = os.geteuid() if hasattr(os, "geteuid") else 0
+        stamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        path = _audit_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(path), "a", encoding="utf-8") as handle:
+            for plan in plans:
+                handle.write("%s uid=%s tier=root %s %s -> %s\n"
+                             % (stamp, uid, plan["path"], plan.get("old"), plan.get("new")))
+    except Exception as exc:                      # noqa: BLE001 - 审计是旁路, 不许影响写入
+        print("（审计行没写进去：%r；配置**已经**写成功了）" % (exc,), file=sys.stderr)
+
+
 def _tier_or_none(path: str) -> Optional[str]:
     """这个键属于哪一级；**不是可设置的标量键**（结构级/自定义子键/不存在）-> None。
 
@@ -1904,8 +1933,10 @@ async def cmd_set(args: argparse.Namespace) -> int:
     if not result["changed"]:
         print("值本来就是这些，一个字节都没动（也没留 .bak）。")
         return EXIT_OK
-    print("已写 %d 项 -> %s（备份 %s）" % (result["changed"], result["path"],
-                                        os.path.basename(result["backup"])))
+    _audit_root_writes(target, plans, session_tier)
+    print("已写 %d 项 -> %s（备份 %s%s）" % (
+        result["changed"], result["path"], os.path.basename(result["backup"]),
+        "；root 级写入已留审计行 %s" % _audit_path() if allow_root else ""))
     return EXIT_OK
 
 
