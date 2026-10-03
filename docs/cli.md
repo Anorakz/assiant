@@ -55,7 +55,7 @@ python3 -m agent.cli status          # ⚠ 用 -m，不要在 agent/ 里直接 p
 | --- | --- |
 | `0` | 成功。**包括**"连上了但对方没推送"这类"如实说明"的情况（见 `status`） |
 | `1` | 环境或连接问题（socket 不存在、等不到回复、配置读不出来） |
-| `2` | 参数错（argparse 的默认行为：不认识的命令/选项、`mode` 给了非法值） |
+| `2` | 参数错（argparse 的默认行为：不认识的命令/选项、`mode` 给了非法值）／**权限不够**（user 层改 root 级设置项 —— 见 §4 `set` 与 `shell`） |
 
 判据是"用户是不是得到了他要的答案"，不是"有没有发生 IO"：`status` 等不到推送**不是**错误
 （协议上 Agent 只在状态变化时推），而"我发了话却没回音"（`chat` 超时）**是**错误。
@@ -415,6 +415,25 @@ $ assistant tag --apply
 
 ### `set` —— 改设置项（文本级；默认只看）
 
+> **T15-4：设置项分两级权限**（完整口径见 [`config-sources.md`](config-sources.md) §3.5）
+>
+> | 级 | 是什么 | 谁能改 |
+> | --- | --- | --- |
+> | **user** | **GUI 设置页能改的那些键**（25 个：`gui.*` 通用页 / 学习 / 游戏检测 / 画像压缩）| 命令行直接改（默认这一层）|
+> | **root** | 模板里**其余的标量键**（`study.adapt`、`bilibili.buffer.*`、`llm.ctx_size` … 以及本轮新增的 17 个调试项）| **只在 `assistant shell` 里 `mode root` 之后** |
+>
+> ```bash
+> assistant set study --show                  # 按 user / root 两段列出当前值 + 当前权限层
+> assistant set --list-tiers                  # 两级清单与计数（"权限地图"）
+> assistant set study --no-adapt --apply      # user 层里改 root 级键 -> 拒绝（退出码 2，一个字节不写）
+> assistant shell                             # 进去 `mode root` 之后再改；`exit` 退出
+> ```
+>
+> · **审计**：root 层每次实写会在 `$AGENT_LOG` 同目录的 `config-audit.log` 留一行
+>   （`时间 uid tier=root 键 旧 -> 新`）；写不进去只记一条 warning，不影响写入本身。
+> · 结构级键（`scheduler.recurring` 这类序列/映射）与用户自定义子键**两级都不认** —— 它们要手改文件。
+
+
 ```bash
 $ assistant set study --show                      # 这一组能改什么、现在是什么
 $ assistant set study --relative-band 0.07        # 只看：会说改哪一行、旧值 -> 新值
@@ -450,6 +469,32 @@ $ assistant set cookie --sessdata '<值>' --apply --verify      # B 站凭据（
 > `study.adapt`、`study.target_unknown_rate`、`study.min_labeled`、`study.anchor_file` /
 > `study.stats_file` / `study.max_anchors_per_class` / `study.keep_shots`。
 > 键清单与白名单守卫见 [`study.md`](study.md) §8.1、[`config-sources.md`](config-sources.md) §3.3。
+
+### `shell` —— 交互式会话（`mode root` / `exit` 管权限层）
+
+一次性调用是"一个进程一条命令"，而 root 权限层需要一个**跨命令的状态**，所以有了这个会话：
+
+```bash
+assistant shell
+assistant(user)> status
+assistant(user)> set study --no-adapt --apply
+✗ 改不了：study.adapt 是 **root 级**设置项（… 先 `mode root`）
+assistant(user)> mode root
+⚠ 已进入 root 体系（**只在本会话有效**）…
+assistant(root)> set study --no-adapt --apply
+✓ 已写 1 项 -> …/config.yaml（备份 config.yaml.bak；root 级写入已留审计行 …/config-audit.log）
+assistant(root)> exit
+```
+
+| 规矩 | 说明 |
+| --- | --- |
+| 命令集 | **就是现有子命令**（同一套解析器）—— 不另造语法；一行 = 一次普通调用的执行路径 |
+| `mode root` / `mode user` | 会话内切**权限层**（`root`/`user` 不是合法的 Agent 模式，与 `mode sleep\|idle\|study\|game` 不冲突）|
+| `exit` | 结束会话（root 层里退出会说明）；`Ctrl-C` 只中断当前命令，`Ctrl-D` 退出 |
+| 状态 | 权限层**只在内存**，不落任何文件（进程一退就没了，不存在"忘了退出"的残留）|
+| euid | 进 root 层要求 euid==0（板上人人 root；非 root 登录时明确拒绝）—— ⚠ **这不是安全边界**，是"意图确认 + 别让界面/脚本乱改" |
+| 脚本用法 | `assistant shell -c "mode root; set study --no-adapt --apply"`（`;` 分隔、**失败即停**；也支持非 tty 的 stdin）|
+| 不做什么 | 不做 tab 补全/历史文件；不许在会话里再 `shell` |
 
 ### `study` —— 学习内容监督的日常操作（不用起 Agent）
 

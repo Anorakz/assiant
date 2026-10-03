@@ -215,6 +215,10 @@ GUI 是 C++、跑在板端，与 Agent 侧的 Python 没法共用代码，所以
   `study.skip_on_keyword`、`study.learn`、`study.adapt`、`study.target_unknown_rate`、
   `study.min_labeled`、`study.anchor_file` / `stats_file` / `max_anchors_per_class` / `keep_shots`
   —— 用 `assistant set study --set study.remind=false --apply` 这类写法。
+  ⚠ **T15-4 起这一批是 root 级**（与 GUI 能改的那 7 个 `study.*` 相对）：命令要在
+  `assistant shell` 里 `mode root` 之后跑（`exit` 退出）。两个 `assistant study freeze/unfreeze`
+  走的是同一个写入器，命令行原样不变 —— 它们本来就是 root 控制台上的操作。
+  两级清单：`assistant set --list-tiers`（口径见 [`config-sources.md`](config-sources.md) §3.5）。
 - **凭据框故意不预填**：里面存的是账号，状态标签只给掩码（`se…90（15 位）`）；
   三个框**留空 = 不改动那个键**（合并写），填了才写，写完就清空。
 - `config_store.cpp` 的实现细节：载入模板后才有"缺段新建 + 类型校验"；**没载入模板时行为与

@@ -542,8 +542,11 @@ decision = watcher.tick(frame, state="study")
 - 两条数据文件（`config/study_anchors.jsonl` / `config/study_stats.json`）都是**派生数据**、
   已进 `.gitignore`，与**游戏锚点库分开**（一个认作品、一个认大类）。
 - **能改的设置**：`assistant set study|game-watch|profile|cookie`（文本级: 只动那一行 + `.bak`，
-  默认只看、`--apply` 才写）；日常操作 `assistant study status|check|label|freeze|reset`
-  （**不用起 Agent**）。细节 [`docs/cli.md`](docs/cli.md)。
+  默认只看、`--apply` 才写）。
+  ⚠ **T15-4 起分两级权限**：与 GUI 设置页对等的那些键命令行直接改；**其余键（含排障用的调试项）
+  要在 `assistant shell` 里 `mode root` 之后改**（`assistant set --list-tiers` 看两级清单）——
+  口径 [`docs/config-sources.md`](docs/config-sources.md) §3.5。
+  日常操作 `assistant study status|check|label|freeze|reset`（**不用起 Agent**）。细节 [`docs/cli.md`](docs/cli.md)。
 - **GUI 也能改**（板端设置页三张卡片: 学习监督 / 游戏检测含 B 站凭据 / 画像压缩，T13-9）：
   写的是同一批键、走**同一套**文本级约定（只动那一行、缺段按 `config.example.yaml` 新建、
   值的类型跟着模板走），并有一条**按键盘点**的白名单契约测试钉住"GUI 只许动这些键"；

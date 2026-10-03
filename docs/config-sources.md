@@ -295,6 +295,33 @@ GUI 那份 C++ 写入器（`gui/src/core/config_store.{h,cpp}`）与 §3.2 是**
 ⚠ 两处**刻意的**不同：GUI **不预填**凭据输入框（预填会把掩码串当成新值写回去）；
 GUI 不改 §8.1 里列出的那些"只在 CLI 改"的键（动作开关、自学习开关、数据文件路径）。
 
+### 3.5 两套权限：user / root（T15-4）
+
+**这是"谁能改哪些键"的唯一口径**（实现：`agent/core/config_tiers.py`）：
+
+| 级 | 是什么 | 谁能改 |
+| --- | --- | --- |
+| **user** | **GUI 设置页能改的那些键**（25 个）| CLI 直接改；GUI 走 IPC 改 |
+| **root** | 模板里**其余的标量键**（含本轮新增的 17 个调试项）| **只在 `assistant shell` 里 `mode root` 之后**（CLI）|
+| 不进体系 | 结构级键（`scheduler.recurring` 这类序列/映射）与用户自定义子键（`process_names.*`）| 谁都不给改，**手改文件** |
+
+三条路径的边界：
+
+| 路径 | 闸门 | 位置 |
+| --- | --- | --- |
+| CLI（`assistant set`） | user 层碰 root 键 -> 拒绝（退出码 2，一个字节不写）；root 层放行 | `agent/cli.py::cmd_set` |
+| GUI / IPC（`set_config`） | **永远**按 user 权限走 —— root 级键一律 `ok=false` | `agent/ipc/__init__.py::_handle_set_config` |
+| 写入器（真正的落盘点） | `config_tiers.plan_changes_for_tier()` / `apply_changes_for_tier()`（`allow_root` 默认 **False**） | `agent/core/config_tiers.py`；有守卫钉住"`agent/` 里只有它能直接调裸写入器" |
+
+**安全默认**：模板里**新增**的键自动落 root 级；想升成 user 级必须显式写进 `USER_KEYS`，
+而那样会立刻被 `tests/test_config_tiers.py` 要求"GUI 设置页里也得有它"（双向钉住）。
+
+> ⚠ **如实说明：这不是安全边界。** 板端镜像只有 root 一个账号（`BR2_TARGET_GENERIC_ROOT_PASSWD`），
+> agent/gui 服务也都是 `User=root` —— 拿到那个控制台的人本来就什么都能改。这一层管的是：
+> ①**界面改不了**主机级/排障级参数（GUI 只覆盖 user 级那 25 个键）；
+> ②手滑与脚本误改有个明确的"二次确认"（`mode root`）；
+> ③root 级的每次实写**留一行痕**（`config-audit.log`）。有了它，将来真出现非 root 登录时行为也是对的。
+
 ## 4. Agent 只认一份配置
 
 `agent/config.py` 加载的就是 `config/config.yaml`（`--config` 可覆盖路径），

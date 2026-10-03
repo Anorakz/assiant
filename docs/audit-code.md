@@ -224,7 +224,7 @@ ruff check . --statistics        # 0.6.9；本轮基线见 §4
 | 类别 | 结果 |
 | --- | --- |
 | **CLI 子命令孤儿**（定义了但进不了派发表） | **0**：按零引用口径，`agent/cli.py` 里没有"定义了却没人引用"的命令函数 |
-| **配置项孤儿**（example 里有、没人读） | 初筛 14 个"`agent/*.py` 里一次都没出现"的键，逐个到 `gui/` 复核后：**13 个是 GUI 在读**（`theme`/`fullscreen`/`wake`/`idle_ms`/`speed`/`start_page`/`video_overlay`/`max_rows`/`bottom`/`input_source`/`onboard_auto`/`monitor_interval_ms`/`api_base`）—— 这是**跨语言配置契约**，不是孤儿；**1 个（`chat_channel`）谁都不读 → 已删** |
+| **配置项孤儿**（example 里有、没人读） | 初筛 14 个"`agent/*.py` 里一次都没出现"的键，逐个到 `gui/` 复核后：**12 个是 GUI 在读**（`fullscreen`/`wake`/`idle_ms`/`speed`/`start_page`/`video_overlay`/`max_rows`/`bottom`/`input_source`/`onboard_auto`/`monitor_interval_ms`/`api_base`）—— 这是**跨语言配置契约**，不是孤儿；**1 个（`chat_channel`）谁都不读 → 已删**；⚠ **勘误（T15-4）**：当时把 `theme` 也判成"GUI 在读"**是错的** —— 实测 `gui/src/**` 里 `theme`/`grey` 零命中（被 `gui/tests/test_settings_page.cpp` 的夹具误导），它其实是孤儿，T15-4 已把它和另外三个一起删掉 |
 
 ### 8.5 顺带学到的（写进工具注释）
 
