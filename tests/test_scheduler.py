@@ -22,6 +22,8 @@ tests/test_scheduler.py — Scheduler 单测
 """
 
 import asyncio
+import contextlib
+import io
 import sys
 import unittest
 from datetime import date, datetime, timedelta
@@ -970,6 +972,31 @@ class TestListenCommandsLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bus.subscriber_count, 1)
         await scheduler.stop()
         self.assertEqual(bus.subscriber_count, 0, "stop 后必须注销订阅")
+
+    async def test_a_command_action_that_raises_is_reported(self):
+        """命令动作协程抛异常: **打一条** (T15-3 第 7 项: 公共实现在 agent/async_util.py)。
+
+        钉的是**本模块那句打印口径** (`Scheduler: background action raised: ...`) 不许变。
+        """
+        bus = ChatInputBus()
+        scheduler = Scheduler(
+            state=StateMachine(), bus=bus,
+            config={"scheduler": {"commands": [{"command": "game", "state": "game"}]}},
+        )
+        await scheduler.start()
+        await asyncio.sleep(0)                   # 让订阅真的挂上
+
+        async def boom(action, reason):
+            raise RuntimeError("动作炸了")
+
+        scheduler._apply_action = boom           # 只换这一处, 其余全走真路径
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            await bus.push("terminal", "game")
+            await asyncio.sleep(0.05)
+        await scheduler.stop()
+        self.assertIn("Scheduler: background action raised: RuntimeError('动作炸了')",
+                      out.getvalue())
 
     async def test_fake_bus_without_subscribe_warns(self):
         # 只提供 get() 的替身: 监听退化, 但要有明确 warning (静默失效更难查)

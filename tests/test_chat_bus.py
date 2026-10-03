@@ -17,6 +17,8 @@ tests/test_chat_bus.py — ChatInputBus 单测
 """
 
 import asyncio
+import contextlib
+import io
 import sys
 import time
 import unittest
@@ -176,6 +178,24 @@ class TestChatBus(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(task, timeout=1.0)
         self.assertTrue(blocked.is_set())
         self.assertEqual((await bus.get())["text"], "second")
+
+    # --------------------------------------------------- 订阅者协程报错 ---
+    async def test_an_async_subscriber_that_raises_is_reported(self):
+        """协程订阅者抛异常: **打一条** (不静默、也不阻塞 push)。
+
+        T15-3 第 7 项把这段 done 回调的公共实现搬到了 `agent/async_util.py`
+        (scheduler 与自己共用) —— 这里钉的是**本模块那句打印口径**不许变。
+        """
+        async def boom(event):
+            raise RuntimeError("订阅者炸了")
+
+        self.bus.subscribe(boom)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            await self.bus.push("gui", "hello")
+            await asyncio.sleep(0.05)            # 让后台任务真的抛出来
+        self.assertIn("ChatInputBus: subscriber task raised: RuntimeError('订阅者炸了')",
+                      out.getvalue())
 
     # --------------------------------------------------------- 跨 loop ---
     async def test_cross_loop_use_is_rejected(self):
