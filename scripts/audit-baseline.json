@@ -113,7 +113,6 @@
     "heuristic|深嵌套（≥6 层）|tests/test_user_profile.py",
     "heuristic|深嵌套（≥6 层）|tests/test_wall_data.py",
     "heuristic|深嵌套（≥6 层）|tests/test_wallpaper.py",
-    "heuristic|超长函数（≥120 行）|agent/cli.py build_parser（157 行）",
     "heuristic|超长函数（≥120 行）|agent/cli.py cmd_tag（171 行）",
     "heuristic|超长函数（≥120 行）|agent/cli.py cmd_video（160 行）",
     "heuristic|超长函数（≥120 行）|agent/core/study_watch.py tick（138 行）",

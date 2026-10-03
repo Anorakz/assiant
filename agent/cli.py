@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from agent.config import ConfigError, ConfigNotFoundError, config_path, load_config
+from agent.core import config_tiers
 from agent.core import schedule_config
 from agent.core.scheduler import Scheduler, SchedulerError, oneoff_matcher
 from agent.core.state_machine import StateMachine
@@ -376,8 +377,12 @@ async def cmd_mode(args: argparse.Namespace) -> int:
     """
     want = normalize_mode(args.value)
     if want is None:
-        print("模式只认 %s（大小写不限），收到：%r" % ("/".join(MODES), args.value),
-              file=sys.stderr)
+        hint = ""
+        if str(args.value or "").strip().lower() in ("root", "user"):
+            hint = ("\n  （`root` / `user` 是**配置的权限层**, 不是 Agent 模式 —— "
+                    "要它们请用 `assistant shell`，在会话里 `mode root` / `mode user`。）")
+        print("模式只认 %s（大小写不限），收到：%r%s"
+              % ("/".join(MODES), args.value, hint), file=sys.stderr)
         return EXIT_USAGE
 
     path = _resolve_path(args)
@@ -1720,6 +1725,87 @@ def _config_target(args: argparse.Namespace) -> str:
     return config_path("config")
 
 
+def _tier_or_none(path: str) -> Optional[str]:
+    """这个键属于哪一级；**不是可设置的标量键**（结构级/自定义子键/不存在）-> None。
+
+    @note None 一律放行给写入器去报它自己那句 —— 不在权限层重复一套错误文案。
+    """
+    try:
+        return config_tiers.tier_of(path)
+    except config_tiers.ConfigTierError:
+        return None
+
+
+def _print_tiers() -> int:
+    """`assistant set --list-tiers`：两级权限的地图（清单 + 计数）。"""
+    data = config_tiers.summary()
+    counts = data["counts"]
+    print("配置的两级权限（可设置的标量键共 %d 个）:" % counts["settable"])
+    print("  **user 级 %d 个** —— 与 GUI 设置页**对等**（界面上能改的，命令行里也能改）:"
+          % counts["user"])
+    for path in data["user"]:
+        print("    %s" % path)
+    print("  **root 级 %d 个** —— CLI 独有；在 `assistant shell` 里 `mode root` 之后才能改:"
+          % counts["root"])
+    for path in data["root"]:
+        print("    %s" % path)
+    print("  （结构级键与用户自定义子键不在两级里：它们要**手改文件**，"
+          "`assistant set` 一律拒绝。）")
+    return EXIT_OK
+
+
+def _refuse_root_in_user_tier(changes: Dict[str, Any], session_tier: str) -> Optional[int]:
+    """user 层里想改 root 级的键 -> 打印原话 + 返回退出码；没有要拒的 -> None。
+
+    @note `tier_of()` 读的是**当前配置目录**里的模板，所以调用方必须已经
+          `load_plane_config(args.config)`（否则会拿默认目录的模板去判）。
+    """
+    if session_tier == config_tiers.ROOT_TIER:
+        return None
+    blocked = [path for path in sorted(changes)
+               if _tier_or_none(path) == config_tiers.ROOT_TIER]
+    if not blocked:
+        return None
+    print("改不了：%s 是 **root 级**设置项。\n"
+          "  · 进 root 体系：`assistant shell` → 会话里 `mode root` → 再跑这条命令；\n"
+          "  · 看两级清单：`assistant set --list-tiers`；\n"
+          "  · 退出 root 体系：会话里 `exit`（`mode user` 也能降回）。"
+          % "、".join(blocked), file=sys.stderr)
+    return EXIT_USAGE
+
+
+def _show_group(group: str, target: Any, session_tier: str) -> int:
+    """`assistant set <组> --show`：按 **user / root 两段**列出当前值。"""
+    from agent.core import settings_config as sc
+
+    paths = list(SET_GROUPS[group]["numbers"].values()) \
+        + [item[0] for item in SET_GROUPS[group]["switches"].values()]
+    user_paths, root_paths, unknown = [], [], []
+    for path in sorted(set(paths)):
+        tier = _tier_or_none(path)
+        if tier == config_tiers.USER_TIER:
+            user_paths.append(path)
+        elif tier == config_tiers.ROOT_TIER:
+            root_paths.append(path)
+        else:
+            unknown.append(path)
+
+    def _row(tag: str, path: str) -> None:
+        print("  %-8s %-32s %s" % (tag, path,
+                                   sc.read_value(path, target=str(target)) or "（文件里没有）"))
+
+    print("%s 组能改的设置项（当前值 ← 点号路径）；当前权限层：**%s**" % (group, session_tier))
+    for path in user_paths:
+        _row("[user]", path)
+    if root_paths:
+        print("  ---- root 级（要 `assistant shell` → `mode root` 才能改）----")
+        for path in root_paths:
+            _row("[root]", path)
+    for path in unknown:
+        _row("[  ?  ]", path)
+    return EXIT_OK
+
+
 async def cmd_set(args: argparse.Namespace) -> int:
     """改设置项（**文本级**，默认只看；`--apply` 才写）。
 
@@ -1733,7 +1819,14 @@ async def cmd_set(args: argparse.Namespace) -> int:
     """
     from agent.core import settings_config as sc
 
+    if getattr(args, "list_tiers", False):
+        return _print_tiers()
+
     group = args.group
+    if not group:
+        print("要给一个组（%s / cookie）；只想看权限地图用 `assistant set --list-tiers`。"
+              % " / ".join(sorted(SET_GROUPS)), file=sys.stderr)
+        return EXIT_USAGE
     if group == "cookie":
         return await _set_cookie(args)
     if group not in SET_GROUPS:
@@ -1758,13 +1851,10 @@ async def cmd_set(args: argparse.Namespace) -> int:
             key, value = item.split("=", 1)
             changes[key.strip()] = value.strip()
 
-    target = config_path("config")
-    # `--config` 已经把 AGENT_CONFIG_DIR 指过去了（见 load_plane_config）; 这里再读一次
-    # 只是为了拿 cookie 路径与"配置读不读得出来"的提示。
-    config, why = load_plane_config(args.config)
-
     # ⚠ 先把 `--config` 交给 load_plane_config（它会设 AGENT_CONFIG_DIR）——
     #   否则 `config_path()` 拿到的是**默认**配置目录, 测试/多份配置就会写错文件。
+    #   （T15-4 顺手去掉这里原来**重复的一次调用**：那个 `target = config_path("config")`
+    #     的值随后就被这一行覆盖了。行为不变。）
     config, why = load_plane_config(args.config)
     if why:
         print("读不到配置（%s）—— 但写的是文件本身, 继续。" % why, file=sys.stderr)
@@ -1777,14 +1867,17 @@ async def cmd_set(args: argparse.Namespace) -> int:
     if not changes and not args.show:
         print("没给任何设置项。看这一组能改什么: `assistant set %s --show`" % group)
         return EXIT_OK
+
+    # ---- 权限层（T15-4）：root 级的键只在 `assistant shell` 里 `mode root` 之后才让改 ----
+    # ⚠ 放在这里（而不是 `cmd_set` 开头）是因为 `tier_of()` 读的是**当前配置目录**里的模板，
+    #   而配置目录由上面的 `load_plane_config(args.config)` 定下来。
+    session_tier = str(getattr(args, "tier", config_tiers.USER_TIER))
+    refused = _refuse_root_in_user_tier(changes, session_tier)
+    if refused is not None:
+        return refused
+
     if args.show or not changes:
-        paths = {path: None for path in
-                 list(SET_GROUPS[group]["numbers"].values())
-                 + [item[0] for item in SET_GROUPS[group]["switches"].values()]}
-        print("%s 组能改的设置项（当前值 ← 点号路径）:" % group)
-        for path in sorted(set(paths)):
-            print("  %-38s %s" % (path, sc.read_value(path, target=str(target)) or "（文件里没有）"))
-        return EXIT_OK
+        return _show_group(group, target, session_tier)
 
     try:
         plans = sc.plan_changes(changes, target=str(target))
@@ -2113,6 +2206,71 @@ def _common_options(*, suppress_defaults: bool,
     return parent
 
 
+def _add_set_parser(sub: Any) -> None:
+    """`assistant set` 那一大坨开关（表驱动：`SET_GROUPS` 加一行 = 多一个开关）。
+
+    @note 从 `build_parser()` 里抽出来（T15-4 任务 2）: 那一坨 45 行把 `build_parser`
+          顶过了"超长函数 120 行"的线, 抽出来两边都清楚。
+    """
+    p_set = sub.add_parser(
+        "set",
+        help="改设置项（文本级: 只动那一行 + .bak；默认只看, --apply 才写）",
+        parents=[_common_options(suppress_defaults=True, with_timeout=False)])
+    p_set.add_argument("group", nargs="?", choices=sorted(SET_GROUPS) + ["cookie"],
+                       help="哪一组设置: %s / cookie（B 站凭据）；配 --list-tiers 时可以不给"
+                            % " / ".join(sorted(SET_GROUPS)))
+    p_set.add_argument("--apply", action="store_true",
+                       help="真写（config.yaml 旁边留 .bak；cookie 写 config/bilibili_cookie.json）")
+    p_set.add_argument("--show", action="store_true",
+                       help="只列出这一组能改的设置项与当前值（按 user / root 两级分段）")
+    p_set.add_argument("--list-tiers", action="store_true",
+                       help="列出配置的两级权限（user = 与 GUI 设置页对等；root = CLI 独有）")
+    p_set.add_argument("--set", action="append", metavar="键=值",
+                       help="按点号路径直接设（可以给多次；键必须是模板里有的）")
+    # 数值项与开关（表驱动：加一行 = 多一个开关）。
+    # ⚠ 同一个开关可能出现在**多组**里（`--enabled` 三组都有）—— argparse 不许重复注册,
+    #   所以这里去重, 帮助文本里把"它属于哪几组"写全（处理时仍按**当前组**的表取值）。
+    numbers: Dict[str, List[str]] = {}
+    switches: Dict[str, List[str]] = {}
+    for group, table in SET_GROUPS.items():
+        for flag, path in table["numbers"].items():
+            numbers.setdefault(flag, []).append("%s -> %s" % (group, path))
+        for flag, (path, _value) in table["switches"].items():
+            switches.setdefault(flag, []).append("%s -> %s" % (group, path))
+    for flag, notes in numbers.items():
+        p_set.add_argument(flag, type=float, default=None, help="；".join(notes))
+    for flag, notes in switches.items():
+        p_set.add_argument(flag, action="store_true", help="；".join(notes))
+    # cookie 那一组
+    p_set.add_argument("--sessdata", default=None, help="[cookie] B 站 SESSDATA（凭据, 不会回显）")
+    p_set.add_argument("--bili-jct", default=None, help="[cookie] B 站 bili_jct（可选）")
+    p_set.add_argument("--dede-user-id", default=None, help="[cookie] B 站 DedeUserID（可选）")
+    p_set.add_argument("--verify", action="store_true",
+                       help="[cookie] 顺手问一次 B 站, 看这份 cookie 好不好使")
+    p_set.set_defaults(func=cmd_set)
+
+
+def _add_study_parser(sub: Any) -> None:
+    """`assistant study` 那一组（同样从 `build_parser()` 里抽出来，见 `_add_set_parser`）。"""
+    p_study = sub.add_parser(
+        "study",
+        help="学习内容监督: status / check / label / freeze / unfreeze / reset（不用起 Agent）",
+        parents=[_common_options(suppress_defaults=True, with_timeout=False)])
+    p_study.add_argument("action",
+                         choices=["status", "check", "label", "freeze", "unfreeze", "reset"])
+    p_study.add_argument("--image", default=None, help="check/label: 一张截图（按真管线还原）")
+    p_study.add_argument("--mode", default="native", choices=["native", "area", "direct"],
+                         help="check/label: 用哪条还原管线（默认 native = 板子真走的那条）")
+    p_study.add_argument("--stream", default=None, help="check/label: 流分辨率, 默认 1280x720")
+    p_study.add_argument("--class", dest="klass", default=None,
+                         help="label/reset: 子标签（code/doc/real/anime/game）")
+    p_study.add_argument("--thresholds", action="store_true",
+                         help="reset: 连阈值与 EWMA 一起清回配置初值")
+    p_study.add_argument("--apply", action="store_true", help="label/reset: 真写（默认只看）")
+    p_study.add_argument("--json", action="store_true", help="status/check: 输出 JSON")
+    p_study.set_defaults(func=cmd_study)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="assistant",
@@ -2218,56 +2376,17 @@ def build_parser() -> argparse.ArgumentParser:
                        help="顺手清掉「图已经不在了」的行（与 --apply 一起才真写）")
     p_tag.set_defaults(func=cmd_tag)
 
-    p_set = sub.add_parser(
-        "set",
-        help="改设置项（文本级: 只动那一行 + .bak；默认只看, --apply 才写）",
-        parents=[_common_options(suppress_defaults=True, with_timeout=False)])
-    p_set.add_argument("group", choices=sorted(SET_GROUPS) + ["cookie"],
-                       help="哪一组设置: %s / cookie（B 站凭据）" % " / ".join(sorted(SET_GROUPS)))
-    p_set.add_argument("--apply", action="store_true",
-                       help="真写（config.yaml 旁边留 .bak；cookie 写 config/bilibili_cookie.json）")
-    p_set.add_argument("--show", action="store_true", help="只列出这一组能改的设置项与当前值")
-    p_set.add_argument("--set", action="append", metavar="键=值",
-                       help="按点号路径直接设（可以给多次；键必须是模板里有的）")
-    # 数值项与开关（表驱动：加一行 = 多一个开关）。
-    # ⚠ 同一个开关可能出现在**多组**里（`--enabled` 三组都有）—— argparse 不许重复注册,
-    #   所以这里去重, 帮助文本里把"它属于哪几组"写全（处理时仍按**当前组**的表取值）。
-    numbers: Dict[str, List[str]] = {}
-    switches: Dict[str, List[str]] = {}
-    for group, table in SET_GROUPS.items():
-        for flag, path in table["numbers"].items():
-            numbers.setdefault(flag, []).append("%s -> %s" % (group, path))
-        for flag, (path, _value) in table["switches"].items():
-            switches.setdefault(flag, []).append("%s -> %s" % (group, path))
-    for flag, notes in numbers.items():
-        p_set.add_argument(flag, type=float, default=None, help="；".join(notes))
-    for flag, notes in switches.items():
-        p_set.add_argument(flag, action="store_true", help="；".join(notes))
-    # cookie 那一组
-    p_set.add_argument("--sessdata", default=None, help="[cookie] B 站 SESSDATA（凭据, 不会回显）")
-    p_set.add_argument("--bili-jct", default=None, help="[cookie] B 站 bili_jct（可选）")
-    p_set.add_argument("--dede-user-id", default=None, help="[cookie] B 站 DedeUserID（可选）")
-    p_set.add_argument("--verify", action="store_true",
-                       help="[cookie] 顺手问一次 B 站, 看这份 cookie 好不好使")
-    p_set.set_defaults(func=cmd_set)
+    _add_set_parser(sub)
 
-    p_study = sub.add_parser(
-        "study",
-        help="学习内容监督: status / check / label / freeze / unfreeze / reset（不用起 Agent）",
-        parents=[_common_options(suppress_defaults=True, with_timeout=False)])
-    p_study.add_argument("action",
-                         choices=["status", "check", "label", "freeze", "unfreeze", "reset"])
-    p_study.add_argument("--image", default=None, help="check/label: 一张截图（按真管线还原）")
-    p_study.add_argument("--mode", default="native", choices=["native", "area", "direct"],
-                         help="check/label: 用哪条还原管线（默认 native = 板子真走的那条）")
-    p_study.add_argument("--stream", default=None, help="check/label: 流分辨率, 默认 1280x720")
-    p_study.add_argument("--class", dest="klass", default=None,
-                         help="label/reset: 子标签（code/doc/real/anime/game）")
-    p_study.add_argument("--thresholds", action="store_true",
-                         help="reset: 连阈值与 EWMA 一起清回配置初值")
-    p_study.add_argument("--apply", action="store_true", help="label/reset: 真写（默认只看）")
-    p_study.add_argument("--json", action="store_true", help="status/check: 输出 JSON")
-    p_study.set_defaults(func=cmd_study)
+    _add_study_parser(sub)
+
+    p_shell = sub.add_parser(
+        "shell",
+        help="交互式会话: 一条条跑命令；会话里 `mode root` / `mode user` 切权限层, `exit` 退出")
+    p_shell.add_argument("-c", "--command", dest="shell_command", action="append",
+                         default=None, metavar="命令",
+                         help="不交互: 跑这些命令（可给多次；每一条里还能用 `;` 分成多条，"
+                              "例如 -c \"mode root; set study --adapt --apply\"）")
 
     return parser
 
@@ -2282,6 +2401,16 @@ def main(argv: Optional[list] = None) -> int:
                 reconfigure(errors="replace")
 
     args = build_parser().parse_args(argv)
+
+    # ⚠ `shell` 走**同步早分支**: 会话要一条一条地跑命令, 而每条命令自己就是
+    #   `asyncio.run(...)`（与一次性调用逐字相同）—— `asyncio.run` 不能嵌套, 所以
+    #   不能让它落进下面那个 `asyncio.run(args.func(args))` 里。
+    #   （`shell` 自己不带 `func`；`-c` 的值存在 `shell_command` 里, 不与子命令名 `command` 抢。）
+    if args.command == "shell":
+        from agent import shell
+
+        return shell.main(getattr(args, "shell_command", None))
+
     try:
         return asyncio.run(args.func(args))
     except KeyboardInterrupt:
