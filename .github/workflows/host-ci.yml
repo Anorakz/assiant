@@ -69,8 +69,14 @@ jobs:
 
       - name: ruff（窄口径：语法错 / 未定义名 / 坏 f-string）
         run: |
-          python -m pip install ruff
+          # 固定版本：审计结论要可复现，不能让上游规则变化改数字（T15-3）
+          python -m pip install ruff==0.6.9
           ruff check --select E9,F63,F7,F82 agent tests
+
+      - name: 代码规范审计棘轮（T15-3）
+        # 只拦**新增**问题：存量在 scripts/audit-baseline.json 里，收敛一项就刷新一次。
+        # 这样"边修边加"会立刻红，而存量不会把 CI 一直按在地上。
+        run: python3 scripts/audit-code.py --baseline scripts/audit-baseline.json --quiet
 
       - name: host C++ 单测（真编译 + ctest）
         run: |

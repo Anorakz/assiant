@@ -85,6 +85,9 @@ tests/test_image_recipe.py
 tests/test_image_runtime.py
 tests/test_image_target.py
 tests/test_image_payload.py
+tests/test_image_dev_flavor.py
+tests/test_image_bootable_after_flash.py
+tests/test_audit_script.py
 "
 
 pytest_file=tests/test_ipc.py
