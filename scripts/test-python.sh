@@ -76,6 +76,7 @@ tests/test_schedule_parity.py
 tests/test_schedule_config.py
 tests/test_settings_config.py
 tests/test_config_tiers.py
+tests/test_config_keys.py
 tests/test_cli_shell.py
 tests/test_llm_env.py
 tests/test_cli.py

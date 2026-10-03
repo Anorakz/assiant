@@ -631,9 +631,12 @@ class Scheduler:
         self._tasks: List[asyncio.Task] = []
         self._fired: Set[Tuple[date, str]] = set()
         #: 触发事实 (有界, 只供查询/推送; 见模块头 "触发事实")
+        #: ⚠ T15-4: 构造参数没给就从**配置**里读 `scheduler.history_limit`（模板里那个键）；
+        #:   都没给才落 `DEFAULT_HISTORY_LIMIT`。显式参数优先（测试与调用方照旧）。
+        configured_limit = history_limit if history_limit is not None else section.get("history_limit")
         self._history_limit = (
-            DEFAULT_HISTORY_LIMIT if history_limit is None
-            else self._non_negative_int(history_limit, "history_limit")
+            DEFAULT_HISTORY_LIMIT if configured_limit is None
+            else self._non_negative_int(configured_limit, "history_limit")
         )
         self._history: Deque[Dict[str, Any]] = deque(maxlen=self._history_limit)
         #: 每次真的触发一条日程后调一次 (IPC 用它做实时推送)。默认没接。

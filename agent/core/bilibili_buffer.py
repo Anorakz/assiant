@@ -187,6 +187,7 @@ class BilibiliBuffer(object):
                  create_fifo: Optional[Callable[[str], None]] = None,
                  meminfo: Optional[Callable[[], Dict[str, float]]] = None,
                  transport: str = DEFAULT_TRANSPORT, port: Optional[int] = None,
+                 feed_stall_s: Optional[float] = None,
                  log: Optional[logging.Logger] = None, retries: int = 2) -> None:
         """
         @param spawn       起 ffmpeg 的方式（默认 `subprocess.Popen`; 单测注入假的）
@@ -207,6 +208,8 @@ class BilibiliBuffer(object):
         self.initial_s = max(1.0, float(initial_s or DEFAULT_INITIAL_S))
         self.max_s = max(self.initial_s, float(max_s or DEFAULT_MAX_S))
         self.mem_watermark_mb = float(mem_watermark_mb or DEFAULT_MEM_WATERMARK_MB)
+        #: 一条连接"一点料都等不到"多久才放弃（T15-4 起可由 `bilibili.buffer.feed_stall_s` 配）
+        self.feed_stall_s = max(5.0, float(feed_stall_s or FEED_STALL_S))
         self.binary = str(binary or "ffmpeg")
         self.retries = max(0, int(retries))
         self._spawn = spawn or self._default_spawn
@@ -602,7 +605,7 @@ class BilibiliBuffer(object):
               限速、暂时没料、内存水位卡住 —— 一律**在这儿等着**, 等多久都行（最多
               `FEED_STALL_S` 秒一点料都没有才放弃, 那时日志会如实记一笔）。
         """
-        stall_deadline = time.time() + FEED_STALL_S
+        stall_deadline = time.time() + self.feed_stall_s
         while True:
             with self._idle:
                 base = self._total_in - len(self._window)
@@ -622,7 +625,8 @@ class BilibiliBuffer(object):
             if time.time() > stall_deadline:                  #: 兜底: 别让死连接吊着线程
                 self.log.warning("bilibili: 这条连接 %.0f 秒没等到料（cap=%.0f s, 已喂 %.1f s, "
                                  "窗口 %.1f s）—— 收工",
-                                 FEED_STALL_S, self.cap_s(), self.written_s(), self.buffered_s())
+                                 self.feed_stall_s, self.cap_s(), self.written_s(),
+                                 self.buffered_s())
                 return b""
 
     def _serve_client(self, handler: Any, cursor: int) -> None:

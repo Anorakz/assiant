@@ -51,7 +51,8 @@ EXAMPLE = os.path.join(PROJECT_ROOT, "config", "config.example.yaml")
 KNOWN_KEYS = {
     "top": {"enabled", "cookie_file", "timeout_s", "queue", "buffer", "game_watch"},
     "queue": {"viewport_fallback", "max"},
-    "buffer": {"transport", "port", "dir", "initial_s", "max_s", "mem_watermark_mb"},
+    "buffer": {"transport", "port", "dir", "initial_s", "max_s", "mem_watermark_mb",
+               "feed_stall_s"},
     "game_watch": {"enabled", "interval_s", "confident_score", "confident_margin",
                    "anchor_file", "process_names", "mem_watermark_mb"},
 }

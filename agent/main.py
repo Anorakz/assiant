@@ -70,7 +70,8 @@ from agent.config import (ConfigError, ConfigNotFoundError, config_path, load_co
 from agent.core import Scheduler, State, StateMachine, ToolRouter
 from agent.core import read_intents
 from agent.core import schedule_config
-from agent.core.chat_memory import ChatMemory
+from agent.core.chat_memory import (DEFAULT_KEEP_AFTER_SETTLE, DEFAULT_MAX_CHARS,
+                                    DEFAULT_MAX_ENTRIES, ChatMemory)
 from agent.core.crash_log import git_revision, install_crash_logging
 from agent.core.scheduler import (
     WEEKDAYS,
@@ -1344,7 +1345,8 @@ class Runtime:
         """
         from agent.core.study_anchors import StudyAnchors
         from agent.core.study_stats import StudyStats
-        from agent.core.study_watch import StudyWatcher
+        from agent.core.study_watch import (DEFAULT_EWMA_ALPHA, DEFAULT_STEP,
+                                            StudyWatcher)
 
         async def _start() -> None:
             section = self._cfg("study", default={}) or {}
@@ -1396,7 +1398,10 @@ class Runtime:
                 skip_on_keyword=bool(section.get("skip_on_keyword", True)),
                 learn=bool(section.get("learn", True)),
                 adapt=bool(section.get("adapt", True)),
-                log=self.log)
+                # T15-4: 自适应阈值怎么挪（模板里那两个 root 级键；常量仍是默认值）
+                step=float(section.get("adapt_step", DEFAULT_STEP) or DEFAULT_STEP),
+                ewma_alpha=float(section.get("ewma_alpha", DEFAULT_EWMA_ALPHA)
+                                 or DEFAULT_EWMA_ALPHA),                log=self.log)
             self._study_watch.seed_thresholds()
             self._study_task = asyncio.ensure_future(self._study_watch_loop())
             self.log.info(
@@ -1429,6 +1434,17 @@ class Runtime:
         async def _start() -> None:
             self._profile_enabled = bool(self._cfg("profile", "enabled", default=True))
             self.profile_file = user_profile.resolve_profile_file(self._cfg("profile", "file"))
+            # T15-4: 纯对话记忆的三个上限进配置（原来写死在 ChatMemory 的默认参数里）。
+            # ⚠ 用 `reconfigure()` **不换对象**：别处可能已经拿着这个实例,
+            #   换对象会把已经攒下的对话清空（第一版就是那么写的, 被单测当场抓住）。
+            self.chat_memory.reconfigure(
+                max_chars=int(self._cfg("profile", "memory_max_chars",
+                                        default=DEFAULT_MAX_CHARS) or DEFAULT_MAX_CHARS),
+                max_entries=int(self._cfg("profile", "memory_max_entries",
+                                          default=DEFAULT_MAX_ENTRIES) or DEFAULT_MAX_ENTRIES),
+                keep_after_settle=int(self._cfg("profile", "memory_keep_after_settle",
+                                                default=DEFAULT_KEEP_AFTER_SETTLE)
+                                      or DEFAULT_KEEP_AFTER_SETTLE))
             self._profile_trigger_chars = max(1, int(
                 self._cfg("profile", "trigger_chars", default=DEFAULT_TRIGGER_CHARS)
                 or DEFAULT_TRIGGER_CHARS))
@@ -2037,6 +2053,8 @@ class Runtime:
                                 initial_s=buffer_cfg.get("initial_s", 15),
                                 max_s=buffer_cfg.get("max_s", 60),
                                 mem_watermark_mb=buffer_cfg.get("mem_watermark_mb", 400),
+                                # T15-4: 卡住多久算失败（缺键 = buffer 自己的默认常量）
+                                feed_stall_s=buffer_cfg.get("feed_stall_s"),
                                 transport=buffer_cfg.get("transport"),   # 缺省 = http（见 buffer）
                                 port=buffer_cfg.get("port"),
                                 log=self.log)
@@ -3352,6 +3370,27 @@ def _crash_demo(kind: str, log: logging.Logger) -> int:
     return 2
 
 
+def _apply_crash_log_limits(crash: Any, log: logging.Logger) -> None:
+    """把 `crash_log.keep` / `crash_log.tail_lines` 补到**已经装好**的崩溃日志器上（T15-4）。
+
+    @note 崩溃钩子是**尽早**装的（配置还没读），而这两项只在"真写报告"时才用得上 ——
+          所以等配置能读了再补。⚠ 读不到 / 类型不对一律**保持默认**：绝不让"读配置"
+          这件事本身影响崩溃钩子。
+    """
+    try:
+        section = (load_config("config") or {}).get("crash_log") or {}
+    except (ConfigError, ConfigNotFoundError) as exc:
+        log.debug("crash_log 段读不到（保留策略用默认值）: %r", exc)
+        return
+    try:
+        if section.get("keep") is not None:
+            crash.keep = max(1, int(section["keep"]))
+        if section.get("tail_lines") is not None:
+            crash.tail_lines = max(0, int(section["tail_lines"]))
+    except (TypeError, ValueError) as exc:
+        log.warning("crash_log 段的保留策略不像数字（用默认值）: %r", exc)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """命令行入口。"""
     parser = argparse.ArgumentParser(
@@ -3411,6 +3450,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.config:
         os.environ.setdefault("AGENT_CONFIG_DIR", str(Path(args.config).resolve().parent))
+
+    # T15-4: `crash_log.keep` / `crash_log.tail_lines` 是**保留策略**，只在真写报告时才用得上
+    # —— 所以先照旧"尽早装好钩子"（上面那次, 参数取环境变量/默认值），等配置能读了再把
+    # 这两项补上。报告是**崩溃之后**才写的, 那时这两个值早就在了；这样也不会因为"读配置"
+    # 这件事本身失败而丢掉崩溃钩子（那正是最需要它的时刻）。
+    _apply_crash_log_limits(crash, log)
 
     if args.check_config:
         try:

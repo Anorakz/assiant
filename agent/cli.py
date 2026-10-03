@@ -1987,7 +1987,7 @@ def _study_plane(args: argparse.Namespace):
     """读锚点库 + 统计 + 判定器（**不起 Agent**）—— `assistant study` 的公共入口。"""
     from agent.core.study_anchors import StudyAnchors
     from agent.core.study_stats import StudyStats
-    from agent.core.study_watch import StudyWatcher
+    from agent.core.study_watch import DEFAULT_EWMA_ALPHA, DEFAULT_STEP, StudyWatcher
 
     config, why = load_plane_config(args.config)
     if why:
@@ -2010,7 +2010,10 @@ def _study_plane(args: argparse.Namespace):
         recheck_interval_min=float(section.get("recheck_interval_min", 5) or 5),
         max_failures=int(section.get("max_failures", 3) or 3),
         cooldown_min=float(section.get("cooldown_min", 30) or 30),
-        adapt=bool(section.get("adapt", True)), learn=bool(section.get("learn", True)))
+        adapt=bool(section.get("adapt", True)), learn=bool(section.get("learn", True)),
+        # T15-4: 自适应阈值怎么挪（模板里那两个 root 级键；常量仍是默认值）
+        step=float(section.get("adapt_step", DEFAULT_STEP) or DEFAULT_STEP),
+        ewma_alpha=float(section.get("ewma_alpha", DEFAULT_EWMA_ALPHA) or DEFAULT_EWMA_ALPHA))
     watcher.seed_thresholds()
     return config, section, anchors, stats, watcher
 

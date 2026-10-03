@@ -143,12 +143,15 @@ class CrashLogger:
         app: str = "agent",
         crash_dir: Optional[Path] = None,
         keep: Optional[int] = None,
+        tail_lines: Optional[int] = None,
         context: Optional[Dict[str, str]] = None,
         log: Optional[logging.Logger] = None,
     ) -> None:
         self.app = app
         self.dir = Path(crash_dir) if crash_dir is not None else default_crash_dir()
         self.keep = keep if keep is not None else self._env_keep()
+        #: 报告里带多少行日志尾巴（T15-4 起可由 `crash_log.tail_lines` 配）
+        self.tail_lines = max(0, int(tail_lines)) if tail_lines is not None else LOG_TAIL_LINES
         self.context: Dict[str, str] = dict(context or {})
         self.log = log
         self._installed = False
@@ -283,10 +286,11 @@ class CrashLogger:
         except (OSError, ValueError):
             pass
 
-    def recent_log_text(self, limit: int = LOG_TAIL_LINES) -> str:
+    def recent_log_text(self, limit: Optional[int] = None) -> str:
+        """最近若干行日志（默认用本实例的 `tail_lines` —— T15-4 起可由配置改）。"""
         if self._tail is None:
             return ""
-        return self._tail.text(limit=limit)
+        return self._tail.text(limit=self.tail_lines if limit is None else limit)
 
     def write_report(
         self,
@@ -304,7 +308,7 @@ class CrashLogger:
         chunks: List[str] = [""]
         tail = self.recent_log_text()
         if tail:
-            chunks += ["--- 最近 %d 条日志 ---" % LOG_TAIL_LINES, tail, ""]
+            chunks += ["--- 最近 %d 条日志 ---" % self.tail_lines, tail, ""]
         chunks += [
             "!" * 78,
             "崩溃/异常 : %s" % reason,
@@ -478,6 +482,7 @@ def install_crash_logging(
     crash_dir: Optional[Path] = None,
     context: Optional[Dict[str, str]] = None,
     keep: Optional[int] = None,
+    tail_lines: Optional[int] = None,
     sigusr1_dump: bool = True,
 ) -> CrashLogger:
     """一行装好：建会话文件 → 装钩子 → 给 logger 挂最近日志缓冲。
@@ -485,7 +490,8 @@ def install_crash_logging(
     @param sigusr1_dump 额外把 SIGUSR1 注册成"手动 dump 全线程栈"
                         （`kill -USR1 <pid>`，板端排查卡死时很顺手）
     """
-    logger = CrashLogger(app=app, crash_dir=crash_dir, keep=keep, context=context, log=log)
+    logger = CrashLogger(app=app, crash_dir=crash_dir, keep=keep, tail_lines=tail_lines,
+                         context=context, log=log)
     logger.install(sigusr1_dump=sigusr1_dump)
     if log is not None:
         logger.attach_log_tail(log)

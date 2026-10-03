@@ -105,6 +105,21 @@ class ChatMemory:
         self._pending_chars = 0
         self._pending_turns = 0
 
+    def reconfigure(self, *, max_chars: Optional[int] = None,
+                    max_entries: Optional[int] = None,
+                    keep_after_settle: Optional[int] = None) -> None:
+        """换三个上限（T15-4 起它们来自 `profile.memory_*`）。
+
+        @note 刻意**不新建对象**：Agent 起画像这条路时别的组件可能已经拿到这个实例
+              （运行期与测试都有），换对象会把它们手里那份甩掉、把已经攒下的对话清空。
+        """
+        if max_chars is not None:
+            self._max_chars = max(1, int(max_chars))
+        if max_entries is not None:
+            self._max_entries = max(1, int(max_entries))
+        if keep_after_settle is not None:
+            self._keep_after_settle = max(0, int(keep_after_settle))
+
     # ------------------------------------------------------------ 记 ---
     def add(self, role: str, text: str, source: str = "gui",
             state: str = "") -> Optional[Entry]:
