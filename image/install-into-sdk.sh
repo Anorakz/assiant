@@ -108,6 +108,23 @@ install_file image/device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k
              device/rockchip/.chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1mini_release_defconfig
 install_file image/device/rockchip/.chips/rk3566_rk3568/parameter-assistant-ab.txt \
              device/rockchip/.chips/rk3566_rk3568/parameter-assistant-ab.txt
+# ---------------------------------------------------------------------------
+# misc 镜像（T15-2-12 修 2）：让"刷完就能启动"这件事由镜像保证
+#  ---------------------------------------------------------------------------
+#  这个文件不是拷进去的，是**生成**的（image/make-misc-img.py）：48 KB，0x800 处
+#  是 AVB 的 A/B 元数据（两个槽都可引导）。板级 defconfig 里开了
+#  RK_MISC=y + RK_MISC_CUSTOM=y + RK_MISC_IMG="misc-assistant-ab.img"，
+#  于是 SDK 的 mk-misc.sh 会取它 → Image/misc.img 存在 →
+#  mk-updateimg.sh 的 gen_package_file() 自动把 `misc  misc.img` 收进包 →
+#  **刷机从此会写入可引导的元数据**（以前不写，元数据是上次残留，一失败就死锁）。
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$HERE/make-misc-img.py" \
+        "$SDK/device/rockchip/.chips/rk3566_rk3568/misc-assistant-ab.img" \
+        | sed 's/^/   /' || { echo "!! 生成 misc 镜像失败" >&2; exit 1; }
+else
+    echo "!! 没有 python3，无法生成 misc 镜像（刷机将不会写入 A/B 元数据）" >&2
+    exit 1
+fi
 # u-boot 的 A/B 片段（T15-2-11 救砖）：厂商只给 rk3588/rv1126/rk3576 带了 -ab.config，
 # rk3568 没有 → 我们补一份；板级 defconfig 里用 RK_UBOOT_CFG_FRAGMENTS 指过来。
 install_file image/uboot/rk3568-assistant-ab.config \

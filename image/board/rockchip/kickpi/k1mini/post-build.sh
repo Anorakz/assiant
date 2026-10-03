@@ -323,4 +323,53 @@ else
     exit 1
 fi
 
+# --- 5) 板上 gcc 的链接件（T15-2-12）----------------------------------------
+#  实测（2026-10-02，开发镜像）：开了"板上 gcc"这个包之后，工具链的 **libgcc_s
+#  不会进 target** —— 板上 gcc 能编不能链：
+#      ld: cannot find -lgcc_s
+#  对照：发行镜像的 target 里有 libgcc_s.so/.so.1（Qt 一切正常），开发那份没有。
+#  所以这里从交叉工具链的 sysroot 把缺的补上。
+#  另外 libc_nonshared.a 在 target 里可能没有符号索引：
+#      ld: archive has no index; run ranlib to add one
+#  用交叉 ranlib 重建索引（同一个文件在 sysroot 里是好的；实测 ranlib 之后
+#  这条错就消失了）。
+#  ⚠ 只补"缺的"：发行镜像本来就有 libgcc_s，这里不会去动它。
+for lib in libgcc_s.so libgcc_s.so.1; do
+    for src in "$HOST_DIR"/*/sysroot/usr/lib/$lib; do
+        [ -e "$src" ] || continue
+        if [ ! -e "$TARGET_DIR/usr/lib/$lib" ]; then
+            cp -a "$src" "$TARGET_DIR/usr/lib/$lib"
+            echo "   + 补 /usr/lib/$lib（板上 gcc 链接需要）"
+        fi
+    done
+done
+# 还要补 glibc 的**开发期文件**（同一类问题的第二层）：buildroot 的 strip 步骤
+#  连 target 里的可重定位目标文件一起剥了符号 —— 实测 target 的 crt1.o 只剩 944
+#  字节、**符号表里没有 _start**，于是板上 gcc 链接出来的程序入口是错的：
+#      ld: warning: cannot find entry symbol _start; defaulting to 00000000004003c0
+#  那种二进制跑起来会乱来（实测把验收脚本的 shell 内存撑到 3.8G，被 OOM 杀掉）。
+#  sysroot 里这几份是完整的（crt1.o 2416 字节、有 _start）→ 大小不一致就照搬过来。
+#  ⚠ 只有"板上 gcc 需要"的开发期文件在这里；运行期库不动。
+for f in crt1.o Scrt1.o crti.o crtn.o libc_nonshared.a libc.so libm.so; do
+    for d in lib lib64; do
+        for src in "$HOST_DIR"/*/sysroot/usr/$d/$f; do
+            [ -e "$src" ] || continue
+            dst="$TARGET_DIR/usr/$d/$f"
+            if [ ! -e "$dst" ] || [ "$(stat -c %s "$src")" != "$(stat -c %s "$dst" 2>/dev/null || echo 0)" ]; then
+                cp -a "$src" "$dst"
+                echo "   + 补 /usr/$d/$f（板上 gcc 链接/启动需要）"
+            fi
+        done
+    done
+done
+
+for a in "$TARGET_DIR/usr/lib64/libc_nonshared.a" "$TARGET_DIR/usr/lib/libc_nonshared.a"; do
+    [ -f "$a" ] || continue
+    for rl in "$HOST_DIR"/bin/*-ranlib; do
+        [ -x "$rl" ] || continue
+        "$rl" "$a" 2>/dev/null && echo "   + $(basename "$a") 符号索引已重建"
+        break
+    done
+done
+
 echo "== [assistant post-build] 完成"

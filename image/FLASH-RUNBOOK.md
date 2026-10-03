@@ -128,7 +128,7 @@ android_image_load_by_partname: Can't find part: boot
 已修：`image/uboot/rk3568-assistant-ab.config`（开 `CONFIG_ANDROID_AB`）+
 板级 defconfig 的 `RK_UBOOT_CFG_FRAGMENTS`。**别再删这两处。**
 
-### 5.2 `No bootable slots found` → A/B 元数据被"扣"光了（会掉进 fastboot）
+### 5.2 `No bootable slots found` → A/B 元数据不可引导（会掉进 fastboot）
 
 串口表现：
 ```
@@ -139,17 +139,41 @@ FIT: No boot partition
 ... Android boot failed, error -1.
 Enter fastboot...OK
 ```
-根因：SPL 与 u-boot 每次启动都把当前槽 `tries_remaining` **减 1**
-（`common/spl/spl_ab.c`、`lib/avb/rk_avb_user/rk_ab_ops_user.c`），而镜像里
-**没有任何东西**置 `successful_boot` → 扣到 0，两个槽都判死。
-已修：镜像里加了 `ab-mark.service`（开机早期把当前槽按 **AVB 格式**写成
-`successful_boot=1`）。
+**两个独立成因，都已经修掉**（2026-10-02 各踩一次）：
 
-**现场急救（不用重刷、不用拆机，5 分钟内）**：
-1. 让板子停在 u-boot 提示符：用 `temp/serial-ctrlc.ps1`（**持续发 Ctrl+C**，
+1. **反复开机把计数扣光**：SPL 与 u-boot 每次启动都把当前槽 `tries_remaining`
+   减 1（`common/spl/spl_ab.c`、`lib/avb/rk_avb_user/rk_ab_ops_user.c`），而镜像里
+   没有东西置 `successful_boot` → 扣到 0 两个槽都判死。
+   **已修**：`ab-mark.service`（开机早期把当前槽按 **AVB 格式**写成 `successful_boot=1`）。
+2. **刷机根本不写 misc，元数据是上一次的残留** —— 而残留里 `tries=0`：
+   只要这次启动失败一次，两个槽立刻全死；而 `ab-mark` 要等系统起来才能跑 →
+   **死锁：刷完就再也起不来**（这次"黑屏 + WiFi 连不上"就是这个）。
+   机制：`mk-updateimg.sh` 的 `gen_package_file()` 按分区表生成条目，**镜像文件
+   存在才收进包** → `Image/` 里没有 `misc.img` 时刷机不写 `misc`。
+   **已修**：板级 defconfig 开 `RK_MISC=y` + `RK_MISC_CUSTOM=y`
+   + `RK_MISC_IMG="misc-assistant-ab.img"`，镜像由 `image/make-misc-img.py` 生成
+   （48 KB，0x800 处是 AVB 默认状态：**两个槽都可引导**）→ `package-file` 里
+   自动出现 `misc  misc.img` → **刷完就是可引导的**。
+   ⚠ 判断有没有生效：`grep -w misc output/update-ab/Image/package-file` 应有输出。
+
+**现场急救（不用重刷、不用拆机，5 分钟内）**：两种做法二选一 ——
+1. 让板子停在 u-boot 提示符（`temp/serial-ctrlc.ps1` **持续发 Ctrl+C**；
    这块板的 u-boot 只认 Ctrl+C，窗口只有一两秒，手动敲基本来不及），
-   脚本跑起来时给板子断电→上电；
-2. 在 `=>` 下把 `misc` 置零（= 首刷时的空状态）：
+   然后**写回可引导的元数据**（推荐：保留槽位信息，不破坏 last_boot）：
+   ```
+   mmc dev 0
+   mmc read 0x10000000 0x6004 1
+   mw.l 0x10000008 0x0000070f      # 槽A: prio15 tries7 succ0
+   mw.l 0x1000000c 0x0001070f      # 槽B: prio15 tries7 succ1
+   mw.b 0x10000010 0x01            # last_boot = B
+   mw.l 0x1000001c 0x37d933d1      # CRC32（大端在内存里是反的）
+   md.b 0x10000000 0x20            # 先核对
+   mmc write 0x10000000 0x6004 1
+   reset
+   ```
+   ⚠ 上面那串是**这一份元数据**的固定值；改了槽位/计数就要自己重算 CRC
+   （`image/make-misc-img.py` 里有现成的 `crc32_ieee()`）。
+2. 或者干脆把 `misc` 置零（= 首刷时的空状态，SPL 会自己重写默认元数据）：
    ```
    part list mmc 0                 # 确认 misc 的起止 LBA（我们的是 0x6000–0x7fff）
    mw.b 0x10000000 0 0x400000
@@ -160,10 +184,17 @@ Enter fastboot...OK
    Error validating A/B metadata from disk. Resetting and writing new A/B metadata
    to disk.`）→ 正常启动。
    ⚠ 如果只想标记成功而不清零，可以用镜像里的工具：
-   `python3 /usr/lib/assistant/ab-mark.py`（幂等，会打印前后状态）。
+   `python3 /usr/lib/assistant/ab-mark.py`（幂等，会打印前后状态）—— 但这要
+   系统已经能起来；起不来时只能用上面 u-boot 里的两条路。
 
 ### 5.3 串口**一个字符都没有**（连 SPL 都没打印）
 
-先排除时序：抓取窗口要**在断电之前**就开着。若确实静默 →
-loader 模式（按住 RECOVERY 上电，RKDevTool 能看到 LOADER）重刷整包即可。
+先排除时序：抓取窗口要**在断电之前**就开着。还要分清"真的静默"和"已经停在
+fastboot"：后者串口不会有新输出，但 **Windows 设备管理器里会出现
+`USB download gadget`**（VID_18D1&PID_4D00）—— 看到它基本就是 §5.2 那种情况，
+先在串口里发几次 Ctrl+C 抢提示符（fastboot 循环里 Ctrl+C 能退出来，不必断电），
+再按 §5.2 修元数据。
+
+若确实是完全静默 → loader 模式（按住 RECOVERY 上电，RKDevTool 能看到 LOADER）
+重刷整包即可。
 

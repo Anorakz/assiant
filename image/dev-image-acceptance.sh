@@ -107,11 +107,15 @@ cat > "$TMP/hello.c" <<'EOF'
 int main(void) { printf("hello from board gcc\n"); return 0; }
 EOF
 if gcc -O2 -o "$TMP/hello" "$TMP/hello.c" 2>"$TMP/gcc.err"; then
-    OUT="$("$TMP/hello")"
+    # ⚠ **限时 + 限量**：板上 gcc 曾经链接出入口错误的程序（缺 _start），一跑就
+    # 狂输出，把这里的 `$( )` 缓冲撑到 3.8 GB，然后整个脚本被 OOM 杀掉
+    # （dmesg: Out of memory: Killed process (sh) anon-rss:3840984kB）。
+    # 验收脚本不该因为被测程序发疯而把板子搞死 —— 两道闸都加上。
+    OUT="$(timeout 5 "$TMP/hello" 2>/dev/null | head -c 200)"
     if [ "$OUT" = "hello from board gcc" ]; then
         ok "gcc 编译并运行成功：$OUT"
     else
-        bad "gcc 编出来的程序输出不对：$OUT"
+        bad "gcc 编出来的程序输出不对（限时 5s/截断 200B：[$OUT]）"
     fi
 else
     bad "gcc 编译失败：$(head -2 "$TMP/gcc.err" | tr '\n' ' ')"
@@ -208,10 +212,13 @@ fi
 
 echo
 echo "=== 9) 系统数字（顺带记录） ==="
-echo "  内存: $(free -m 2>/dev/null | awk '/Mem:/{printf \"used %s MB / total %s MB\", $3, $2}')"
-echo "  温度: $(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null) (zone0, 千分之一度)"
-echo "  根分区: $(df -h / | awk 'NR==2{print $3 \" used / \" $2 \" (\" $5 \")\"}')"
-echo "  发行镜像里没有的东西（应在此镜像里有）: gcc=$(command -v gcc >/dev/null 2>&1 && echo 有 || echo 无) pgrep=$(command -v pgrep >/dev/null 2>&1 && echo 有 || echo 无) gdb=$(command -v gdb >/dev/null 2>&1 && echo 有 || echo 无)"
+# ⚠ 不用 awk 的 printf：板端是 busybox awk，实测 `awk '/Mem:/{printf \"...\"}'`
+#   这种带转义引号的写法会报 "Unexpected token" 然后输出空行。
+MEM="$(free -m 2>/dev/null | grep '^Mem:' | tr -s ' ' | cut -d' ' -f3,2)"
+echo "  内存(used,total MB): ${MEM:-未知}"
+ROOT="$(df -h / 2>/dev/null | grep -v '^Filesystem' | tr -s ' ' | cut -d' ' -f3,2,5)"
+echo "  根分区(used,size,use%): ${ROOT:-未知}"
+echo "  温度(zone0, 千分之一度): $(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 未知)"
 
 echo
 echo "=================================================="

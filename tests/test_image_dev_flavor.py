@@ -247,5 +247,57 @@ class TestDevAcceptanceScript(unittest.TestCase):
         self.assertIn("import zlib", text, "顺带验 zlib（发行镜像缺它）")
 
 
+class TestBoardGccCanLink(unittest.TestCase):
+    """2-12-5 板端实测：**开了板上 gcc 之后，工具链的 libgcc_s 不会进 target** ✗
+
+        ld: cannot find -lgcc_s
+        ld: /usr/lib64/libc_nonshared.a: archive has no index; run ranlib
+
+    对照证据：发行镜像的 target 里有 `/usr/lib/libgcc_s.so{,.1}`（Qt 一切正常），
+    开发那份没有；而交叉工具链的 sysroot 里两者都有。结果板上 gcc 变成
+    "装了但编不出可执行文件"——验收脚本的 5/6/8 三节全挂在这一个根因上。
+    修法：post-build 从 sysroot 补 libgcc_s，并用交叉 ranlib 重建
+    libc_nonshared.a 的符号索引。
+    """
+
+    POSTBUILD = IMG / "board" / "rockchip" / "kickpi" / "k1mini" / "post-build.sh"
+
+    def test_post_build_supplies_libgcc_s_from_sysroot(self):
+        text = self.POSTBUILD.read_text(encoding="utf-8")
+        self.assertIn("libgcc_s.so.1", text)
+        self.assertIn("sysroot/usr/lib/$lib", text)
+        self.assertIn('cp -a "$src" "$TARGET_DIR/usr/lib/$lib"', text)
+
+    def test_post_build_rebuilds_libc_nonshared_index(self):
+        text = self.POSTBUILD.read_text(encoding="utf-8")
+        self.assertIn("libc_nonshared.a", text)
+        self.assertIn("-ranlib", text, "要用交叉工具链的 ranlib")
+
+    def test_post_build_also_restores_glibc_dev_files(self):
+        """第二层：buildroot 的 strip 连 target 里的 `.o` 一起剥了符号 ✗
+
+        实测：target 的 `crt1.o` 只剩 944 字节且**没有 `_start`**（sysroot 里是
+        2416 字节、有），于是板上 gcc 链接出来的程序入口是错的：
+            ld: warning: cannot find entry symbol _start; defaulting to ...4003c0
+        那种二进制跑起来会乱来 —— 实测把验收脚本的 shell 内存撑到 3.8 GB 被 OOM
+        杀掉。所以 post-build 要从 sysroot 把这几个开发期文件补齐（大小不符就替换）。
+        """
+        text = self.POSTBUILD.read_text(encoding="utf-8")
+        for f in ("crt1.o", "Scrt1.o", "crti.o", "crtn.o", "libc_nonshared.a"):
+            self.assertIn(f, text, "post-build 没补 %s" % f)
+        self.assertIn("stat -c %s", text, "要比较大小，才能发现被 strip 过的残件")
+
+    def test_acceptance_bounds_the_program_output(self):
+        """验收脚本跑被测程序必须限时+限量：坏二进制曾把 shell 撑到 3.8 GB。"""
+        text = ACCEPTANCE.read_text(encoding="utf-8")
+        self.assertIn('timeout 5 "$TMP/hello"', text)
+        self.assertIn("head -c 200", text)
+
+    def test_it_only_fills_gaps_not_overwrites(self):
+        """发行镜像本来就有 libgcc_s → 这里不该去动它（只补缺的）。"""
+        text = self.POSTBUILD.read_text(encoding="utf-8")
+        self.assertIn('[ ! -e "$TARGET_DIR/usr/lib/$lib" ]', text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
