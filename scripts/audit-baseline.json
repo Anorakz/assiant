@@ -117,7 +117,6 @@
     "heuristic|超长函数（≥120 行）|agent/cli.py cmd_video（160 行）",
     "heuristic|超长函数（≥120 行）|agent/core/study_watch.py tick（138 行）",
     "heuristic|超长函数（≥120 行）|agent/core/user_profile.py build_profile（204 行）",
-    "heuristic|超长函数（≥120 行）|agent/ipc/__init__.py _handle_set_config（129 行）",
     "heuristic|超长函数（≥120 行）|agent/main.py __init__（141 行）",
     "heuristic|超长函数（≥120 行）|scripts/pair_sunshine.py main（209 行）",
     "heuristic|超长函数（≥120 行）|tests/board/p8_coexist.py main（149 行）",

@@ -1879,9 +1879,12 @@ async def cmd_set(args: argparse.Namespace) -> int:
     if args.show or not changes:
         return _show_group(group, target, session_tier)
 
+    # ⚠ 写配置一律走 `config_tiers` 那两个**带权限闸门**的入口（裸的 `settings_config.*`
+    #   只允许 `config_tiers` 自己调 —— 有守卫盯着，见 tests/test_config_tiers.py）。
+    allow_root = session_tier == config_tiers.ROOT_TIER
     try:
-        plans = sc.plan_changes(changes, target=str(target))
-    except sc.SettingsConfigError as exc:
+        plans = config_tiers.plan_changes_for_tier(changes, target=str(target), allow_root=allow_root)
+    except (sc.SettingsConfigError, config_tiers.ConfigTierError) as exc:
         print("改不了：%s" % exc, file=sys.stderr)
         return EXIT_ERROR
 
@@ -1894,8 +1897,8 @@ async def cmd_set(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     try:
-        result = sc.apply_changes(changes, target=str(target))
-    except sc.SettingsConfigError as exc:
+        result = config_tiers.apply_changes_for_tier(changes, target=str(target), allow_root=allow_root)
+    except (sc.SettingsConfigError, config_tiers.ConfigTierError) as exc:
         print("写不进去：%s" % exc, file=sys.stderr)
         return EXIT_ERROR
     if not result["changed"]:

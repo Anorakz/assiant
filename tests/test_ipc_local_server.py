@@ -1189,6 +1189,7 @@ _SET_CONFIG_TEMPLATE = """\
 study:
   enabled: false
   relative_band: 0.05
+  adapt: true
 llm:
   port: 9000
   local_api_key: sk-test
@@ -1200,6 +1201,7 @@ _SET_CONFIG_CONFIG = """\
 study:
   enabled: false
   relative_band: 0.05
+  adapt: true
 llm:
   port: 9000
   local_api_key: sk-test
@@ -1310,6 +1312,45 @@ class TestSetConfigCommand(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(data["ok"])
         self.assertIn("数字", data["error"])
         self.assertEqual(self.config_text(), before)
+
+    async def test_root_tier_key_is_refused_from_the_gui(self):
+        """GUI/IPC **永远是 user 权限**：root 级键改不了（T15-4 任务 3）。
+
+        `study.adapt` 是 root 级（不在 `config_tiers.USER_KEYS` 里）；`study.relative_band`
+        是 user 级。这条同时验"拒 + 一个字节不写 + 不留 .bak"，下面那条验反空转。
+        """
+        before = self.config_text()
+        handler = self.handler()
+        await handler(COMMAND_SET_CONFIG, {"id": "r", "keys": {"study.adapt": "false"}})
+
+        topic, data = self.pushed[0]
+        self.assertEqual(topic, TOPIC_CONFIG_RESULT)
+        self.assertFalse(data["ok"], data)
+        self.assertEqual(data["changed"], 0)
+        self.assertIn("root 级", data["error"])
+        self.assertEqual(self.config_text(), before, "被拒时一个字节都不许写")
+        self.assertFalse((self.config.parent / "config.yaml.bak").exists(), "也不留 .bak")
+
+    async def test_user_tier_key_from_the_gui_still_works(self):
+        """反空转：同一条 IPC 路上 user 级的键照旧写得进去（不是"什么都拒"）。"""
+        handler = self.handler()
+        await handler(COMMAND_SET_CONFIG, {"id": "r", "keys": {"study.relative_band": "0.09"}})
+
+        _, data = self.pushed[0]
+        self.assertTrue(data["ok"], data)
+        self.assertIn("relative_band: 0.09", self.config_text())
+
+    async def test_a_mixed_payload_is_refused_as_a_whole(self):
+        """混合载荷（user + root）必须**整体拒**，不能"前半写进去、后半报错"。"""
+        before = self.config_text()
+        handler = self.handler()
+        await handler(COMMAND_SET_CONFIG, {"id": "r", "keys": {
+            "study.relative_band": "0.09", "study.adapt": "false"}})
+
+        _, data = self.pushed[0]
+        self.assertFalse(data["ok"], data)
+        self.assertIn("root 级", data["error"])
+        self.assertEqual(self.config_text(), before, "混合载荷也一个字节都不许写")
 
     async def test_bad_payload_shape_is_refused_with_a_receipt(self):
         before = self.config_text()

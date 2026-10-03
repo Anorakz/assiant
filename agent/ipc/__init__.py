@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.config import read_config_file
-from agent.core import llm_env, settings_config, settings_credentials
+from agent.core import config_tiers, llm_env, settings_config, settings_credentials
 
 from .local_client import (
     CLIENT_SUPPORTED,
@@ -598,9 +598,15 @@ def _handle_set_config(runtime: Any, payload: dict, push: Any) -> None:
 
     顺序刻意是"先全部校验、再动第一份文件"：
       ① 载荷形状 -> ② 凭据纯校验（不写）-> ③ 配置**算计划**（不写；不认识的键 /
-      类型错 / 结构级键都在这一步被拒）-> ④ 写配置（`settings_config.apply_changes`：
-      只动目标行 + `.bak` + 原子写）-> ⑤ 写凭据（另一个文件）-> ⑥ 派生 `llm.env`。
+      类型错 / 结构级键 / **root 级键**都在这一步被拒）-> ④ 写配置
+      （`settings_config.apply_changes`：只动目标行 + `.bak` + 原子写）->
+      ⑤ 写凭据（另一个文件）-> ⑥ 派生 `llm.env`。
     ①②③ 任何一步失败都**一个字节都不写**，回执 ok=false + 原话。
+
+    ⚠ **权限层（T15-4）**：GUI/IPC 这条路**永远**按 user 权限走
+      （`config_tiers.plan_changes/apply_changes` 的 `allow_root` 默认 False）——
+      也就是说 root 级设置项（`study.adapt`、`bilibili.buffer.*` …）**界面改不了**，
+      要在板端 root 控制台里 `assistant shell` → `mode root` 才改得动。
 
     回执走 `TOPIC_CONFIG_RESULT`（带 payload 里的 id）—— GUI 靠它知道"写进去没有"，
     所以**每一条路径都必须 push**（包括失败），否则界面只能等到超时。
@@ -670,8 +676,8 @@ def _handle_set_config(runtime: Any, payload: dict, push: Any) -> None:
 
     if keys:
         try:
-            settings_config.plan_changes(keys, target=str(config_file))
-        except settings_config.SettingsConfigError as exc:
+            config_tiers.plan_changes_for_tier(keys, target=str(config_file))
+        except (settings_config.SettingsConfigError, config_tiers.ConfigTierError) as exc:
             reply["error"] = str(exc)
             _log.warning("ipc: set_config 被拒（没写任何文件）：%s", exc)
             _finish()
@@ -680,8 +686,8 @@ def _handle_set_config(runtime: Any, payload: dict, push: Any) -> None:
     # ③ 写配置真源
     if keys:
         try:
-            result = settings_config.apply_changes(keys, target=str(config_file))
-        except settings_config.SettingsConfigError as exc:
+            result = config_tiers.apply_changes_for_tier(keys, target=str(config_file))
+        except (settings_config.SettingsConfigError, config_tiers.ConfigTierError) as exc:
             reply["error"] = "写 config.yaml 失败：%s" % exc
             _log.warning("ipc: set_config 写入失败：%s", exc)
             _finish()
@@ -690,7 +696,18 @@ def _handle_set_config(runtime: Any, payload: dict, push: Any) -> None:
         reply["backup"] = str(result.get("backup", ""))
     reply["ok"] = True
 
-    # ④ 写凭据（另一个文件；只写这次真给的键）
+    _finish_set_config(config_file, cleaned_credentials, reply, _finish)
+
+
+def _finish_set_config(config_file: Any, cleaned_credentials: Dict[str, str],
+                       reply: Dict[str, Any], finish: Any) -> None:
+    """④⑤ 收尾：写凭据（另一个文件）+ 派生 `llm.env` + 回执。
+
+    @note 从 `_handle_set_config` 里抽出来（T15-4 任务 3）：那个函数本来就在"超长函数
+          120 行"的线附近, 加几行说明就过线了 —— 抽出来两边都清楚。
+    @note 这一步失败时"配置**已经**写成功了"，所以原话必须说清那个中间态，
+          而且**不能**因此把 `ok` 留在 true（凭据没写进去 = 这次请求没全成）。
+    """
     if cleaned_credentials:
         try:
             config_data = read_config_file(str(config_file))
@@ -698,7 +715,7 @@ def _handle_set_config(runtime: Any, payload: dict, push: Any) -> None:
             reply["ok"] = False
             reply["error"] = "配置已写，但读不回真源（凭据没写）：%s" % exc
             _log.warning("ipc: set_config 凭据那步失败：%s", exc)
-            _finish()
+            finish()
             return
         try:
             settings_credentials.write_cookie(config_data, cleaned_credentials)
@@ -706,7 +723,7 @@ def _handle_set_config(runtime: Any, payload: dict, push: Any) -> None:
             reply["ok"] = False
             reply["error"] = "配置已写，但凭据写入失败：%s" % exc
             _log.warning("ipc: set_config 凭据写入失败：%s", exc)
-            _finish()
+            finish()
             return
 
     # ⑤ 派生 llm.env（同一个回执里报成败 —— 真源已经写成功了，不让它变 ok=false）
@@ -721,7 +738,7 @@ def _handle_set_config(runtime: Any, payload: dict, push: Any) -> None:
     _log.info("ipc: set_config id=%s 改了 %d 行 (llm.env %s)",
               reply["id"] or "-", reply["changed"],
               "已同步" if reply["llm_env"]["ok"] else "没同步")
-    _finish()
+    finish()
 
 
 def _schedule_state_data(scheduler: Any) -> Dict[str, Any]:

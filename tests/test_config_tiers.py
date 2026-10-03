@@ -11,6 +11,7 @@
     python3 tests/test_config_tiers.py
 """
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -154,6 +155,90 @@ class TestSummary(unittest.TestCase):
         """`ConfigTierError` 与写入器的错误都是 ValueError 家族 —— CLI 好统一处理。"""
         self.assertTrue(issubclass(tiers.ConfigTierError, ValueError))
         self.assertTrue(issubclass(SettingsConfigError, ValueError))
+
+
+class TestTheGate(unittest.TestCase):
+    """tier 感知的写入入口：**默认拒 root**（T15-4 任务 3）。
+
+    ⚠ 这一层是"GUI/IPC 改不了 root 级键"的最后一道闸门 —— CLI 的那句好话（"先 mode root"）
+      在 `cmd_set` 里, 但**真正拦住**的是这里。
+    """
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="tiers-")
+        self.addCleanup(shutil.rmtree, self.folder, True)
+        self.template = Path(self.folder) / "config.example.yaml"
+        self.target = Path(self.folder) / "config.yaml"
+        shutil.copy2(str(EXAMPLE), str(self.template))
+        shutil.copy2(str(EXAMPLE), str(self.target))
+
+    def text(self) -> str:
+        return self.target.read_text(encoding="utf-8")
+
+    def test_a_root_key_is_refused_by_plan_and_by_apply(self):
+        before = self.text()
+        for call in (tiers.plan_changes_for_tier, tiers.apply_changes_for_tier):
+            with self.assertRaises(tiers.ConfigTierError, msg="%s 应当拒 root 级键" % call.__name__):
+                call({"study.adapt": "false"}, target=str(self.target), template=str(self.template))
+        self.assertEqual(self.text(), before, "被拒时一个字节都不许写")
+
+    def test_allow_root_lets_it_through(self):
+        tiers.apply_changes_for_tier({"study.adapt": "false"}, target=str(self.target),
+                                     template=str(self.template), allow_root=True)
+        self.assertIn("adapt: false", self.text())
+
+    def test_a_user_key_needs_no_allow_root(self):
+        """反空转：user 级的键默认就该能写（不是"什么都要 root"）。"""
+        tiers.apply_changes_for_tier({"study.relative_band": "0.08"}, target=str(self.target),
+                                     template=str(self.template))
+        self.assertIn("relative_band: 0.08", self.text())
+
+    def test_a_mixed_payload_is_refused_as_a_whole(self):
+        before = self.text()
+        with self.assertRaises(tiers.ConfigTierError):
+            tiers.apply_changes_for_tier({"study.relative_band": "0.08", "study.adapt": "false"},
+                                         target=str(self.target), template=str(self.template))
+        self.assertEqual(self.text(), before, "混合载荷也不能写一半")
+
+    def test_unknown_keys_still_get_the_writers_own_error(self):
+        """不认识的键由写入器报它自己那句（权限层不重复一套文案）。"""
+        with self.assertRaises(SettingsConfigError):
+            tiers.plan_changes_for_tier({"study.zz_nope": "1"}, target=str(self.target),
+                                        template=str(self.template))
+
+
+class TestNobodyBypassesTheGate(unittest.TestCase):
+    """`agent/` 里**只有 `config_tiers`** 能直接调裸写入器。
+
+    这是"权限层不是装饰"的机械保证：谁绕过它直接 `settings_config.plan_changes(...)`，
+    谁就把 GUI 那条路（或 CLI 的 user 层）的闸门一起拆了。
+    """
+
+    ALLOWED = {"agent/core/config_tiers.py"}
+    CALL = re.compile(r"settings_config\.(plan_changes|apply_changes)\(")
+
+    def _callers(self):
+        found = []
+        for path in sorted((_PROJECT_ROOT / "agent").rglob("*.py")):
+            rel = path.relative_to(_PROJECT_ROOT).as_posix()
+            if rel in self.ALLOWED:
+                continue
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if self.CALL.search(line):
+                    found.append("%s:%d %s" % (rel, number, line.strip()))
+        return found
+
+    def test_only_config_tiers_calls_the_raw_writer(self):
+        offenders = self._callers()
+        self.assertEqual(offenders, [], "这些地方绕过了权限闸门（改成 config_tiers.*）：%s"
+                         % offenders)
+
+    def test_the_scan_is_not_vacuous(self):
+        """反空转：`config_tiers` 里**确实**在调裸写入器（否则这条守卫查的是空气）。"""
+        text = (_PROJECT_ROOT / "agent" / "core" / "config_tiers.py").read_text(encoding="utf-8")
+        self.assertGreaterEqual(len(self.CALL.findall(text)), 2,
+                                "config_tiers 里没找到对裸写入器的调用 —— 守卫是假的")
+
 
 
 if __name__ == "__main__":

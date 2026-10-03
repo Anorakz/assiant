@@ -35,6 +35,7 @@ from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 __all__ = [
     "ConfigTierError", "USER_TIER", "ROOT_TIER", "USER_KEYS",
     "settable_keys", "tier_of", "tiers", "user_keys", "root_keys", "summary",
+    "refuse_root", "plan_changes_for_tier", "apply_changes_for_tier",
 ]
 
 #: 级名（就用这两个字符串, 别处不要再造同义词）
@@ -139,3 +140,62 @@ def summary(template: Optional[str] = None) -> Dict[str, Any]:
         "root": root,
         "counts": {"user": len(user), "root": len(root), "settable": len(everything)},
     }
+
+
+# ---------------------------------------------------------------------------
+#  闸门：tier 感知的写入入口（**改配置请一律走这两个**）
+# ---------------------------------------------------------------------------
+#: 只有本模块可以直接调 `settings_config.plan_changes/apply_changes`（守门的那一层）。
+WRITER_ENTRY = "agent/core/config_tiers.py"
+
+
+def refuse_root(paths: Any, *, allow_root: bool = False,
+                template: Optional[str] = None) -> None:
+    """user 权限下碰到 root 级键 -> 抛 `ConfigTierError`。
+
+    @param paths    要改的键（字典 / 序列都行）
+    @param allow_root 只有进了 root 体系（`assistant shell` 里 `mode root`）才给 True
+    @note 不认识的键（结构级 / 自定义子键 / 不存在）**一律放行**给写入器去报它自己那句 ——
+          这一层只管权限, 不重复一套"这个键能不能改"的文案。
+    """
+    if allow_root:
+        return
+    blocked = []
+    for path in paths:
+        try:
+            if tier_of(path, template) == ROOT_TIER:
+                blocked.append(str(path))
+        except ConfigTierError:
+            continue
+    if blocked:
+        raise ConfigTierError(
+            "%s 是 **root 级**设置项 —— 只有板端 root 控制台里 `assistant shell` → `mode root` "
+            "之后才能改（GUI / IPC 一律改不了；看两级清单：`assistant set --list-tiers`）。"
+            % "、".join(sorted(blocked)))
+
+
+def plan_changes_for_tier(changes: Any, *, allow_root: bool = False,
+                          **kwargs: Any) -> List[Dict[str, Any]]:
+    """`settings_config.plan_changes` + **权限闸门**（推荐入口）。
+
+    @note 名字带 `_for_tier` 是刻意的：审计器的"同名不同体"会把这儿的 `plan_changes` 与
+          写入器里那个当成撞名 —— 它们确实干的是同一件事的两个层次（裸的 / 带闸门的），
+          所以名字上就分开。
+    @raise ConfigTierError user 权限下要改 root 级键（**动任何文件之前**）
+    """
+    refuse_root(changes, allow_root=allow_root, template=kwargs.get("template"))
+    from agent.core import settings_config
+
+    return settings_config.plan_changes(changes, **kwargs)
+
+
+def apply_changes_for_tier(changes: Any, *, allow_root: bool = False,
+                           **kwargs: Any) -> Dict[str, Any]:
+    """`settings_config.apply_changes` + **权限闸门**（推荐入口）。
+
+    @note 闸门在这**再查一遍**：`plan` 与 `apply` 是两次调用，中间谁都能改主意。
+    """
+    refuse_root(changes, allow_root=allow_root, template=kwargs.get("template"))
+    from agent.core import settings_config
+
+    return settings_config.apply_changes(changes, **kwargs)
