@@ -224,6 +224,13 @@ bool MoonlightAdapter::connect_limelight(const std::string& app_version,
     //   失败也仍然是"快速失败": setup 返回非 0 会让 LiStartConnection 直接失败,
     //   所以连上了却一帧解不出来的情况不会发生。
 #ifndef AGENT_HAVE_MOONLIGHT
+    // 这个分支里四个参数用不到（真正的实现在 #else 分支）；显式 (void) 是为了在
+    // -Wall -Wextra 下不报 -Wunused-parameter（T15-3 / 3-6b）。
+    // ⚠ 不能改成"省略参数名"：那会让 #else 分支（交叉构建）编不过。
+    (void)app_version;
+    (void)gfe_version;
+    (void)codec_mode_support;
+    (void)session_url;
     impl_->set_error(
         "moonlight integration not linked in this build "
         "(AGENT_HAVE_MOONLIGHT undefined)");
