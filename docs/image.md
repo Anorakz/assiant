@@ -1027,6 +1027,121 @@ make O=... python3-dirclean python3                   # 只有 dirclean 才重�
 
 ---
 
+### 5.11 开发镜像（T15-2-12）：同一套配方 + 第二棵树
+
+**目标**（用户 2026-10-02 批准的清单）：发行镜像保持最小；另出一个开发镜像，
+板上带编译链与排障工具，**能在板上跑 pytest 与验收脚本**。
+
+**怎么建**（两条命令，都在 SDK 之外/仓库里执行）：
+
+```bash
+# ① 造开发树：硬链接复制第二份 SDK（实测 64 秒，实际只多占 582 MB）
+bash image/make-dev-sdk.sh <发行树 SDK 根目录>
+# ② 按 dev 形态构建（板级配置 + ASSISTANT_FLAVOR=dev 都会自动切）
+wsl -u root bash image/build-image.sh --flavor dev <开发树 SDK 根目录>
+```
+
+**为什么是"第二棵树"而不是"两个输出目录"**：SDK 把输出目录写死在
+`device/rockchip/common/scripts/build.sh`（`export RK_OUTDIR="$RK_SDK_DIR/output"`，
+而且**不止一处**）。实测把它改成可由环境变量指定后，`output-dev/` 确实建起来了、
+release 的 `output/` 也没被动，**但 lunch 仍把配置写进 `output/.config`** ——
+要继续就得在 vendor 脚本上打多处补丁，改动面越大越难维护。所以选"同一套配方 +
+第二棵树"：`cp -al` 让开发树**继承**发行树已编好的产物，首编只编 dev 新增的包。
+
+| 项 | 值（2026-10-03 实测） |
+| --- | --- |
+| `cp -al` 造树 | **64 秒**，实际多占 **582 MB** |
+| 首编（含 ccache 触发的工具链重编） | **63.5 分钟** |
+| 之后改一行再重建（ccache 生效） | **3 分 12 秒** |
+| 镜像 / target 体积 | dev **1003 MB** / 759 MB；release 737 MB / 532 MB |
+| ccache 缓存 | 782 MB（`~/.buildroot-ccache`，只给开发树开） |
+
+**结构：dev = release + 一个"只加不改"的片段**
+
+```
+buildroot:  configs/rockchip_rk3568_kickpi_k1mini_dev_defconfig
+              ├─ #include 发行那份 defconfig（原样引入，拿到全部基础）
+              └─ #include products/kickpi-k1mini-dev-assistant.config（只加不改）
+板级:       .chips/rk3566_rk3568/rockchip_rk3568_kickpi_k1mini_dev_defconfig
+              = 发行那份，**只差 RK_BUILDROOT_BASE_CFG 一行**（守卫测试钉住）
+```
+
+这样"两镜像行为一致"是**结构性**保证的，不靠人同步两份配置；dev 多出来的东西
+一律不进发行镜像。
+
+**dev 清单（都验证过是 aarch64 ELF）**
+
+编译链 `gcc / ld / make / ctest / pkgconf`；调试排障 `gdb / gdbserver / strace /
+top / pgrep / pkill / vim`；网络 `tcpdump / iperf3`；版本控制与测试 `git /
+python-pytest / python3-zlib`；外加 `ASSISTANT_FLAVOR=dev` 保留的 `usb-gadget`
+（adb/rndis）。发行镜像里**没有**这些（实测不串味）。
+
+**已知差异（用户 2026-10-02 选"方案 A"接受，不算失败）**
+
+| 项 | 实测 | 为什么不补 |
+| --- | --- | --- |
+| 板端 **C++** | target 里只有 `cc1`，**没有 `cc1plus`、没有 `g++`**；`gcc -x c++` 直接失败 | 要改 buildroot 的 gcc 包行为并**重编板端 GCC**（30–60 分钟）+ 长期维护；而我们所有交付物本来就是 **PC 侧交叉编译** |
+| 板端 **cmake 驱动** | 只装了 `ctest`(8.9 MB) 与 `share/cmake-3.28`，**没有 `cmake`** | 厂商那份 buildroot 的 cmake 包只把 ctest 装进 target（包目录里还有厂商自己的 patch） |
+
+**板上验收**（出口判据就是它）：
+
+```bash
+scp image/dev-image-acceptance.sh rk3568:/tmp/
+ssh rk3568 "sed -i 's/\r$//' /tmp/dev-image-acceptance.sh; sh /tmp/dev-image-acceptance.sh"
+```
+
+真编 C 程序、真跑 pytest、gdb 下断点求值、strace 抓 write、板上 make 构建，
+逐项验 15 个工具 + zlib。**2026-10-03 实测：通过 23 项 / 失败 0 项 / 已知差异 3 项。**
+脚本是 POSIX sh（板上可能没 bash），且有失败项时退出码非 0。
+
+⚠ **脚本里跑被测程序必须限时+限量**（`timeout 5` + `head -c 200`）：板上 gcc 曾
+链接出入口错误的程序（见 §5.12 末），一跑就狂输出，把 `$( )` 缓冲撑到 3.8 GB，
+整个脚本被 OOM 杀掉。验收工具不该因为被测程序发疯而把板子搞死。
+
+### 5.12 刷机自带可引导的 A/B 元数据（T15-2-12 修 2）
+
+**两次砖的根因**（2026-10-02，b8 一次、"黑屏+WiFi 连不上"一次）：刷完镜像后板子
+黑屏、掉 fastboot，串口 `No bootable slots found.`；读 `misc@0x800` 发现两个槽都
+不可引导、且 **`tries=0`** —— 只要这次启动失败一次，两个槽立刻全死；而
+`ab-mark.service`（开机标记成功）要等系统起来才能跑 → **死锁，只能串口救**。
+
+**机制**（读 SDK 源码）：`mk-updateimg.sh` 的 `gen_package_file()` 按分区表逐个生成
+条目，而且 **`[ -r "$IMAGE" ]` 存在才收进包** —— 所以 `Image/` 里没有 `misc.img`
+时，刷机**根本不写 misc**，元数据一直是上一次的残留（而残留可能已经是死的）。
+
+**修法**（三件事，全在配方里，不改 SDK）：
+
+1. 两份板级 defconfig 开 `RK_MISC=y` + `RK_MISC_CUSTOM=y`
+   + `RK_MISC_IMG="misc-assistant-ab.img"`；
+2. 新增 `image/make-misc-img.py`：生成 48 KB 镜像，0x800 处是 AVB 默认状态
+   （槽A prio15/tries7、槽B prio14/tries7 → **两个槽都可引导**；CRC32 大端）；
+3. `install-into-sdk.sh` 把它生成到 `<SDK>/device/rockchip/.chips/rk3566_rk3568/`，
+   SDK 的 `mk-misc.sh`（`build-hooks/08-misc.sh`）会取它。
+
+**验证**（2026-10-03）：
+
+```
+打包日志：misc,Add file: ./misc.img ... flash_address=0x00006000
+package-file：misc	misc.img
+刷完板端 misc@0x800：00 41 42 30 01 00 00 00  0f 07 01 00 0e 07 00 00 ...
+                    magic ✓ ver1.0            槽A prio15 tries7 succ1 ✓  槽B prio14 tries7 ✓
+```
+
+槽A 的 `successful=1` 是**起来之后 ab-mark 自动标的** —— 整条链闭合：
+**刷机写入可引导元数据 → 启动 → 标记成功 → 再也不会被扣死**。
+（现场急救流程仍保留在 `image/FLASH-RUNBOOK.md` §5.2。）
+
+**同一轮里修掉的板上 gcc 问题（修 1，两层）**
+
+| 层 | 现象 | 修法 |
+| --- | --- | --- |
+| 1 | 开了板上 gcc 后 `libgcc_s` **不会进 target** → `ld: cannot find -lgcc_s` | post-build 从交叉 sysroot 补 `libgcc_s.so{,.1}` |
+| 2 | buildroot 的 strip **连 target 里的 `.o` 一起剥了符号** → `crt1.o` 只剩 944 B、**没有 `_start`**（sysroot 里 2416 B 有）→ 链接出的程序入口错误：`ld: warning: cannot find entry symbol _start; defaulting to ...4003c0` | 从 sysroot 补 `crt1.o / Scrt1.o / crti.o / crtn.o / libc_nonshared.a / libc.so / libm.so`（**大小不符即替换**）+ 交叉 `ranlib` 重建索引 |
+
+第 2 层的危害是实测出来的：那种二进制跑起来乱来，把验收脚本的 shell 内存撑到
+3.8 GB 被 OOM 杀掉（`dmesg: Killed process (sh) anon-rss:3840984kB`）。
+补完后板上闭环通过：`gcc 编译并运行成功：hello from board gcc`。
+
 ## 6. 板级对齐（T15-2-3，已编译验证）
 
 **方法**：以**板端实际运行**的设备树为准（`dtc -I fs /sys/firmware/devicetree/base` 导出 6065 行，
@@ -1162,7 +1277,7 @@ make ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu- -j8 rockchip/rk3568-kickpi
 
 ---
 
-## 6. 附：盘点用到的命令（可复现）
+## 9. 附：盘点用到的命令（可复现）
 
 ```bash
 # 板端：现状基线
