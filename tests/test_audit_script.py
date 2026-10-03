@@ -117,5 +117,34 @@ class TestAuditScript(unittest.TestCase):
         self.assertTrue(all(isinstance(x, str) for x in data["findings"]))
 
 
+class TestAuditDecisions(unittest.TestCase):
+    """把 3-2 收敛表里**判定为"保留两份"**的决定钉住（见 docs/audit-code.md §7.3）。
+
+    这类决定最容易被将来的人"顺手合并"或"只改一处"，两种都会出问题：
+      · 合并 → 构建侧代码被拖进板端 payload（板端 python3 没有 zlib，必须自带实现）；
+      · 只改一处 → 两边的 CRC 算法分叉，生成的 misc 镜像会在板端校验失败。
+    """
+
+    def _load(self, rel: str, name: str):
+        import importlib.util
+        p = _ROOT / rel
+        spec = importlib.util.spec_from_file_location(name, p)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_the_two_crc32_implementations_agree(self):
+        a = self._load("image/make-misc-img.py", "make_misc_img_probe")
+        b = self._load("image/payload/ab-mark.py", "ab_mark_probe")
+        for probe in (b"", b"x", b"%s", bytes(range(256)), b"assistant"):
+            self.assertEqual(a.crc32_ieee(probe), b.crc32_ieee(probe),
+                             "两份 crc32_ieee 结果不一致（%r）—— 见 audit-code.md §7.3" % probe)
+
+    def test_both_still_avoid_zlib(self):
+        """板端 python3 没有 zlib（实测），所以 ab-mark 那份必须自带实现。"""
+        text = (_ROOT / "image" / "payload" / "ab-mark.py").read_text(encoding="utf-8")
+        self.assertNotIn("import zlib", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
