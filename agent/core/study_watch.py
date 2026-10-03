@@ -73,6 +73,8 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from agent.core.notes import drain
+
 from .study_anchors import StudyAnchors, StudyAnchorError
 
 __all__ = [
@@ -972,9 +974,7 @@ class StudyWatcher(object):
 
     def notes(self) -> List[str]:
         """攒下来的"要如实说的话"。取走即清空。"""
-        out = list(self._notes)
-        self._notes = []
-        return out
+        return drain(self._notes)
 
     # ------------------------------------------------------------ 状态 ---
     def snapshot(self) -> Dict[str, Any]:

@@ -59,6 +59,8 @@ import os
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from agent.core.paths import resolve_config_path
+
 from .game_anchors import cosine, decode, encode
 
 __all__ = [
@@ -143,9 +145,7 @@ def _repo_root() -> str:
 def resolve_anchor_file(configured: Optional[str] = None) -> str:
     """把配置里的锚点文件路径解析成绝对路径（相对路径按**仓库根**，与其它数据文件同款）。"""
     text = str(configured or "").strip() or DEFAULT_ANCHOR_FILE
-    if os.path.isabs(text):
-        return os.path.normpath(text)
-    return os.path.normpath(os.path.join(_repo_root(), text))
+    return resolve_config_path(configured, DEFAULT_ANCHOR_FILE, _repo_root())
 
 
 def normalize_classes(raw: Optional[Mapping[str, Any]] = None) -> Dict[str, str]:

@@ -33,6 +33,8 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
+from agent.core.notes import drain
+
 __all__ = ["GameWatcher", "DEFAULT_INTERVAL_S", "DEFAULT_CONFIDENT_SCORE",
            "DEFAULT_CONFIDENT_MARGIN", "DEFAULT_MEM_WATERMARK_MB", "RESIDENT_STATES"]
 
@@ -285,9 +287,7 @@ class GameWatcher(object):
     # ------------------------------------------------------------ 杂 ---
     def notes(self) -> List[str]:
         """攒下来的"要如实说的话"（加载被跳过、卸载、锚点没记下来…）。取走即清空。"""
-        out = list(self._notes)
-        self._notes = []
-        return out
+        return drain(self._notes)
 
     def snapshot(self) -> Dict[str, Any]:
         """给日志/状态用（谁在常驻、上次认出了什么）。"""

@@ -48,6 +48,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from agent.core.notes import drain
+
 __all__ = ["BilibiliBuffer", "BufferError", "seconds_to_bytes", "ffmpeg_argv",
            "DEFAULT_INITIAL_S", "DEFAULT_MAX_S", "DEFAULT_MEM_WATERMARK_MB",
            "DEFAULT_TRANSPORT", "DEFAULT_PORT"]
@@ -326,9 +328,7 @@ class BilibiliBuffer(object):
 
     def notes(self) -> List[str]:
         """攒下来的"要如实告诉用户的话"（例如上游断过、重连过）。取走即清空。"""
-        out = list(self._notes)
-        self._notes = []
-        return out
+        return drain(self._notes)
 
     # ------------------------------------------------------------ 起停 ---
     def start(self, item: Dict[str, Any], *, playing: bool = True,

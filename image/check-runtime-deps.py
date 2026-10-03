@@ -114,8 +114,7 @@ PY_IN_IMAGE = {
 
 
 
-def site_packages(target: Path) -> Path:
-    return imagelib.site_packages(target)
+# site_packages 已收敛到 imagelib（T15-3 / 3-6a）——不再留本地包装
 
 
 # ---------------------------------------------------------------------------

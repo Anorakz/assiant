@@ -38,6 +38,8 @@ import os
 import time
 from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional, Sequence
 
+from agent.core.paths import resolve_config_path
+
 from collections import deque
 
 __all__ = [
@@ -82,9 +84,7 @@ def _repo_root() -> str:
 def resolve_stats_file(configured: Optional[str] = None) -> str:
     """把配置里的统计文件路径解析成绝对路径（相对路径按**仓库根**，与其它数据文件同款）。"""
     text = str(configured or "").strip() or DEFAULT_STATS_FILE
-    if os.path.isabs(text):
-        return os.path.normpath(text)
-    return os.path.normpath(os.path.join(_repo_root(), text))
+    return resolve_config_path(configured, DEFAULT_STATS_FILE, _repo_root())
 
 
 def bucket_of(score: float, buckets: int = HISTOGRAM_BUCKETS) -> int:
