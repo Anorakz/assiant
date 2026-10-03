@@ -413,3 +413,21 @@ CI 同一条命令（`python3 scripts/audit-code.py --baseline scripts/audit-bas
 
 ⚠ 启示：**"收敛"本身会产生新的死代码**（搬走实现后剩下的 import / 局部变量）——
 所以每一步都要重新跑一次机械普查，而不是只在批次开始时跑一次。
+
+### 11.5 ⚠ 镜像里的 Python payload 现在还停在 T15-2 那版
+
+`E:\rk3568\flash\` 里那批镜像（发行 b9 / b11、开发 `update-assistant-dev-fix1b.img`）
+都是 **2026-10-03 15:06–15:07** 打的，而 T15-3 的第一笔改动是 **17:07**（3-1）——
+所以板上 `/usr/lib/assistant/agent/` 里跑的**不是**这份收敛后的代码：
+
+| 差异 | 内容 |
+| --- | --- |
+| 3-3 | 删掉 7 处零引用（板上那份还带着，无害） |
+| 3-4 | 89 处规范修正（ruff 安全修复 + 未用变量 + 文本 `open()` 补 `encoding="utf-8"`） |
+| 3-6 | 9 项收敛；其中 **5 个新模块**（`core/notes.py`、`core/paths.py`、`core/similarity.py`、`core/anchor_io.py`、`tools/_common.py`）—— `agent/` 下的 `.py` 从 **66 变 71** |
+
+**不必为 T15-3 重新刷板**：这一轮全是等价改写 + 删零引用，**行为不变**（板上那版
+自洽，能跑）。但**下次刷板 / 做 OTA 之前必须先重打包**
+（`image/build-image.sh --flavor dev|release`，ccache 后约 3 分钟）——
+⚠ 别只把 `agent/` 里的**一部分**文件拷进板子：旧代码 + 新模块混着来会缺那 5 个模块，
+直接 ImportError。
