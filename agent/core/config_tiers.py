@@ -47,14 +47,15 @@ class ConfigTierError(ValueError):
     """这个路径不是**可设置的标量键**（不在模板里, 或是结构级/用户自定义子键）。"""
 
 
-#: user 级 = GUI 设置页能改的键（2026-10-03 的 `settings_page.cpp`，25 个）。
+#: user 级 = GUI 设置页能改的键（2026-10-03 的 `settings_page.cpp`，24 个）。
 #: 顺序按界面（通用页 → 学习 → 游戏检测 → 画像压缩），便于人对着界面对。
 #: ⚠ 加一项就得同时改 `gui/src/ui/settings_page.cpp`，否则 `test_config_tiers.py`
 #:   的"逐条一致"会红 —— 这正是我们要的。
+#: ⚠ T15-4 任务 9：`gui.fullscreen` 已随设置页那个"启动形态"下拉框一起删除
+#:   （25 → 24）—— 它从来没被任何代码读过，全屏/窗口是启动参数 `--windowed` 决定的。
 USER_KEYS: FrozenSet[str] = frozenset((
     # ---- 通用页 ----
     "gui.debug",
-    "gui.fullscreen",
     "gui.start_page",
     "gui.input_source",
     "gui.wake.top",

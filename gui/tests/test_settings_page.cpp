@@ -97,8 +97,6 @@ QString TestSettingsPage::writeConfig(QTemporaryDir& tmp, const QString& extra)
     QFile file(path);
     file.open(QIODevice::WriteOnly);
     file.write(QStringLiteral("gui:\n"
-                              "  theme: grey\n"
-                              "  fullscreen: true\n"
                               "  start_page: system\n"
                               "  debug: true\n"
                               "  wake:\n"
@@ -226,7 +224,12 @@ void TestSettingsPage::requestOnlyTouchesWhitelistedKeys()
                                 QStringLiteral("gui.input_source")}) {
         QVERIFY2(keys.contains(must), qPrintable(must));
     }
-    QCOMPARE(keys.size(), 25);      // 15 个 gui.* + 10 个卡片键（少一个就说明有人把行删了）
+    QCOMPARE(keys.size(), 24);      // 10 个 gui.* + 14 个卡片键（少一个就说明有人把行删了）
+    // T15-4 任务 9：「启动形态」下拉框与 `gui.fullscreen` 一起删了 —— 那个键从来没有
+    // 任何代码读（全屏/窗口由启动参数 `--windowed` 决定）。这条反回归断言比总数更直白：
+    // 谁要是把下拉框加回来，这里立刻红。
+    QVERIFY2(!keys.contains(QStringLiteral("gui.fullscreen")),
+             "gui.fullscreen 已随「启动形态」下拉框一起删除，不应再出现在请求里");
 }
 
 void TestSettingsPage::credentialsAreOnlyTheFilledOnes()

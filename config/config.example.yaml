@@ -566,8 +566,11 @@ profile:
 #    按约定"统一为 sig 固定, 只有 llm 配置可改"。
 gui:
   # ---- 界面 ----
-  theme: grey              # 高级灰 (当前只有这一档)
-  fullscreen: true         # 启动即全屏 kiosk (--windowed 可临时覆盖)
+  # ⚠ T15-4 任务 9（只减不加）：原来这里的 `theme` / `fullscreen` 已**删除** ——
+  #    它们是"纸面配置"：代码从来没有读过。全屏 kiosk 由启动参数说了算
+  #    （`--windowed` 临时改窗口），主题当前只有高级灰一档、没有第二档可切，
+  #    所以设置页里那个"启动形态"下拉框也一并摘掉了。
+  #    同理删掉 `gui.video.speed` / `gui.video.fullscreen`（见下面"日程区"之后的说明）。
   start_page: home         # home | model | system | settings
   debug: false             # 开: 日志输出每条收到的报文与连接细节 (界面不显示标记)
 
@@ -600,12 +603,15 @@ gui:
   #    （recurring / oneoff）做展示，日程的增删改仍然改那一段。
   #    为什么这么设计、以及"两边语义只保证等价到夹具覆盖的范围"，见
   #    docs/config-sources.md。
-  max_rows: 6
+  #
+  #  ⚠ 这里原来是 `gui.max_rows`（GUI 真正读的却是 `gui.schedule.max_rows`，见
+  #    docs/audit-code.md §8.4 的勘误）—— T15-4 任务 9 把它改成**真正生效的那条路径**
+  #    并归到 root 级：改完重启 GUI 生效（设置页不改它，所以不出现在 user 级清单里）。
+  schedule:
+    max_rows: 6
 
-  # ---- 视频 (游戏模式主区) ----
-  video:
-    speed: 1.0             # 0.5 - 3.0
-    fullscreen: true
+  # ⚠ T15-4 任务 9 删除：原来这里还有一个 `video:` 段（`speed` / `fullscreen`）。
+  #    两个键都没有任何代码读 —— 画面倍速与全屏由视频面板的按钮直接控制。
 
 
 # ============================================================================

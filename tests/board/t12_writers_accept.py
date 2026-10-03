@@ -177,7 +177,7 @@ def _check_tool_chain():
     try:
         config = {"llm": {"mode": "disabled"},
                   "scheduler": {"interval_min": 1, "recurring": [], "oneoff": []},
-                  "gui": {"theme": "grey"}}
+                  "gui": {"start_page": "home"}}
         logging.disable(logging.CRITICAL)
         runtime = Runtime(config=config, config_path_used=path,
                           start_native=False, start_terminal=False)

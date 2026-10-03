@@ -301,7 +301,7 @@ GUI 不改 §8.1 里列出的那些"只在 CLI 改"的键（动作开关、自�
 
 | 级 | 是什么 | 谁能改 |
 | --- | --- | --- |
-| **user** | **GUI 设置页能改的那些键**（25 个）| CLI 直接改；GUI 走 IPC 改 |
+| **user** | **GUI 设置页能改的那些键**（24 个）| CLI 直接改；GUI 走 IPC 改 |
 | **root** | 模板里**其余的标量键**（含本轮新增的 17 个调试项）| **只在 `assistant shell` 里 `mode root` 之后**（CLI）|
 | 不进体系 | 结构级键（`scheduler.recurring` 这类序列/映射）与用户自定义子键（`process_names.*`）| 谁都不给改，**手改文件** |
 
@@ -316,9 +316,16 @@ GUI 不改 §8.1 里列出的那些"只在 CLI 改"的键（动作开关、自�
 **安全默认**：模板里**新增**的键自动落 root 级；想升成 user 级必须显式写进 `USER_KEYS`，
 而那样会立刻被 `tests/test_config_tiers.py` 要求"GUI 设置页里也得有它"（双向钉住）。
 
+**T15-4 任务 9（只减不加）**：user 级从 25 个减到 **24 个** —— 设置页那个"启动形态"下拉框
+和它写的 `gui.fullscreen` 一起删了（那个键从来没有代码读，全屏/窗口由启动参数 `--windowed`
+决定）。同一次还删了三个同类"纸面配置"：`gui.theme`（主题只有高级灰一档）、
+`gui.video.speed` / `gui.video.fullscreen`（画面倍速与全屏由视频面板按钮直接控制）。
+另外把 `gui.max_rows` 改成**真正生效的那条路径** `gui.schedule.max_rows`（GUI 一直读的是后者，
+见 `docs/audit-code.md` §8.4），它落在 root 级 —— 改完重启 GUI 生效，设置页不管它。
+
 > ⚠ **如实说明：这不是安全边界。** 板端镜像只有 root 一个账号（`BR2_TARGET_GENERIC_ROOT_PASSWD`），
 > agent/gui 服务也都是 `User=root` —— 拿到那个控制台的人本来就什么都能改。这一层管的是：
-> ①**界面改不了**主机级/排障级参数（GUI 只覆盖 user 级那 25 个键）；
+> ①**界面改不了**主机级/排障级参数（GUI 只覆盖 user 级那 24 个键）；
 > ②手滑与脚本误改有个明确的"二次确认"（`mode root`）；
 > ③root 级的每次实写**留一行痕**（`config-audit.log`）。有了它，将来真出现非 root 登录时行为也是对的。
 

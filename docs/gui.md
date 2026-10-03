@@ -154,8 +154,7 @@ GUI 读写 `config/config.yaml` 的两个段：
 
 | 键（都在 `config/config.yaml` 里） | 谁读 | 含义 |
 |---|---|---|
-| `gui.theme` | GUI | 高级灰（当前仅一档） |
-| `gui.fullscreen` / `gui.start_page` / `gui.debug` | GUI | 启动形态 / 默认页 / Debug 日志 |
+| `gui.start_page` / `gui.debug` | GUI | 默认页 / Debug 日志 |
 | `gui.wake.top/bottom/left/right` | GUI | 四区域 `active` 或 `locked` |
 | `gui.wake.idle_ms` | GUI | **四区域共用**的休眠时间 |
 | `gui.video_overlay.mode` / `gui.video_overlay.idle_ms` | GUI | 视频内嵌控制条的活动/锁定与**独立**休眠时间 |
@@ -163,6 +162,14 @@ GUI 读写 `config/config.yaml` 的两个段：
 | `gui.schedule.max_rows` | GUI | 日程区最多显示几行（今天+明天**合计**，默认 6） |
 | `llm.*` | GUI 写、Agent 读 | 推理位置（`edge`／`cloud`／`disabled`）与参数 |
 | `scheduler.recurring` / `scheduler.oneoff` | Agent 触发、**GUI 只读展示** | 日程本身（GUI 读它画日程区，见下） |
+
+> **T15-4 任务 9（只减不加）**：`gui.theme`、`gui.fullscreen`、`gui.video.speed`、
+> `gui.video.fullscreen`、`gui.max_rows` 五个键**已从模板删除** —— 它们都是"纸面配置"：
+> 没有任何代码读（全屏/窗口由启动参数 `--windowed` 决定，主题只有高级灰一档，
+> 倍速与全屏由视频面板按钮直接控制）。设置页里那个"启动形态"下拉框随 `gui.fullscreen`
+> 一起摘掉，所以"设置页能改的键"从 25 个变成 **24 个**。日程区行数改成真正生效的
+> `gui.schedule.max_rows`（一直由 GUI 读，见 `docs/audit-code.md` §8.4 的勘误），归 **root 级**：只在
+> `assistant shell` → `mode root` 里能改，改完重启 GUI 生效。
 
 写回规则：只替换**已存在的键**，保留注释与顺序；文件里没有的键追加到该段末尾。
 保存前 ConfigStore 会在原文件旁留一份 `.bak`（`*.bak` 已在 `.gitignore`）。
@@ -226,7 +233,7 @@ python3 -m agent.cli doctor             # 只看派生文件跟真源一不一�
 | 主页面 | 模式切换、对话（chat_input/llm）、音乐条、壁纸（**只画 Agent 推来的 `wallpaper`** —— 换壁纸只走对话，T7-3 起主区没有「下一张」按钮了；目录来自配置的 `wallpaper.dir`）、视频（本地文件播放/暂停/全屏/下一集）、输入源二选（键盘 onboard / 命令行）、**日程区**（只读展示 `scheduler` 段：**接下来 24 小时**、`时间 + 状态`、窗口终点写在副标题） | 歌词、歌手、专辑、进度、上一集、倍速、B站封面 |
 | 模型测试 | 推理位置三选、本地 GGUF 下拉与参数、云端参数、配置保存与同步、服务脚本启停与日志、基准测试（预检/全量/多模态）、停止测试、最新报告 | SigLIP 固定只读块 |
 | 系统 | CPU/内存/NPU 负载/频率/温度/网络 IP/串流主机，按 `monitor_interval_ms` 刷新 | 看门狗启停 |
-| 设置 | debug、四区域活动锁定与共用休眠、视频控制条活动锁定与独立休眠、启动形态、默认页、默认输入类型、配置路径、恢复默认、关于 | 主题仅一档 |
+| 设置 | debug、四区域活动锁定与共用休眠、视频控制条活动锁定与独立休眠、默认页、默认输入类型、配置路径、恢复默认、关于 | 主题仅一档（"启动形态"下拉框 T15-4 任务 9 已删，见 §3 的表注） |
 
 ## 5. 图标
 

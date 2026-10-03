@@ -148,10 +148,8 @@ void SettingsPage::build()
     // 首卡片标题被裁。这里让勾选框不吃焦点（它照样能点/能用键盘切换）。
     debug_->setFocusPolicy(Qt::NoFocus);
     generalForm->addRow(debug_);
-    fullscreen_ = new QComboBox(general);
-    fullscreen_->addItem(QStringLiteral("全屏 kiosk"), true);
-    fullscreen_->addItem(QStringLiteral("窗口"), false);
-    generalForm->addRow(QStringLiteral("启动形态"), fullscreen_);
+    // T15-4 任务 9：「启动形态」下拉框已删 —— 它写的 `gui.fullscreen` 从来没有任何
+    // 代码读（真正的全屏/窗口是启动参数 `--windowed` 决定的），改它等于改纸面配置。
     startPage_ = new QComboBox(general);
     for (const PageEntry& entry : pageEntries()) {
         startPage_->addItem(entry.label, entry.key);
@@ -778,7 +776,6 @@ void SettingsPage::loadFromConfig(const QString& configPath)
     selectByData(overlayMode_,
                  store.value(QStringLiteral("gui.video_overlay.mode"), QStringLiteral("active")));
     overlayIdle_->setValue(store.intValue(QStringLiteral("gui.video_overlay.idle_ms"), 3000));
-    fullscreen_->setCurrentIndex(store.boolValue(QStringLiteral("gui.fullscreen"), true) ? 0 : 1);
     selectByData(startPage_, store.value(QStringLiteral("gui.start_page"), QStringLiteral("home")));
     selectByData(inputSource_,
                  store.value(QStringLiteral("gui.input_source"), QStringLiteral("keyboard")));
@@ -833,7 +830,6 @@ QJsonObject SettingsPage::buildKeys() const
     store.set(QStringLiteral("gui.wake.idle_ms"), QString::number(regionIdle_->value()));
     store.set(QStringLiteral("gui.video_overlay.mode"), overlayMode_->currentData().toString());
     store.set(QStringLiteral("gui.video_overlay.idle_ms"), QString::number(overlayIdle_->value()));
-    store.setBool(QStringLiteral("gui.fullscreen"), fullscreen_->currentIndex() == 0);
     store.set(QStringLiteral("gui.start_page"), startPage_->currentData().toString());
     store.set(QStringLiteral("gui.input_source"), inputSource_->currentData().toString());
     fillCardChanges(&store);
@@ -919,7 +915,6 @@ void SettingsPage::restoreDefaults()
     regionIdle_->setValue(5000);
     selectByData(overlayMode_, QStringLiteral("active"));
     overlayIdle_->setValue(3000);
-    fullscreen_->setCurrentIndex(0);
     selectByData(startPage_, QStringLiteral("home"));
     selectByData(inputSource_, QStringLiteral("keyboard"));
 

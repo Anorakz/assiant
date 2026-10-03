@@ -224,7 +224,7 @@ ruff check . --statistics        # 0.6.9；本轮基线见 §4
 | 类别 | 结果 |
 | --- | --- |
 | **CLI 子命令孤儿**（定义了但进不了派发表） | **0**：按零引用口径，`agent/cli.py` 里没有"定义了却没人引用"的命令函数 |
-| **配置项孤儿**（example 里有、没人读） | 初筛 14 个"`agent/*.py` 里一次都没出现"的键，逐个到 `gui/` 复核后：**12 个是 GUI 在读**（`fullscreen`/`wake`/`idle_ms`/`speed`/`start_page`/`video_overlay`/`max_rows`/`bottom`/`input_source`/`onboard_auto`/`monitor_interval_ms`/`api_base`）—— 这是**跨语言配置契约**，不是孤儿；**1 个（`chat_channel`）谁都不读 → 已删**；⚠ **勘误（T15-4）**：当时把 `theme` 也判成"GUI 在读"**是错的** —— 实测 `gui/src/**` 里 `theme`/`grey` 零命中（被 `gui/tests/test_settings_page.cpp` 的夹具误导），它其实是孤儿，T15-4 已把它和另外三个一起删掉 |
+| **配置项孤儿**（example 里有、没人读） | 初筛 14 个"`agent/*.py` 里一次都没出现"的键，逐个到 `gui/` 复核后：**12 个是 GUI 在读**（`fullscreen`/`wake`/`idle_ms`/`speed`/`start_page`/`video_overlay`/`max_rows`/`bottom`/`input_source`/`onboard_auto`/`monitor_interval_ms`/`api_base`）—— 这是**跨语言配置契约**，不是孤儿；**1 个（`chat_channel`）谁都不读 → 已删**；⚠ **勘误（T15-4）**：当时把 `theme` 也判成"GUI 在读"**是错的** —— 实测 `gui/src/**` 里 `theme`/`grey` 零命中（被 `gui/tests/test_settings_page.cpp` 的夹具误导），它其实是孤儿，T15-4 已把它和另外三个一起删掉。⚠ **第二处勘误（T15-4 任务 9）**：上表里 `fullscreen` / `speed` 也不是"配置被读"—— `gui/src` 里只有**控件**（视频面板的全屏/倍速按钮），没有任何一处读 `gui.fullscreen` / `gui.video.speed` 这两个**配置键**（`settings_page.cpp` 只是**写**它们），已随 `theme` 一起删；`max_rows` 则是**键名写错了**：GUI 读的一直是 `gui.schedule.max_rows`，模板里却叫 `gui.max_rows`（= 一条永远不生效的配置），T15-4 任务 9 已把模板改成真正生效的那条路径 |
 
 ### 8.5 顺带学到的（写进工具注释）
 

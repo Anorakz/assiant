@@ -6,7 +6,9 @@
 //    · 四区域 活动/锁定 + **四个区域共用的**休眠时间（wake.*）
 //    · 视频内嵌控制条 活动/锁定 + **它自己单独的**休眠时间（video_overlay.*）
 //      —— 按验收要求：控制条的时间**不与区域活动共享**，单独设置
-//    · 启动形态（全屏/窗口）、默认页、默认输入类型
+//    · 默认页、默认输入类型
+//      （原来的"启动形态（全屏/窗口）"下拉框 T15-4 任务 9 已删：它写的 `gui.fullscreen`
+//       从来没有代码读，全屏/窗口由启动参数 `--windowed` 决定）
 //    · **学习监督**（study.*：开关 + 时间参数 + 起始相对阈值）
 //    · **游戏检测**（bilibili.game_watch.*：开关/间隔/有把握分数）+ **B 站凭据**
 //      （bilibili.cookie_file + 写进凭据文件的那三个键）
@@ -73,7 +75,6 @@ public:
     QSpinBox* regionIdleSpin() const { return regionIdle_; }
     QComboBox* overlayMode() const { return overlayMode_; }
     QSpinBox* overlayIdleSpin() const { return overlayIdle_; }
-    QComboBox* fullscreenBox() const { return fullscreen_; }
     QComboBox* startPageBox() const { return startPage_; }
     QComboBox* inputSourceBox() const { return inputSource_; }
     QPushButton* saveButton() const { return save_; }
@@ -166,7 +167,6 @@ private:
     QSpinBox* regionIdle_ = nullptr;
     QComboBox* overlayMode_ = nullptr;
     QSpinBox* overlayIdle_ = nullptr;
-    QComboBox* fullscreen_ = nullptr;
     QComboBox* startPage_ = nullptr;
     QComboBox* inputSource_ = nullptr;
 

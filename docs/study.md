@@ -209,7 +209,10 @@ GUI 是 C++、跑在板端，与 Agent 侧的 Python 没法共用代码，所以
 | **游戏检测** | `bilibili.game_watch.enabled`、`bilibili.game_watch.interval_s`、`bilibili.game_watch.confident_score` |
 | ↳ 卡里的 **B 站凭据** | `bilibili.cookie_file`（配置里那一行）+ `SESSDATA` / `bili_jct` / `DedeUserID`（写进**凭据文件**，不是真源） |
 | **画像压缩** | `profile.enabled`、`profile.trigger_chars`、`profile.trigger_turns` |
-| 原有卡片 | `gui.debug`、`gui.wake.*`、`gui.video_overlay.*`、`gui.fullscreen`、`gui.start_page`、`gui.input_source` |
+| 原有卡片 | `gui.debug`、`gui.wake.*`、`gui.video_overlay.*`、`gui.start_page`、`gui.input_source` |
+
+> ⚠ T15-4 任务 9：`gui.fullscreen` 已随设置页"启动形态"下拉框一起**删除**（从来没被任何
+> 代码读过），所以上面这行里没有它了 —— 设置页能改的键一共 **24** 个。
 
 - **GUI 不碰的键**（只能在 CLI / 真源里改）：`study.remind`、`study.back_to_desktop`、
   `study.skip_on_keyword`、`study.learn`、`study.adapt`、`study.target_unknown_rate`、
