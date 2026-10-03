@@ -26,13 +26,12 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from agent.core import similarity
-
+from agent.core.anchor_io import decode_rows, save_shot
 from agent.core.paths import resolve_config_path
 
 __all__ = ["GameAnchors", "AnchorError", "cosine", "DEFAULT_ANCHOR_FILE", "DEFAULT_SHOT_DIR"]
@@ -55,7 +54,6 @@ def _repo_root() -> str:
 
 def resolve_anchor_file(configured: Optional[str] = None) -> str:
     """把配置里的锚点文件路径解析成绝对路径（相对路径按**仓库根**，与其它数据文件同款）。"""
-    text = str(configured or "").strip() or DEFAULT_ANCHOR_FILE
     return resolve_config_path(configured, DEFAULT_ANCHOR_FILE, _repo_root())
 
 
@@ -122,13 +120,11 @@ class GameAnchors(object):
 
     def vectors(self) -> List[Tuple[str, List[float]]]:
         """[(游戏, 向量)] —— 解不出来的锚点**跳过并如实记一条**（不静默）。"""
-        out: List[Tuple[str, List[float]]] = []
-        for row in self._rows:
-            try:
-                out.append((str(row["game"]), decode(str(row["vector"]))))
-            except Exception as exc:                       # noqa: BLE001
-                self.log.warning("game_anchors: 一条锚点解不出来（跳过）: %s", exc)
-        return out
+        return decode_rows(self._rows, "game", decode, on_error=self._warn_bad_anchor)
+
+    def _warn_bad_anchor(self, exc: Exception) -> None:
+        """一条锚点解不出来（见 `vectors`）—— 只记一条, 不抛。"""
+        self.log.warning("game_anchors: 一条锚点解不出来（跳过）: %s", exc)
 
     # ------------------------------------------------------------ 比 ---
     def match(self, vector: Sequence[float]) -> Optional[Dict[str, Any]]:
@@ -189,21 +185,12 @@ class GameAnchors(object):
         return dict(row)
 
     def _save_shot(self, game: str, shot: bytes, *, when: Optional[float] = None) -> str:
-        folder = os.path.join(self.shot_dir, game)
-        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(when or time.time()))
-        path = os.path.join(folder, "%s.jpg" % stamp)
+        """存一张截图 —— 存不下来只记一条并返回 ""（自学习不该因为存图失败而中断）。"""
         try:
-            os.makedirs(folder, exist_ok=True)
-            with open(path, "wb") as handle:
-                handle.write(shot)
+            return save_shot(self.shot_dir, game, shot, when=when, root=_repo_root())
         except OSError as exc:
             self.log.warning("game_anchors: 截图没存下来（忽略）: %s", exc)
             return ""
-        try:
-            return os.path.relpath(path, _repo_root())
-        except ValueError:
-            # 跨盘（Windows 上截图目录在别的盘）算不出相对路径 -> 如实记绝对路径
-            return path
 
 
 def encode(vector: Sequence[float]) -> str:

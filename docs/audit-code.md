@@ -90,6 +90,9 @@ ruff check . --statistics        # 0.6.9；本轮基线见 §4
 
 棘轮基线：`scripts/audit-baseline.json`（**151 条**发现，行号已归一化；随每次收敛刷新）。
 
+⚠ 上面这张表是 **3-1 当时**的数字，留在这里当"起点"。3-6 收敛之后的数字见 §11.3
+（重复实现 生产 11 -> **3** 组；棘轮 151 -> **147** 条）。
+
 棘轮**双向验证过**：基线刷新后立刻复跑 = 0；故意注入一条新发现 = 退出码 2；清理后回到 0。
 
 ## 5. 结论与后续任务
@@ -146,6 +149,10 @@ ruff check . --statistics        # 0.6.9；本轮基线见 §4
 | 9 | `cosine()`：余弦相似度 | `core/game_anchors.py:60`、`vision/tag_index.py:119` | 新增 `vision/similarity.py`（或 `core/math.py`） | 两处导入；**先核对数值细节**（长度不一致/全零的处理是否一致） | 中 |
 | 10 | `vectors()` / `_save_shot()`：锚点库的"解码 + 跳过并记一条"与截图落盘 | `core/game_anchors.py:130,198`、`core/study_anchors.py:298,615` | 两个类抽公共基类 `core/anchors_base.py` | 改动最大，放最后；行为不变，只有日志措辞差异要统一 | 中 |
 | 11 | `_int`-类"参数归一化"模式 | `tools/{bilibili,music,schedule,wallpaper}.py` 的 `normalize()` | `tools/_common.py`（与 #3 同一处） | 只收敛**共用小步骤**（别名取值、空值清洗、数值夹取），各工具的业务归一化留在原地 | 中 |
+
+⚠ **第 6、7 项在执行时重新判定为"保留"**：动手前复核发现原计划会把 **11 处调用点**
+（对着真机握手、且一条测试都没有的配对脚本）搅在一起，或者新增仓库里今天不存在的一条
+**跨层依赖**。证据与替代方案见 §11.2 —— 这两条要你复核。
 
 ### 7.2 判定为"不是重复、保留"的（写明理由，避免下次又被当成问题）
 
@@ -326,3 +333,83 @@ ruff check . --statistics        # 0.6.9；本轮基线见 §4
 1. `moonlight_adapter.cpp` 4 个未用参数 → 定义处省略参数名（**机械、零行为变更**，
    改完用同一条 `-Wall -Wextra` 构建 + ctest 172 项验证）；
 2. 1 条待办标记 → 与 Python 侧那 5 条一起在 3-4b 归类。
+
+## 11. 3-6 收敛实施（11 项：9 项落地 / 2 项重新判定为"保留"）
+
+口径：每项先出"改哪里、怎么改、风险"，你确认后按 §7.4 的顺序做（低风险先行）；
+每做完一项跑该模块的单测，一批做完刷新一次棘轮基线。本节数字都是**改完后**用
+CI 同一条命令（`python3 scripts/audit-code.py --baseline scripts/audit-baseline.json
+--quiet`）取的。
+
+分三轮做：`59bab14`（3-6a 第 1 批）→ `fd02085` + `c7b76a5`（3-6b）→ 本轮（3-6 收尾）。
+
+### 11.1 落地的 9 项
+
+| # | 收敛到 | 动作 | 验证 |
+| --- | --- | --- | --- |
+| 1 | 新增 `core/notes.py` 的 `drain(notes)`（**原地清空**, 调用方拿到的是副本） | `core/{bilibili_buffer,game_watch,study_watch}.py` 三处 `notes()` 改用它 | 三模块单测 OK；`test_bilibili_buffer` / `test_game_watch` / `test_study_watch` 全绿 |
+| 2 | 新增 `core/paths.py` 的 `resolve_config_path(configured, default, root)` | 五处 import：`core/{game_anchors,study_anchors,study_stats}.py`（常量默认值）+ `media/music_library.py`、`vision/wall_data.py`（**可调用默认值 = 惰性**，保持原来"用到才算"的语义） | 五处各自单测绿（music 84 / wallpaper 132 / study_anchors 96 / tag_index 65） |
+| 3 | `tools/_common.py` 的 `clean_text()` | `tools/music.py` 删掉自己的 `_clean_text` + `_EMPTY_VALUES`；`tools/schedule.py` 保留一个 **2 行包装**（它多认一个「不填」） | `test_tool_normalize` 16 项 + `test_merged_tools` 47 项绿 |
+| 4 | `llm/provider.py::EdgeBackend.from_config` 内的 `_num(key, cast)` | `_int` / `_float` 两份**逐字相同**的实现合一；顺带修掉 `timeout_s` 被读两遍 | `test_llm` / `test_llm_service` 绿 |
+| 5 | `image/imagelib.py::site_packages` | `image/check-runtime-deps.py` 不再自带副本（也不再需要"兼容旧调用"的 `target_dir` 包装，已按 3-3 删掉） | 镜像侧脚本单测绿 |
+| 8 | `net/sunshine_client.py::_launch_like(action, app_id, mode)` | `launch()` / `resume()` 变成两行（对外 API **不变**） | `test_sunshine_client` 绿 |
+| 9 | 新增 `core/similarity.py::cosine` | `core/game_anchors.py`（原实现）与 `vision/tag_index.py`（**原来是 `zip` 静默截断**）都改用它 —— 取**更严格**那版：长度不一致 -> 0.0 | `test_tag_index` 65 + `test_study_anchors` 96 绿；`test_audit_script.py` 里那条"两个 crc32 实现必须一致"的同款断言也钉住了余弦 |
+| 10 | 新增 `core/anchor_io.py` 的 `decode_rows()` + `save_shot()` | `core/game_anchors.py` 与 `core/study_anchors.py` 的 `vectors()` / `_save_shot()` 改调助手（**不是**计划里写的"公共基类" —— 见 §11.3 的理由） | `test_study_anchors` 96 项绿；重复(生产) 又少 2 组 |
+| 11 | `tools/_common.py` 的 `EMPTY_VALUES` / `action_of()` | 四个 `tools/*.py` 的 `normalize()` 只留**各自的语义规则**；空值表与 action 改写改成导入 | `test_tool_normalize` 16 + `test_bilibili_tool` 19 + `test_schedule_tool` 46 + `test_wallpaper` 132 绿 |
+
+### 11.2 两处**重新判定为"保留"**（计划里写的是"收敛"，动手前复核后改了判定）
+
+| # | 原计划 | 复核后的事实 | 判定 |
+| --- | --- | --- | --- |
+| 6 | 把 `pair_ref.py` 与 `pair_sunshine.py` 的 `http_get()` 并成 `scripts/_common.py` 一份（"签名取并集：`url, timeout`"） | 两者**不是同一件事**：`pair_ref` 的收 **URL**、返回 **body**（`urllib.request`，4 处调用）；`pair_sunshine` 的收 **host/port/path**、返回 **(status, body)**（`http.client.HTTPConnection`，4 处调用 + `pair_probe.py` 另外 3 处**import 它**）。"取并集"要改 **11 处调用点 + 1 条 import**，而这些是**对着真机握手**的配对脚本、**一条测试都没有** | **保留两份**，与 §7.2 里 `decode`/`encode`（名字撞车、语义不同）同款处理；`pair_sunshine` 那份本来就已经被 `pair_probe` 复用，共享面没有再压缩的余地 |
+| 7 | 把 `core/scheduler.py` 与 `io/chat_bus.py` 的 `_log_task_exception()` 并成一个共享助手 | 两份**逐字相同**（只差打印前缀），但它们分处两层：`agent/io/*` 今天**一个 `agent.core` 都不 import**（它是有意的叶子层），`agent/core/*` 也只在一处**惰性**碰 `io`。合并要么新增首个 `io -> core` 依赖（会把整个 `agent.core` 包拉进 `io` 的 import 路径），要么为一个 5 行函数新开一个顶层工具模块 | **保留两份**：5 行代码换一条新的跨层依赖不划算；而且 §9.2 已经判定这两处 `print` 出口是**有意为之**（后台协程报错时日志系统可能正在初始化/重入），合并会让这条判定与代码位置脱钩 |
+
+⚠ 这两条都由你复核：**要合并就说一句**，我按上面的"事实"栏改（第 6 项建议只做**改名**
+消掉同名——`pair_sunshine::http_get -> http_request`，6 行；第 7 项建议新开
+`agent/async_util.py` 让两边都 import 中立的兄弟模块，避免跨层）。
+
+### 11.3 收敛后的数字（可复现）
+
+| 项 | 3-1 基线（§4） | 3-6 之后 | 说明 |
+| --- | --- | --- | --- |
+| 重复实现：**生产** | 11 组 | **3 组** | 剩下 3 组见下 |
+| 重复实现：测试 | 46 组 | 46 组 | 测试里的重复"通常是刻意铺开的分支覆盖"，不收敛 |
+| 同名不同体（生产模块级） | 15 | **15** | 四个 `normalize()` 与五个 `build()` **故意仍同名**（各自的规则表 / 依赖检查就是它们的语义）；`vectors` / `_save_shot` 是类方法, 本来就不进这条统计 |
+| 零引用定义 | 3 | 3 | 全是框架钩子假阳性（§8.2） |
+| 仅测试引用 | 22 | 22 | 测试锁定的契约（§8.3） |
+| 规范启发式 | 101 | 101 | 深嵌套 / 超长函数 / 待办标记那几类留给 3-4b 与专门的重构任务 |
+| **棘轮基线** | 151 条 | **147 条** | `--write-baseline` 刷新；刷新后立刻复跑 = "没有新增 ✓" |
+
+**剩下的 3 组重复（都写明为什么留着）**：
+
+| 组 | 判定 |
+| --- | --- |
+| `image/make-misc-img.py` / `image/payload/ab-mark.py` 的 `crc32_ieee` | 反例，**保留两份**（§7.3）：一份在构建侧、一份要进板端 payload（板端 python3 没有 zlib） |
+| `core/scheduler.py` / `io/chat_bus.py` 的 `_log_task_exception` | §11.2 第 7 项，保留 |
+| `ipc/local_client.py::LocalClient.on_message` / `ipc/local_server.py::LocalServer.on_command` | **不该合并**：一个在客户端、一个在服务端，分别是**收**和**发**方向的消息处理；形状像是因为两边都用"取出 envelope -> 分派"这个套路 |
+
+**同名不同体里那 3 个 `cosine`（收敛的尾部）**：第 9 项之后，
+`core/game_anchors.py` 与 `vision/tag_index.py` 各自留了一个**只做转发的同名函数**
+（前者对外 API 里就有它、后者是 tag_index 的公开出口），实现只有
+`core/similarity.py` 一份。三个同名 = 一个真实现 + 两个兼容壳，**这是有意的**：
+删壳要动 `__all__` 与调用方，收益为零。同类还有 `decode` / `encode`（§7.2 已判定）。
+
+⚠ 这里有个**口径局限**值得记下来：重复比较用的指纹会把**字符串常量与标识符都抹平**
+（`scripts/audit-code.py::BodyNormalizer`），所以"两处都改成调用同一个助手"之后，
+剩下的**同形调用**仍然会被算成一组 —— 数字从 11 掉到 3 是**实打实消掉的实现**，
+但它也不是"还剩 3 组就还有 3 坨重复代码"。
+
+### 11.4 顺带修掉：3-6 自己引进来的 3 条 ruff 发现
+
+3-4 那次 ruff 普查（剩 14 条，全是杂项）是在 3-6 **之前**做的，所以 3-6 的迁移自己
+带进来的问题不在那份清单里。本轮用同一条命令复核，抓到 3 条并修掉：
+
+| 位置 | 规则 | 原因 |
+| --- | --- | --- |
+| `core/game_anchors.py` | F401 | 第 9 项把余弦搬到 `core/similarity.py` 之后，`import math` 就没人用了 |
+| `core/game_anchors.py`、`core/study_anchors.py` | F841 ×2 | 第 2 项迁移时留下的一行 `text = ...`（旧实现的头一行），没人读 |
+
+修完 `ruff check`（默认规则集）在 3-6 碰过的全部文件上 **All checks passed**。
+
+⚠ 启示：**"收敛"本身会产生新的死代码**（搬走实现后剩下的 import / 局部变量）——
+所以每一步都要重新跑一次机械普查，而不是只在批次开始时跑一次。

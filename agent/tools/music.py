@@ -45,6 +45,7 @@ from typing import Any, Dict, Optional
 from ..core import label_spec
 from ..core.state_machine import State
 from ..core.tool_router import Tool
+from ._common import action_of, clean_text
 
 __all__ = ["NAME", "ALLOWED_STATES", "ACTIONS", "SORTS", "TIMEOUT_S", "DESCRIPTION",
            "SCHEMA", "normalize", "build"]
@@ -169,21 +170,8 @@ _ACTION_SYNONYMS = {
     "search_music": "search",
 }
 
-#: 空值写法 —— 模型有时候把"没给"写成这些字面量（板端实测见过 `track_id="none"`）
-_EMPTY_VALUES = ("", "none", "null", "nil", "n/a", "na", "-", "无", "空")
-
 #: 哪些字段出现就意味着"这是一条 enqueue"（action 缺失时用来推断）
 _ENQUEUE_HINTS = ("track_id", "keyword", "tag", "sort", "limit", "replace")
-
-
-def _clean_text(value: Any) -> Optional[str]:
-    """字符串字段的清洗: 去空白; 空值字面量 -> None（= 没给）。"""
-    if value is None:
-        return None
-    text = str(value).strip()
-    if text.lower() in _EMPTY_VALUES:
-        return None
-    return text
 
 
 def normalize(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -211,15 +199,11 @@ def normalize(args: Dict[str, Any]) -> Dict[str, Any]:
     """
     out = dict(args)
 
-    action = out.get("action")
-    if isinstance(action, str):
-        action = action.strip().lower()
-    if isinstance(action, str) and action:
-        action = _ACTION_SYNONYMS.get(action, action)
+    action = action_of(out, _ACTION_SYNONYMS)
 
     for key in ("track_id", "keyword", "tag", "set_tag"):
         if key in out:
-            cleaned = _clean_text(out.get(key))
+            cleaned = clean_text(out.get(key))
             if cleaned is None:
                 out.pop(key, None)
             else:

@@ -247,21 +247,17 @@ class EdgeBackend(_OpenAICompatibleBackend):
         """
         cfg = llm_cfg if isinstance(llm_cfg, dict) else {}
 
-        def _int(key: str) -> Optional[int]:
-            raw = cfg.get(key)
-            if isinstance(raw, bool) or raw is None:
-                return None
-            try:
-                return int(str(raw).strip())
-            except (TypeError, ValueError):
-                return None
+        def _num(key: str, cast: Callable[[str], Any]) -> Optional[Any]:
+            """读配置里的数字: 坏值 / 没给 / bool -> None（**不抛异常**, 调用方退回默认值）。
 
-        def _float(key: str) -> Optional[float]:
+            @note 原来是 `_int` 与 `_float` 两份**逐字相同**的实现（T15-3 §7.1 第 4 项），
+                  只差最后那个 `int(...)` / `float(...)` —— 收敛成传 `cast`。
+            """
             raw = cfg.get(key)
             if isinstance(raw, bool) or raw is None:
                 return None
             try:
-                return float(str(raw).strip())
+                return cast(str(raw).strip())
             except (TypeError, ValueError):
                 return None
 
@@ -271,7 +267,8 @@ class EdgeBackend(_OpenAICompatibleBackend):
                 return raw.strip()
             return None
 
-        port = _int("port")
+        port = _num("port", int)
+        timeout_s = _num("timeout_s", float)
         base_url = _text("edge_base_url")
         if base_url is None:
             base_url = _edge_base_url(port if port is not None else DEFAULT_EDGE_PORT)
@@ -280,9 +277,9 @@ class EdgeBackend(_OpenAICompatibleBackend):
             base_url=base_url,
             model=_text("model_name"),
             api_key=_text("local_api_key"),
-            timeout_s=_float("timeout_s") if _float("timeout_s") is not None else 30.0,
-            max_tokens=_int("max_tokens"),
-            temperature=_float("temperature"),
+            timeout_s=timeout_s if timeout_s is not None else 30.0,
+            max_tokens=_num("max_tokens", int),
+            temperature=_num("temperature", float),
             model_path=_text("model_path"),
         )
 

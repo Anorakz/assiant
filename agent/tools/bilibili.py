@@ -41,6 +41,7 @@ from typing import Any, Dict, Optional
 
 from ..core.state_machine import State
 from ..core.tool_router import Tool
+from ._common import EMPTY_VALUES
 
 __all__ = ["NAME", "ALLOWED_STATES", "TIMEOUT_S", "DESCRIPTION", "SCHEMA", "normalize",
            "build"]
@@ -54,9 +55,6 @@ ALLOWED_STATES = (State.GAME,)
 
 #: 搜一次要过网络（实测 1~4 s; 补一页更久）—— 路由默认 5 s 太紧, 自己声明。
 TIMEOUT_S = 30.0
-
-#: 空值写法（模型把"没给"写成这些字面量时当没给）—— 与壁纸那边同一套。
-_EMPTY_VALUES = ("", "none", "null", "nil", "n/a", "na", "-", "无", "空")
 
 DESCRIPTION = (
     "在 B 站搜视频并把它排进预览队列（**只排不播**：播不播由用户在界面里点）。"
@@ -108,7 +106,7 @@ def normalize(args: Dict[str, Any]) -> Dict[str, Any]:
         value = next((item for item in value if str(item or "").strip()), "")
     if isinstance(value, str):
         value = value.strip()
-        if value.lower() in _EMPTY_VALUES:
+        if value.lower() in EMPTY_VALUES:
             out.pop("keyword", None)                        # 当没给 -> schema 报缺参数
         else:
             out["keyword"] = value

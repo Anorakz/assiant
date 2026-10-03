@@ -59,6 +59,7 @@ import os
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from agent.core.anchor_io import decode_rows, save_shot
 from agent.core.paths import resolve_config_path
 
 from .game_anchors import cosine, decode, encode
@@ -144,7 +145,6 @@ def _repo_root() -> str:
 
 def resolve_anchor_file(configured: Optional[str] = None) -> str:
     """把配置里的锚点文件路径解析成绝对路径（相对路径按**仓库根**，与其它数据文件同款）。"""
-    text = str(configured or "").strip() or DEFAULT_ANCHOR_FILE
     return resolve_config_path(configured, DEFAULT_ANCHOR_FILE, _repo_root())
 
 
@@ -297,13 +297,11 @@ class StudyAnchors(object):
 
     def vectors(self) -> List[Tuple[str, List[float]]]:
         """[(子标签, 向量)] —— 解不出来的锚点**跳过并如实记一条**（不静默）。"""
-        out: List[Tuple[str, List[float]]] = []
-        for row in self._rows:
-            try:
-                out.append((str(row["cls"]), decode(str(row["vector"]))))
-            except Exception as exc:                       # noqa: BLE001
-                self.log.warning("study_anchors: 一条锚点解不出来（跳过）: %s", exc)
-        return out
+        return decode_rows(self._rows, "cls", decode, on_error=self._warn_bad_anchor)
+
+    def _warn_bad_anchor(self, exc: Exception) -> None:
+        """一条锚点解不出来（见 `vectors`）—— 只记一条, 不抛。"""
+        self.log.warning("study_anchors: 一条锚点解不出来（跳过）: %s", exc)
 
     def unit_vectors(self) -> List[Tuple[str, List[float]]]:
         """[(子标签, **单位**向量)] —— 匹配真正用的那份（解码一次就缓存）。
@@ -613,21 +611,12 @@ class StudyAnchors(object):
             raise StudyAnchorError("锚点文件写不回去（%s）: %s" % (self.path, exc)) from exc
 
     def _save_shot(self, cls: str, shot: bytes, *, when: Optional[float] = None) -> str:
-        folder = os.path.join(self.shot_dir, cls)
-        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(when or time.time()))
-        path = os.path.join(folder, "%s.jpg" % stamp)
+        """存一张截图 —— 存不下来只记一条并返回 ""（自学习不该因为存图失败而中断）。"""
         try:
-            os.makedirs(folder, exist_ok=True)
-            with open(path, "wb") as handle:
-                handle.write(shot)
+            return save_shot(self.shot_dir, cls, shot, when=when, root=_repo_root())
         except OSError as exc:
             self.log.warning("study_anchors: 截图没存下来（忽略）: %s", exc)
             return ""
-        try:
-            return os.path.relpath(path, _repo_root())
-        except ValueError:
-            # 跨盘（Windows 上截图目录在别的盘）算不出相对路径 -> 如实记绝对路径
-            return path
 
     # ------------------------------------------------------------ 杂 ---
     def snapshot(self) -> Dict[str, Any]:

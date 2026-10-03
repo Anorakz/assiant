@@ -61,6 +61,7 @@ from typing import Any, Dict, Mapping, Optional
 
 from ..core.state_machine import State
 from ..core.tool_router import Tool
+from ._common import EMPTY_VALUES, action_of
 
 __all__ = ["NAME", "ALLOWED_STATES", "ACTIONS", "SORTS", "DESCRIPTION", "SCHEMA",
            "VOCAB_TEXT_LIMIT", "normalize", "build"]
@@ -192,9 +193,6 @@ _STEPS = {"next": 1, "prev": -1, "repeat": 0}
 #: ⚠ 来源: 板端实测模型偶尔会写老参数名/老写法; 1/-1/0 的语义与 next/prev/repeat 完全一致。
 _STEP_ACTIONS = {"1": "next", "-1": "prev", "0": "repeat", 1: "next", -1: "prev", 0: "repeat"}
 
-#: 空值写法 —— 模型有时候把"没给"写成这些字面量
-_EMPTY_VALUES = ("", "none", "null", "nil", "n/a", "na", "-", "无", "空")
-
 
 def normalize(args: Dict[str, Any]) -> Dict[str, Any]:
     """参数归一化（T8-5c）—— **按语义接受, 不按参数名挑刺**。
@@ -227,10 +225,7 @@ def normalize(args: Dict[str, Any]) -> Dict[str, Any]:
     """
     out = dict(args)
 
-    action = out.get("action")
-    if isinstance(action, str):
-        action = action.strip().lower()
-        action = _ACTION_SYNONYMS.get(action, action)
+    action = action_of(out, _ACTION_SYNONYMS)
     if action is None or action == "":
         # 老参数名 `step` -> action（只认语义完全一致的那三个）
         if "step" in out:
@@ -243,7 +238,7 @@ def normalize(args: Dict[str, Any]) -> Dict[str, Any]:
         value = out.get(key)
         if isinstance(value, str):
             value = value.strip()
-            if value.lower() in _EMPTY_VALUES:
+            if value.lower() in EMPTY_VALUES:
                 out.pop(key, None)
             else:
                 out[key] = value.lower() if key == "sort" else value

@@ -39,6 +39,7 @@ from typing import Any, Dict, List, Optional
 
 from ..core.state_machine import State
 from ..core.tool_router import Tool
+from ._common import EMPTY_VALUES, action_of, clean_text
 
 __all__ = ["NAME", "ALLOWED_STATES", "ACTIONS", "STATES", "DESCRIPTION", "SCHEMA",
            "WEEKDAYS", "normalize", "build"]
@@ -140,8 +141,9 @@ _DAY_GROUPS = {
     "周末": [5, 6], "weekend": [5, 6],
 }
 
-#: 空值写法（模型把"没给"写成这些字面量时当没给）—— 与壁纸/B 站那边同一套
-_EMPTY_VALUES = ("", "none", "null", "nil", "n/a", "na", "-", "无", "空", "不填")
+#: 空值写法 —— 公共那套（壁纸 / B 站 / 音乐同款, 见 `_common.EMPTY_VALUES`）
+#: **外加**「不填」这一个（模型偶尔这么写；另外三个工具不认它, 别跟着抄）
+_EMPTY_VALUES = EMPTY_VALUES + ("不填",)
 
 #: `start` 的同义键（模型偶尔换个名字）
 _START_ALIASES = ("time", "at", "clock", "when", "begin", "start_time")
@@ -151,13 +153,11 @@ _DATE_ALIASES = ("day_date", "on", "oneoff_date")
 
 
 def _clean_text(value: Any) -> Optional[str]:
-    """字符串字段清洗: 去空白; 空值字面量 -> None（= 没给）。"""
-    if value is None:
-        return None
-    text = str(value).strip()
-    if text.lower() in _EMPTY_VALUES:
-        return None
-    return text
+    """字符串字段清洗: 去空白; 空值字面量 -> None（= 没给）。
+
+    @note 就是公共那件 `_common.clean_text`, 只是这边多认一个「不填」（见 `_EMPTY_VALUES`）。
+    """
+    return clean_text(value, _EMPTY_VALUES)
 
 
 def _normalize_clock(value: Any) -> Optional[str]:
@@ -262,10 +262,7 @@ def normalize(args: Dict[str, Any]) -> Dict[str, Any]:
     """
     out = dict(args or {})
 
-    action = out.get("action")
-    if isinstance(action, str):
-        action = action.strip().lower()
-        action = _ACTION_SYNONYMS.get(action, action)
+    action = action_of(out, _ACTION_SYNONYMS)
     if not action:
         if any(key in out for key in ("start", "days", "date") + _START_ALIASES):
             action = "add"
