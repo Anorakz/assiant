@@ -14,7 +14,6 @@ tests/board/test_binding_api.py — 在板端验证 agent_native 暴露的完整
     · read_latest 返回 numpy (256,256,3) uint8
     · send_* 不得阻塞事件循环 (本脚本用信号量验证 GIL 确实被释放)
 """
-import os
 import sys
 import threading
 import time

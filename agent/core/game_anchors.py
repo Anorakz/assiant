@@ -29,7 +29,7 @@ import logging
 import math
 import os
 import time
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 __all__ = ["GameAnchors", "AnchorError", "cosine", "DEFAULT_ANCHOR_FILE", "DEFAULT_SHOT_DIR"]
 

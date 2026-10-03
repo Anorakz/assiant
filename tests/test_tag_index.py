@@ -24,7 +24,6 @@ tests/test_tag_index.py — 标签索引 + 锚点检索（Phase 7 T7-3）
 ⚠ 不测"分数准不准"（那是板端 `tests/board/tag_quality.py` 与人工真值的事）。
 """
 
-import json
 import logging
 import math
 import os
@@ -37,7 +36,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from agent.vision import tag_vocab, wall_data  # noqa: E402
+from agent.vision import wall_data  # noqa: E402
 from agent.vision.tag_index import (  # noqa: E402
     DEFAULT_LIMIT,
     IP_KEY,
@@ -187,7 +186,7 @@ class TestLoading(unittest.TestCase):
     def test_empty_file_is_not_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "empty.jsonl")
-            open(path, "w").close()
+            open(path, "w", encoding="utf-8").close()
             index = TagIndex.from_file(path)
             self.assertEqual(index.count(), 0)
 

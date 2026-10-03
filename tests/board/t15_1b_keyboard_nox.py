@@ -111,10 +111,10 @@ def heal_stale_x_lock():
 
 # --------------------------------------------------------------------- fb ---
 def fb_geom():
-    with open("/sys/class/graphics/fb0/virtual_size") as handle:
+    with open("/sys/class/graphics/fb0/virtual_size", encoding="utf-8") as handle:
         w, h = [int(v) for v in handle.read().strip().split(",")]
-    stride = int(open("/sys/class/graphics/fb0/stride").read().strip())
-    bpp = int(open("/sys/class/graphics/fb0/bits_per_pixel").read().strip())
+    stride = int(open("/sys/class/graphics/fb0/stride", encoding="utf-8").read().strip())
+    bpp = int(open("/sys/class/graphics/fb0/bits_per_pixel", encoding="utf-8").read().strip())
     return w, h, stride, bpp
 
 
@@ -258,7 +258,7 @@ def find_event_node(name):
         if not entry.startswith("event"):
             continue
         try:
-            with open("/sys/class/input/%s/device/name" % entry) as handle:
+            with open("/sys/class/input/%s/device/name" % entry, encoding="utf-8") as handle:
                 if handle.read().strip() == name:
                     return "/dev/input/" + entry
         except OSError:
@@ -518,7 +518,7 @@ class RfbGrab:
                 return width, height, rgb, bits
             if kind == 1:                                # SetColourMapEntries
                 self._u8()
-                first, n = self._u16(), self._u16()
+                _first, n = self._u16(), self._u16()
                 self._recv(n * 6)
             elif kind == 2:                              # Bell
                 pass
@@ -592,7 +592,7 @@ def main():
 
         # ---------------- P2：EGLFS（产品形态） ----------------
         say("[P2] EGLFS + 旋转 90（=产品形态）：屏 1280×800、键盘窗口可见、IM_VISIBLE=1")
-        p2 = run_gui("P2", LOG_P2, "eglfs",
+        run_gui("P2", LOG_P2, "eglfs",
                      ["--focus-input-demo", "--dump-input", "--screenshot-delay", "9000"], [])
         p2_lines = log_lines(LOG_P2)
         nox = [ln for ln in p2_lines if "[ui] 无 X" in ln]
@@ -686,7 +686,7 @@ def main():
 
         # ---------------- P5：收起键盘后布局要复原 ----------------
         say("[P5] EGLFS 不给输入框焦点（键盘不该弹）：布局应当回到原样")
-        p5 = run_gui("P5", "/tmp/t151b_P5_nofocus.log", "eglfs",
+        run_gui("P5", "/tmp/t151b_P5_nofocus.log", "eglfs",
                      ["--dump-input", "--screenshot-delay", "5000"], [])
         p5_lines = log_lines("/tmp/t151b_P5_nofocus.log")
         p5_im = field(p5_lines, "IM_VISIBLE\t", 0)

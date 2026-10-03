@@ -21,9 +21,7 @@ scripts/pair_ref.py — 忠实移植 Moonlight Embedded 的配对实现 (temp/pa
 """
 import binascii
 import hashlib
-import os
 import secrets
-import ssl
 import sys
 import urllib.request
 

@@ -36,7 +36,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 #: 直接 `python tests/test_crash_log.py` 时 sys.path[0] 是 tests/，得自己把仓库根放进来
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from agent.core.crash_log import CrashLogger, read_report_head_tail   # noqa: E402
+from agent.core.crash_log import read_report_head_tail   # noqa: E402
 
 #: 子进程里跑的引导脚本：装好崩溃日志再按需崩。
 #: `PROBE_CLEAN` 非空 = 照**生产那套**用 `atexit` 收尾（Agent 就是这么挂的）；
@@ -274,7 +274,6 @@ class TestCrashLogger(unittest.TestCase):
 
     def test_banner_is_bounded(self):
         """横幅不能把整份报告倒进日志（长报告只取头尾）。"""
-        from agent.core.crash_log import read_report_head_tail
         long_report = self.dir / "agent-20260101-000000-1.log"
         long_report.write_text(
             "\n".join("LINE-%03d" % i for i in range(300)), encoding="utf-8")

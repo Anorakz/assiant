@@ -14,7 +14,6 @@ tests/test_label_spec.py — 统一标签语法（Phase 7 T8-5b）
 """
 
 import logging
-import os
 import sys
 import unittest
 from pathlib import Path

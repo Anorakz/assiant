@@ -22,7 +22,6 @@ tests/test_tool_normalize.py — 工具参数归一化（Phase 7 T8-5c）
      自己炸了也不影响工具、没声明 normalize 的工具原样通过
 """
 
-import asyncio
 import logging
 import sys
 import unittest

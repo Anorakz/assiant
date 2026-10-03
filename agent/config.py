@@ -46,7 +46,7 @@ import copy
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Tuple, Union
 
 try:
     import yaml

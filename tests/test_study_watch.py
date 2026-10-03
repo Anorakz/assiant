@@ -15,7 +15,6 @@
   · 没把握带一次只动 0.01、样本不够不动、到界就停、每次调整都有理由;
   · 弹回桌面后 5 分钟内又判成学习 -> 记"可能误判" + 那个类停学。
 """
-import json
 import os
 import shutil
 import sys

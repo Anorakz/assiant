@@ -54,7 +54,6 @@ T11-5 加了只在 GAME 的 bilibili_search；T12-6 加了 set_schedule）:
       transport（播放/暂停/上一首/下一首）, 不决定放什么; 音乐开关是 `music.enabled`。
 """
 
-import asyncio
 import logging
 import os
 import sys

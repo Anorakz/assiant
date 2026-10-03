@@ -38,7 +38,7 @@ import time
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from ..media import music_library as lib
-from ..net.netease_cli import NeteaseCli, NeteaseCliError, PlayerFailure
+from ..net.netease_cli import NeteaseCli, NeteaseCliError
 
 __all__ = ["MusicPlayer", "MusicError", "DEFAULT_POLL_INTERVAL_S",
            "tracks_from_search"]

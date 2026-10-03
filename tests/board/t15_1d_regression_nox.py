@@ -95,13 +95,13 @@ def main_pid(unit):
 def proc_stat(pid):
     """返回 (cpu_seconds, rss_kb)。读不到返回 (None, None)。"""
     try:
-        with open("/proc/%d/stat" % pid) as handle:
+        with open("/proc/%d/stat" % pid, encoding="utf-8") as handle:
             parts = handle.read().rsplit(")", 1)[1].split()
         ticks = int(parts[11]) + int(parts[12])          # utime + stime
         hz = os.sysconf("SC_CLK_TCK")
         cpu = ticks / float(hz)
         rss = 0
-        with open("/proc/%d/status" % pid) as handle:
+        with open("/proc/%d/status" % pid, encoding="utf-8") as handle:
             for line in handle:
                 if line.startswith("VmRSS:"):
                     rss = int(line.split()[1])
@@ -113,7 +113,7 @@ def proc_stat(pid):
 
 def sys_cpu():
     """返回 (busy_total, idle) 两个累计值（jiffies）。"""
-    with open("/proc/stat") as handle:
+    with open("/proc/stat", encoding="utf-8") as handle:
         parts = handle.readline().split()[1:]
     vals = [int(p) for p in parts]
     idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
@@ -129,7 +129,7 @@ def top_consumers(seconds=5.0, limit=5):
                 continue
             pid = int(entry)
             try:
-                with open("/proc/%d/stat" % pid) as handle:
+                with open("/proc/%d/stat" % pid, encoding="utf-8") as handle:
                     parts = handle.read().rsplit(")", 1)[1].split()
                 data[pid] = (int(parts[11]) + int(parts[12]),
                              parts[0].strip(), read_cmdline(pid))

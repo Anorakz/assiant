@@ -34,8 +34,7 @@ import json
 import logging
 import os
 import re
-import time
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 __all__ = [
     "BilibiliApi",

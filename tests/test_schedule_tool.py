@@ -15,7 +15,6 @@
      · 模板（`config.example.yaml`）不许写、调度器没起来只写不载、坏配置如实报。
 """
 import logging
-import os
 import shutil
 import sys
 import tempfile

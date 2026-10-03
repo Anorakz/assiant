@@ -26,7 +26,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from agent import tools as tools_pkg  # noqa: E402
 from agent.core.state_machine import State, StateMachine  # noqa: E402
-from agent.core.tool_router import Tool, ToolRouter  # noqa: E402
+from agent.core.tool_router import ToolRouter  # noqa: E402
 from agent.tools import back_to_desktop  # noqa: E402
 
 

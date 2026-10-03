@@ -21,7 +21,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Optional, Tuple
+from typing import Any, Tuple
 
 from .errors import SiglipRuntimeError
 

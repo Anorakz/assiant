@@ -1020,9 +1020,9 @@ class TestAutofill(unittest.TestCase):
         first = player.refill(profile, search_per_cycle=2, search_backoff_s=300, now=1000.0)
         self.assertEqual(calls, ["A", "B"], "一个 tick 最多搜 2 个")
         self.assertEqual(sorted(first["skipped"]), ["A", "B"])
-        second = player.refill(profile, search_per_cycle=3, search_backoff_s=300, now=1100.0)
+        player.refill(profile, search_per_cycle=3, search_backoff_s=300, now=1100.0)
         self.assertEqual(calls, ["A", "B", "C"], "退避中的 A/B 不再试, 换 C")
-        third = player.refill(profile, search_per_cycle=3, search_backoff_s=300, now=1400.0)
+        player.refill(profile, search_per_cycle=3, search_backoff_s=300, now=1400.0)
         self.assertEqual(calls[-1], "C", "C 也进了退避（1400-1000=400 > 300 -> A 可以再试）")
 
     def test_muted_artists_and_tracks_are_left_alone(self):
@@ -1080,7 +1080,7 @@ class TestQueueRemoval(unittest.TestCase):
         player._queue_index = 1
         result = player.remove(["2"])
         self.assertTrue(result["current_removed"])
-        player_step = player.step(1)
+        player.step(1)
         self.assertEqual(player.current_id, "3", "跳到被去掉那首后面那首")
 
     def test_removing_everything_leaves_an_empty_queue(self):

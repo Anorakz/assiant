@@ -491,7 +491,7 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
     def test_without_runtime_only_inbound_is_wired(self):
         # 向后兼容: 老签名 (bus, config) 行为不变 —— 不注册回调、不碰 on_reply
         runtime = self._StubRuntime()
-        server = build_ipc(None, {"ipc": {"socket_path": "/tmp/legacy.sock"}})
+        build_ipc(None, {"ipc": {"socket_path": "/tmp/legacy.sock"}})
         self.assertEqual(runtime.state.callback_count, 0)
         self.assertIsNone(runtime.on_reply)
 

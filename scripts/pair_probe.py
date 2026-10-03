@@ -17,14 +17,11 @@ scripts/pair_probe.py — 一次打通 step1..step3 并做对称性判定
 import binascii
 import hashlib
 import os
-import re
 import secrets
 import sys
 
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import serialization
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pair_sunshine import aes_ecb, xml_tag, http_get  # noqa: E402
@@ -43,7 +40,7 @@ def main():
     uid = secrets.token_hex(16)
 
     cert_pem = open(cert_path, "rb").read()
-    k = serialization.load_pem_private_key(open(key_path, "rb").read(), password=None)
+    serialization.load_pem_private_key(open(key_path, "rb").read(), password=None)
     cli_sig = x509.load_pem_x509_certificate(cert_pem).signature
 
     salt = secrets.token_bytes(16)

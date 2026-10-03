@@ -26,7 +26,6 @@ tests/test_wallpaper.py — 壁纸"下一张"（Phase 7 T3；T7-3 起能按内�
 ⚠ 标签索引本身的算法（词表向量、IP 锚点、排序）在 `tests/test_tag_index.py`。
 """
 
-import asyncio
 import logging
 import os
 import sys

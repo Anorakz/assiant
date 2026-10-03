@@ -45,7 +45,7 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 from agent.config import config_dir, read_config_file, write_text_atomic
 

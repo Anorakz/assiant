@@ -101,7 +101,7 @@ def crc32_ieee(data: bytes) -> int:
 
 def current_slot_from_cmdline() -> str:
     try:
-        with open("/proc/cmdline") as f:
+        with open("/proc/cmdline", encoding="utf-8") as f:
             cmdline = f.read()
     except OSError:
         return ""

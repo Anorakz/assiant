@@ -18,7 +18,6 @@ tests/test_chat_memory.py — 纯对话记忆（Phase 7 T9-1）
   tests/test_read_intents.py 里那段说明）。
 """
 
-import asyncio
 import logging
 import sys
 import unittest

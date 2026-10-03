@@ -18,7 +18,7 @@ def load(d, name):
     p = os.path.join(d, name + ".hex")
     if not os.path.exists(p):
         return None
-    return binascii.unhexlify(open(p).read().strip())
+    return binascii.unhexlify(open(p, encoding="utf-8").read().strip())
 
 
 def H(b):
@@ -79,7 +79,7 @@ def main():
     cli_chal = None
     p = os.path.join(d, "05_client_challenge.hex")
     if os.path.exists(p):
-        cli_chal = binascii.unhexlify(open(p).read().strip())
+        cli_chal = binascii.unhexlify(open(p, encoding="utf-8").read().strip())
     parts = {
         "cli_chal": cli_chal,
         "srv_chal": srv_chal,
@@ -109,7 +109,7 @@ def main():
     print("   dec(key, chalresp_raw) == chalresp_dec ? %s" % ("是" if rt == chalresp_dec else "否"))
     # 用 pair_sunshine 保存的 enc 与 raw 是否一致
     print("   cli_chal_enc 长度 %d, 用 key 加密一次看是否可复现" % len(cli_chal_enc))
-    e = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
+    Cipher(algorithms.AES(key), modes.ECB()).encryptor()
     print("   (加密是随机的, 无法比对; 只验证解密确定性)")
     return 0
 

@@ -25,7 +25,6 @@ tests/test_read_intents.py — 只读问句直连（Phase 7 T8-5c）
    且不许出现"换一张/放一首/挑一张"这类动作。见 `agent/core/read_intents.py`。
 """
 
-import asyncio
 import logging
 import os
 import sys

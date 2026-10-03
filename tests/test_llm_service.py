@@ -22,7 +22,6 @@ tests/test_llm_service.py — Agent 管本机 llama-server 的启停（Phase 7 T
 """
 
 import asyncio
-import json
 import logging
 import os
 import shutil
@@ -38,7 +37,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from agent.core.state_machine import State, StateMachine  # noqa: E402
+from agent.core.state_machine import State  # noqa: E402
 from agent.llm.service import LlamaService  # noqa: E402
 
 logging.disable(logging.CRITICAL)          # "不管/启动失败"那几条 warning 别刷屏

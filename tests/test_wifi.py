@@ -25,7 +25,6 @@
 
 import logging
 import unittest.mock as mock
-import os
 import sys
 import tempfile
 import unittest
@@ -36,7 +35,6 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from agent.net.wifi import (  # noqa: E402
-    AccessPoint,
     LinkGuard,
     Wifi,
     WifiError,

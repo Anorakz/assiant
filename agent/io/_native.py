@@ -29,7 +29,7 @@ from __future__ import annotations
 import atexit
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Optional
+from typing import Any
 
 __all__ = [
     "NATIVE_MODULE_NAME",

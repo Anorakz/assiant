@@ -169,7 +169,7 @@ def main():
     total = 0
     for name, files in games.items():
         try:
-            tvec = np.asarray(model.encode_text(name), dtype=np.float32)
+            np.asarray(model.encode_text(name), dtype=np.float32)
         except Exception as exc:                            # noqa: BLE001
             print("   %-14s 文本编码失败: %r" % (name, exc))
             continue

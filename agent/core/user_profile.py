@@ -42,7 +42,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 __all__ = [
     "PROFILE_VERSION",

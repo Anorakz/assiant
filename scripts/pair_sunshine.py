@@ -26,11 +26,7 @@ import http.client
 import os
 import re
 import secrets
-import socket
-import ssl
-import subprocess
 import sys
-import time
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -43,7 +39,7 @@ DUMP = None
 def dump(name, data):
     if not DUMP:
         return
-    with open(os.path.join(DUMP, name + ".hex"), "w") as f:
+    with open(os.path.join(DUMP, name + ".hex"), "w", encoding="utf-8") as f:
         f.write(binascii.hexlify(data).decode() + "\n")
 
 

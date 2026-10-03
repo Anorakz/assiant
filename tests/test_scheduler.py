@@ -22,7 +22,6 @@ tests/test_scheduler.py — Scheduler 单测
 """
 
 import asyncio
-import json
 import sys
 import unittest
 from datetime import date, datetime, timedelta

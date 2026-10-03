@@ -40,7 +40,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from ..core import label_spec
 from ..core.state_machine import State

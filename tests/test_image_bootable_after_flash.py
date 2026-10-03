@@ -15,7 +15,6 @@
 """
 import importlib.util
 import pathlib
-import struct
 import subprocess
 import sys
 import tempfile

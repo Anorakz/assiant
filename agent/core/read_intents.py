@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Mapping, Optional, Pattern, Sequence, Union
+from typing import Any, Callable, List, Mapping, Optional, Pattern, Sequence, Union
 
 __all__ = ["ReadIntent", "ReadAnswer", "INTENTS", "answer", "looks_like_read"]
 

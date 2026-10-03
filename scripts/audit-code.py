@@ -53,7 +53,7 @@ import os
 import re
 import subprocess
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 # 目录白名单：只有这些是我们的源码（没有 git 时用）
 INCLUDE_DIRS = ("agent", "gui", "native", "scripts", "image", "tests", "systemd", "config", "cmake")
@@ -389,8 +389,12 @@ def heuristics(c: Corpus):
                         if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
                                 and sub.func.attr == "sleep" and isinstance(sub.func.value, ast.Name)
                                 and sub.func.value.id == "time"):
-                            out["异步函数里用 time.sleep（阻塞事件循环）"].append(
-                                "%s:%d %s" % (rel, sub.lineno, node.name))
+                            # ⚠ 只看**生产**代码：测试里在 async 测试中调 time.sleep 往往正是
+                            #   被测行为（"同步处理器会不会阻塞事件循环"）——3-4 实测 10 条全在
+                            #   测试里，都是有意为之，报出来只是噪音。
+                            if not Corpus.is_test(rel):
+                                out["异步函数里用 time.sleep（阻塞事件循环）"].append(
+                                    "%s:%d %s" % (rel, sub.lineno, node.name))
                 span = getattr(node, "end_lineno", node.lineno) - node.lineno + 1
                 if span >= LONG_FUNC_LINES:
                     out["超长函数（≥%d 行）" % LONG_FUNC_LINES].append(
@@ -398,7 +402,15 @@ def heuristics(c: Corpus):
             if isinstance(node, ast.Call):
                 fn = node.func
                 if isinstance(fn, ast.Name) and fn.id == "open":
-                    if not any(k.arg == "encoding" for k in node.keywords):
+                    # ⚠ 二进制 open 不需要 encoding（3-4 实测：69 条里 56 条是二进制）——
+                    #   不跳过的话这条启发式永远以假阳性为主，数字没法用。
+                    mode = ""
+                    if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
+                        mode = str(node.args[1].value)
+                    for kw in node.keywords:
+                        if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+                            mode = str(kw.value.value)
+                    if "b" not in mode and not any(k.arg == "encoding" for k in node.keywords):
                         out["open() 没写 encoding（默认随 locale）"].append("%s:%d" % (rel, node.lineno))
                 if isinstance(fn, ast.Attribute) and fn.attr in ("run", "call", "check_output", "Popen"):
                     if any(k.arg == "shell" and getattr(k.value, "value", False) is True

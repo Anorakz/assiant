@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 __all__ = ["PcProbe", "PcProbeError", "normalize_process", "DEFAULT_PS_COMMAND"]
 

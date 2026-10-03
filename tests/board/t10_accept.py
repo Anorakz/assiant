@@ -90,7 +90,7 @@ def shows(rt):
     out = []
     for track_id in rt.music.queue_ids():
         track = by_id.get(track_id) or {}
-        tags = track.get("tags") or {}
+        track.get("tags") or {}
         out.append("%s-%s" % ("、".join(artists_of(track)) or "?",
                               str(track.get("name"))[:12]))
     return out

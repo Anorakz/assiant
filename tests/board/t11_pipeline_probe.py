@@ -70,7 +70,7 @@ def children_cpu():
 def pick_streams(quality):
     from agent.config import load_config
 
-    config = load_config("config")
+    load_config("config")
     sess = ""
     try:
         with open("config/bilibili_cookie.json", encoding="utf-8") as handle:

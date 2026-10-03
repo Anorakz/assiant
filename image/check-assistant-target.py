@@ -194,7 +194,7 @@ def check_unit_file(name: str, unit: dict, problems: list) -> None:
     for section, keys in text_sections.items():
         for key, values in keys.items():
             for v in values:
-                low = v.lower()
+                v.lower()
                 if "/home/kickpi" in v:
                     problems.append("%s: 还带着板端 git checkout 路径: %s=%s" % (name, key, v))
                 if section == "Service" and key.startswith("Exec"):

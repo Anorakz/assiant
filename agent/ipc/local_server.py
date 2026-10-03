@@ -62,7 +62,6 @@ from .protocol import (
     MODES,
     SOCKET_PATH,
     IpcProtocolError,
-    decode,
     decode_command,
     encode,
 )

@@ -2026,7 +2026,6 @@ def _study_check(args, action, watcher) -> int:
     """判一张**截图**（`--image`），可选把它学成锚点（`label --class X --apply`）。"""
     import json as _json
 
-    from agent.config import load_config
     from agent.vision import frame_pipeline as fp
 
     if not args.image:

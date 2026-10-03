@@ -94,7 +94,6 @@ def axis_accuracy(truth: Dict[str, Any], records: Dict[str, Dict[str, Any]],
 # ---------------------------------------------------------------------------
 def preprocess_ab(truth: Dict[str, Any], axes, top_k: int, limit: int = 0) -> Dict[str, Any]:
     import cv2
-    import numpy as np
 
     from agent.config import load_config
     from agent.vision import tag_vocab
