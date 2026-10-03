@@ -23,6 +23,15 @@
 #    `ConditionPathExists=!/data/assistant/config/config.yaml` 让它只在**缺配置**时
 #    做复制这一步（之后每次开机都只是建目录，不会覆盖用户改过的配置）。
 # ============================================================================
+#  ⚠ 模板**也要**铺一份到 /data（T15-4 板端验收抓到的真问题）
+#  ---------------------------------------------------------------------------
+#    写入器（`settings_config`）把 `config.example.yaml` 当"键清单的唯一真源"，而且按
+#    **目标配置同目录**找它 ⇒ 只有 rootfs 里那一份是不够的：板端 `assistant set --apply`
+#    与 GUI 保存都会报"读不到模板 /data/assistant/config/config.example.yaml"，**一个字节都写不动**
+#    （2026-10-03 板端实测）。所以这里连模板一起 `cp -n` 到 /data：
+#      · `-n` = 已存在就不覆盖（用户改过模板也不动它）；
+#      · 与 config.yaml 同一个道理：**不软链**（A/B OTA 换槽不能把它带走）。
+# ============================================================================
 [Unit]
 Description=板端助手：铺 userdata 上的状态目录与默认配置
 Documentation=file:///usr/lib/assistant/docs/image.md
@@ -45,6 +54,12 @@ ExecStart=/bin/sh -c '\
     if [ ! -f "/data/assistant/config/$f.yaml" ] && [ -f "/usr/lib/assistant/config/$f.example.yaml" ]; then \
       cp -n "/usr/lib/assistant/config/$f.example.yaml" "/data/assistant/config/$f.yaml"; \
       echo "[assistant-init] 已铺默认配置 $f.yaml"; \
+    fi; \
+  done && \
+  for f in config user_profile; do \
+    if [ ! -f "/data/assistant/config/$f.example.yaml" ] && [ -f "/usr/lib/assistant/config/$f.example.yaml" ]; then \
+      cp -n "/usr/lib/assistant/config/$f.example.yaml" "/data/assistant/config/$f.example.yaml"; \
+      echo "[assistant-init] 已铺模板 $f.example.yaml"; \
     fi; \
   done'
 StandardOutput=journal

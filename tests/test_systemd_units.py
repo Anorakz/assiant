@@ -377,6 +377,40 @@ class TestXrandrUnitIsFixed(unittest.TestCase):
                       "转屏命令本身不能变（只是外面套了 timeout，见上一条）")
 
 
+class TestImageInitProvisionsTheTemplate(unittest.TestCase):
+    """镜像首启要把**模板**也铺到 /data（T15-4 板端验收抓到的真问题）。
+
+    `settings_config` 把 `config.example.yaml` 当"键清单唯一真源"，而且按**目标配置同目录**
+    找它 ⇒ 只在 rootfs 里放一份是不够的：板端 `assistant set --apply` 与 GUI 保存会报
+    "读不到模板 …/config.example.yaml"、**一个字节都写不动**（2026-10-03 板端实测）。
+    """
+
+    UNIT = _PROJECT_ROOT / "systemd" / "image" / "assistant-init.service"
+
+    def _text(self) -> str:
+        self.assertTrue(self.UNIT.is_file(), "首启单元不见了：%s" % self.UNIT)
+        return self.UNIT.read_text(encoding="utf-8")
+
+    def test_it_copies_the_template_too(self):
+        text = self._text()
+        self.assertIn("config.example.yaml", text,
+                      "首启单元没有把模板铺到 /data —— 板端设置写入会全线写不动")
+        self.assertIn("/data/assistant/config/config.example.yaml", text,
+                      "铺的目标路径不对（写入器按目标配置同目录找模板）")
+
+    def test_it_still_provisions_the_real_config(self):
+        """反空转 + 回归：真配置那一段不许被这次改动弄丢。"""
+        text = self._text()
+        self.assertIn("cp -n", text)
+        self.assertIn("/data/assistant/llm/config", text, "目录那一串也不许丢")
+        self.assertIn('"/data/assistant/config/$f.yaml"', text)
+
+    def test_the_check_has_teeth(self):
+        """反空转：把模板那段抹掉之后，本测试的判据必须看得出来。"""
+        fake = self._text().replace("config.example.yaml", "NOT-A-TEMPLATE")
+        self.assertNotIn("/data/assistant/config/config.example.yaml", fake)
+
+
 class TestDeployDocListsEveryUnit(unittest.TestCase):
     """安装片段必须点名三个文件 —— 只装两个正是当时成环的原因。"""
 
