@@ -146,5 +146,20 @@ class TestAuditDecisions(unittest.TestCase):
         self.assertNotIn("import zlib", text)
 
 
+class TestNativeAuditScript(unittest.TestCase):
+    """原生侧普查器（3-5）也要有冒烟测试：工具不可信，结论就没有意义。"""
+
+    NATIVE = _ROOT / "scripts" / "audit-native.py"
+
+    def test_runs_and_reports_numbers(self):
+        proc = subprocess.run([sys.executable, str(self.NATIVE), str(_ROOT), "--top", "3"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              universal_newlines=True, timeout=300)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        for anchor in ("== 规模", "重复函数体", "同名不同体", "可疑写法"):
+            self.assertIn(anchor, proc.stdout, "输出里缺 %s" % anchor)
+        self.assertIn("源文件", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
