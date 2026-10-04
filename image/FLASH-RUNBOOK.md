@@ -198,3 +198,42 @@ fastboot"：后者串口不会有新输出，但 **Windows 设备管理器里会
 若确实是完全静默 → loader 模式（按住 RECOVERY 上电，RKDevTool 能看到 LOADER）
 重刷整包即可。
 
+---
+
+## 6. 2026-10-04 实测补记（A/B 切槽 / 刷分区 vs 整包 / host key）
+
+### 6.1 `misc` 是这套 A/B 的**单点**
+- U-Boot 环境里的 `bootargs` **本身不带槽信息**（实测只有
+  `storagemedia=emmc androidboot.storagemedia=emmc androidboot.mode=normal`）；
+  **槽后缀与 `root=PARTUUID=…` 是 U-Boot 每次从 `misc` 的 BCB 现拼进 cmdline 的**。
+  ⇒ `misc` 一坏必然 `No bootable slots found` + `FIT: No bootpartition` + 掉 fastboot。
+- 症状对照：正常启动的 cmdline 里有 `android_slotsufix=_b root=PARTUUID=…54aa`；
+  坏了就只剩 6.1 说的那半段。急救按 §5.2。
+
+### 6.2 切槽 = 改 `misc` 里两个槽的**优先级**
+- 出厂那份 `misc-assistant-ab.img` 是 **A prio=15 / B prio=14** ⇒ **默认起 A 槽**
+  （2026-10-04 实测：写它进板子后 cmdline 就是 `android_slotsufix=_a`）。
+- 切到 B：把 B 抬到 15、A 降到 14（`image/make-misc-img.py` 的 `SLOT0_PRIORITY` /
+  `SLOT1_PRIORITY` 是**模块常量**，不是命令行参数 —— 改常量再调 `build_metadata()`）
+  → 写进 `/dev/mmcblk0p2` → 重启即起 B 槽（实测 ✓，CRC 自检 ok）。
+- **板端从运行中的系统**写 BCB 的一行式（将来 OTA「指向新槽」就是这一步）：
+  ```
+  dd if=<misc.img> of=/dev/mmcblk0p2 bs=512 conv=fsync && sync && reboot
+  ```
+- 别用 `new-misc` 之外的东西试：写坏 `misc` 的表现**和"完全刷坏"一模一样**，
+  别误判成镜像问题（这次就绕过一圈）。
+
+### 6.3 刷写方式：**整包必然带 userdata**
+- `update-ab.img` 的 `package-file` 含 `userdata userdata.img` ⇒ **整包刷会写掉 `/data`**
+  （4.9 GB 模型、全部配置、日志都在那儿）。
+- 想保住 `/data` 只有两条路：**① 分区刷**（只勾 `boot_a|b` / `system_a|b` / `misc`…，
+  **不勾 `userdata`**）；**② 先删 userdata 再整包刷**。
+- 分区刷的一个事实：`system` 那份镜像只有 **925 MiB**（`rootfs.ext2`）而槽是 3 GiB ——
+  实测**没问题**（10-03 与 10-04 两版都是这么刷上来的），不必凑满槽。
+
+### 6.4 新 rootfs 会换 **sshd host key**
+- 刷完新镜像后 PC 侧第一次 ssh 会报 `WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!`
+  ⇒ **正常现象**（新 rootfs 重新生成密钥），不是中间人：
+  `ssh-keygen -R <板子IP>` 再连即可。它同时也是"确实起了新镜像"的旁证。
+
+

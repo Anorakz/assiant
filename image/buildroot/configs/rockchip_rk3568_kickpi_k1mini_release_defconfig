@@ -124,3 +124,18 @@ BR2_PACKAGE_WPA_SUPPLICANT_DBUS=y
 #    post-build 会装成 /root/.ssh/authorized_keys（0600）。
 # ---------------------------------------------------------------------------
 BR2_TARGET_GENERIC_ROOT_PASSWD="assistant"
+
+# ---------------------------------------------------------------------------
+#  T15-14：OTA 执行者 —— 瑞芯微官方的 Linux 升级工具
+# ---------------------------------------------------------------------------
+#  为什么：A/B 无线 OTA 的**板端那一半**就是它。出包在宿主侧（`./build.sh
+#  ota-updateimg` -> `device/rockchip/common/scripts/mk-updateimg.sh`），板端用
+#  `/usr/bin/rkupdate` 消费那个包。
+#  ⚠ 这个包**默认是关的**，所以在此之前板上 `command -v rkupdate` 是 none
+#    （2026-10-04 实测）。来源：`external/rkupdate` +
+#    `buildroot/package/rockchip/rkupdate/rkupdate.mk`（那个配方把它装到
+#    `$(TARGET_DIR)/usr/bin/rkupdate`，0755）。
+#  产物判据：镜像里 `/usr/bin/rkupdate` 在位；板上 `rkupdate --help` 能跑。
+# ---------------------------------------------------------------------------
+BR2_PACKAGE_RKUPDATE=y
+
