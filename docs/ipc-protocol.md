@@ -224,6 +224,19 @@ GUI 收到后按 `topic` 分发。**不认识的 topic 忽略**。
 > 那段说明同样适用）。**不认识的客户端忽略即可**。
 > ⚠ 板端实测：eth0/eth1 都是 `unavailable`，**wlan0 是唯一链路**。
 
+| `ota_state` | `ok` | bool | OTA/槽状态读到了没有（false 时看 `reason`）。**T15-14-a** |
+| `ota_state` | `current_slot` | string | 当前运行的 A/B 槽：`a` / `b` |
+| `ota_state` | `slots` | array | 两槽状态：`{name, priority, tries_remaining, successful_boot, bootable}`。**`bootable` = `priority>0 && (successful_boot \|\| tries_remaining>0)`** —— 这条判据 2026-10-04 在真板上观察到过（槽B `prio15/tries0/succ0` 被判死，引导器起了合法的 A 槽 ✓） |
+| `ota_state` | `last_boot` | string | 上一次启动的槽（`a` / `b`） |
+| `ota_state` | `misc_ok` / `misc_reason` | bool / string | `misc` 里的 A/B 元数据合不合法（不合法 = 引导器认不出槽 ⇒ `No bootable slots` ⇒ 掉 fastboot，见 runbook §5.2/§7.6） |
+| `ota_state` | `last_ota` | object | `/data/assistant/ota/state.json` 的内容（`step` / `target_slot` / `at` / `backup`），流程见 `docs/ota.md` |
+| `ota_state` | `confirm` | object | `/data/assistant/ota/confirm.json` 的内容（`ok` / `elapsed_s` / `marked` / `at`）—— **确认服务**的判定结果（判据：Agent 与 GUI 都 active 且 IPC 通 ✓） |
+
+⚠ 约定（与 `music` 同款）：
+- **变化才推**（去重键 = `ok` / 当前槽 / `state.json` 的 `step` / `confirm.ok` / 两槽 `tries` ✓）；
+- **客户端连上时补推一次**，而且**必须 force** ✗ —— 否则"状态没变"会被去重吞掉（T15-16 在音乐条上踩过同一个 bug ✓）；
+- GUI **只展示**：界面上**不提供"开始升级"按钮** ✓（升级是 root 级命令行动作，危险动作不该藏在设置页里）。
+
 ### `status.mode` 的取值
 
 **全大写**：`SLEEP`、`IDLE`、`STUDY`、`GAME`（常量 `MODE_*`，全集 `MODES`）。
