@@ -106,6 +106,10 @@ signals:
     void llmReceived(QJsonObject data);
     void wallpaperReceived(QJsonObject data);
     void musicReceived(QJsonObject data);
+    /// T15-14-a: OTA/槽状态（`{ok, current_slot, slots[], last_boot, misc_ok, misc_reason,
+    /// last_ota, confirm}`，字段表见 docs/ipc-protocol.md §3）。
+    /// ⚠ **只展示**：界面上不提供"开始升级"按钮 —— 升级是 root 级命令行动作。
+    void otaStateReceived(QJsonObject data);
     /// T11-7: B 站队列（载荷是 `{queue[], index, current, stream, …}`，
     /// 字段表见 docs/ipc-protocol.md §3）。负载里带数组，所以不像其它 topic
     /// 那样进 ViewState，而由视频区/封面区直接消化。

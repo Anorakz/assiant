@@ -44,6 +44,9 @@ class QListWidget;
 class QPushButton;
 class QScrollArea;
 class QSpinBox;
+// ⚠ T15-14-a：`buildOtaCard(QVBoxLayout*)` 的参数类型必须**前向声明**，否则编译器
+//   认不出它（实测报 `void SettingsPage::buildOtaCard(int*)` ✗ —— 真够吓人的 ✓）。
+class QVBoxLayout;
 
 namespace core {
 class ConfigStore;   ///< 只在私有方法签名里用到，所以前向声明（不必把 core 头拉进来）
@@ -65,6 +68,11 @@ public:
     /// Agent 的回执（MainWindow 收到 `config_result` 后调它）。
     /// ok=true -> 提示"已写入"并重新读一遍配置；false -> 把 Agent 的原话显示出来。
     void onConfigResult(const QJsonObject& result);
+
+    /// T15-14-a：OTA/槽状态（topic `ota_state`，字段见 docs/ipc-protocol.md §3）。
+    /// **只展示** —— 界面上没有"开始升级"的入口 ✓（升级是 root 级命令行动作）。
+    /// 缺字段/读不到时按"还不知道"显示，不报错 ✓。
+    void setOtaState(const QJsonObject& state);
 
     /// 把界面恢复成本页的默认值（不写文件，等用户点保存）
     void restoreDefaults();
@@ -147,6 +155,12 @@ protected:
 private:
     void build();
 
+    /// T15-14-a：「系统升级」卡（OTA/槽状态，**只展示**）。
+    /// @note 单独一个方法、而不是塞进 `build()` —— 那个函数早就贴着"超长函数（≥120 行）"
+    ///       那条启发式，而审计棘轮的 key 里**带行数**，往里加行会凭空多一条 ✗
+    ///       （T15-14-a 实测确认过 ✓）。所以 `build()` 里只留一行调用 ✓。
+    void buildOtaCard(QVBoxLayout* root);
+
     /// 载入 / 写出三张卡片（`study.*` / `bilibili.game_watch.*` + 凭据 / `profile.*`）。
     void loadCards(core::ConfigStore* store);
     /// 把三张卡片的当前值塞进 `store` 的待改列表（**不落盘**；就是发给 Agent 的 keys）。
@@ -169,6 +183,13 @@ private:
     QSpinBox* overlayIdle_ = nullptr;
     QComboBox* startPage_ = nullptr;
     QComboBox* inputSource_ = nullptr;
+
+    // ---- T15-14-a：OTA/槽状态（**只展示**；数据来自 topic `ota_state`）----
+    // 四个标签各管一块，`setOtaState()` 一次刷完 ✓（缺字段就显示"还不知道" ✓）。
+    QLabel* otaSlot_ = nullptr;      ///< 当前槽 + 两槽的 prio/tries/successful/可引导
+    QLabel* otaMisc_ = nullptr;      ///< `misc` 里的 A/B 元数据合不合法
+    QLabel* otaLast_ = nullptr;      ///< 最近一次 OTA（step / 目标槽 / 时间）
+    QLabel* otaConfirm_ = nullptr;   ///< 确认服务的判定（ok / 耗时 / 时间）
 
     // ---- 学习监督 ----
     QCheckBox* studyEnabled_ = nullptr;

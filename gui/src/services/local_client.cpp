@@ -37,6 +37,7 @@ const char kTopicStatus[]    = "status";
 const char kTopicLlm[]       = "llm";
 const char kTopicWallpaper[] = "wallpaper";
 const char kTopicMusic[]     = "music";
+const char kTopicOtaState[]  = "ota_state";   ///< T15-14-a：OTA/槽状态（只展示，界面不发起）
 const char kTopicBilibili[]  = "bilibili";   // T11-7: B 站队列/当前条/缓冲状态
 const char kTopicConfigResult[] = "config_result";   // T14-3: set_config 的回执
 const char kTopicServiceResult[] = "service_result"; // T14-3: llm_service 的回执
@@ -301,6 +302,10 @@ void LocalClient::processLine(const QByteArray& line)
         emit wallpaperReceived(data);
     } else if (topic == QLatin1String(kTopicMusic)) {
         emit musicReceived(data);
+    } else if (topic == QLatin1String(kTopicOtaState)) {
+        // T15-14-a: OTA/槽状态。**只展示** —— 升级是 root 级命令行动作，
+        // 界面上不提供"开始升级"按钮（见 docs/ipc-protocol.md §3 的约定）。
+        emit otaStateReceived(data);
     } else if (topic == QLatin1String(kTopicBilibili)) {
         emit bilibiliReceived(data);
     } else if (topic == QLatin1String(kTopicConfigResult)) {

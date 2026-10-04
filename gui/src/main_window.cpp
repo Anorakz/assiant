@@ -365,6 +365,9 @@ MainWindow::MainWindow(QWidget* parent)
             [this](const QJsonObject& d) { onMessage(QStringLiteral("wallpaper"), d); });
     connect(client_, &LocalClient::musicReceived, this,
             [this](const QJsonObject& d) { onMessage(QStringLiteral("music"), d); });
+    // T15-14-a: OTA/槽状态 —— 只交给设置页展示（MainWindow 不留状态：它不参与绘制）
+    connect(client_, &LocalClient::otaStateReceived, this,
+            [this](const QJsonObject& d) { onMessage(QStringLiteral("ota_state"), d); });
     connect(client_, &LocalClient::bilibiliReceived, this,
             [this](const QJsonObject& d) { onMessage(QStringLiteral("bilibili"), d); });
     // T14-3：两条回执按请求 id 的路由（`<prefix>-<n>`）—— 页面自己不认识就忽略
@@ -1193,6 +1196,13 @@ void MainWindow::onMessage(const QString& topic, const QJsonObject& data)
         }
         if (topic == QLatin1String("music")) {
             applyMusic(data);                      // T15-16：一条路走到底（推送与 --lyric-demo 共用）
+        }
+        if (topic == QLatin1String("ota_state")) {
+            // T15-14-a：设置页的「系统升级」块**只展示**（界面上没有开始升级的按钮 ✓）。
+            // 状态本身不留在这里 —— MainWindow 不参与它的绘制。
+            if (settingsPage_ != nullptr) {
+                settingsPage_->setOtaState(data);
+            }
         }
         // T11-7：B 站队列 —— 预览栏 + 地址栏 + 下区域封面，**同一份载荷**喂两处；
         //   `stream` 由视频区自己决定换不换源（板端是 FIFO 路径，不是 URL）。

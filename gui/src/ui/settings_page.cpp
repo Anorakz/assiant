@@ -102,6 +102,83 @@ SettingsPage::SettingsPage(QWidget* parent)
     build();
 }
 
+void SettingsPage::buildOtaCard(QVBoxLayout* root)
+{
+    // T15-14-a：系统升级（OTA/槽状态）—— **只展示**。
+    // 数据来自 Agent 推的 topic `ota_state`（字段表见 docs/ipc-protocol.md §3）。
+    // ⚠ 这里**没有**"开始升级"的按钮：升级是 root 级命令行动作，危险动作不该藏在设置页。
+    QVBoxLayout* otaBox = nullptr;
+    QFrame* card = makeCard(this, QStringLiteral("系统升级"), &otaBox);
+    const auto line = [this, card, otaBox](QLabel** target, const QString& text) {
+        *target = new QLabel(card);
+        (*target)->setObjectName(QStringLiteral("SysValueSmall"));
+        (*target)->setWordWrap(true);
+        (*target)->setText(text);
+        otaBox->addWidget(*target);
+    };
+    line(&otaSlot_, QStringLiteral("槽状态：还不知道（等 Agent 推 ota_state）"));
+    line(&otaMisc_, QStringLiteral("misc 元数据：还不知道"));
+    line(&otaLast_, QStringLiteral("最近一次 OTA：还没有记录"));
+    line(&otaConfirm_, QStringLiteral("确认结果：还没有记录"));
+    root->addWidget(card);
+}
+
+void SettingsPage::setOtaState(const QJsonObject& state)
+{
+    // ⚠ 不在这里建控件：卡片由 build() -> buildOtaCard() 建好（见头文件里的注解 ✓）。
+    if (otaSlot_ == nullptr) {
+        return;
+    }
+    const QString current = state.value(QStringLiteral("current_slot")).toString();
+    // ⚠ 不显式写 `QJsonArray` / `QStringList`：那要额外 include（实测编不过 ✗）。
+    //   用 `+=` 拼文本、`toArray()` 直接进 range-for，类型都由 Qt 头自己带 ✓。
+    QString slotText;
+    for (const QJsonValue& item : state.value(QStringLiteral("slots")).toArray()) {
+        const QJsonObject row = item.toObject();
+        const QString name = row.value(QStringLiteral("name")).toString();
+        const QString mark = (!current.isEmpty() && name == current)
+                                 ? QStringLiteral("（当前）") : QString();
+        slotText += QStringLiteral("槽%1%2：prio %3 · tries %4 · successful %5 · %6\n")
+                        .arg(name.isEmpty() ? QStringLiteral("?") : name, mark)
+                        .arg(row.value(QStringLiteral("priority")).toInt())
+                        .arg(row.value(QStringLiteral("tries_remaining")).toInt())
+                        .arg(row.value(QStringLiteral("successful_boot")).toInt())
+                        .arg(row.value(QStringLiteral("bootable")).toBool()
+                                 ? QStringLiteral("可引导")
+                                 : QStringLiteral("**判死**"));
+    }
+    if (slotText.isEmpty()) {
+        slotText = QStringLiteral("槽状态：读不到（Agent 那边 ok=%1 reason=%2）")
+                       .arg(state.value(QStringLiteral("ok")).toBool() ? QStringLiteral("true")
+                                                                      : QStringLiteral("false"),
+                            state.value(QStringLiteral("reason")).toString());
+    }
+    otaSlot_->setText(slotText.trimmed());
+
+    const bool miscOk = state.value(QStringLiteral("misc_ok")).toBool();
+    otaMisc_->setText(miscOk
+        ? QStringLiteral("misc 元数据：合法 ✓（A/B 元数据两份副本都在）")
+        : QStringLiteral("misc 元数据：**不合法** ✗ %1 —— 串口进 U-Boot 用备份整块写回（runbook §5.2）")
+              .arg(state.value(QStringLiteral("misc_reason")).toString()));
+
+    const QJsonObject last = state.value(QStringLiteral("last_ota")).toObject();
+    otaLast_->setText(last.isEmpty()
+        ? QStringLiteral("最近一次 OTA：还没有记录")
+        : QStringLiteral("最近一次 OTA：%1 → 目标槽 %2（%3）")
+              .arg(last.value(QStringLiteral("step")).toString(),
+                   last.value(QStringLiteral("target_slot")).toString(),
+                   last.value(QStringLiteral("at")).toString()));
+
+    const QJsonObject confirm = state.value(QStringLiteral("confirm")).toObject();
+    otaConfirm_->setText(confirm.isEmpty()
+        ? QStringLiteral("确认结果：还没有记录（判据：Agent 与 GUI 都 active 且 IPC 通）")
+        : QStringLiteral("确认结果：%1 · 耗时 %2 s · %3")
+              .arg(confirm.value(QStringLiteral("ok")).toBool() ? QStringLiteral("成功 ✓")
+                                                                : QStringLiteral("未通过 ✗"))
+              .arg(confirm.value(QStringLiteral("elapsed_s")).toDouble())
+              .arg(confirm.value(QStringLiteral("at")).toString()));
+}
+
 void SettingsPage::build()
 {
     // 本页的输入控件直接挂样式：全局表里 QComboBox 的规则在这条控件树上没吃住
@@ -390,7 +467,7 @@ void SettingsPage::build()
     startAgent_->setVisible(false);          // 只在需要时出现
     cfgBox->addWidget(startAgent_);
     root->addWidget(cfg);
-
+    buildOtaCard(root);                       // T15-14-a：系统升级卡（见头文件里为什么单独一个方法）
     QVBoxLayout* aboutBox = nullptr;
     QFrame* about = makeCard(this, QStringLiteral("关于"), &aboutBox);
     about_ = new QLabel(about);
