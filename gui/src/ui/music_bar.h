@@ -4,20 +4,32 @@
 //  下区域高度 192px（96×2）。内部分区**不是三等分**：
 //
 //      ┌───────────────────────────────────┬──────────────────┐
-//      │ 标题 / 歌手 · 专辑                  │                  │
-//      │ 进度 / 总时长                       │      歌词         │
+//      │ 标题 / 歌手 · 专辑                  │  当前那句歌词     │
+//      │ 进度 / 总时长                       │  下一句（灰）     │
 //      │ [上一首] [ ▶ ] [下一首]             │                  │
 //      └───────────────────────────────────┴──────────────────┘
 //        行1、行2 按内容高度（保持原有字号），行3 吃掉剩余高度，
 //        中间那颗播放/暂停按钮**略大**（56×56）。
 //
-//  数据来源只有协议 `music{title,playing}`；**控制类（上一首/暂停/下一首）
-//  协议里没有对应命令**，所以按方案 §7 做成"可点但只是给说明"的占位。
+//  T15-16 起这里**全部点亮**了（不再是占位块）：
+//    · 数据：`setMusic(整份 music 载荷)` —— 曲目/歌手/专辑/播放状态/进度时长；
+//    · 歌词：`setLyricsProvider()` + `setPosition()` —— 界面只认 D5 那个接口，
+//      "显示哪一句"是 `core::TimedLyrics` 算的（见 core/lyrics.h 的分层说明）；
+//    · 控制：三个按钮**发信号**，由主窗口转成现成的三条命令
+//      （`music_prev` / `music_play_pause` / `music_next`）—— 控件自己不碰 IPC。
+//
+//  ⚠ 进度条**不做时间外推**：位置由调用方算好再喂（`setProgress`）。这样控件是纯
+//    渲染层、单测里不用等时钟；外推与"暂停就不动"由主窗口那个 1 s 定时器负责。
 // ============================================================================
 #pragma once
 
+#include <QJsonObject>
 #include <QString>
 #include <QWidget>
+
+namespace core {
+class LyricsProvider;
+}
 
 class QLabel;
 class QProgressBar;
@@ -29,16 +41,29 @@ class MusicBar : public QWidget {
 public:
     explicit MusicBar(QWidget* parent = nullptr);
 
-    /// 协议 `music` 到达时调用。title 为空 = 没有曲目信息。
-    void setMusic(const QString& title, bool playing);
+    /// 协议 `music` 到达时调用（整份 `data`）。字段是**部分更新**：没带的保持原值。
+    void setMusic(const QJsonObject& music);
+
+    /// 进度（秒）。调用方自己外推后喂进来；`durationS <= 0` = 没有进度可显示。
+    void setProgress(double positionS, double durationS);
+
+    /// 歌词来源（D5 的 `core::LyricsProvider`）。不设 = 右列显示"歌词未接入"。
+    void setLyricsProvider(core::LyricsProvider* provider);
+
+    /// 当前播放位置（秒）—— 用它去问 provider"该显示哪句 / 下一句"。
+    void setPosition(double positionS);
+
+    /// 与 Agent 的链路状态：断连时三个控制按钮**禁用**（点了也发不出去）。
+    void setConnected(bool connected);
 
     bool hasMusic() const { return hasMusic_; }
+    bool playing() const { return playing_; }
+    bool connected() const { return connected_; }
     QString title() const;
-    /// 当前显示的占位说明（点击占位块后会有内容；供单测/验收核对）
-    QString noteText() const;
 
     // 供单测/验收演示直接拿控件
     QLabel* lyricsLabel() const { return lyrics_; }
+    QLabel* nextLyricsLabel() const { return nextLyrics_; }
     QLabel* titleLabel() const { return title_; }
     QLabel* artistLabel() const { return artist_; }
     QLabel* albumLabel() const { return album_; }
@@ -46,21 +71,20 @@ public:
     QProgressBar* progressBar() const { return progress_; }
     QPushButton* previousButton() const { return prev_; }
     QPushButton* nextButton() const { return next_; }
-    /// 中间那颗大的播放/暂停按钮（文本显示 ▶ / ⏸）
+    /// 中间那颗大的播放/暂停按钮（图标显示 ▶ / ⏸）
     QPushButton* playButton() const { return play_; }
 
-    /// 触发某个占位块的说明。what ∈ {歌词, 歌手, 专辑, 进度, 控制}。
-    /// 点击与"验收演示"都走这一个入口（单测也能直接调，不用模拟鼠标）。
-    void triggerPlaceholder(const QString& what);
-
 signals:
-    /// 点了"未接入"的占位区；what 说明是哪一块
-    void placeholderClicked(const QString& what);
+    /// 上一首 / 播放暂停 / 下一首（主窗口接上现成的三条命令）
+    void prevClicked();
+    void playPauseClicked();
+    void nextClicked();
 
 private:
-    void showNote(const QString& what, const QString& text);
+    void refreshLyrics();
 
-    QLabel* lyrics_ = nullptr;     ///< 右列：歌词（也是占位说明的显示位）
+    QLabel* lyrics_ = nullptr;      ///< 右列第一行：当前那句
+    QLabel* nextLyrics_ = nullptr;  ///< 右列第二行：下一句（灰）
     QLabel* title_ = nullptr;
     QLabel* artist_ = nullptr;
     QLabel* album_ = nullptr;
@@ -70,7 +94,10 @@ private:
     QPushButton* play_ = nullptr;
     QPushButton* next_ = nullptr;
 
+    core::LyricsProvider* provider_ = nullptr;
+    double position_ = 0.0;         ///< 最近一次喂进来的播放位置（秒）
+    double duration_ = 0.0;         ///< 最近一次知道的时长（秒）
     bool hasMusic_ = false;
     bool playing_ = false;
-    QString noteText_;             ///< 当前占位说明（空 = 没有点过占位块）
+    bool connected_ = false;        ///< 默认断连（还没收到任何链路消息）
 };

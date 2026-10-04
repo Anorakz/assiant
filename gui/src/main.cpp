@@ -97,7 +97,7 @@ struct Options {
     QString chatDemo;              ///< 非空 = 启动后走真实控件发这条消息（验收用）
     QString inputTypeDemo;         ///< 非空 = 启动后切到这个输入源（验收用）
     bool inputMenuDemo = false;    ///< 启动后展开输入源菜单（配合 scrot 抓图）
-    QString musicNoteDemo;         ///< 非空 = 启动后触发音乐条某个占位说明（验收用）
+    QString lyricDemo;             ///< 非空 = 灌一份假 music 载荷（有词|纯音乐|取不到，验收用）
     bool nextBilibiliDemo = false;  ///< 启动后点一下视频区"下一集"（验收用）
     bool prevBilibiliDemo = false;  ///< 启动后点一下视频区"上一集"（验收用）
     int bilibiliPickDemo = -1;      ///< >=0 时点一下预览栏第 N 格（验收用）
@@ -148,7 +148,7 @@ void printUsage()
         "  --chat-demo <文本>   启动后走真实输入框+发送按钮发一条（验收用）\n"
         "  --input-type-demo <terminal|keyboard>  启动后切到该输入源（验收用）\n"
         "  --input-menu-demo    启动后展开输入源菜单（配 --scrot 抓图）\n"
-        "  --music-note-demo <歌词|歌手|专辑|进度>  触发音乐条占位说明（验收用）\n"
+        "  --lyric-demo <有词|纯音乐|取不到>  灌一份假 music 载荷（不依赖 PC；验收用）\n"
         "  --video <文件>       主区视频源（本地文件；验收用）\n"
         "  --next-bilibili-demo 启动后点一下视频区「下一集」（验收用）\n"
         "  --prev-bilibili-demo 启动后点一下视频区「上一集」（验收用）\n"
@@ -235,10 +235,9 @@ Options parseArgs(int argc, char** argv)
                 optionValue(arg, QStringLiteral("--input-type-demo"), i, argc, argv, opt);
         } else if (arg == QLatin1String("--input-menu-demo")) {
             opt.inputMenuDemo = true;
-        } else if (arg == QLatin1String("--music-note-demo")
-                   || arg.startsWith(QLatin1String("--music-note-demo="))) {
-            opt.musicNoteDemo =
-                optionValue(arg, QStringLiteral("--music-note-demo"), i, argc, argv, opt);
+        } else if (arg == QLatin1String("--lyric-demo")
+                   || arg.startsWith(QLatin1String("--lyric-demo="))) {
+            opt.lyricDemo = optionValue(arg, QStringLiteral("--lyric-demo"), i, argc, argv, opt);
         } else if (arg == QLatin1String("--video") || arg.startsWith(QLatin1String("--video="))) {
             opt.videoFile = optionValue(arg, QStringLiteral("--video"), i, argc, argv, opt);
         } else if (arg == QLatin1String("--next-bilibili-demo")) {
@@ -875,9 +874,9 @@ int runGuiMode(const Options& opt, int argc, char** argv)
             QCoreApplication::exit(ok ? 0 : 3);
         });
     }
-    if (!opt.musicNoteDemo.isEmpty()) {
-        const QString what = opt.musicNoteDemo;
-        QTimer::singleShot(1600, &window, [&window, what]() { window.demoPlaceholderNote(what); });
+    if (!opt.lyricDemo.isEmpty()) {
+        const QString which = opt.lyricDemo;
+        QTimer::singleShot(1600, &window, [&window, which]() { window.demoLyrics(which); });
     }
     if (!opt.videoFile.isEmpty()) {
         window.setVideoSource(opt.videoFile);

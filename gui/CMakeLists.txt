@@ -72,6 +72,7 @@ add_library(gui_services STATIC
     src/core/idle_watcher.h
     src/core/idle_watcher.cpp
     src/core/lyrics.h
+    src/core/lyrics.cpp
     src/core/image_fit.h
     src/core/image_fit.cpp
     src/core/system_stats.h

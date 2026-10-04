@@ -1,63 +1,51 @@
 // ============================================================================
-//  gui/src/ui/music_bar.cpp — 音乐条实现（192px：左列三行 + 右列歌词）
+//  gui/src/ui/music_bar.cpp — 音乐条实现（192px：左列三行 + 右列两句歌词）
 //
-//  占位块（歌词/歌手/专辑/进度/控制）都能点，点了就在歌词位置给出说明 ——
-//  比 tooltip 好的一点是它能被 grab() 抓进验收截图。
+//  T15-16：占位块全部点亮。控件只做三件事：**渲染**、**发信号**、**问 provider 要两句词**。
+//  它不认识时钟（进度由调用方算好喂进来）、也不认识 IPC（命令由主窗口发）。
 // ============================================================================
 #include "ui/music_bar.h"
 
+#include "core/lyrics.h"
 #include "ui/icons.h"
 
-#include <QHBoxLayout>
-#include <QLabel>
-#include <QMouseEvent>
 #include <QColor>
+#include <QHBoxLayout>
 #include <QIcon>
+#include <QJsonValue>
+#include <QLabel>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSizePolicy>
 #include <QVBoxLayout>
 
-#include <functional>
-
 namespace {
 
-/// 点得动的标签：不引入 Q_OBJECT，直接挂一个回调
-class ClickableLabel : public QLabel {
-public:
-    explicit ClickableLabel(const QString& text, QWidget* parent = nullptr)
-        : QLabel(text, parent)
-    {
-        setCursor(Qt::PointingHandCursor);
-    }
-    std::function<void()> onClick;
+/// 颜色：正常前景 / 次要（灰）/ 提示（琥珀）/ 完全不可用（更暗）
+const QColor kPrimary(0xE6, 0xE6, 0xE6);
+const QColor kMuted(0x9A, 0xA1, 0xA9);
+const QColor kHint(0xF5, 0x9E, 0x0B);
+const QColor kOff(0x6F, 0x75, 0x7C);
 
-protected:
-    void mousePressEvent(QMouseEvent* event) override
-    {
-        if (onClick) {
-            onClick();
-        }
-        QLabel::mousePressEvent(event);
-    }
-};
-
-/// "未接入"小角标（方案 §7：占位必须可见地"不能当真"）
-QLabel* makeTag(const QString& text, QWidget* parent)
+/// 秒 -> `m:ss`（1:10）；不能显示时给 `—:—`。
+QString formatClock(double seconds)
 {
-    auto* tag = new QLabel(text, parent);
-    tag->setObjectName(QStringLiteral("PlaceholderTag"));
-    return tag;
+    if (!(seconds >= 0.0)) {                       // 负数与 NaN 都当"没有"
+        return QStringLiteral("—:—");
+    }
+    const int total = static_cast<int>(seconds + 0.5);
+    return QStringLiteral("%1:%2").arg(total / 60)
+                                  .arg(total % 60, 2, 10, QLatin1Char('0'));
 }
 
-/// 控制类按钮（上一首/下一首/播放暂停）：点了只给说明，不发协议
+/// 控制类按钮（上一首/下一首/播放暂停）
 ///
 /// 符号选择是按**板端字体实测**定的（fc-list 查码位）：
 ///   U+25B6 ▶ / U+25C0 ◀ 有；U+23F8 ⏸、U+23EE ⏮、U+23ED ⏭ **全都没有**（会画成豆腐块）。
-///   所以用 `|◀` / `||` / `▶` / `▶|` —— 只用被覆盖的码位。
-QPushButton* makeCtlButton(const QString& text, bool big, QWidget* parent)
+///   所以图标一律走 `ui::tintedIcon()`（自绘 SVG，不依赖字体码位）。
+QPushButton* makeCtlButton(bool big, QWidget* parent)
 {
-    auto* button = new QPushButton(text, parent);
+    auto* button = new QPushButton(parent);
     button->setObjectName(big ? QStringLiteral("MusicCtlMain") : QStringLiteral("MusicCtl"));
     const int side = big ? 56 : 44;        // 验收：播放/暂停略大一点
     button->setFixedSize(side, side);      // 方形标准按钮
@@ -80,13 +68,13 @@ MusicBar::MusicBar(QWidget* parent)
     leftBox->setContentsMargins(0, 0, 0, 0);
     leftBox->setSpacing(8);
 
-    // ---- 行 1：标题 / 歌手 · 专辑（按内容高度，字号保持原样）----
+    // ---- 行 1：标题 / 歌手 · 专辑 ----
     auto* row1 = new QWidget(left);
     auto* row1Box = new QVBoxLayout(row1);
     row1Box->setContentsMargins(0, 0, 0, 0);
     row1Box->setSpacing(2);
 
-    title_ = new QLabel(row1);
+    title_ = new QLabel(QStringLiteral("未播放"), row1);
     title_->setObjectName(QStringLiteral("MusicTitle"));
     row1Box->addWidget(title_);
 
@@ -95,76 +83,65 @@ MusicBar::MusicBar(QWidget* parent)
     subBox->setContentsMargins(0, 0, 0, 0);
     subBox->setSpacing(6);
 
-    auto* artistLabel = new ClickableLabel(QStringLiteral("歌手 —"), subRow);
-    artistLabel->setObjectName(QStringLiteral("MusicPlaceholder"));
-    artistLabel->onClick = [this]() { triggerPlaceholder(QStringLiteral("歌手")); };
-    artist_ = artistLabel;
-
-    auto* albumLabel = new ClickableLabel(QStringLiteral("专辑 —"), subRow);
-    albumLabel->setObjectName(QStringLiteral("MusicPlaceholder"));
-    albumLabel->onClick = [this]() { triggerPlaceholder(QStringLiteral("专辑")); };
-    album_ = albumLabel;
-
+    artist_ = new QLabel(QStringLiteral("歌手 —"), subRow);
+    artist_->setObjectName(QStringLiteral("MusicArtist"));
+    album_ = new QLabel(QStringLiteral("专辑 —"), subRow);
+    album_->setObjectName(QStringLiteral("MusicAlbum"));
     subBox->addWidget(artist_);
     subBox->addWidget(album_);
-    subBox->addWidget(makeTag(QStringLiteral("未接入"), subRow));
     subBox->addStretch(1);
     row1Box->addWidget(subRow);
     leftBox->addWidget(row1);
 
-    // ---- 行 2：进度 / 总时长（占位）----
+    // ---- 行 2：进度 / 总时长 ----
     auto* row2 = new QWidget(left);
     auto* row2Box = new QHBoxLayout(row2);
     row2Box->setContentsMargins(0, 0, 0, 0);
     row2Box->setSpacing(10);
 
-    auto* timeClickable = new ClickableLabel(QStringLiteral("—:— / —:—"), row2);
-    timeClickable->setObjectName(QStringLiteral("MusicPlaceholder"));
-    timeClickable->onClick = [this]() { triggerPlaceholder(QStringLiteral("进度")); };
-    time_ = timeClickable;
-
     progress_ = new QProgressBar(row2);
     progress_->setObjectName(QStringLiteral("MusicProgress"));
-    progress_->setRange(0, 100);
+    progress_->setRange(0, 1000);           // 千分比：1 s 的进度条也看得出动
     progress_->setValue(0);
     progress_->setTextVisible(false);
     progress_->setFixedHeight(10);
     progress_->setFixedWidth(150);          // 验收：缩短一半（原来铺满整行 ~290px）
-    progress_->setToolTip(QStringLiteral("播放进度未接入"));
+    progress_->setToolTip(QStringLiteral("还没有进度（还没起播 / 不是本机在放）"));
+
+    time_ = new QLabel(QStringLiteral("—:— / —:—"), row2);
+    time_->setObjectName(QStringLiteral("MusicTime"));
 
     row2Box->addWidget(progress_);
     row2Box->addWidget(time_);
-    row2Box->addWidget(makeTag(QStringLiteral("未接入"), row2));
     row2Box->addStretch(1);                 // 左对齐，剩余空间留在右边
     leftBox->addWidget(row2);
 
-    // ---- 行 3：上一首 / 播放暂停 / 下一首（协议无控制命令 → 占位）----
+    // ---- 行 3：上一首 / 播放暂停 / 下一首（发信号，由主窗口发命令）----
     auto* row3 = new QWidget(left);
     auto* row3Box = new QHBoxLayout(row3);
     row3Box->setContentsMargins(0, 6, 0, 0);
     row3Box->setSpacing(12);
 
-    prev_ = makeCtlButton(QString(), false, row3);
-    prev_->setIcon(ui::tintedIcon(QStringLiteral("prev"), QColor(0xE6, 0xE6, 0xE6)));
+    prev_ = makeCtlButton(false, row3);
+    prev_->setIcon(ui::tintedIcon(QStringLiteral("prev"), kPrimary));
     prev_->setIconSize(QSize(20, 20));
-    play_ = makeCtlButton(QString(), true, row3);
-    play_->setIcon(ui::tintedIcon(QStringLiteral("play"), QColor(0xE6, 0xE6, 0xE6)));
+    prev_->setToolTip(QStringLiteral("上一首"));
+    play_ = makeCtlButton(true, row3);
+    play_->setIcon(ui::tintedIcon(QStringLiteral("play"), kPrimary));
     play_->setIconSize(QSize(24, 24));
-    next_ = makeCtlButton(QString(), false, row3);
-    next_->setIcon(ui::tintedIcon(QStringLiteral("next"), QColor(0xE6, 0xE6, 0xE6)));
+    play_->setToolTip(QStringLiteral("播放 / 暂停"));
+    next_ = makeCtlButton(false, row3);
+    next_->setIcon(ui::tintedIcon(QStringLiteral("next"), kPrimary));
     next_->setIconSize(QSize(20, 20));
-    const auto asPlaceholder = [this](QPushButton* button) {
-        connect(button, &QPushButton::clicked, this,
-                [this]() { triggerPlaceholder(QStringLiteral("控制")); });
-    };
-    asPlaceholder(prev_);
-    asPlaceholder(play_);
-    asPlaceholder(next_);
+    next_->setToolTip(QStringLiteral("下一首"));
+
+    connect(prev_, &QPushButton::clicked, this, &MusicBar::prevClicked);
+    connect(play_, &QPushButton::clicked, this, &MusicBar::playPauseClicked);
+    connect(next_, &QPushButton::clicked, this, &MusicBar::nextClicked);
 
     row3Box->addWidget(prev_);
     row3Box->addWidget(play_);
     row3Box->addWidget(next_);
-    row3Box->addWidget(makeTag(QStringLiteral("未接入"), row3));
     row3Box->addStretch(1);
     leftBox->addWidget(row3, 1);           // 行 3 吃掉剩余高度（不是三等分）
     root->addWidget(left, 3);
@@ -175,27 +152,28 @@ MusicBar::MusicBar(QWidget* parent)
     rightBox->setContentsMargins(0, 0, 0, 0);
     rightBox->setSpacing(4);
 
-    auto* lyricsClickable = new ClickableLabel(QStringLiteral("歌词未接入"), right);
-    lyricsClickable->setObjectName(QStringLiteral("MusicPlaceholder"));
-    lyricsClickable->onClick = [this]() { triggerPlaceholder(QStringLiteral("歌词")); };
-    // ⚠ 不许让提示文本驱动布局宽度：否则一句长的占位说明会把整个窗口撑宽
+    lyrics_ = new QLabel(QStringLiteral("歌词未接入"), right);
+    lyrics_->setObjectName(QStringLiteral("MusicLyric"));
+    // ⚠ 不许让歌词/提示文本驱动布局宽度：否则一句长词会把整个窗口撑宽
     //   （T7 出图时实测 1280 → 1290）。让它在拉伸区里自己收缩。
-    lyricsClickable->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    lyricsClickable->setWordWrap(true);
-    lyricsClickable->setAlignment(Qt::AlignTop | Qt::AlignLeft);
-    lyrics_ = lyricsClickable;
+    lyrics_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    lyrics_->setWordWrap(true);
+    lyrics_->setAlignment(Qt::AlignTop | Qt::AlignLeft);
 
-    auto* lyricsRow = new QWidget(right);
-    auto* lyricsRowBox = new QHBoxLayout(lyricsRow);
-    lyricsRowBox->setContentsMargins(0, 0, 0, 0);
-    lyricsRowBox->setSpacing(6);
-    lyricsRowBox->addWidget(lyrics_, 1);
-    lyricsRowBox->addWidget(makeTag(QStringLiteral("未接入"), lyricsRow), 0, Qt::AlignTop);
-    rightBox->addWidget(lyricsRow);
+    nextLyrics_ = new QLabel(QString(), right);
+    nextLyrics_->setObjectName(QStringLiteral("MusicLyricNext"));
+    nextLyrics_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    nextLyrics_->setWordWrap(true);
+    nextLyrics_->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+    nextLyrics_->setStyleSheet(QStringLiteral("color:#9AA1A9; font-size:12px;"));
+
+    rightBox->addWidget(lyrics_);
+    rightBox->addWidget(nextLyrics_);
     rightBox->addStretch(1);
     root->addWidget(right, 2);
 
-    setMusic(QString(), false);
+    setConnected(false);                  // 还没收到链路消息：按钮先按不动
+    setMusic(QJsonObject());              // 空载荷 = 回到"未播放"
 }
 
 QString MusicBar::title() const
@@ -203,66 +181,144 @@ QString MusicBar::title() const
     return title_ != nullptr ? title_->text() : QString();
 }
 
-QString MusicBar::noteText() const
+void MusicBar::setMusic(const QJsonObject& music)
 {
-    return noteText_;
-}
-
-void MusicBar::triggerPlaceholder(const QString& what)
-{
-    if (what == QStringLiteral("歌词")) {
-        showNote(what, QStringLiteral("歌词来源未接入（D5 已预留 LyricsProvider 接口）"));
-    } else if (what == QStringLiteral("歌手")) {
-        showNote(what, QStringLiteral("歌手信息未接入（协议 music 只有 title/playing）"));
-    } else if (what == QStringLiteral("专辑")) {
-        showNote(what, QStringLiteral("专辑信息未接入（协议 music 只有 title/playing）"));
-    } else if (what == QStringLiteral("进度")) {
-        showNote(what, QStringLiteral("播放进度未接入（协议 music 无 position/duration）"));
-    } else if (what == QStringLiteral("控制")) {
-        showNote(what, QStringLiteral("音乐控制未接入（协议暂无 上一首/暂停/下一首 命令）"));
+    const QJsonValue title = music.value(QStringLiteral("title"));
+    if (title.isString()) {
+        hasMusic_ = !title.toString().isEmpty();
+        title_->setText(hasMusic_ ? title.toString() : QStringLiteral("未播放"));
     }
-}
-
-void MusicBar::showNote(const QString& what, const QString& text)
-{
-    noteText_ = text;
-    if (lyrics_ != nullptr) {
-        lyrics_->setText(text);
-        lyrics_->setStyleSheet(QStringLiteral("color:#F59E0B;"));
+    const QJsonValue playing = music.value(QStringLiteral("playing"));
+    if (playing.isBool()) {
+        playing_ = playing.toBool();
     }
-    emit placeholderClicked(what);
-}
-
-void MusicBar::setMusic(const QString& title, bool playing)
-{
-    hasMusic_ = !title.isEmpty();
-    playing_ = playing;
-
-    // 收到新的 music 数据就把占位说明清掉，回到正常显示
-    noteText_.clear();
-    if (lyrics_ != nullptr) {
-        lyrics_->setText(QStringLiteral("歌词未接入"));
-        lyrics_->setStyleSheet(QString());
+    const QJsonValue artist = music.value(QStringLiteral("artist"));
+    if (artist.isString()) {
+        const QString name = artist.toString().trimmed();
+        artist_->setText(name.isEmpty() ? QStringLiteral("歌手 —")
+                                        : QStringLiteral("歌手 %1").arg(name));
+    }
+    const QJsonValue album = music.value(QStringLiteral("album"));
+    if (album.isString()) {
+        const QString name = album.toString().trimmed();
+        album_->setText(name.isEmpty() ? QStringLiteral("专辑 —")
+                                       : QStringLiteral("专辑 %1").arg(name));
     }
 
-    if (title_ != nullptr) {
-        title_->setText(hasMusic_ ? title : QStringLiteral("未播放"));
+    // 进度：协议里是"部分更新"，但 position/duration 总是成对出现（同一条 snapshot）
+    const QJsonValue position = music.value(QStringLiteral("position_s"));
+    const QJsonValue duration = music.value(QStringLiteral("duration_s"));
+    if (position.isDouble() || duration.isDouble()) {
+        setProgress(position.toDouble(0.0), duration.toDouble(0.0));
     }
+
+    // 中间大按钮兼作状态显示
     if (play_ != nullptr) {
-        // 中间大按钮兼作状态显示（可点，但点了只给"未接入"说明）
-        // T14/验收：一律用**按按钮前景色染色**的单色图标（不再用 — / || / ▶ 这些文字符号）
-        play_->setText(QString());
         if (!hasMusic_) {
-            // 没曲目：暗色播放图标（以前是"—"，看着像"圆里一道横"，看不懂）
-            play_->setIcon(ui::tintedIcon(QStringLiteral("play"), QColor(0x6F, 0x75, 0x7C)));
-        } else if (playing) {
-            play_->setIcon(ui::tintedIcon(QStringLiteral("pause"), QColor(0xE6, 0xE6, 0xE6)));
+            play_->setIcon(ui::tintedIcon(QStringLiteral("play"), kOff));
+        } else if (playing_) {
+            play_->setIcon(ui::tintedIcon(QStringLiteral("pause"), kPrimary));
         } else {
-            play_->setIcon(ui::tintedIcon(QStringLiteral("play"), QColor(0xE6, 0xE6, 0xE6)));
+            play_->setIcon(ui::tintedIcon(QStringLiteral("play"), kPrimary));
         }
     }
-    if (progress_ != nullptr) {
-        progress_->setValue(0);      // 协议没有进度，横条保持 0 且不可拖
-        progress_->setEnabled(false);
+}
+
+void MusicBar::setProgress(double positionS, double durationS)
+{
+    position_ = positionS;
+    duration_ = durationS;
+    const bool known = durationS > 0.0;
+    if (time_ != nullptr) {
+        // 时长不知道（没起播 / 不是本机在放）就连位置都不显示 —— 显示 "0:00 / 0:00"
+        // 会让人以为"正在播但停在 0 秒"。
+        time_->setText(known ? QStringLiteral("%1 / %2").arg(formatClock(positionS),
+                                                           formatClock(durationS))
+                             : QStringLiteral("—:— / —:—"));
+        time_->setStyleSheet(known ? QString() : QStringLiteral("color:#9AA1A9;"));
     }
+    if (progress_ != nullptr) {
+        progress_->setEnabled(known);
+        int permille = 0;
+        if (known) {
+            const double ratio = qBound(0.0, positionS / durationS, 1.0);
+            permille = static_cast<int>(ratio * 1000.0 + 0.5);
+        }
+        progress_->setValue(permille);
+        progress_->setToolTip(known ? QStringLiteral("%1 / %2")
+                                          .arg(formatClock(positionS), formatClock(durationS))
+                                    : QStringLiteral("还没有进度（还没起播 / 不是本机在放）"));
+    }
+}
+
+void MusicBar::setLyricsProvider(core::LyricsProvider* provider)
+{
+    provider_ = provider;
+    if (provider_ != nullptr) {
+        provider_->setPosition(position_);   // 先把"现在放到哪了"喂进去再问
+    }
+    refreshLyrics();
+}
+
+void MusicBar::setPosition(double positionS)
+{
+    position_ = positionS;
+    if (provider_ != nullptr) {
+        provider_->setPosition(positionS);
+    }
+    refreshLyrics();
+}
+
+void MusicBar::setConnected(bool connected)
+{
+    connected_ = connected;
+    for (QPushButton* button : {prev_, play_, next_}) {
+        if (button == nullptr) {
+            continue;
+        }
+        button->setEnabled(connected);
+        if (!connected) {
+            button->setToolTip(QStringLiteral("还没连上 Agent —— 音乐控制暂时按不动"));
+        }
+    }
+    if (connected) {
+        if (prev_ != nullptr) {
+            prev_->setToolTip(QStringLiteral("上一首"));
+        }
+        if (play_ != nullptr) {
+            play_->setToolTip(QStringLiteral("播放 / 暂停"));
+        }
+        if (next_ != nullptr) {
+            next_->setToolTip(QStringLiteral("下一首"));
+        }
+    }
+}
+
+void MusicBar::refreshLyrics()
+{
+    if (lyrics_ == nullptr || nextLyrics_ == nullptr) {
+        return;
+    }
+    if (provider_ == nullptr) {
+        lyrics_->setText(QStringLiteral("歌词未接入"));
+        lyrics_->setStyleSheet(QString());
+        nextLyrics_->clear();
+        return;
+    }
+    if (!provider_->available()) {
+        // 没歌词：有话说就显示那句话（琥珀），否则是"还没取到"（灰点，别让人以为坏了）
+        const QString reason = provider_->reason();
+        if (reason.isEmpty()) {
+            lyrics_->setText(QStringLiteral("♪"));
+            lyrics_->setStyleSheet(QStringLiteral("color:#9AA1A9;"));
+        } else {
+            lyrics_->setText(reason);
+            lyrics_->setStyleSheet(QStringLiteral("color:#F59E0B;"));
+        }
+        nextLyrics_->clear();
+        return;
+    }
+    lyrics_->setText(provider_->currentLine());
+    lyrics_->setStyleSheet(QString());
+    nextLyrics_->setText(provider_->nextLine());
 }

@@ -319,6 +319,27 @@ T8-5b 合并成三个工具后：**一次 `next_music(action="enqueue")` 就能�
   **数分钟**，这是 0.6B + RK3568 的硬现实，不是 bug；T8-5b 同时在查"工具路径上的隐藏思考"
   （`reasoning_content`，见 [llm.md](llm.md) §5.2）。
 
+### 5.1 歌词（T15-16）
+
+数据、节奏、显示三层都定死了，**别把歌词塞进轮询**：
+
+| 环 | 怎么做的 | 为什么 |
+| --- | --- | --- |
+| **取** | 换歌时 `MusicPlayer.ensure_lyric()` 走一趟 `neteasecli --json track lyric <id>`（`{lrc, tlyric, hasLyric, hasTranslation}`） | 一次 `track lyric` 与 `player status` 同量级；放 3 s 轮询里等于把 PC 的 sshd 敲爆 |
+| **缓存/退避** | 同一首只拉一次；失败后 **300 s** 不再试（到点自己再试，PC 回来就恢复） | 歌词是锦上添花，不通时不该刷屏刷 ssh；失败原因**同一条只记一行日志** |
+| **解析** | `agent/core/lyrics.py::parse_lrc()`：`[mm:ss.xx|xxx]`、一行多时间戳、`[offset:±ms]`、译文按时间戳合并、**只有时间戳的行（间奏）不产出行**、坏行跳过且**绝不抛** | 真数据里这几种形状都有（夹具 `tests/data/lyrics/` 就是从 PC 真拉的那首剪的） |
+| **有没有译文** | 按**解析出来的内容**判，不看 netease 的 `hasTranslation` 旗标 | 实测它会撒谎（《晴天》报 `true` 但译文全是空行） |
+| **推** | 随 `music` 推四个字段：`lyric_ok` / `lyric_lines` / `lyric_rev` / `lyric_reason`（[`ipc-protocol.md` §3](ipc-protocol.md)） | 一条只推一次，**不跟进度流式推** |
+| **选行** | GUI 侧：`position_s` 当锚点 + 自己的 1 s 定时器外推，`core::TimedLyrics` 在时间轴里选"当前句 / 下一句"；`lyric_rev` 变了就整份换掉 | 3 s 才推一次位置，光等推送歌词会晚一句；本地选行还能把定时器**只定到下一句的时间戳** |
+| **显示** | **优先译文**：`tr` 非空取 `tr`，否则取原文；右列两行（当前句 + 下一句灰字） | 你 2026-10-04 定的口径 |
+| **对轴** | 配置键 `music.lyric_offset_ms`（**root 级**，正值 = 歌词提前；与 LRC 自己的 `[offset:]` 同号可叠加） | PC 出声 + ssh 往返会让歌词略晚，差多少只有耳朵知道 |
+| **三态** | 有词 / 纯音乐（`没有歌词`）/ 取不到（`歌词取不到（…）`）；`reason` 为空 = **还没取到** | 界面要能区分"这首歌没词"和"我还没拿到" |
+
+代码落点：`agent/core/lyrics.py`（解析）、`agent/core/music.py::ensure_lyric()`（取+缓存+退避）、
+`gui/src/core/lyrics.{h,cpp}`（时间轴与选行）、`gui/src/ui/music_bar.cpp`（显示）；
+测试 `tests/test_lyrics.py`、`tests/test_music_player.py`、`gui/tests/test_lyrics.cpp`、
+`gui/tests/test_bottom_bar.cpp`。验收开关：`agent_gui --lyric-demo <有词|纯音乐|取不到>`。
+
 ## 6. 失败都要"能照做"（板端排障四类）
 
 | 症状 | 板端会说什么 |

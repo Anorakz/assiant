@@ -351,6 +351,10 @@ MainWindow::MainWindow(QWidget* parent)
         if (up) {
             everConnected_ = true;
         }
+        // T15-16：链接一通/一断，音乐条那三个按钮就跟着可用/禁用
+        if (BottomBar* bar = bottomBar(); bar != nullptr && bar->musicBar() != nullptr) {
+            bar->musicBar()->setConnected(up);
+        }
         refreshLinkState();
     });
     connect(client_, &LocalClient::statusReceived, this,
@@ -486,12 +490,40 @@ MainWindow::MainWindow(QWidget* parent)
             sendToAgent(QStringLiteral("bilibili_viewport"),
                         QJsonObject{{QStringLiteral("visible"), visible}});
         });
+
         // 真实进度回报（不进 LLM：这是 Agent 自己要看的事实）
         connect(video, &VideoPanel::videoStateReported, this,
                 [this](qint64 positionMs, qint64 durationMs, bool playing, bool eof) {
                     sendToAgent(QStringLiteral("video_state"),
                                 bilibili::videoStatePayload(positionMs, durationMs, playing, eof));
                 });
+    }
+
+    // ---- T15-16：音乐条三个按钮 → 现成的三条命令（**不新增协议**）----
+    //   ⚠ 控件只发信号、命令在这里发（与 B 站那几条同一个路子）：`sendToAgent()` 会
+    //     处理"还没连上 Agent"的情况（往对话区写一句"没发出去"）。
+    if (mainPage_ != nullptr && mainPage_->bottomBar() != nullptr
+        && mainPage_->bottomBar()->musicBar() != nullptr) {
+        MusicBar* music = mainPage_->bottomBar()->musicBar();
+        connect(music, &MusicBar::prevClicked, this,
+                [this]() { sendToAgent(QStringLiteral("music_prev")); });
+        connect(music, &MusicBar::playPauseClicked, this,
+                [this]() { sendToAgent(QStringLiteral("music_play_pause")); });
+        connect(music, &MusicBar::nextClicked, this,
+                [this]() { sendToAgent(QStringLiteral("music_next")); });
+
+        // ---- T15-16：歌词与进度的那条线 ----
+        //   · `musicLyrics_` 收 `lyric_*` 字段（rev 变了才整份换）；
+        //   · provider 是 D5 接口的真实现 —— 音乐条只按位置问它"该显示哪两句"；
+        //   · 1 s 定时器：**进度条与歌词都靠它走**。协议 3 s 才推一次位置，
+        //     光等推送的话进度条一顿一顿、歌词还会晚一句；本地时钟外推就没这问题，
+        //     每次收到推送再重新锚定一次（消漂移）。
+        musicLyricsProvider_.setSource(&musicLyrics_);
+        music->setLyricsProvider(&musicLyricsProvider_);
+        musicTick_ = new QTimer(this);
+        musicTick_->setInterval(1000);
+        connect(musicTick_, &QTimer::timeout, this, &MainWindow::tickMusic);
+        musicTick_->start();
     }
 
     // T9：内嵌控制条的 活动/锁定 —— **自己的 watcher、自己的 idle_ms**，
@@ -1009,12 +1041,101 @@ BottomBar* MainWindow::bottomBar() const
     return (mainPage_ != nullptr) ? mainPage_->bottomBar() : nullptr;
 }
 
-void MainWindow::demoPlaceholderNote(const QString& what)
+void MainWindow::applyMusic(const QJsonObject& data)
 {
     BottomBar* bar = bottomBar();
-    if (bar != nullptr && bar->musicBar() != nullptr) {
-        bar->musicBar()->triggerPlaceholder(what);
+    MusicBar* music = (bar != nullptr) ? bar->musicBar() : nullptr;
+    if (music == nullptr) {
+        return;
     }
+    music->setMusic(data);                       // 曲目/歌手/专辑/播放状态（见 music_bar.h）
+    music->setConnected(agentUp_);
+
+    const QJsonValue duration = data.value(QStringLiteral("duration_s"));
+    if (duration.isDouble()) {
+        musicDuration_ = duration.toDouble();
+    }
+    const QJsonValue playing = data.value(QStringLiteral("playing"));
+    if (playing.isBool()) {
+        musicPlaying_ = playing.toBool();
+    }
+    const QJsonValue position = data.value(QStringLiteral("position_s"));
+    if (position.isDouble()) {
+        // 收到的是**真值**：重新锚定，之后靠本地时钟外推（见 musicPosition()）
+        musicAnchorPosition_ = position.toDouble();
+        musicAnchorMs_ = QDateTime::currentMSecsSinceEpoch();
+    }
+    musicLyrics_.applyPayload(data);             // 曲目/歌词没变 -> 它自己会什么都不做
+    pushMusicClock();                            // 立刻画一次，别等下一秒
+}
+
+void MainWindow::tickMusic()
+{
+    pushMusicClock();
+}
+
+void MainWindow::pushMusicClock()
+{
+    double position = musicPosition();
+    if (musicDuration_ > 0.0) {
+        position = qMin(position, musicDuration_);
+    }
+    BottomBar* bar = bottomBar();
+    MusicBar* music = (bar != nullptr) ? bar->musicBar() : nullptr;
+    if (music == nullptr) {
+        return;
+    }
+    music->setProgress(position, musicDuration_);
+    music->setPosition(position);                // 顺带让它去问歌词"该显示哪句"
+}
+
+double MainWindow::musicPosition() const
+{
+    if (!musicPlaying_ || musicAnchorMs_ <= 0) {
+        return musicAnchorPosition_;             // 暂停/不知道：停在锚点上不动
+    }
+    const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - musicAnchorMs_;
+    return musicAnchorPosition_ + static_cast<double>(qMax<qint64>(0, elapsed)) / 1000.0;
+}
+
+void MainWindow::demoLyrics(const QString& which)
+{
+    const auto row = [](double t, const QString& text, const QString& tr) {
+        QJsonObject out;
+        out.insert(QStringLiteral("t"), t);
+        out.insert(QStringLiteral("text"), text);
+        if (!tr.isEmpty()) {
+            out.insert(QStringLiteral("tr"), tr);
+        }
+        return out;
+    };
+    QJsonObject payload;
+    payload.insert(QStringLiteral("track_id"), QStringLiteral("186016"));
+    payload.insert(QStringLiteral("title"), QStringLiteral("晴天"));
+    payload.insert(QStringLiteral("artist"), QStringLiteral("周杰伦"));
+    payload.insert(QStringLiteral("album"), QStringLiteral("叶惠美"));
+    payload.insert(QStringLiteral("playing"), true);
+    payload.insert(QStringLiteral("position_s"), 30.0);
+    payload.insert(QStringLiteral("duration_s"), 269.0);
+    if (which == QStringLiteral("有词")) {
+        QJsonArray rows;
+        rows.append(row(0.0, QStringLiteral("作词 : 周杰伦"), QString()));
+        rows.append(row(28.95, QStringLiteral("故事的小黄花"), QStringLiteral("The little yellow flower")));
+        rows.append(row(32.38, QStringLiteral("从出生那年就飘着"), QString()));
+        rows.append(row(35.87, QStringLiteral("童年的荡秋千"), QString()));
+        payload.insert(QStringLiteral("lyric_ok"), true);
+        payload.insert(QStringLiteral("lyric_rev"), 1);
+        payload.insert(QStringLiteral("lyric_lines"), rows);
+    } else if (which == QStringLiteral("纯音乐")) {
+        payload.insert(QStringLiteral("lyric_ok"), false);
+        payload.insert(QStringLiteral("lyric_rev"), 2);
+        payload.insert(QStringLiteral("lyric_reason"), QStringLiteral("没有歌词"));
+    } else {
+        payload.insert(QStringLiteral("lyric_ok"), false);
+        payload.insert(QStringLiteral("lyric_rev"), 3);
+        payload.insert(QStringLiteral("lyric_reason"), QStringLiteral("歌词取不到（PC 离线）"));
+    }
+    applyMusic(payload);                         // 与真推送同一条路
 }
 
 void MainWindow::demoSend(const QString& text)
@@ -1064,9 +1185,8 @@ void MainWindow::onMessage(const QString& topic, const QJsonObject& data)
         if (topic == QLatin1String("wallpaper")) {
             setWallpaperFromPath(view_.wallpaperPath(), view_.wallpaperIndex());
         }
-        if (topic == QLatin1String("music") && mainPage_->bottomBar() != nullptr
-            && mainPage_->bottomBar()->musicBar() != nullptr) {
-            mainPage_->bottomBar()->musicBar()->setMusic(view_.musicTitle(), view_.musicPlaying());
+        if (topic == QLatin1String("music")) {
+            applyMusic(data);                      // T15-16：一条路走到底（推送与 --lyric-demo 共用）
         }
         // T11-7：B 站队列 —— 预览栏 + 地址栏 + 下区域封面，**同一份载荷**喂两处；
         //   `stream` 由视频区自己决定换不换源（板端是 FIFO 路径，不是 URL）。

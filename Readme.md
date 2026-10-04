@@ -141,7 +141,7 @@ agent/
 │   ├── config-sources.md        # 配置来源: 谁写 / 谁读 / 谁派生
 │   ├── cli.md                   # 板端控制 CLI (assistant) 使用手册
 │   ├── tagging.md               # 壁纸标签化: 词表 / wall_data.jsonl / IP 检索 / 三格窗口与画像挑图 (T7/T10-3)
-│   ├── music.md                 # 音乐: 板端 ssh 调 PC neteasecli / 本地库 / 工具四件套 / 自动补歌 (T8/T10-4)
+│   ├── music.md                 # 音乐: 板端 ssh 调 PC neteasecli / 本地库 / 工具四件套 / 自动补歌 / 歌词 (T8/T10-4/T15-16)
 │   ├── profile.md               # 用户画像: 纯对话记忆 / IP·歌手权重 / 负反馈两层清零 / 心情 / **谁在消费它** (T9/T10)
 │   ├── bilibili.md              # B 站视频: 队列滑动窗口 / 缓冲走本机 HTTP 的来龙去脉 / 清晰度与 cookie 真相 / 双路认游戏 / 实测数字 (T11)
 │   ├── study.md                 # 学习内容监督: 相对分口径 / 升级链 / 阈值自适应护栏 / 管线与几何 / 已知边界 (T13)

@@ -1,10 +1,12 @@
 // ============================================================================
-//  gui/tests/test_bottom_bar.cpp — 下区域（音乐条 / 封面）控件级测试（T7）
+//  gui/tests/test_bottom_bar.cpp — 下区域（音乐条 / 封面）控件级测试（T7 / T15-16）
 //
-//  覆盖：music 数据 → 曲目名与播放徽标；占位块点击 → 说明文案 + 信号；
-//        GAME ↔ 非游戏 的页面互斥切换；歌词接口的占位实现。
-//        T11-7：封面页从"未接入"占位换成真控件（BilibiliCover）后的那几条。
+//  覆盖：music 载荷 → 曲目名 / 歌手 / 专辑 / 进度（T15-16 起全部点亮）；
+//        三个控制按钮 → **各自的信号**（由主窗口转成现成命令）；
+//        断连时按钮禁用；歌词两行（真 `TimedLyrics` + `TimedLyricsProvider`）与
+//        "为什么没有歌词"的三种态；GAME ↔ 非游戏 的页面互斥切换；封面页那几条。
 // ============================================================================
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
 #include <QProgressBar>
@@ -16,14 +18,55 @@
 #include "ui/bottom_bar.h"
 #include "ui/music_bar.h"
 
+namespace {
+
+/// 一条 `music` 载荷的替身（只带测试要看的字段；其余省略 = 部分更新）
+QJsonObject music(const QString& title, bool playing, const QString& artist = QString(),
+                  const QString& album = QString(), double position = -1.0,
+                  double duration = -1.0)
+{
+    QJsonObject out;
+    out.insert(QStringLiteral("title"), title);
+    out.insert(QStringLiteral("playing"), playing);
+    if (!artist.isNull()) {
+        out.insert(QStringLiteral("artist"), artist);
+    }
+    if (!album.isNull()) {
+        out.insert(QStringLiteral("album"), album);
+    }
+    if (position >= 0.0) {
+        out.insert(QStringLiteral("position_s"), position);
+    }
+    if (duration >= 0.0) {
+        out.insert(QStringLiteral("duration_s"), duration);
+    }
+    return out;
+}
+
+QJsonObject lyricRow(double t, const QString& text, const QString& tr = QString())
+{
+    QJsonObject row;
+    row.insert(QStringLiteral("t"), t);
+    row.insert(QStringLiteral("text"), text);
+    if (!tr.isEmpty()) {
+        row.insert(QStringLiteral("tr"), tr);
+    }
+    return row;
+}
+
+} // namespace
+
 class TestBottomBar : public QObject {
     Q_OBJECT
 
 private slots:
     void musicUpdatesTitleAndState();
     void playButtonIsBiggerAndShowsAction();
-    void controlButtonsArePlaceholders();
-    void placeholderClickShowsNote();
+    void musicLightsUpArtistAlbumAndProgress();
+    void controlButtonsEmitTheirOwnSignals();
+    void controlButtonsAreDisabledWhileDisconnected();
+    void lyricsShowTwoLinesFromTheProvider();
+    void lyricsExplainWhyTheyAreMissing();
     void gameModeSwitchesToCoverPage();
     void nullLyricsProviderIsUnavailable();
     void coverPageIsTheRealWidgetAndSaysWhereItComesFrom();
@@ -34,27 +77,24 @@ private slots:
 void TestBottomBar::musicUpdatesTitleAndState()
 {
     MusicBar bar;
-    // 还没收到 music：显示"未播放"，大按钮显示 —
+    // 还没收到 music：显示"未播放"，大按钮给播放图标
     QCOMPARE(bar.title(), QStringLiteral("未播放"));
     QVERIFY(!bar.hasMusic());
-    // T14 起播放键是**图标**（不再是 — / || / ▶ 文字符号）
     QVERIFY(!bar.playButton()->icon().isNull());
     QCOMPARE(bar.playButton()->text(), QString());
 
-    bar.setMusic(QStringLiteral("夜曲"), true);
+    bar.setMusic(music(QStringLiteral("夜曲"), true));
     QVERIFY(bar.hasMusic());
+    QVERIFY(bar.playing());
     QCOMPARE(bar.title(), QStringLiteral("夜曲"));
-    QVERIFY(!bar.playButton()->icon().isNull());      // 在播 → 按钮给"暂停"动作
-    QCOMPARE(bar.artistLabel()->text(), QStringLiteral("歌手 —")); // 歌手仍是占位
-    QCOMPARE(bar.albumLabel()->text(), QStringLiteral("专辑 —"));
-    QVERIFY(bar.progressBar() != nullptr);
-    QVERIFY(!bar.progressBar()->isEnabled());                     // 进度未接入：不可交互
+    QVERIFY(!bar.playButton()->icon().isNull());                  // 在播 -> 图标是"暂停"
 
-    bar.setMusic(QStringLiteral("夜曲"), false);
-    QVERIFY(!bar.playButton()->icon().isNull());                // 已暂停 → 播放图标
+    bar.setMusic(music(QStringLiteral("夜曲"), false));
+    QVERIFY(!bar.playing());
+    QVERIFY(!bar.playButton()->icon().isNull());
 
-    // title 缺失（空）→ 回到"未播放"，不崩
-    bar.setMusic(QString(), false);
+    // 显式空标题 -> 回到"未播放"，不崩
+    bar.setMusic(music(QString(), false));
     QVERIFY(!bar.hasMusic());
     QCOMPARE(bar.title(), QStringLiteral("未播放"));
 }
@@ -74,54 +114,116 @@ void TestBottomBar::playButtonIsBiggerAndShowsAction()
     QVERIFY(bar.playButton()->minimumHeight() > bar.previousButton()->minimumHeight());
 }
 
-void TestBottomBar::controlButtonsArePlaceholders()
+void TestBottomBar::musicLightsUpArtistAlbumAndProgress()
 {
     MusicBar bar;
-    bar.setMusic(QStringLiteral("夜曲"), true);
+    bar.setMusic(music(QStringLiteral("晴天"), true, QStringLiteral("周杰伦"),
+                       QStringLiteral("叶惠美"), 70.3, 269.0));
+    QCOMPARE(bar.artistLabel()->text(), QStringLiteral("歌手 周杰伦"));
+    QCOMPARE(bar.albumLabel()->text(), QStringLiteral("专辑 叶惠美"));
+    QCOMPARE(bar.timeLabel()->text(), QStringLiteral("1:10 / 4:29"));
+    QVERIFY(bar.progressBar()->isEnabled());
+    // 千分比：70.3 / 269 = 26.1%
+    QVERIFY(bar.progressBar()->value() >= 255 && bar.progressBar()->value() <= 265);
 
-    QSignalSpy spy(&bar, &MusicBar::placeholderClicked);
-    // 协议没有音乐控制命令：点这三颗按钮只应给出说明，不发任何协议
-    bar.previousButton()->click();
-    QCOMPARE(spy.count(), 1);
-    QCOMPARE(spy.first().at(0).toString(), QStringLiteral("控制"));
-    QVERIFY(bar.noteText().contains(QStringLiteral("上一首")));
-    QVERIFY(bar.noteText().contains(QStringLiteral("未接入")));
+    // 歌手/专辑**字段在但值为空** -> 回到"—"（部分更新：不把上一次的值留着骗人）
+    QJsonObject cleared = music(QStringLiteral("晴天"), true);
+    cleared.insert(QStringLiteral("artist"), QString());
+    cleared.insert(QStringLiteral("album"), QString());
+    bar.setMusic(cleared);
+    QCOMPARE(bar.artistLabel()->text(), QStringLiteral("歌手 —"));
+    QCOMPARE(bar.albumLabel()->text(), QStringLiteral("专辑 —"));
 
-    bar.nextButton()->click();
-    QCOMPARE(spy.count(), 2);
-    bar.playButton()->click();
-    QCOMPARE(spy.count(), 3);
-    // 点了占位按钮后，播放状态不受影响（图标仍是"在播"对应的暂停图标）
-    QVERIFY(!bar.playButton()->icon().isNull());
-
-    // 新的 music 数据到达 → 说明清掉
-    bar.setMusic(QStringLiteral("晴天"), true);
-    QVERIFY(bar.noteText().isEmpty());
+    // 没有时长 -> 不可交互 + "—:—"
+    bar.setProgress(0.0, 0.0);
+    QVERIFY(!bar.progressBar()->isEnabled());
+    QCOMPARE(bar.timeLabel()->text(), QStringLiteral("—:— / —:—"));
 }
 
-void TestBottomBar::placeholderClickShowsNote()
+void TestBottomBar::controlButtonsEmitTheirOwnSignals()
 {
     MusicBar bar;
-    QVERIFY(bar.noteText().isEmpty());
+    bar.setMusic(music(QStringLiteral("夜曲"), true));
+    bar.setConnected(true);
+
+    QSignalSpy prev(&bar, &MusicBar::prevClicked);
+    QSignalSpy play(&bar, &MusicBar::playPauseClicked);
+    QSignalSpy next(&bar, &MusicBar::nextClicked);
+
+    bar.previousButton()->click();
+    QCOMPARE(prev.count(), 1);
+    QCOMPARE(play.count(), 0);
+    bar.playButton()->click();
+    QCOMPARE(play.count(), 1);
+    bar.nextButton()->click();
+    QCOMPARE(next.count(), 1);
+    QCOMPARE(prev.count(), 1);
+
+    // 点按钮**不改**播放状态（真状态由 Agent 推回来）
+    QVERIFY(bar.playing());
+}
+
+void TestBottomBar::controlButtonsAreDisabledWhileDisconnected()
+{
+    MusicBar bar;
+    bar.setMusic(music(QStringLiteral("夜曲"), true));
+    QVERIFY(!bar.connected());
+    QVERIFY(!bar.previousButton()->isEnabled());
+    QVERIFY(!bar.playButton()->isEnabled());
+    QVERIFY(!bar.nextButton()->isEnabled());
+
+    QSignalSpy next(&bar, &MusicBar::nextClicked);
+    bar.nextButton()->click();
+    QCOMPARE(next.count(), 0);                    // 禁用的按钮点不动
+
+    bar.setConnected(true);
+    QVERIFY(bar.previousButton()->isEnabled());
+    QVERIFY(bar.playButton()->isEnabled());
+    QVERIFY(bar.nextButton()->isEnabled());
+}
+
+void TestBottomBar::lyricsShowTwoLinesFromTheProvider()
+{
+    MusicBar bar;
     QCOMPARE(bar.lyricsLabel()->text(), QStringLiteral("歌词未接入"));
 
-    QSignalSpy spy(&bar, &MusicBar::placeholderClicked);
-    bar.triggerPlaceholder(QStringLiteral("歌词"));           // 与点击走同一入口
-    QCOMPARE(spy.count(), 1);
-    QCOMPARE(spy.first().at(0).toString(), QStringLiteral("歌词"));
-    QVERIFY(bar.noteText().contains(QStringLiteral("LyricsProvider")));
-    QVERIFY(bar.lyricsLabel()->text().contains(QStringLiteral("未接入")));
+    core::TimedLyrics lyrics;
+    QJsonArray rows;
+    rows.append(lyricRow(0.0, QStringLiteral("原文一"), QStringLiteral("译文一")));
+    rows.append(lyricRow(10.0, QStringLiteral("原文二")));
+    lyrics.setLines(rows, 1, true);
+    core::TimedLyricsProvider provider(&lyrics);
 
-    bar.triggerPlaceholder(QStringLiteral("歌手"));
-    QVERIFY(bar.noteText().contains(QStringLiteral("歌手")));
-    bar.triggerPlaceholder(QStringLiteral("专辑"));
-    QVERIFY(bar.noteText().contains(QStringLiteral("专辑")));
-    bar.triggerPlaceholder(QStringLiteral("进度"));
-    QVERIFY(bar.noteText().contains(QStringLiteral("进度")));
+    bar.setLyricsProvider(&provider);
+    bar.setPosition(0.0);
+    QCOMPARE(bar.lyricsLabel()->text(), QStringLiteral("译文一"));      // 优先译文
+    QCOMPARE(bar.nextLyricsLabel()->text(), QStringLiteral("原文二"));
 
-    // 新的 music 数据到达 → 说明清掉，回到正常显示
-    bar.setMusic(QStringLiteral("晴天"), true);
-    QVERIFY(bar.noteText().isEmpty());
+    bar.setPosition(12.0);
+    QCOMPARE(bar.lyricsLabel()->text(), QStringLiteral("原文二"));      // 没译文的那行
+    QCOMPARE(bar.nextLyricsLabel()->text(), QString());
+}
+
+void TestBottomBar::lyricsExplainWhyTheyAreMissing()
+{
+    MusicBar bar;
+
+    // ① 有说法的（纯音乐 / 取不到）：把 Agent 那句话**原样**显示
+    core::TimedLyrics none;
+    none.setLines(QJsonArray(), 2, false, QStringLiteral("没有歌词"));
+    core::TimedLyricsProvider provider(&none);
+    bar.setLyricsProvider(&provider);
+    QCOMPARE(bar.lyricsLabel()->text(), QStringLiteral("没有歌词"));
+    QCOMPARE(bar.nextLyricsLabel()->text(), QString());
+
+    // ② 还没取到（reason 空）：给一个灰点，别让人以为界面坏了
+    core::TimedLyrics pending;
+    core::TimedLyricsProvider pendingProvider(&pending);
+    bar.setLyricsProvider(&pendingProvider);
+    QCOMPARE(bar.lyricsLabel()->text(), QStringLiteral("♪"));
+
+    // ③ 没有任何来源（老 Agent / 演示）：回到老文案
+    bar.setLyricsProvider(nullptr);
     QCOMPARE(bar.lyricsLabel()->text(), QStringLiteral("歌词未接入"));
 }
 

@@ -21,6 +21,7 @@
 #include <QString>
 #include <QVector>
 
+#include "core/lyrics.h"
 #include "core/view_state.h"
 #include "ui/top_bar.h"
 
@@ -80,9 +81,6 @@ public:
     /// 输入框焦点变化 → 按 OnboardCtl::shouldShow() 弹/收软键盘（S10）
     void onChatInputFocused(bool focused);
 
-    /// 验收辅助：触发音乐条某个占位块的说明（歌词/歌手/专辑/进度）。
-    void demoPlaceholderNote(const QString& what);
-
     /// 验收辅助：点一下视频区的「下一集」
     void demoNextBilibili();
     /// 验收辅助：点一下视频区的「上一集」
@@ -96,6 +94,9 @@ public:
     void demoVideoNote(const QString& what);
     /// 验收辅助：切换内嵌控制条的播放/暂停
     void demoPlayPause();
+    /// 验收辅助：灌一份**假的** music 载荷（不依赖 PC）—— 走与真推送同一条路。
+    /// @param which "有词" / "纯音乐" / "取不到"（其它值按"取不到"处理）
+    void demoLyrics(const QString& which);
     /// 验收辅助：切换全屏
     void demoFullscreen();
     /// 设置视频源（本地文件路径或 URL）；空字符串 = 回到"视频源未接入"占位
@@ -131,6 +132,15 @@ private:
     QVector<RegionHost*> regions() const;
 
     void onMessage(const QString& topic, const QJsonObject& data);
+    /// T15-16：一条 `music` 载荷走到底（**真推送与 `--lyric-demo` 共用**）：
+    /// 标题/歌手/专辑/状态给音乐条、`lyric_*` 给 `musicLyrics_`、位置重新锚定。
+    void applyMusic(const QJsonObject& data);
+    /// T15-16：1 s 一跳 —— 进度条与歌词都靠它走（协议 3 s 才推一次）。
+    void tickMusic();
+    /// 把"锚点 + 本地时钟"算出来的位置喂给音乐条（进度 + 歌词选行）。
+    void pushMusicClock();
+    /// 当前播放位置（秒）：暂停就停在锚点，播放中按本地时钟外推。
+    double musicPosition() const;
     /// T11-7: 给 Agent 发一条命令（没连上就只记日志，不回对话区刷屏）。
     /// @return 真的发出去了吗
     bool sendToAgent(const QString& action, const QJsonObject& payload = QJsonObject());
@@ -184,6 +194,14 @@ private:
     QString repoRoot_;
     QTimer* monitorTimer_ = nullptr;
     QTimer* scheduleTimer_ = nullptr;    ///< 日程区的定时刷新（S5，60 秒）
+    // ---- T15-16：歌词与进度（推送给"锚点"，本地时钟负责"走"）----
+    core::TimedLyrics musicLyrics_;              ///< 时间轴 + 选行（纯数据，见 core/lyrics.h）
+    core::TimedLyricsProvider musicLyricsProvider_;   ///< D5 接口的真实现（喂给音乐条）
+    QTimer* musicTick_ = nullptr;                ///< 1 s：进度与歌词换行都靠它
+    double musicAnchorPosition_ = 0.0;           ///< 最近一次收到的**真值**位置（秒）
+    qint64 musicAnchorMs_ = 0;                   ///< 收到它那一刻（毫秒，0 = 还不知道）
+    double musicDuration_ = 0.0;                 ///< 最近一次知道的时长（秒）
+    bool musicPlaying_ = false;                  ///< 最近一次知道的播放状态
     /// T11-7：B 站封面的取图器（预览栏与下区域封面**共用**一份内存缓存）
     CoverLoader* coverLoader_ = nullptr;
     TopBar::LinkState lastLinkState_ = TopBar::LinkState::Disconnected;
