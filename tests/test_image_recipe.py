@@ -986,7 +986,12 @@ class TestAbMarkKeepsSlotsBootable(unittest.TestCase):
         self.assertIn("MISC_OFFSET = 0x800", text)
         # 必须**不依赖 zlib**（板端 python3 没有这个模块，实测 ModuleNotFoundError）
         self.assertNotIn("import zlib", text)
-        self.assertIn("def crc32_ieee", text)
+        # T15-14：CRC 与槽解析**只有一处实现**（agent/core/ota.py）——
+        #   以前这条断言钉的是"本文件自带 def crc32_ieee"，那是重复实现 ✗（审计棘轮
+        #   的 duplicates_prod 就是冲它来的）。现在钉"复用"这一件事 ✓。
+        self.assertIn("from agent.core.ota import crc32_ieee", text)
+        self.assertNotIn("def crc32_ieee", text, "不要再自带一份 CRC 实现（会与 ota.py 漂移）")
+        self.assertIn("parse_bcb", text, "写完要用 ota.parse_bcb 自校验 ✓")
 
     def test_installer_and_postbuild_wire_it(self):
         self.assertIn("ab-mark.service", self.INSTALL.read_text(encoding="utf-8"))

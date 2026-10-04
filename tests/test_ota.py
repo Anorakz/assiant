@@ -5,10 +5,16 @@
 
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 
-from agent.core import ota
+# ⚠ CI 是**逐文件直接跑**这份测试的（`python3 tests/test_ota.py`），那时 `sys.path[0]`
+#   是 `tests/` 而不是仓库根 ⇒ 直接 `from agent.core import ota` 会 ModuleNotFoundError
+#   （2026-10-04 CI 实测 ✓）。照仓库其它测试的做法，先把自己挂上仓库根 ✓。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from agent.core import ota  # noqa: E402  （必须在 sys.path 之后）
 
 
 class TestBcb(unittest.TestCase):
