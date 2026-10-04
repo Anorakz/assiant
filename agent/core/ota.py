@@ -282,3 +282,78 @@ def apply_package(package_path: str,
     out["sha256"] = digest
     out["size"] = os.path.getsize(package_path)
     return out
+
+
+# ---------------------------------------------------------------------------
+#  状态快照（GUI 的「系统升级」块 / IPC topic `ota_state` 用它）
+# ---------------------------------------------------------------------------
+
+OTA_STATE_JSON = "/data/assistant/ota/state.json"
+OTA_CONFIRM_JSON = "/data/assistant/ota/confirm.json"
+
+
+def _read_json(path: str) -> Dict[str, Any]:
+    """读一个小 JSON；坏了/不在就返回 {}（状态展示不该因为缺文件而报错 ✓）。"""
+    try:
+        import json
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def ota_state_snapshot(cmdline_path: str = "/proc/cmdline",
+                       misc_device: str = DEFAULT_PARTITION_DEV["misc"],
+                       state_json: str = OTA_STATE_JSON,
+                       confirm_json: str = OTA_CONFIRM_JSON) -> Dict[str, Any]:
+    """拼出"OTA 现在什么状态"的一整块数据（**只读** ✓，给 GUI 展示用）。
+
+    @return {
+        "ok": 能不能拿到槽信息（False 时 `reason` 说明为什么）,
+        "current_slot": "a"/"b"/"",
+        "slots": [{"name","priority","tries_remaining","successful_boot","bootable"}, …],
+        "last_boot": "a"/"b"/"",
+        "misc_ok": 元数据合不合法, "misc_reason": …,
+        "last_ota": state.json 的内容（步骤/目标槽/时间）,
+        "confirm": confirm.json 的内容（ok/耗时/时间）,
+    }
+    @note 判据与板上一致：可引导 = `priority > 0 && (successful_boot || tries_remaining > 0)`
+          （这条 2026-10-04 在真板上观察到过 ✓）。
+    """
+    out: Dict[str, Any] = {"ok": False, "reason": "", "current_slot": "", "slots": [],
+                           "last_boot": "", "misc_ok": False, "misc_reason": "",
+                           "last_ota": _read_json(state_json),
+                           "confirm": _read_json(confirm_json)}
+    try:
+        with open(cmdline_path, encoding="utf-8") as handle:
+            out["current_slot"] = current_slot_from_cmdline(handle.read())
+    except (OSError, OtaError) as exc:
+        out["reason"] = "拿不到当前槽：%s" % exc
+        return out
+    try:
+        with open(misc_device, "rb") as handle:
+            handle.seek(MISC_METADATA_OFFSETS[0])
+            raw = handle.read(METADATA_SIZE)
+    except OSError as exc:
+        out["reason"] = "读不了 %s：%s" % (misc_device, exc)
+        return out
+    parsed = parse_bcb(raw)
+    out["misc_ok"] = bool(parsed["ok"])
+    out["misc_reason"] = parsed["reason"]
+    if not parsed["ok"]:
+        out["reason"] = parsed["reason"]
+        return out
+    for index, name in enumerate(SLOT_NAMES):
+        item = parsed["slots"][index]
+        out["slots"].append({"name": name,
+                             "priority": item["priority"],
+                             "tries_remaining": item["tries_remaining"],
+                             "successful_boot": item["successful_boot"],
+                             "bootable": bool(item["priority"] > 0
+                                              and (item["successful_boot"]
+                                                   or item["tries_remaining"] > 0))})
+    last = parsed["last_boot"]
+    out["last_boot"] = SLOT_NAMES[last] if last in (0, 1) else ""
+    out["ok"] = True
+    return out

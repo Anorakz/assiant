@@ -331,6 +331,11 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
             bilibili = getattr(runtime, "push_current_bilibili", None)
             if callable(bilibili):
                 _log.debug("ipc: 新客户端连上 -> 补推 B 站队列: %s", bilibili())
+            # T15-14-a: OTA/槽状态同理 —— 而且**必须走 force 补推**：
+            #   否则"状态没变"会被变化去重吞掉（T15-16 在音乐条上踩过同一个 bug ✗）。
+            ota_push = getattr(runtime, "push_current_ota", None)
+            if callable(ota_push):
+                _log.debug("ipc: 新客户端连上 -> 补推 OTA 状态: %s", ota_push())
 
         server.on_client_connect = _on_client_connect
         _log.debug("ipc: 已接上'连上补推壁纸/音乐' (server.on_client_connect)")
@@ -343,6 +348,16 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
 
         runtime.on_music = _on_music
         _log.debug("ipc: 已接上音乐推送 (runtime.on_music -> music)")
+
+    # · OTA/槽状态 -> ota_state{ok, current_slot, slots, last_boot, last_ota, confirm}（T15-14-a）
+    # 与 on_music 同款"有就接"。GUI 只**展示**它（升级本身是 root 级命令行动作，
+    # 界面上不提供"开始升级"按钮 ✓ —— 危险动作不该藏在设置页里）。
+    if hasattr(runtime, "on_ota"):
+        def _on_ota(state: Dict[str, Any]) -> None:
+            dispatch("ota_state", dict(state))
+
+        runtime.on_ota = _on_ota
+        _log.debug("ipc: 已接上 OTA 推送 (runtime.on_ota -> ota_state)")
 
     # · B 站队列/当前那条/要播的本地流 -> bilibili{queue, index, current, stream, …}（T11-6）
     # 与 on_music 同款"有就接"。⚠ 那个 `stream` 是**板端本地 FIFO 路径**（不是 URL）——

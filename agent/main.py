@@ -1731,6 +1731,47 @@ class Runtime:
         state.pop("lyric_lines", None)
         return state
 
+    # ---- OTA / A/B 槽状态（T15-14-a：GUI 的「系统升级」块靠它）----
+    #: OTA/槽状态推送钩子（与 `on_music` 同款"有就接"）—— IPC 层把它接到 topic `ota_state`。
+    #: @note 放**类属性**而不是 `__init__` 里：`__init__` 已经贴着"超长函数（≥120 行）"
+    #:       那条启发式了，再加几行就把审计棘轮顶出新条目 ✗（2026-10-04 实测过一次 ✓）。
+    on_ota: Optional[Callable[[Dict[str, Any]], Any]] = None
+    _last_ota_push: Optional[tuple] = None
+
+    def _push_ota(self, state: Dict[str, Any], force: bool = False) -> bool:
+        """把 OTA 与槽状态推给 GUI（**变化才推** ✓）。
+
+        @param force True = 忽略去重**照推**（"GUI 刚连上补推一次"用它）。
+               ⚠ T15-16 的教训（同 `_push_music`）：没有 force 时"状态没变"会把补推吞掉 ✗。
+        """
+        if self.on_ota is None:
+            return False
+        # key 里带上"槽的 tries 与确认结果" —— 它们正是"这次 OTA 到底成没成"的证据 ✓
+        key = (bool(state.get("ok")),
+               str(state.get("current_slot") or ""),
+               str((state.get("last_ota") or {}).get("step") or ""),
+               bool((state.get("confirm") or {}).get("ok")),
+               tuple(int(item.get("tries_remaining") or 0)
+                     for item in (state.get("slots") or [])))
+        if not force and key == self._last_ota_push:
+            return False
+        try:
+            self.on_ota(dict(state))
+            self._last_ota_push = key
+            return True
+        except Exception as exc:                # noqa: BLE001 - 推送失败不该让轮询停
+            self.log.warning("ota: 推送失败 (已忽略): %r", exc)
+            return False
+
+    def push_current_ota(self) -> bool:
+        """GUI 刚连上时补推一次（要 force ✓，理由同 `push_current_music`）。"""
+        return self._push_ota(self.ota_state(), force=True)
+
+    def ota_state(self) -> Dict[str, Any]:
+        """OTA 与 A/B 槽的当前状态（**只读** ✓；读不了也不抛，返回 `ok=False` + 原因 ✓）。"""
+        from agent.core import ota as ota_mod
+        return ota_mod.ota_state_snapshot()
+
     def music_control(self, action: str, **kwargs: Any) -> Dict[str, Any]:
         """播放控制（play_pause / pause / resume / stop / next / prev / seek / volume）。
 
