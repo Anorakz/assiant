@@ -79,6 +79,18 @@ import os
 import struct
 import sys
 
+# ⚠ T15-14：CRC 与槽解析**只有一份实现**了（原来这里各有一份，审计棘轮的
+#   `duplicates_prod` / `same_name_prod` 就是冲这个来的）。板上两者同处
+#   `PYTHONPATH=/usr/lib/assistant`（本文件在 `/usr/lib/assistant/ab-mark.py`，
+#   `agent/` 也在那儿），仓库里则要往上找到仓库根。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _cand in (_HERE, os.path.dirname(os.path.dirname(_HERE))):
+    if os.path.isdir(os.path.join(_cand, "agent", "core")):
+        if _cand not in sys.path:
+            sys.path.insert(0, _cand)
+        break
+from agent.core.ota import crc32_ieee, parse_bcb  # noqa: E402  （不在 zlib 上：板端没有 zlib 模块）
+
 MISC_OFFSET = 0x800          # 4 扇区（spl_ab.h: AB_METADATA_OFFSET）
 AVB_MAGIC = b"\x00AB0"       # AVB_AB_MAGIC
 AVB_MAJOR, AVB_MINOR = 1, 0
@@ -88,28 +100,27 @@ SLOT_OFF = 8                 # slots[] 在结构里的偏移
 SLOT_SIZE = 4
 
 
-# ⚠ 不用 zlib：板端 python3 是 buildroot 的精简版，**没有 zlib 模块**
-#   （实测 ModuleNotFoundError）。内置标准 CRC-32（与 u-boot 的 crc32() 同值）。
-def crc32_ieee(data: bytes) -> int:
-    crc = 0xFFFFFFFF
-    for byte in data:
-        crc ^= byte
-        for _ in range(8):
-            crc = (crc >> 1) ^ (0xEDB88320 if crc & 1 else 0)
-    return crc ^ 0xFFFFFFFF
+def slot_from_cmdline_or_empty() -> str:
+    """从 `/proc/cmdline` 取当前槽（拼写是厂商的 `android_slotsufix=_a|_b`）。
 
+    @note 解析逻辑复用 `agent.core.ota`（**函数名不再与它同名** —— 审计棘轮的
+          `same_name_prod` 就是冲这个来的 ✓）；这里保留"取不到就返回空串"的老行为，
+          脚本要靠空串打印那句人话提示 ✓。
+    """
+    from agent.core.ota import OtaError, current_slot_from_cmdline as _parse
 
-def current_slot_from_cmdline() -> str:
     try:
         with open("/proc/cmdline", encoding="utf-8") as f:
             cmdline = f.read()
     except OSError:
         return ""
-    for token in cmdline.split():
-        for key in ("android_slotsufix=", "androidboot.slot_suffix="):
-            if token.startswith(key):
-                return token[len(key):].strip().lstrip("_")
-    return ""
+    try:
+        return _parse(cmdline)
+    except OtaError:
+        for token in cmdline.split():            # 兼容 androidboot.slot_suffix= 这种写法
+            if token.startswith("androidboot.slot_suffix="):
+                return token.split("=", 1)[1].strip().lstrip("_")
+        return ""
 
 
 def decode_slot(buf: bytes, idx: int):
@@ -132,7 +143,7 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    slot_name = args.slot or current_slot_from_cmdline()
+    slot_name = args.slot or slot_from_cmdline_or_empty()
     if slot_name not in ("a", "b"):
         print("!! 拿不到当前槽（cmdline 无 android_slotsufix=_a/_b，也没给 --slot）")
         return 2
@@ -174,8 +185,16 @@ def main() -> int:
     crc = crc32_ieee(bytes(bcb[0:28]))
     struct.pack_into(">I", bcb, 28, crc)   # **大端**（be32toh 那一步）
 
-    after = [decode_slot(bcb, i) for i in range(2)]
-    print("写入后: 槽0(_a)=%s  槽1(_b)=%s  crc32=0x%08x(BE)" % (after[0], after[1], crc))
+    # ⚠ T15-14：写完**用 `agent.core.ota.parse_bcb` 自校验一遍**（顺带把 CRC 也验了 ✓）。
+    #   以前这里是本地 `decode_slot` 各读一遍、CRC 只由调用方口头确认 —— 现在这一步
+    #   既是"打印写入后的状态"，也是"证明刚才那 32 字节是**格式合法**的" ✓。
+    checked = parse_bcb(bytes(bcb))
+    if not checked["ok"]:
+        print("!! 写入后的元数据自校验失败: %s" % checked["reason"])
+        return 3
+    after = checked["slots"]
+    print("写入后: 槽0(_a)=%s  槽1(_b)=%s  last_boot=%s  crc32=0x%08x(BE) 自校验=ok"
+          % (after[0], after[1], checked["last_boot"], crc))
 
     if args.dry_run:
         print("（--dry-run，不落盘）")

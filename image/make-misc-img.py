@@ -51,40 +51,42 @@ import argparse
 import pathlib
 import sys
 
-MISC_OFFSET = 0x800
-AVB_MAGIC = b"\x00AB0"
-AVB_MAJOR, AVB_MINOR = 1, 0
-SLOT0_PRIORITY, SLOT1_PRIORITY = 15, 14     # avb_ab_data_init 的默认
+# ⚠ T15-14：格式与 CRC **只有一份实现**（`agent/core/ota.py`）。这里原来自己抄了一份
+#   `crc32_ieee` —— 审计棘轮的 `duplicates_prod` 就是冲它来的 ✓。板端与宿主都从同一个
+#   模块取，避免"两处格式各自漂移"（今天就吃过"只改主份"的亏 ✓）。
+_HERE = pathlib.Path(__file__).resolve().parent
+for _cand in (_HERE.parent, _HERE):            # 仓库根 / 本目录
+    if (_cand / "agent" / "core").is_dir():
+        if str(_cand) not in sys.path:
+            sys.path.insert(0, str(_cand))
+        break
+from agent.core.ota import (  # noqa: E402
+    AVB_MAJOR,
+    AVB_MAGIC,
+    AVB_MINOR,
+    METADATA_SIZE,
+    MISC_METADATA_OFFSETS,
+    apply_bcb_to_misc,
+    build_bcb,
+    crc32_ieee,
+)
+
+MISC_OFFSET = MISC_METADATA_OFFSETS[0]      # 0x800（主份；备份见 MISC_METADATA_OFFSETS）
+SLOT0_PRIORITY, SLOT1_PRIORITY = 15, 14     # avb_ab_data_init 的默认（可被外部改写）
 MAX_TRIES = 7
 DEFAULT_SIZE = 48 * 1024                     # 与 SDK 的 48 KB 一致（老工具的上限）
 
 
-def crc32_ieee(data: bytes) -> int:
-    """标准 CRC-32（与 u-boot 的 crc32()、zlib 同值）。
-
-    ⚠ 不用 zlib：板端/精简环境可能没有这个模块（T15-2-11 实测过）。
-    """
-    crc = 0xFFFFFFFF
-    for byte in data:
-        crc ^= byte
-        for _ in range(8):
-            crc = (crc >> 1) ^ (0xEDB88320 if crc & 1 else 0)
-    return crc ^ 0xFFFFFFFF
-
-
 def build_metadata() -> bytes:
-    b = bytearray(32)
-    b[0:4] = AVB_MAGIC
-    b[4], b[5] = AVB_MAJOR, AVB_MINOR
-    b[6:8] = b"\x00\x00"                      # reserved1
-    # slots[0] / slots[1]：4 字节一槽（priority, tries_remaining, successful_boot, reserved）
-    b[8], b[9], b[10], b[11] = SLOT0_PRIORITY, MAX_TRIES, 0, 0
-    b[12], b[13], b[14], b[15] = SLOT1_PRIORITY, MAX_TRIES, 0, 0
-    b[16] = 0                                  # last_boot = A
-    b[17:28] = b"\x00" * 11                    # reserved2
-    crc = crc32_ieee(bytes(b[0:28]))
-    b[28:32] = crc.to_bytes(4, "big")          # 大端
-    return bytes(b)
+    """按本脚本的"出厂形态"拼 32 字节元数据（A 优先、两槽都可引导）。
+
+    @note 复用 `agent.core.ota.build_bcb()` —— 优先级取本模块的 `SLOT0/SLOT1_PRIORITY`
+          （外部脚本会改写它们来造演练镜像 ✓，所以这里必须现读、不能内联常量 ✓）。
+    """
+    return build_bcb(slot_priorities=(SLOT0_PRIORITY, SLOT1_PRIORITY),
+                     tries=(MAX_TRIES, MAX_TRIES),
+                     successful=(0, 0),
+                     last_boot=0)
 
 
 def main() -> int:
@@ -104,19 +106,22 @@ def main() -> int:
         print("!! 尺寸太小，装不下 0x800 处的元数据", file=sys.stderr)
         return 2
 
-    img = bytearray(size)
-    img[MISC_OFFSET:MISC_OFFSET + 32] = build_metadata()
+    raw = bytearray(size)
+    # 整块写：**主备两份副本一起改**（`0x800` 与 `0x860`）—— 复用 agent/core/ota.py 的实现 ✓
+    img = bytearray(apply_bcb_to_misc(bytes(raw), build_metadata()))
 
     out = pathlib.Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(bytes(img))
 
-    md = img[MISC_OFFSET:MISC_OFFSET + 32]
+    for offset in MISC_METADATA_OFFSETS:
+        md = img[offset:offset + METADATA_SIZE]
+        print("   副本@0x%x: magic=%r ver=%d.%d 槽A(prio=%d tries=%d succ=%d) "
+              "槽B(prio=%d tries=%d succ=%d) last_boot=%d crc=%s"
+              % (offset, md[0:4], md[4], md[5], md[8], md[9], md[10], md[12], md[13],
+                 md[14], md[16], md[28:32].hex()))
+    md = bytes(img[MISC_OFFSET:MISC_OFFSET + METADATA_SIZE])
     print("已生成 %s（%d 字节）" % (out, size))
-    print("   元数据@0x800: magic=%r ver=%d.%d 槽A(prio=%d tries=%d succ=%d) "
-          "槽B(prio=%d tries=%d succ=%d) last_boot=%d crc=%s"
-          % (md[0:4], md[4], md[5], md[8], md[9], md[10], md[12], md[13], md[14],
-             md[16], md[28:32].hex()))
     print("   自检 CRC: %s" % ("ok" if int.from_bytes(md[28:32], "big") == crc32_ieee(md[0:28]) else "!! 不符"))
     return 0
 

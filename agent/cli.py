@@ -1561,6 +1561,97 @@ def run_derivation_check(config_file: str, env_file: str) -> Tuple[str, str]:
     return derivation_check(config_file, env_file)
 
 
+async def cmd_ota(args: argparse.Namespace) -> int:
+    """`assistant ota status|apply` —— 无线 OTA 的"看状态"与"算计划"（T15-14）。
+
+    @note 这一版**故意只做本地读取与计算**，不写块设备、不重启：
+          `status` 读 `/proc/cmdline` 与 `misc` 打印两槽与可引导性；
+          `apply` 调 `agent.core.ota.apply_package`（清单检查 -> sha256 校验 -> 槽守卫 -> 计划）。
+          真正的落盘/重启由**板端入口**按这份计划执行（`image/ota/`）——
+          分开的理由：算计划这件事必须能单测 ✓，而写盘是 OS 级动作 ✓。
+    """
+    from agent.core import ota as ota_mod
+
+    action = getattr(args, "ota_action", "status")
+    misc = getattr(args, "misc", "") or ota_mod.DEFAULT_PARTITION_DEV["misc"]
+
+    try:
+        with open("/proc/cmdline", encoding="utf-8") as handle:
+            slot = ota_mod.current_slot_from_cmdline(handle.read())
+    except (OSError, ota_mod.OtaError) as exc:
+        print("!! 拿不到当前槽：%s" % exc)
+        return 2
+
+    if action == "status":
+        print("当前槽: _%s" % slot)
+        try:
+            with open(misc, "rb") as handle:
+                handle.seek(ota_mod.MISC_METADATA_OFFSETS[0])
+                raw = handle.read(ota_mod.METADATA_SIZE)
+        except OSError as exc:
+            print("!! 读不了 %s：%s" % (misc, exc))
+            return 2
+        got = ota_mod.parse_bcb(raw)
+        if not got["ok"]:
+            print("!! misc 元数据不合法：%s" % got["reason"])
+            return 3
+        for index, name in enumerate(ota_mod.SLOT_NAMES):
+            item = got["slots"][index]
+            bootable = item["priority"] > 0 and (item["successful_boot"]
+                                                 or item["tries_remaining"] > 0)
+            print("  槽%s: priority=%-2d tries=%d successful=%d %s%s"
+                  % (name, item["priority"], item["tries_remaining"],
+                     item["successful_boot"],
+                     "可引导" if bootable else "**判死**",
+                     "  <- 当前" if name == slot else ""))
+        last = got["last_boot"]
+        print("  last_boot=%s" % (ota_mod.SLOT_NAMES[last] if last in (0, 1) else "?"))
+        print("  （槽A=system_a(p6)/boot_a(p3)，槽B=system_b(p7)/boot_b(p4)）")
+        return 0
+
+    path = getattr(args, "package", "") or ""
+    if not path:
+        print("!! 用法: assistant ota apply <包文件> [--package-file <清单>]"
+              " [--sha256 <期望>] [--write]")
+        return 2
+
+    package_file_text = None
+    manifest = getattr(args, "package_file", "") or ""
+    if manifest:
+        try:
+            with open(manifest, encoding="utf-8") as handle:
+                package_file_text = handle.read()
+        except OSError as exc:
+            print("!! 读不了包清单 %s：%s" % (manifest, exc))
+            return 2
+
+    try:
+        plan = ota_mod.apply_package(
+            path, slot,
+            package_file_text=package_file_text,
+            expect_sha256=(getattr(args, "sha256", "") or None),
+            allow_same_slot=False)
+    except ota_mod.OtaError as exc:
+        print("!! 拒绝执行：%s" % exc)
+        return 4
+
+    print("计划（目标槽 _%s）：" % plan["target_slot"])
+    print("  包        : %s（%d B）" % (path, plan["size"]))
+    print("  sha256    : %s" % plan["sha256"])
+    for role, device in plan["writes"]:
+        print("  写 %-6s : %s" % (role, device))
+    print("  写 misc   : %s（写前先备份 ✓）" % plan["misc"])
+    got = ota_mod.parse_bcb(plan["bcb"])
+    print("  目标元数据: 槽A(prio=%d) 槽B(prio=%d) —— 抬目标槽优先级，重启后进它"
+          % (got["slots"][0]["priority"], got["slots"][1]["priority"]))
+    if not getattr(args, "write", False):
+        print("（默认只看：真写盘由板端入口执行 —— 加 --write 才走那一步）")
+        return 0
+    print("!! 本机不写块设备：请用板端入口执行（/usr/lib/assistant 里的 ota 入口），"
+          "它会按上面的计划 dd + 写 BCB + 可选重启 ✓")
+    return 0
+
+
 async def cmd_doctor(args: argparse.Namespace) -> int:
     """体检：配置 / socket / 派生一致性 / 日程 / 关键路径，逐项 OK 或警告。"""
     checks: List[Tuple[str, str, str]] = []
@@ -2308,6 +2399,29 @@ def _add_study_parser(sub: Any) -> None:
     p_study.set_defaults(func=cmd_study)
 
 
+def _add_ota_parser(sub: Any) -> Any:
+    """挂 `assistant ota`（T15-14）。
+
+    @note 单独一个函数是**仓库惯例**（见 `_add_set_parser` / `_add_study_parser` ✓），
+          顺带让 `build_parser()` 不至于越过"超长函数（≥120 行）"那条启发式 ✓。
+    """
+    parser = sub.add_parser(
+        "ota",
+        help="无线 OTA：ota status 看两槽；ota apply <包> 算计划（默认只看，--write 走板端入口）",
+        parents=[_common_options(suppress_defaults=True, with_timeout=False)])
+    parser.add_argument("ota_action", nargs="?", default="status",
+                        choices=("status", "apply"), help="status（默认）或 apply")
+    parser.add_argument("package", nargs="?", default="", help="apply 用的 OTA 包文件")
+    parser.add_argument("--package-file", default="",
+                        help="包清单（afptool 的 package-file）；给了就一并检查")
+    parser.add_argument("--sha256", default="", help="期望的包哈希；不符则一个字节都不写")
+    parser.add_argument("--misc", default="", help="misc 设备（默认 by-partlabel/misc）")
+    parser.add_argument("--write", action="store_true",
+                        help="要求落盘（本机不写块设备：由板端入口执行）")
+    parser.set_defaults(func=cmd_ota)
+    return parser
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="assistant",
@@ -2389,6 +2503,7 @@ def build_parser() -> argparse.ArgumentParser:
                               parents=[_common_options(suppress_defaults=True)])
     p_doctor.set_defaults(func=cmd_doctor)
 
+    _add_ota_parser(sub)
     p_cleanup = sub.add_parser(
         "cleanup",
         help="清理已经过去的一次性日程（默认只看；--apply 才真删）",

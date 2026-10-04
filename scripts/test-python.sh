@@ -92,6 +92,7 @@ tests/test_image_payload.py
 tests/test_image_dev_flavor.py
 tests/test_image_bootable_after_flash.py
 tests/test_audit_script.py
+tests/test_ota.py
 "
 
 pytest_file=tests/test_ipc.py
