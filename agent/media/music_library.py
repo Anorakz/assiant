@@ -112,12 +112,21 @@ def default_library_file() -> str:
 
 
 def resolve_library_file(configured: Optional[str] = None) -> str:
-    """把配置里的 `music.library_file` 解析成绝对路径（相对路径按**仓库根**）。
+    """把配置里的 `music.library_file` 解析成绝对路径（相对路径按**状态根**）。
 
+    @note 相对路径的"根"不是仓库根：设了 `AGENT_CONFIG_DIR` 时用它的**父目录**
+          （板端 `/data/assistant/config` -> 根是 `/data/assistant`）。这样模板里的
+          `config/music_library.jsonl` 正好落在 `/data/assistant/config/` 里。
+    @note 为什么（2026-10-04 板端真歌验收抓到的真问题）: 板上代码在 `/usr/lib/assistant`
+          —— 那是 **A/B 系统槽**，OTA 一换槽就没了；而 D7 的约定是"可写状态放 /data"。
+          按仓库根解析会把本地音乐库写进系统槽（实测 agent 读的是
+          `/usr/lib/assistant/config/music_library.jsonl`，与库里的记录对不上）。
     @note 一律过 `normpath`：`os.path.join` 遇到带 `/` 的相对路径会混出
           `…/assitant\\config/music_library.jsonl` 这种两种分隔符都在的串。
     """
-    return resolve_config_path(configured, default_library_file, repo_root())
+    config_dir = os.environ.get("AGENT_CONFIG_DIR")
+    root = os.path.dirname(config_dir) if config_dir else repo_root()
+    return resolve_config_path(configured, default_library_file, root)
 
 
 # ---------------------------------------------------------------------------

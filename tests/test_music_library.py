@@ -145,6 +145,25 @@ class TestPathResolution(unittest.TestCase):
         resolved = ml.resolve_library_file("config/music_library.jsonl")
         self.assertNotIn("/", resolved.replace(os.sep, ""))
 
+    def test_config_dir_moves_the_root_to_its_parent(self):
+        """板端（`AGENT_CONFIG_DIR=/data/assistant/config`）: 库要落 **/data**，不能落系统槽。
+
+        2026-10-04 真歌验收抓到的真问题：按仓库根解析会写到 `/usr/lib/assistant/config/`
+        —— 那是 A/B 系统槽，OTA 一换槽就没了（D7 的约定是"可写状态放 /data"）。
+        """
+        old = os.environ.get("AGENT_CONFIG_DIR")
+        os.environ["AGENT_CONFIG_DIR"] = os.path.join(os.sep, "data", "assistant", "config")
+        try:
+            resolved = ml.resolve_library_file("config/music_library.jsonl")
+        finally:
+            if old is None:
+                os.environ.pop("AGENT_CONFIG_DIR", None)
+            else:
+                os.environ["AGENT_CONFIG_DIR"] = old
+        self.assertEqual(resolved,
+                         os.path.normpath(os.path.join(os.sep, "data", "assistant", "config",
+                                                       "music_library.jsonl")))
+
 
 # ===========================================================================
 #  3) 合并

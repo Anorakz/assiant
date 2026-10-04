@@ -988,6 +988,38 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
         finally:
             await runtime.stop()
 
+    async def test_reconnecting_gui_gets_the_current_state_even_when_paused(self):
+        """T15-16 板端真歌验收抓到的真 bug：暂停中补推会被"变化才推"的去重**吞掉**。
+
+        当时的现场：PC 上 mpv 是 paused，`push_current_music()` 复用 `_push_music()` 的去重键
+        （和上一次一模一样）-> 补推被丢弃 -> 新连上的 GUI 显示"未播放"。
+        """
+        tmp = tempfile.mkdtemp(prefix="music-rt-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = self._runtime(tmp)
+        pushed = []
+        runtime.on_music = lambda snapshot: pushed.append(snapshot)
+        await runtime._start_music()
+        try:
+            # 停掉轮询：不然它每 0.05 s 也会推一条，计数就不可确定（这条测的是补推本身）
+            if runtime._music_task is not None:
+                runtime._music_task.cancel()
+                runtime._music_task = None
+            runtime.music.play("536622304", meta={"name": "Lemon"})
+            # 摆成板端当时的现场：有曲目、但 PC 上 mpv 是 **paused**
+            runtime.music._truth = {"position": 8.5, "duration": 256.0, "playing": False}
+            # 先推一条（键 = 标题/playing/lyric_rev）
+            runtime._push_music(runtime.music.snapshot())
+            self.assertEqual(len(pushed), 1)
+            self.assertFalse(pushed[0]["playing"])
+            # 此刻 GUI 重连 -> 补推必须**照推**（force），哪怕键一模一样
+            self.assertTrue(runtime.push_current_music(), "补推不能被去重吞掉")
+            self.assertEqual(len(pushed), 2)
+            self.assertEqual(pushed[-1]["title"], "Lemon")
+            self.assertFalse(pushed[-1]["playing"])
+        finally:
+            await runtime.stop()
+
     async def test_the_offset_key_reaches_the_player(self):
         tmp = tempfile.mkdtemp(prefix="music-rt-")
         self.addCleanup(__import__("shutil").rmtree, tmp, True)

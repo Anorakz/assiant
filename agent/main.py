@@ -1684,8 +1684,13 @@ class Runtime:
         self._autofill_note = note
         return result
 
-    def _push_music(self, snapshot: Dict[str, Any]) -> bool:
-        """把状态推给 GUI（**变化才推**: 曲目/播放状态/歌词一变必推, 播放中每次带新进度推）。"""
+    def _push_music(self, snapshot: Dict[str, Any], force: bool = False) -> bool:
+        """把状态推给 GUI（**变化才推**: 曲目/播放状态/歌词一变必推, 播放中每次带新进度推）。
+
+        @param force True = 忽略"变化才推"的去重，**照推**（"GUI 刚连上补推一次"用它）。
+               ⚠ 没有它的时候有个真 bug（2026-10-04 板端真歌验收抓到）：暂停中曲目/歌词
+                 都没变 -> 去重命中 -> **补推被吞** -> 新连上的界面显示"未播放"。
+        """
         if self.on_music is None:
             return False
         # ⚠ T15-16: key 里必须带 `lyric_rev` —— 否则"暂停时歌词到了"这条推送发不出去
@@ -1693,7 +1698,7 @@ class Runtime:
         key = (str(snapshot.get("title") or ""), bool(snapshot.get("playing")),
                int(snapshot.get("lyric_rev") or 0))
         previous = self._last_music_push
-        if key == previous and not key[1]:
+        if not force and key == previous and not key[1]:
             return False                       # 没在放、曲目与歌词都没变 -> 不重复推
         try:
             self.on_music(dict(snapshot))
@@ -1704,10 +1709,13 @@ class Runtime:
             return False
 
     def push_current_music(self) -> bool:
-        """GUI 刚连上时补推一次当前状态（与 `push_current_wallpaper` 同款）。"""
+        """GUI 刚连上时补推一次当前状态（与 `push_current_wallpaper` 同款）。
+
+        @note **要 force**: 暂停中"曲目与歌词都没变"正是最常见的情况，去重会把这次补推吞掉。
+        """
         if self.music is None:
             return False
-        return self._push_music(self.music.snapshot())
+        return self._push_music(self.music.snapshot(), force=True)
 
     # ---- 音乐动作（GUI 命令与工具都走这里）----
     def music_state(self) -> Dict[str, Any]:
