@@ -87,3 +87,24 @@ ota-run.sh /data/assistant/ota/update-xxxx.img --sha256 <期望哈希> \
 - ✅ **救砖**：`misc` 写坏后 `ext4load` 备份 + `mmc write` 整块写回，一次救回 ✓；
 - ⚠️ **未直接观察**：某个槽**启动失败**导致的自动回退（用的是"抬优先级"等价路径 ✓）；
 - ❌ **不可用**：`/usr/bin/rkupdate`（USB/NAND 时代工具，要 `CRKUsbComm`/`/dev/rkflash0` ✗）。
+
+## 7. 部署与切槽的四个坑（2026-10-04 真跑时全踩过一遍）
+
+| 坑 | 现象 | 规矩 |
+|---|---|---|
+| **`/tmp` 重启即清空** ✗ | 放 `/tmp` 的脚本/镜像重启后消失 → 自动化链**静默空转** ✗ | 跨重启的东西**一律放 `/data`** ✓；每步前确认脚本还在 ✓ |
+| **A/B 各有自己的 rootfs** ✗ | 把 `agent/core/ota.py` 装进 `/usr/lib/assistant/…` 后切槽 ⇒ `ImportError` ✗ | 共享依赖放 `/data` + 显式 `PYTHONPATH=/data/assistant/ota/bin` ✓ |
+| **`ab-mark.py --slot x` ≠ 切槽** ✗ | 在 A 槽钦点 B（prio15/tries7/succ1）⇒ 下次启动被引导器**清零**、板子仍起 A ✗ | 切槽只能用**整块写 `misc`**（两槽都合法、目标槽优先级更高 ✓） |
+| **多份 `misc` 备份是生命线** ✓ | 今天靠它救回过一次砖 ✓ | 每次写 `misc` 前先整块备份到 `/data` ✓（`ota-apply.py` 已内置 ✓） |
+
+**板端实测的推荐调用**（真跑通过 ✓，`OTA-RC=0`）：
+
+```bash
+# 共享依赖树（跨槽、跨重启都在 ✓）
+/data/assistant/ota/bin/{ota-apply.py, agent/…}
+PYTHONPATH=/data/assistant/ota/bin python3 /data/assistant/ota/bin/ota-apply.py \
+    /data/assistant/ota/ota-assistant-ab.img \
+    --sha256 <期望哈希> --images /data/assistant/ota/images
+```
+`--images` 里放 `boot.img` 与 `rootfs.img`（= `ota-updateimg` 产出的 `Image/` 内容 ✓）。
+
