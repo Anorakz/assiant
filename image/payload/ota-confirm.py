@@ -62,14 +62,24 @@ def ipc_ok(socket_path: str, timeout_s: int = 8) -> bool:
         log("socket 不在：%s" % socket_path)
         return False
     try:
-        out = subprocess.run(["assistant", "status", "--timeout", str(timeout_s)],
+        # ⚠ `--timeout` 是**全局选项**，必须写在子命令**之前** ✗✗
+        #   （用法：`assistant [--socket SOCKET] [--timeout TIMEOUT] <命令> …`）。
+        #   原来写成 `assistant status --timeout 8` ⇒ argparse 直接报错退出 ✗
+        #   ⇒ 这里**永远** False ⇒ 判定永远不通过 ⇒ 槽永远标不上成功 ✗
+        #   （2026-10-05 板端实测：`successful 0` + tries 从 7 掉到 6 ✓，就是这条 ✓）。
+        out = subprocess.run(["assistant", "--timeout", str(timeout_s), "status"],
                              capture_output=True, text=True, timeout=timeout_s + 5)
     except (OSError, subprocess.SubprocessError) as exc:
         log("跑 assistant status 失败：%s" % exc)
         return False
     text = (out.stdout or "") + (out.stderr or "")
-    connected = "已连上" in text or "agent.sock" in text
-    log("IPC：%s" % ("通 ✓" if connected else "不通 ✗（%s）" % text.strip().splitlines()[:1]))
+    first = (text.strip().splitlines() or ["（无输出）"])[0]
+    # ⚠ 判据要**同时**看退出码与那句"已连上" ✗ —— 只看文本里有没有 "agent.sock"
+    #   太弱（usage/报错里也可能出现该字样 ⇒ 假"通" ✗）。这次排障就是因为
+    #   没打 rc 才绕了一圈 ✓，所以现在把 rc 一起打出来 ✓。
+    connected = out.returncode == 0 and "已连上" in text
+    log("IPC：%s（rc=%d，首行：%s）" % ("通 ✓" if connected else "不通 ✗",
+                                      out.returncode, first))
     return connected
 
 
@@ -100,12 +110,37 @@ def write_result(path: str, payload: dict) -> None:
         log("（结果没写下来：%s）" % exc)
 
 
-def already_confirmed(path: str) -> bool:
+def current_slot(cmdline_path: str = "/proc/cmdline") -> str:
+    """当前在哪个槽：`android_slotsufix=_a|_b` → `"a"` / `"b"`（取不到给空串 ✓）。"""
+    try:
+        with open(cmdline_path, encoding="utf-8", errors="replace") as handle:
+            for token in handle.read().split():
+                if token.startswith("android_slotsufix="):
+                    return token.split("=", 1)[1].lstrip("_").lower()
+    except OSError:
+        pass
+    return ""
+
+
+def already_confirmed(path: str, slot: str) -> bool:
+    """**本槽**是不是已经确认过了（幂等用 ✓）。
+
+    ⚠ 必须**认槽** ✗✗ —— 只判 `ok` 会跨槽误判：`confirm.json` 是放在
+      `/data`（**两个槽共享** ✓）的，A 槽那次成功留下的 `ok:true`
+      会被 B 槽启动时直接当成"已经确认过了" ⇒ **根本不判定、也不标记** ✗
+      ⇒ `successful_boot` 一直 0、`tries_remaining` 一路递减 ✗
+      （2026-10-05 板端实测就是这个：日志里一句"已经是 ok ✓（幂等，不再重判）"
+       然后在 A 槽上把 23:49 那份**旧槽**的成绩认了下来 ✗）。
+    所以结果里记了 `slot` ✓，这里要求它**等于当前槽** ✓；没记 `slot` 的旧结果一律不算 ✓。
+    """
+    if not slot:
+        return False
     try:
         with open(path, encoding="utf-8") as handle:
-            return bool(json.load(handle).get("ok"))
+            payload = json.load(handle)
     except (OSError, ValueError):
         return False
+    return bool(payload.get("ok")) and payload.get("slot") == slot
 
 
 def main() -> int:
@@ -116,8 +151,10 @@ def main() -> int:
     ap.add_argument("--force", action="store_true", help="忽略已有的成功结果，重判一次")
     args = ap.parse_args()
 
-    if not args.force and already_confirmed(args.json):
-        log("%s 里已经是 ok ✓（幂等，不再重判）" % args.json)
+    slot = current_slot()
+    log("当前槽：%s" % (slot or "（读不到 android_slotsufix ✗）"))
+    if not args.force and already_confirmed(args.json, slot):
+        log("%s 里已经是**本槽（%s）**的 ok ✓（幂等，不再重判）" % (args.json, slot))
         return 0
 
     started = time.time()
@@ -130,7 +167,8 @@ def main() -> int:
         time.sleep(3)
 
     elapsed = round(time.time() - started, 1)
-    payload = {"ok": ok, "elapsed_s": elapsed, "timeout_s": args.timeout,
+    # ⚠ `slot` 必须记下来 ✗ —— 幂等判据要按槽比（见 already_confirmed 的注解 ✓）
+    payload = {"ok": ok, "slot": slot, "elapsed_s": elapsed, "timeout_s": args.timeout,
                "at": time.strftime("%Y-%m-%d %H:%M:%S")}
     if ok:
         # ⚠ 判定通过 ≠ 确认成功：**标成功那一步也必须成** ✓

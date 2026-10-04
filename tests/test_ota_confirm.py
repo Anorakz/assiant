@@ -40,11 +40,17 @@ class TestConfirm(unittest.TestCase):
         self.json_path = os.path.join(self.tmp, "confirm.json")
         self.marked = []
 
-    def _run(self, active: bool, ipc: bool, mark_ok: bool = True, argv=None):
-        """把三个外部依赖换掉后跑 main()（不打桩就真去问 systemd 了 ✗）。"""
-        original = (confirm.services_active, confirm.ipc_ok, confirm.mark_current_slot)
+    def _run(self, active: bool, ipc: bool, mark_ok: bool = True, argv=None, slot: str = "a"):
+        """把四个外部依赖换掉后跑 main()（不打桩就真去问 systemd / 真读 /proc/cmdline ✗）。
+
+        @param slot 假装当前在哪个槽 —— 幂等判据**认槽**，所以要能控 ✓
+                    （2026-10-05 板端实测的 bug：不认槽 ⇒ 新槽把旧槽的成绩认下来 ✗）。
+        """
+        original = (confirm.services_active, confirm.ipc_ok, confirm.mark_current_slot,
+                    confirm.current_slot)
         confirm.services_active = lambda *a, **k: active
         confirm.ipc_ok = lambda *a, **k: ipc
+        confirm.current_slot = lambda *a, **k: slot
 
         def fake_mark():
             self.marked.append(True)
@@ -60,7 +66,8 @@ class TestConfirm(unittest.TestCase):
             finally:
                 sys.argv = old_argv
         finally:
-            confirm.services_active, confirm.ipc_ok, confirm.mark_current_slot = original
+            (confirm.services_active, confirm.ipc_ok, confirm.mark_current_slot,
+             confirm.current_slot) = original
 
     def _result(self):
         with open(self.json_path, encoding="utf-8") as handle:
@@ -95,18 +102,37 @@ class TestConfirm(unittest.TestCase):
         self.assertEqual(len(self.marked), 1)
         self.assertFalse(self._result()["ok"])
 
-    def test_idempotent_when_already_ok(self):
+    def test_idempotent_when_already_ok_for_this_slot(self):
         with open(self.json_path, "w", encoding="utf-8") as handle:
-            json.dump({"ok": True}, handle)
-        code = self._run(active=True, ipc=True, argv=["--json", self.json_path])
+            json.dump({"ok": True, "slot": "a"}, handle)
+        code = self._run(active=True, ipc=True, argv=["--json", self.json_path], slot="a")
         self.assertEqual(code, 0)
-        self.assertEqual(self.marked, [], "已经确认过就不再标一次（幂等 ✓）")
+        self.assertEqual(self.marked, [], "本槽已经确认过就不再标一次（幂等 ✓）")
+
+    def test_another_slots_result_does_not_count_as_confirmed(self):
+        """⚠ 跨槽幂等是个真 bug（2026-10-05 板端实测）✗✗
+
+        `confirm.json` 放在 `/data`（**两个槽共享** ✓）：A 槽那次成功留下的
+        `ok:true` 会被 B 槽启动时当成"已经确认过了" ⇒ **不判定、也不标记** ✗
+        ⇒ `successful_boot` 一直 0、`tries_remaining` 一路递减 ✗。
+        所以：**别的槽的成绩一律不算** ✓，必须重判 ✓，并且结果里要写明**本槽** ✓。
+        """
+        with open(self.json_path, "w", encoding="utf-8") as handle:
+            json.dump({"ok": True, "slot": "b"}, handle)      # 旧槽（b）的成绩
+        code = self._run(active=True, ipc=True, argv=["--json", self.json_path], slot="a")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.marked, [True], "别的槽的 ok 不算数 —— 必须重判并重标 ✓")
+        self.assertEqual(self._result()["slot"], "a", "结果里要写清是**哪个槽**确认的 ✓")
+
+    def test_result_records_the_slot(self):
+        self._run(active=True, ipc=True, slot="b")
+        self.assertEqual(self._result()["slot"], "b")
 
     def test_force_rejudges(self):
         with open(self.json_path, "w", encoding="utf-8") as handle:
-            json.dump({"ok": True}, handle)
+            json.dump({"ok": True, "slot": "a"}, handle)
         code = self._run(active=True, ipc=True,
-                         argv=["--json", self.json_path, "--force", "--timeout", "6"])
+                         argv=["--json", self.json_path, "--force", "--timeout", "6"], slot="a")
         self.assertEqual(code, 0)
         self.assertEqual(len(self.marked), 1, "--force 要真的重判并重标 ✓")
 
