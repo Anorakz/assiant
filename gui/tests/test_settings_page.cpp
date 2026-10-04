@@ -86,6 +86,8 @@ private slots:
     void wifiForgetIsOnlyOfferedForTheActiveOne();
     void wifiAckRendersTheAgentsWords();
     void wifiScanButtonAsksForAScan();
+    // T15-14-a：「系统升级」块（OTA/槽状态）—— **只展示**，界面上没有发起升级的入口 ✓
+    void setOtaStateRendersTheOtaCard();
 
 private:
     QString writeConfig(QTemporaryDir& tmp, const QString& extra = QString());
@@ -112,6 +114,78 @@ QString TestSettingsPage::writeConfig(QTemporaryDir& tmp, const QString& extra)
     file.write(extra.toUtf8());
     file.close();
     return path;
+}
+
+// ⚠ T15-14-a：这里的局部变量**绝不能叫 `slots`** ✗ —— Qt 把 `slots` 定义成了宏
+//   （`#define slots`）⇒ `QJsonArray slots;` 展开成 `QJsonArray ;`，
+//   编译器报 "declaration does not declare anything"、`slots.append(...)` 变成
+//   `.append(...)` 再报一堆 "expected primary-expression" ✗（实测踩过 ✓）。
+//   所以数组叫 `slotRows` ✓。
+
+// T15-14-a：「系统升级」块按 `ota_state` 渲染 —— 这是"卡片真的按数据画"的硬证据 ✓
+// （比一张要手动滚动的截图可靠：断言直接盯标签文本 ✓）
+void TestSettingsPage::setOtaStateRendersTheOtaCard()
+{
+    SettingsPage page;
+    // ① 先喂一份**空**载荷：不许崩，且显示"还不知道" ✓
+    page.setOtaState(QJsonObject{});
+    QString empty;
+    for (const QLabel* label : page.findChildren<QLabel*>()) {
+        empty += label->text() + QLatin1Char('\n');
+    }
+    QVERIFY2(empty.contains(QStringLiteral("槽状态：读不到")), qPrintable(empty));
+
+    // ② 一份**真实形状**的载荷（槽A 已确认可引导、槽B 判死）
+    QJsonArray slotRows;
+    slotRows.append(QJsonObject{{QStringLiteral("name"), QStringLiteral("a")},
+                             {QStringLiteral("priority"), 15},
+                             {QStringLiteral("tries_remaining"), 7},
+                             {QStringLiteral("successful_boot"), 1},
+                             {QStringLiteral("bootable"), true}});
+    slotRows.append(QJsonObject{{QStringLiteral("name"), QStringLiteral("b")},
+                             {QStringLiteral("priority"), 14},
+                             {QStringLiteral("tries_remaining"), 0},
+                             {QStringLiteral("successful_boot"), 0},
+                             {QStringLiteral("bootable"), false}});
+    QJsonObject state;
+    state.insert(QStringLiteral("ok"), true);
+    state.insert(QStringLiteral("current_slot"), QStringLiteral("a"));
+    state.insert(QStringLiteral("last_boot"), QStringLiteral("a"));
+    state.insert(QStringLiteral("misc_ok"), true);
+    state.insert(QStringLiteral("slots"), slotRows);
+    state.insert(QStringLiteral("last_ota"),
+                 QJsonObject{{QStringLiteral("step"), QStringLiteral("done")},
+                             {QStringLiteral("target_slot"), QStringLiteral("a")},
+                             {QStringLiteral("at"), QStringLiteral("2026-10-04 19:38:34")}});
+    state.insert(QStringLiteral("confirm"),
+                 QJsonObject{{QStringLiteral("ok"), true},
+                             {QStringLiteral("elapsed_s"), 12.5},
+                             {QStringLiteral("at"), QStringLiteral("2026-10-04 19:39:00")}});
+    page.setOtaState(state);
+
+    QString shown;
+    for (const QLabel* label : page.findChildren<QLabel*>()) {
+        shown += label->text() + QLatin1Char('\n');
+    }
+    QVERIFY2(shown.contains(QStringLiteral("槽a（当前）：prio 15 · tries 7 · successful 1 · 可引导")),
+             qPrintable(shown));
+    QVERIFY2(shown.contains(QStringLiteral("槽b：prio 14 · tries 0 · successful 0 · **判死**")),
+             qPrintable(shown));
+    QVERIFY2(shown.contains(QStringLiteral("misc 元数据：合法")), qPrintable(shown));
+    QVERIFY2(shown.contains(QStringLiteral("最近一次 OTA：done → 目标槽 a")), qPrintable(shown));
+    QVERIFY2(shown.contains(QStringLiteral("确认结果：成功 ✓")), qPrintable(shown));
+
+    // ③ `misc` 不合法 ⇒ 红字警告 + 带上原因（并指向 runbook 的救砖配方 ✓）
+    QJsonObject bad = state;
+    bad.insert(QStringLiteral("misc_ok"), false);
+    bad.insert(QStringLiteral("misc_reason"), QStringLiteral("CRC 不符"));
+    page.setOtaState(bad);
+    QString shownBad;
+    for (const QLabel* label : page.findChildren<QLabel*>()) {
+        shownBad += label->text() + QLatin1Char('\n');
+    }
+    QVERIFY2(shownBad.contains(QStringLiteral("misc 元数据：**不合法**")), qPrintable(shownBad));
+    QVERIFY2(shownBad.contains(QStringLiteral("CRC 不符")), qPrintable(shownBad));
 }
 
 void TestSettingsPage::loadFromConfigFillsWidgets()
