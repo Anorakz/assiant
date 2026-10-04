@@ -93,6 +93,8 @@ tests/test_image_dev_flavor.py
 tests/test_image_bootable_after_flash.py
 tests/test_audit_script.py
 tests/test_ota.py
+tests/test_ota_confirm.py
+tests/test_ota_protocol.py
 "
 
 pytest_file=tests/test_ipc.py
