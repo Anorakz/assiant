@@ -1,0 +1,37 @@
+#  systemd/image/assistant-ota-confirm.service — OTA 的"这次算成功吗"（T15-14-a）
+#
+#  为什么要它
+#  ---------------------------------------------------------------------------
+#  A/B 的规矩：**新槽起来了、而且真的能用，才算成功**；不确认就让 `tries_remaining`
+#  继续递减，直到引导器判它不可信、自动回退到旧槽 —— 这条回退 2026-10-04 被真实观察到
+#  （槽B prio15/tries0/succ0 时引导器没选它，起了合法的 A 槽 ✓）。
+#
+#  和 `ab-mark.service` 的分工（**别让两个都无条件标** ✗）：
+#    · `ab-mark.py` 只负责"把当前槽标成功"（幂等工具 ✓）；
+#    · 本单元负责**判定**：`agent` 与 `agent-gui` 都 active ✓ 且 IPC 通 ✓ 才去调它。
+#    ⇒ 因此 `ab-mark.service` 应当**停止自动触发**（改由本单元调用），否则它会在
+#      系统还没验证好之前就无条件标成功 ✗，把回退路径废掉 ✗。
+#
+#  判据与超时都是 T15-14-a 里定死的：超时 90 s 判不出来 = **不标成功** ✓。
+# ============================================================================
+[Unit]
+Description=OTA 确认：Agent+GUI 都起来且 IPC 通才把当前 A/B 槽标记为启动成功
+After=agent.service agent-gui.service
+Wants=agent.service agent-gui.service
+ConditionPathExists=/usr/lib/assistant/ota-confirm.py
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/lib/assistant/ota-confirm.py --timeout 90
+# 判定最多等 90 秒；超时也算"不通过"，所以给足余量但别把启动拖住
+TimeoutStartSec=150
+# 不标成功是**正常结果**（退出 1 而已），别让 systemd 反复重启它
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ota-confirm
+
+[Install]
+# ⚠ 项目约定：我们的单元一律挂 `assistant.target`（不是 multi-user ✗）——
+#   `image/check-assistant-target.py` 会当场报错（实测 ✓），test_image_target 直接红 ✓。
+WantedBy=assistant.target

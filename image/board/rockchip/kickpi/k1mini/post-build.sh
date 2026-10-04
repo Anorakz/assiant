@@ -99,7 +99,12 @@ echo "   + default.target -> assistant.target"
 
 # 2) assistant.target.wants/：单元自己的 [Install] WantedBy 落地形式
 mkdir -p "$ETC/assistant.target.wants"
-for u in assistant-init.service agent.service agent-gui.service ab-mark.service; do
+# ⚠ T15-14-a：这里**只挂确认单元**，不再自动挂 `ab-mark.service` ✗ ——
+#    `ab-mark.py` 只会无条件把**当前**槽标成功，装成开机自动跑就等于"系统还没验证
+#    就先宣布成功"，把 A/B 的失败回退路径废掉 ✗（槽耗死也不会回退）。
+#    现在由 `assistant-ota-confirm.service` 判定（Agent + GUI active 且 IPC 通 ✓）
+#    通过之后才调它 ✓；单元文件仍然装进镜像 ✓（它是被调用的工具 ✓）。
+for u in assistant-init.service agent.service agent-gui.service assistant-ota-confirm.service; do
     if [ -f "$SYSD/$u" ]; then
         ln -sfn "/usr/lib/systemd/system/$u" "$ETC/assistant.target.wants/$u"
     else
@@ -107,7 +112,7 @@ for u in assistant-init.service agent.service agent-gui.service ab-mark.service;
         exit 1
     fi
 done
-echo "   + assistant.target.wants/ 已挂上我们的四个单元（含 ab-mark）"
+echo "   + assistant.target.wants/ 已挂上四个单元（init/agent/gui/ota-confirm；ab-mark 只作工具不自动跑 ✓）"
 
 # 2b) **sshd 也 enable**（T15-2-11 板端：现场唯一稳定的交互/关机通道）
 #  ---------------------------------------------------------------------------
