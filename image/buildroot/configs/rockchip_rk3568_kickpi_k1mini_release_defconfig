@@ -139,3 +139,14 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="assistant"
 # ---------------------------------------------------------------------------
 BR2_PACKAGE_RKUPDATE=y
 
+
+# ---------------------------------------------------------------------------
+#  T15-14：OTA 包只写"非当前槽"的两个分区（去掉 userdata/parameter/uboot/misc…）
+#  ---------------------------------------------------------------------------
+#  为什么：SDK 默认的 ab-ota 清单里含 userdata（会把 /data 上的模型与配置写掉 ✗），
+#  还含 parameter/bootloader/uboot/oem。无线 OTA 只要 boot_a + system_a；
+#  "切到新槽"那一步由我们自己的包装写 misc 的 BCB（可测、可回退）。
+#  机制：mk-updateimg.sh 里"清单文件存在就直接 ln 成 package-file，否则自动生成"。
+# ---------------------------------------------------------------------------
+RK_OTA_PACKAGE_FILE_CUSTOM=y
+RK_OTA_PACKAGE_FILE="ota-assistant-ab.txt"

@@ -236,4 +236,61 @@ fastboot"：后者串口不会有新输出，但 **Windows 设备管理器里会
   ⇒ **正常现象**（新 rootfs 重新生成密钥），不是中间人：
   `ssh-keygen -R <板子IP>` 再连即可。它同时也是"确实起了新镜像"的旁证。
 
+---
+
+## 7. 2026-10-04 深夜补记：A/B 机制的实测细节 + 无线 OTA 的落地结论
+
+### 7.1 先看这两行就能判断"槽元数据好不好"（比 ssh 快，且不通网也能看）
+```
+U-Boot SPL ...  SPL: A/B-slot: _a, successful: 0, tries-remain: 6
+U-Boot next-dev ... A/B-slot: _a, successful: 0, tries-remain: 6
+```
+后面的启动链（`RESC: 'boot_a'` → `root=PARTUUID=…54a9/54aa` → `EXT4-fs (mmcblk0p6|p7)`）
+分别对应 **system_a(p6) / system_b(p7)** ✓ —— `mmcblk0p6` 起就是 A 槽、`p7` 起就是 B 槽。
+
+### 7.2 `misc` 里是**主 + 备两份**（`0x800` 与 `0x860`）
+- 实测：**两份不一致也能正常启动** ✓（主份 `tries` 会被扣、备份不会）；
+- 但规矩仍是**改动就整块写**（`dd misc.img` 整 48 KB 或整 4 MB 分区）—— 只改 `0x800`
+  会出现"两份指向不同"的中间态，且我们**不清楚** U-Boot 的校验在什么组合下会判无效 ✗
+  （2026-10-04 有一次只改主份后落 fastboot 的经历 ✗）。
+
+### 7.3 `tries_remaining` 的实测语义（回退机制的发条）
+| 事件 | 实测 |
+|---|---|
+| 每次启动尝试 | 主份 `tries` **减 1**（6→5→4→3 ✓），SPL/U-Boot 各打印一次 |
+| `successful_boot=1` 后 | **不再扣** ✓；且 `ab-mark.py` 标成功时会把 `tries` **补满**（3→7 ✓） |
+| `tries` 减到 0 且 `succ=0` | 该槽被判不可信，**另一槽被扶正**：`prio 14→15`、`succ 0→1`、`last_boot` 指向它 ✓ |
+| 抬优先级 | 直接换启动槽（A=14/B=15 → 实测从 **mmcblk0p7** 起 ✓）= OTA 切槽用的就是这条 ✓ |
+
+⚠ 未直接观察过的一幕：**"某个槽启动失败 → 自动回退"**（我用的是"抬优先级"这条等价路径 ✓）。
+要补它得让该槽真启动失败 ✗ —— 列为可选补测。
+
+### 7.4 `/etc` 改动**不跨重启**（重要）
+`systemctl mask ab-mark.service` 在重启后**自动失效** ✗（该镜像 `/etc` 不是持久层 ✓）。
+⇒ 演练"阻止确认"不能靠 mask，要从**自检不通过**入手 ✓。
+
+### 7.5 无线 OTA 的落地结论（这条最省事，也最要紧）
+- **`/usr/bin/rkupdate` 不是我们的 OTA 执行者** ✗：它要 `CRKUsbComm` + `/dev/rknand_sys_storage`
+  + `/dev/rkflash0`（瑞芯微 **USB/NAND** 时代那套 ✗），在 eMMC + 普通分区的 Buildroot 上
+  实测 `GetFlashInfo failed` ✗（一个字节都没写 ✓）；它的签名是 `rkupdate - <进度fd> <包> <sdBootUpdate>`
+  （`external/rkupdate/main.cpp` 的 `argc==5` ✓），是给 Android 侧调的 ✗。
+- **厂商文档（KICKPI「Rockchip OTA」）只覆盖 Android** ✗：`update.zip` + Recovery + `RKUpdateService`(APK)
+  + tomcat 服务器 + `ro.product.ota.*` —— Buildroot 镜像里这些**一个都没有** ✗。
+- ⇒ **我们自己的路 = 出包（`./build.sh ota-updateimg`）+ 写非当前槽（`dd` 到 `boot_a|b`、`system_a|b`）
+  + 写 `misc` 指向新槽 + 重启 + 自检确认**。全部零件 2026-10-04 实测通过 ✓✓：
+  - 出包：`ota-updateimg` 用**自定义包清单**才能去掉 `userdata` ✗（默认清单含它，会写掉 `/data` ✗✗）；
+  - 自定义清单要落在 **`<SDK>/output/.config`**（`RK_OTA_PACKAGE_FILE_CUSTOM=y` +
+    `RK_OTA_PACKAGE_FILE="…"`，且 `choice` 要**替换** `…_DEFAULT` 而不是追加 ✗），清单文件放
+    `<RK_CHIP_DIR>/` ✓；
+  - 槽守卫：包固定写 A ⇒ **当前就在 A 槽时必须拒绝执行** ✓；
+  - 校验：`sha256` 不符**一个字节都不写** ✓。
+
+### 7.6 排查纪律（血泪）
+- 串口抓取窗口要**在断电之前**就开着 ✓；`Ctrl+C` 能抢 U-Boot 提示符、
+  也能把 fastboot 循环拽回来 ✓（只读不敲时 fastboot 完全静默 ✗，很容易误判成"没上电" ✗）；
+- **所有 `ssh`/`scp` 一律带 `-o ConnectTimeout=…`** ✓ —— 不带超时的那次把整条自动化链挂死，
+  还让后续判断全乱 ✗；
+- 只用 `dd` 改 `misc`、改完**读回核对**再重启 ✓。
+
+
 
