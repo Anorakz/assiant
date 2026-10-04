@@ -108,3 +108,58 @@ PYTHONPATH=/data/assistant/ota/bin python3 /data/assistant/ota/bin/ota-apply.py 
 ```
 `--images` 里放 `boot.img` 与 `rootfs.img`（= `ota-updateimg` 产出的 `Image/` 内容 ✓）。
 
+## 8. 三个"真金白银"的坑（2026-10-05，三次真 OTA 才全踩出来）
+
+这一节全是**板端实测**逼出来的，不是推演 ✓ —— 每一条都让"升级成功"这件事**静默失效**过 ✗。
+
+### 8.1 幂等判据**必须认槽**（最隐蔽 ✗✗）
+
+`confirm.json` 放在 `/data/assistant/ota/`，而 **`/data` 是两个槽共享的** ✗ ⇒
+"A 槽那次成功留下的 `ok:true`" 会被 **B 槽启动时**当成"已经确认过了" ✓ ⇒
+**根本不判定、也不标记** ✗ ⇒ `successful_boot` 一直是 0、`tries_remaining` 一路递减 ✗。
+
+板端日志实锤（它就是被这句话骗过去的）：
+```
+ota-confirm[465]: /data/assistant/ota/confirm.json 里已经是 ok ✓（幂等，不再重判）
+```
+**规矩** ✓：结果里记 `slot` ✓；判断"是否已确认"要求 **`slot` 等于当前槽** ✓
+（当前槽从 `/proc/cmdline` 的 `android_slotsufix=` 取 ✓）；**没记 `slot` 的旧结果一律不算** ✓。
+
+### 8.2 `--timeout` 是**全局选项**，必须写在子命令之前
+
+```bash
+assistant status --timeout 8     # ✗ argparse 直接报错退出 ⇒ 判据永远 False ⇒ 槽永远标不上
+assistant --timeout 8 status     # ✓
+```
+**连带教训** ✓：判"IPC 通不通"**不能只看输出里有没有 `agent.sock`** ✗ ——
+usage/报错文本里也可能出现 ✓（**假通** ✗）。现在判据是 **`rc == 0` 且出现"已连上"** ✓，
+并且**把 rc 打进日志** ✓（这次排障绕远就是因为日志里没有 rc ✗）。
+
+### 8.3 `ab-mark` 的**启用者**是 `assistant.target` 的 `Wants=` ✗（不是 `.wants/` 软链）
+
+`ab-mark.service` 原来是"每次开机无条件把当前槽标成功" ✓ —— 这会把 **A/B 的失败回退路径废掉** ✗
+（新槽只要起得来就算成功，`tries` 再也不递减 ⇒ 永远不会回退 ✓）。改的时候踩过两次空：
+
+| 只改这里 | 结果 |
+|---|---|
+| 清 `post-build.sh` 的挂载清单 / `rm -rf assistant.target.wants` | ✗ **没用** —— target-finalize 阶段 `systemctl preset-all` 又按 `[Install]` 建回来（实测时间戳：post-build 23:40 清过，**板子上它 23:41** 又出现）|
+| 去掉单元自己的 `[Install] WantedBy=` | ✗ **还是没用** —— `systemd/image/assistant.target` 里那行 **`Wants=ab-mark.service`** 才是真正的启用者 |
+
+**正确的分工** ✓（现在的状态）：
+- **判定**由 `assistant-ota-confirm.service` 做（`agent` 与 `agent-gui` 都 active **且 IPC 通** ✓）；
+- 判过了它**按脚本路径**直接调 `/usr/lib/assistant/ab-mark.py` ✓（**不走 systemd** ✓）；
+- `ab-mark.service` **不再自动启动** ✗（`assistant.target` 的 `Wants=` 里已换成确认单元 ✓，
+  单元去掉了 `[Install]` ✓，`image/check-assistant-target.py` 给它记了**带理由的工具类例外** ✓）；
+- 手动排障照样能 `systemctl start ab-mark.service` ✓。
+
+**验收判据**（照这个查，别只看构建成功 ✗）：
+```bash
+assistant ota status                     # 槽A: priority=15 tries=7 successful=1 可引导 <- 当前
+cat /data/assistant/ota/confirm.json     # ok:true + slot 是当前槽 + at 是**本次**
+systemctl is-active ab-mark.service      # 期望 inactive（它不再自动跑 ✓）
+ls /etc/systemd/system/assistant.target.wants/ | grep -c ab-mark   # 期望 0
+```
+⚠ 还有一条**核验纪律** ✓：要确认"镜像里到底是什么"，得看**打包后的** `rootfs.ext2`
+（`debugfs -R "cat /usr/lib/systemd/system/assistant.target" rootfs.ext2` ✓）——
+只看构建用的 target 目录**会漏** ✗（那条旧软链就藏在打包后的镜像里 ✓）。
+

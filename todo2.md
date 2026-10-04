@@ -210,3 +210,47 @@ buildroot 2024.02、Qt 5.15.11（联网拉）；**K1Mini 是一等目标**（`.c
 
 **T15-1 切片 1a（EGLFS + 旋转）**先做完 —— 它是形态的锚点，后面的 CPU/内存/功耗/镜像全部依赖它。
 做完 1a 我会把"无 X 下的实测数字（内存/CPU/启动）"给你，再一起决定 1b/1c 的优先级（键盘与视频）。
+
+---
+
+## 5. T15-14 的当前状态与剩余（2026-10-05）
+
+### 5.1 已经闭环的（T15-14-a：OTA 确认服务 + GUI 展示，共 11 次提交，CI 全绿）
+
+| 交付 | 证据 |
+| --- | --- |
+| 确认服务 `image/payload/ota-confirm.py` + `systemd/image/assistant-ota-confirm.service` | 判据 = `agent` 与 `agent-gui` 都 active **且 IPC 通** ✓；通过才调 `ab-mark.py` 标当前槽并写 `confirm.json` ✓；超时（90 s）**什么都不标** ⇒ 天然的失败回退 ✓ |
+| `ota_state` 快照 + Agent 推送 + IPC topic | `agent/core/ota.py::ota_state_snapshot()` ✓；连上客户端时 **force 补推** ✓；独立组件 `ota_status`（空闲 30 s / OTA 进行中 5 s ✓） |
+| 协议文档 + 双向守卫 + **牙齿演示** | `docs/ipc-protocol.md` §3 字段表 ✓；`tests/test_ota_protocol.py`（文档↔代码双向、含反空绿下限 ✓）；改错字段名 ⇒ **干净的 FAIL**、撤回 ⇒ OK ✓ |
+| GUI 设置页「系统升级」块（**只展示**，无"开始升级"入口 ✓） | `local_client` 信号/常量/分发 ✓、`main_window` 转交 ✓、`settings_page::buildOtaCard/setOtaState` ✓；宿主 `ctest` **26/26** ✓、交叉 **AArch64** ✓、渲染守卫 `setOtaStateRendersTheOtaCard` ✓（用例名出现在 `ctest -V` 输出才算真跑过 ✓） |
+| `ab-mark` 退居"被调用的工具" | 真正的启用者是 `assistant.target` 的 `Wants=`（**只清 `.wants/` 或去掉 `[Install]` 都拦不住** ✗，有板端时间戳实证）；现已 mask + checker 记白名单例外 ✓ |
+| **用 OTA 自己更新自己**（三次真 OTA：B 槽写 A 槽） | 落点 `槽a priority=15 tries=7 successful=1 可引导` ✓、`confirm.json = {ok:true, slot:"a", elapsed_s:15.1, marked:true}` ✓、`ab-mark.service` **inactive** ✓ |
+
+**三条真金白银的坑**（全部写进 [`docs/ota.md`](docs/ota.md) §8，务必先读再动 OTA 代码）：
+① 幂等判据**必须认槽**（`confirm.json` 在 `/data`，两槽共享 ⇒ 跨槽误判会让槽永远标不上成功）；
+② `--timeout` 是**全局选项**必须写在子命令之前；判"IPC 通"要看 **rc==0 且出现"已连上"**（只看文本里有 `agent.sock` 是**假通**）；
+③ `ab-mark` 的启用者是 `assistant.target` 的 `Wants=`。
+
+### 5.2 剩余（建议顺序）
+
+| # | 事项 | 出口判据 |
+| --- | --- | --- |
+| **14-b** | **OTA 服务通道**（板上自己把镜像取下来，不再靠 PC `scp` 1 GB ✗） | 服务端（PC 侧 HTTP / 端口转发 —— 注意**板子只能从 Windows 侧访问，WSL 到不了 192.168.137.x** ✗）；板端下载要有**进度、超时、sha256 校验、断点续传**；落点与 `ota-apply.py --images` 对接。判据：一条命令走到 `state.json` 的 `step=done`；**中途拔网要失败得干净（不写盘）** ✓ |
+| **14-c** | **发行镜像安全清理** | 只留密钥 root（`PasswordAuthentication no`）、清调试后门、recipe 守卫测试进 `scripts/test-python.sh` 显式清单。判据：板上**口令登录被拒**、密钥登录可用 ✓ |
+| 文档 | `docs/image.md` / `docs/ota.md` 同步"`ab-mark` 已退居工具"与"确认服务是唯一标记者" | 文档与 `assistant.target.wants/` 实际内容一致 ✓ |
+| 镜像核验 | 新增 `image/check-image-contents.sh`（把今天手敲的 `debugfs` 核验固化） | 检查：`Wants=` 行、`.wants/` 目录、`ota-confirm.py`/`agent/core/ota.py` 在位、`agent_gui` 是 AArch64 且含 `ota_state`。**教训：只看 target 目录会漏** ✗（旧软链藏在打包后的 rootfs 里） |
+| GUI 尾巴 | 板端**实屏**看一眼「系统升级」块（现在只有 offscreen 截图 + 单测 ✓） | 现成开关：`--settings-scroll-demo <px>`（T13-10 取证用）；可选 `--dump-layout` 核尺寸 |
+| B 槽 | B 槽仍是旧镜像 ✓（本轮只把 A 槽 OTA 成最新） | 下次 OTA 会自动覆盖；想立刻统一就再跑一次"切 A → 写 B" |
+| 音乐 | `agent.log` 里仍有 `music: 板端连 PC 的 ssh 被拒（认证失败）` ✗ | 把板端公钥重新放进 PC 的 `C:\ProgramData\ssh\administrators_authorized_keys`（见 `docs/music.md`）✓ |
+| 磁盘 | `E:\rk3568\tmp\ota-new{,2,3}\` 与 `E:\rk3568\flash\` 堆了多份同批分包 | 留最新一批（`5822d6d2…`）即可；**删前先核 sha256** ✓ |
+
+### 5.3 写给未来的自己的"假绿"清单（今天被坑过，别再踩）
+
+- **`BUILD-RC=$?` 会撒谎**：编译失败时 `ctest` 会拿**旧二进制**报 `Passed` ✗ ⇒
+  判据必须是"**先删目标二进制 → 重建 → 在详细输出里看到用例名**" ✓。
+- **只清 `.wants/` 拦不住 systemd**：真正的启用者可能是 `.target` 的 `Wants=` ✗。
+- **`slots` 是 Qt 的宏**：C++ 里局部变量叫 `slots` 会被展开成空，报一堆莫名其妙的语法错 ✗。
+- **PowerShell 写中文 = GBK**：中文只走 `read`/`write`/`edit` 工具；`.ps1` 里别出现非 ASCII（解析会崩 ✗）。
+- **内联 shell 的变量会被吃**：`wsl bash -lc 'R=/p; cp $R/x'` 里 `$R` 可能为空 ⇒ 用**全路径** ✓。
+- **审计棘轮的 key 里带行数**：别往"已被标记的超长函数"里加行（抽独立方法 + **净 0 行**插入 ✓）。
+
