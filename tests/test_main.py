@@ -89,6 +89,9 @@ EXPECTED_ORDER = [
     # 但组件照旧注册 —— 与上面 music/bilibili/study 同一条规矩）。
     # ⚠ 放在 ipc **之前**：界面一打开就该能看到真实状态。
     "net",
+    # T15-14-a: OTA/槽状态的低频轮询（独立组件 —— 音乐循环只在 music.enabled=true 时跑，
+    # 挂在它上面会出现"音乐一关、OTA 状态就不推了"）。同样放 ipc 之前 ✓。
+    "ota_status",
     "ipc",
     "terminal_input",
 ]

@@ -467,6 +467,10 @@ class Runtime:
         # T14-9: WiFi 链路守护。放在 IPC 之前 —— 界面一打开就能看到真实状态；
         # 它与其它组件没有依赖（只碰 nmcli / ping）。
         "_start_net",
+        # T15-14-a: OTA/槽状态的低频轮询。也放 IPC 之前 —— 界面连上时状态已就位 ✓。
+        # ⚠ 单独一个组件、**不并进音乐循环** ✗：那个循环只在 music.enabled=true 时跑，
+        #   音乐一关 OTA 状态就没人推了 ✗。
+        "_start_ota_status",
         "_start_ipc",
         "_start_terminal_input",
     )
@@ -1162,6 +1166,41 @@ class Runtime:
                 "note": resolved.note, "scores": resolved.detail.get("scores") or {}}
 
     # ---- 3.6) 音乐 (T8-4) ----
+    async def _start_ota_status(self) -> None:
+        """OTA/槽状态的**低频轮询**（T15-14-a）：有变化就推 topic `ota_state`。
+
+        @note 为什么是独立组件：音乐循环只在 `music.enabled=true` 时跑 ✗，
+              挂在它上面会出现"音乐一关、OTA 状态就不推了" ✗（很难在单测里发现 ✓）。
+        @note 间隔：OTA 在跑（`state.json` 的 `step` 不是 `done`）时 5 s ✓、空闲 30 s ✓
+              —— 空闲期别拿没变化的读盘去打扰板子 ✓。
+        """
+        idle_s, busy_s = 30.0, 5.0
+
+        async def _loop() -> None:
+            while True:
+                try:
+                    snapshot = self.ota_state()
+                    step = str((snapshot.get("last_ota") or {}).get("step") or "")
+                    busy = bool(step and step != "done")
+                    await asyncio.sleep(busy_s if busy else idle_s)
+                    self._push_ota(self.ota_state())      # 变化才推（去重在 _push_ota 里 ✓）
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:        # noqa: BLE001 - 轮询失败不该把任务搞死
+                    self.log.warning("ota: 轮询失败 (已忽略): %r", exc)
+
+        holder: Dict[str, Any] = {"task": None}
+
+        async def _start() -> None:
+            holder["task"] = asyncio.ensure_future(_loop())
+
+        async def _stop() -> None:
+            if holder["task"] is not None:
+                holder["task"].cancel()
+                holder["task"] = None
+
+        await self._guarded(_Component("ota_status", _start, _stop), fatal=False)
+
     async def _start_music(self) -> None:
         """按配置接上"在 PC 上跑的 neteasecli" + 本地音乐库（`music.enabled`）。
 
