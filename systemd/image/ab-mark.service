@@ -51,5 +51,18 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ab-mark
 
-[Install]
-WantedBy=assistant.target
+# ⚠ T15-14-a：**故意不写 `[Install]`** ✗✗
+#  ---------------------------------------------------------------------------
+#  以前这里是 `WantedBy=assistant.target` ⇒ 每次构建的 target-finalize 阶段，
+#  buildroot 的 `systemctl preset-all` 都会按 `[Install]` 建一条
+#  `/etc/systemd/system/assistant.target.wants/ab-mark.service` 软链 ⇒
+#  **开机无条件**把当前槽标成功 ✗ ⇒ A/B 的失败回退路径被废掉 ✗
+#  （新槽只要起得来就算成功，`tries_remaining` 再也不递减，永远不会回退）；
+#  而且 `assistant.target` 里那行 `Wants=ab-mark.service` 也是同一个效果 ✗
+#  （两处都改掉了 ✓）。
+#  实测：只清 `.wants/` 目录**没用** ✗ —— post-build 23:40 清过，板子上它 23:41 又被建回来 ✗。
+#
+#  现在的分工（T15-14-a ✓）：
+#    · **判定**由 `assistant-ota-confirm.service` 做（Agent+GUI 都 active 且 IPC 通 ✓）；
+#    · 判过了它**按脚本路径**直接调 `/usr/lib/assistant/ab-mark.py` ✓（不走 systemd ✓）；
+#    · 本单元不再自动启动 ✗；手动排障时仍可 `systemctl start ab-mark.service` ✓。

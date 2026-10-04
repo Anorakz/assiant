@@ -31,7 +31,13 @@ After=basic.target
 #   静态一看就知道这个目标会拉起什么，check-assistant-target.py 也是按这里算闭包的。
 #   post-build 里同时会建 assistant.target.wants/ 的符号链接（enable 的常规形式），
 #   两条路 systemd 会取并集，不冲突。
-Wants=assistant-init.service agent.service agent-gui.service ab-mark.service
+# ⚠ T15-14-a：这里**只留确认单元**，`ab-mark.service` 已从这里移除 ✗✗ ——
+#   它以前被显式列着 ⇒ 开机无条件把当前槽标成功 ⇒ **失败回退路径被废掉** ✗。
+#   只清 `.wants/` 目录或去掉它的 `[Install]` 都拦不住（这一行才是真正的启用者 ✓，
+#   2026-10-04 刷机后实测：改完 post-build 它照样在 23:41 被拉起 ✗）。
+#   现在的分工：**判定**由 `assistant-ota-confirm.service` 做（Agent+GUI 都 active
+#   且 IPC 通 ✓），判过了它**按脚本路径**直接调 `ab-mark.py` ✓（不走 systemd ✓）。
+Wants=assistant-init.service agent.service agent-gui.service assistant-ota-confirm.service
 After=agent.service agent-gui.service
 # ⚠ 唯一一个**不是我们的**直接依赖：NetworkManager
 #   为什么非要显式带上它：buildroot 的 NetworkManager 钩子只管建 dbus 别名

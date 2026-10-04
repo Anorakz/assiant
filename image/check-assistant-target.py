@@ -43,10 +43,15 @@ OUR_UNITS = {
     "agent.service",
     "agent-gui.service",
     "assistant-init.service",
-    # T15-2-11 救砖后补的：每次开机把当前 A/B 槽标记为"启动成功"。
+    # T15-2-11 救砖后补的：把当前 A/B 槽标记为"启动成功"。
     # 不带它的后果是实测出来的 —— SPL/u-boot 每次启动扣一次 tries_remaining，
     # 而没有任何东西置 successful_boot，扣完两个槽都判死 → 掉 fastboot 不进系统。
-    "ab-mark.service",
+    # ⚠ T15-14-a：**改由确认单元来标记** ✗ —— 这里换成 `assistant-ota-confirm.service`
+    #   （判据：Agent+GUI 都 active 且 IPC 通 ✓，判过了它按脚本路径直接调 ab-mark.py ✓）。
+    #   `ab-mark.service` 不再出现在闭包里 —— 它开机无条件标成功会**废掉失败回退路径** ✗
+    #   （2026-10-04 刷机后实测：post-build 改过之后它照样被 assistant.target 的
+    #    `Wants=` 拉起 ✗ ⇒ 这一行之外，`systemd/image/assistant.target` 那行才是关键 ✓）。
+    "assistant-ota-confirm.service",
     # 现场唯一稳定的交互/关机通道（T15-2-11：没有 ssh 就只能拔插头关机）。
     # 安全清理（改密码/只留密钥/关密码认证）留给 T15-12。
     "sshd.service",
@@ -214,7 +219,17 @@ def check_unit_file(name: str, unit: dict, problems: list) -> None:
                         problems.append("%s: WantedBy=%s（镜像里应当挂 assistant.target）" % (name, v))
     if name.endswith(".service"):
         install = unit.get("Install", {})
-        if "WantedBy" not in install and name not in ("assistant-init.service",):
+        # ⚠ 例外名单：这些单元**故意**不参与启动闭包（B1，T15-14-a）✓
+        #   · assistant-init.service：另有机制把它拉起来 ✓
+        #   · ab-mark.service（T15-14-a）：**工具类单元** —— 判定由
+        #     `assistant-ota-confirm.service` 做（Agent+GUI 都 active 且 IPC 通 ✓），
+        #     判过了它**按脚本路径**直接调 `/usr/lib/assistant/ab-mark.py` ✓（不走 systemd ✓）。
+        #     它原来带 `WantedBy=assistant.target` ⇒ preset-all 会挂进 `.wants/` ⇒
+        #     开机**无条件**把当前槽标成功 ⇒ **废掉 A/B 的失败回退路径** ✗
+        #     （2026-10-04 刷机后实测：只清 `.wants/` 没用，它会再被建回来 ✗）。
+        #     所以现在**刻意不写 `[Install]`** ✗ —— 这条例外就是给它的 ✓，不是漏配 ✓。
+        if ("WantedBy" not in install
+                and name not in ("assistant-init.service", "ab-mark.service")):
             problems.append("%s: 没有 [Install] WantedBy（没人会拉起它）" % name)
 
 

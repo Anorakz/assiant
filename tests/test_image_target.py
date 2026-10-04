@@ -106,8 +106,11 @@ class TestImageTarget(unittest.TestCase):
         self.assertEqual(
             names,
             {"agent.service", "agent-gui.service", "assistant-init.service",
-             # T15-2-11 救砖后补：每次开机标记 A/B 当前槽"启动成功"（缺了会被扣死）
-             "ab-mark.service",
+             # T15-14-a：标记这件事改由**确认单元**做（判据：Agent 与 GUI 都 active
+             # 且 IPC 通 ✓）。`ab-mark.service` 已从 target 的 `Wants=` 里移除 ✗ ——
+             # 它开机**无条件**把当前槽标成功，会直接废掉失败回退路径 ✗
+             # （2026-10-04 刷机后实测：post-build 改过之后它照样被拉起 ✗）。
+             "assistant-ota-confirm.service",
              "NetworkManager.service"},
             "assistant.target 的 Wants 只该有我们的服务 + NetworkManager（别的都别加）")
 

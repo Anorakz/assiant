@@ -976,8 +976,17 @@ class TestAbMarkKeepsSlotsBootable(unittest.TestCase):
         self.assertIn("Before=agent.service", text, "要早于业务服务（它们才是'这次算成功'的依据）")
 
     def test_target_wants_it_and_checker_knows_it(self):
-        self.assertIn("ab-mark.service", self.TARGET.read_text(encoding="utf-8"))
-        self.assertIn('"ab-mark.service"', self.CHECKER.read_text(encoding="utf-8"))
+        # T15-14-a：目标里现在只许出现**确认单元** ✗ —— `ab-mark.service` 被移出去了
+        #   （它以前被显式 Wants 着 ⇒ 开机无条件标成功 ⇒ 废掉失败回退路径 ✗）。
+        #   所以这条断言要**反过来**钉：ota-confirm 在、ab-mark **不在** ✓。
+        target = self.TARGET.read_text(encoding="utf-8")
+        # ⚠ 只解析 `Wants=` 那一行，**别扫注释** ✗ —— 这个文件里根本没有 `[Service]` 段，
+        #   按它 split 等于没切；注释里正经提到 ab-mark 也会把断言弄红（实测踩过一次 ✓）。
+        joined = " ".join(line for line in target.splitlines() if line.startswith("Wants="))
+        self.assertIn("assistant-ota-confirm.service", joined)
+        self.assertNotIn("ab-mark.service", joined,
+                         "ab-mark 不许再出现在 assistant.target 的 Wants 里（那是回退路径的地基 ✗）")
+        self.assertIn('"assistant-ota-confirm.service"', self.CHECKER.read_text(encoding="utf-8"))
 
     def test_tool_writes_the_avb_format(self):
         text = self.TOOL.read_text(encoding="utf-8")

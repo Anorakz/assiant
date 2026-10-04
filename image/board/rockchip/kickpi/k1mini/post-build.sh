@@ -98,6 +98,10 @@ ln -sfn "/usr/lib/systemd/system/assistant.target" "$ETC/default.target"
 echo "   + default.target -> assistant.target"
 
 # 2) assistant.target.wants/：单元自己的 [Install] WantedBy 落地形式
+# ⚠ **先清空再重建** ✗：只改上面的"创建清单"是不够的 —— 上一次构建留下的软链
+#   会一直躺在 target 里（实测：`ab-mark.service` 那条旧链时间戳还是上一轮 ✗，
+#   而它一旦存在就照样开机自动跑 ⇒ 把失败回退路径废掉 ✗）。清空是幂等的 ✓。
+rm -rf "$ETC/assistant.target.wants"
 mkdir -p "$ETC/assistant.target.wants"
 # ⚠ T15-14-a：这里**只挂确认单元**，不再自动挂 `ab-mark.service` ✗ ——
 #    `ab-mark.py` 只会无条件把**当前**槽标成功，装成开机自动跑就等于"系统还没验证
