@@ -36,7 +36,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from agent.core.music import MusicError, MusicPlayer  # noqa: E402
+from agent.core.music import (  # noqa: E402
+    DEFAULT_LYRIC_BACKOFF_S, MusicError, MusicPlayer)
 from agent.media import music_library as lib  # noqa: E402
 from agent.net.netease_cli import NeteaseCliError, PlayerFailure  # noqa: E402
 
@@ -55,6 +56,11 @@ class FakeCli(object):
         self.calls = []
         self.fail_play = None
         self.detail = {}
+        #: T15-16: `track lyric` 的返回（形状与真 neteasecli 一致）+ 失败开关
+        self.fail_lyric = None
+        self.lyric_payload = {"lrc": "[00:01.00]第一句\n[00:03.00]第二句\n",
+                              "tlyric": "[00:01.00]First\n[00:03.00]\n",
+                              "hasLyric": True, "hasTranslation": True}
 
     # --- 内核用到的四个动作 ---
     def status(self):
@@ -92,6 +98,12 @@ class FakeCli(object):
     def track_detail(self, track_id):
         self.calls.append(("detail", str(track_id)))
         return self.detail.get(str(track_id), {"name": "T%s" % track_id, "duration": 200000})
+
+    def lyric(self, track_id):
+        self.calls.append(("lyric", str(track_id)))
+        if self.fail_lyric:
+            raise self.fail_lyric
+        return dict(self.lyric_payload)
 
     def search(self, kind, keyword, limit=20, offset=0):
         self.calls.append(("search", kind, keyword))
@@ -264,10 +276,121 @@ class TestSnapshot(unittest.TestCase):
                                "duration_ms": 236007})
         snapshot = player.snapshot()
         for key in ("track_id", "title", "artist", "album", "position_s", "duration_s",
-                    "playing", "plays", "tags"):
+                    "playing", "plays", "tags",
+                    "lyric_ok", "lyric_lines", "lyric_rev", "lyric_reason"):
             self.assertIn(key, snapshot)
         self.assertEqual(snapshot["title"], "A")
         self.assertAlmostEqual(snapshot["duration_s"], 236.0, places=1)
+
+
+# ===========================================================================
+#  3b) 歌词（T15-16）
+# ===========================================================================
+class TestLyrics(unittest.TestCase):
+    """歌词: **换歌才拉** / 缓存 / 失败退避 / 载荷字段 / 版本号只在真变时动。
+
+    ⚠ 这一层是"数据"侧: 解析规则在 `tests/test_lyrics.py`, 显示口径在 C++ 侧。
+    """
+
+    def setUp(self):
+        self.player, self.cli, _path = make_player()
+        self.clock = Clock()
+        self.player._clock = self.clock
+
+    def lyric_calls(self):
+        return [call for call in self.cli.calls if call[0] == "lyric"]
+
+    def test_fetches_once_for_the_current_track(self):
+        self.player.play("1", meta={"name": "A"})
+        first = self.player.ensure_lyric()
+        self.assertTrue(first["fetched"])
+        self.assertTrue(first["ok"])
+        self.assertEqual(len(self.lyric_calls()), 1)
+        again = self.player.ensure_lyric()
+        self.assertFalse(again["fetched"], "同一首不该再走一趟 ssh")
+        self.assertEqual(len(self.lyric_calls()), 1)
+
+    def test_snapshot_carries_the_lines_and_the_translation(self):
+        self.player.play("1", meta={"name": "A"})
+        self.player.ensure_lyric()
+        snapshot = self.player.snapshot()
+        self.assertTrue(snapshot["lyric_ok"])
+        self.assertEqual([row["text"] for row in snapshot["lyric_lines"]],
+                         ["第一句", "第二句"])
+        self.assertEqual(snapshot["lyric_lines"][0]["tr"], "First")
+        self.assertEqual(snapshot["lyric_lines"][1]["tr"], "", "没译文的那行留空 = 显示原文")
+        self.assertEqual(snapshot["lyric_rev"], self.player._lyric["rev"])
+
+    def test_changing_track_drops_the_previous_lyrics_immediately(self):
+        """换歌那一瞬（新歌词还没到）**不许**继续报上一首的歌词。"""
+        self.player.play("1", meta={"name": "A"})
+        self.player.ensure_lyric()
+        self.player.play("2", meta={"name": "B"})
+        snapshot = self.player.snapshot()
+        self.assertFalse(snapshot["lyric_ok"])
+        self.assertEqual(snapshot["lyric_lines"], [])
+        self.assertEqual(snapshot["lyric_reason"], "", "空 reason = 界面知道是'还没取到'")
+
+    def test_a_new_track_is_fetched_again(self):
+        self.player.play("1", meta={"name": "A"})
+        self.player.ensure_lyric()
+        self.player.play("2", meta={"name": "B"})
+        self.player.ensure_lyric()
+        self.assertEqual([call[1] for call in self.lyric_calls()], ["1", "2"])
+
+    def test_failure_is_reported_and_backed_off(self):
+        self.cli.fail_lyric = PlayerFailure("ssh 超时")
+        self.player.play("1", meta={"name": "A"})
+        first = self.player.ensure_lyric()
+        self.assertTrue(first["fetched"], "试过了（只是没成）")
+        self.assertFalse(first["ok"])
+        self.assertIn("歌词取不到", self.player.snapshot()["lyric_reason"])
+
+        self.clock.tick(60.0)
+        self.assertFalse(self.player.ensure_lyric()["fetched"], "退避窗口里不重试")
+        self.assertEqual(len(self.lyric_calls()), 1)
+
+        self.clock.tick(DEFAULT_LYRIC_BACKOFF_S)
+        self.cli.fail_lyric = None                     # PC 回来了
+        self.assertTrue(self.player.ensure_lyric()["fetched"], "退避到点后自己再试")
+        self.assertEqual(len(self.lyric_calls()), 2)
+        self.assertTrue(self.player.snapshot()["lyric_ok"])
+
+    def test_a_pure_instrumental_says_so(self):
+        self.cli.lyric_payload = {"lrc": "", "tlyric": "", "hasLyric": False}
+        self.player.play("1", meta={"name": "A"})
+        self.player.ensure_lyric()
+        snapshot = self.player.snapshot()
+        self.assertFalse(snapshot["lyric_ok"])
+        self.assertEqual(snapshot["lyric_reason"], "没有歌词")
+
+    def test_revision_only_moves_when_the_content_changes(self):
+        """`lyric_rev` 是推送去重键的一部分 —— 每轮都变就等于每轮都推。"""
+        self.player.play("1", meta={"name": "A"})
+        self.player.ensure_lyric()
+        rev = self.player.snapshot()["lyric_rev"]
+        self.player.ensure_lyric()
+        self.player.ensure_lyric()
+        self.assertEqual(self.player.snapshot()["lyric_rev"], rev)
+
+    def test_no_track_means_no_ssh(self):
+        result = self.player.ensure_lyric()
+        self.assertFalse(result["fetched"])
+        self.assertEqual(self.lyric_calls(), [])
+        self.assertFalse(self.player.snapshot()["lyric_ok"])
+
+    def test_the_constructor_offset_moves_the_lines(self):
+        player, _cli, _path = make_player(lyric_offset_ms=500)
+        player.play("1", meta={"name": "A"})
+        player.ensure_lyric()
+        self.assertEqual([row["t"] for row in player.snapshot()["lyric_lines"]], [0.5, 2.5])
+
+    def test_force_refetches_even_in_the_backoff_window(self):
+        self.cli.fail_lyric = PlayerFailure("ssh 超时")
+        self.player.play("1", meta={"name": "A"})
+        self.player.ensure_lyric()
+        self.assertTrue(self.player.ensure_lyric(force=True)["fetched"])
+        self.assertEqual(len(self.lyric_calls()), 2)
 
 
 # ===========================================================================
@@ -589,7 +712,7 @@ class TestCandidates(unittest.TestCase):
 class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
     """`Runtime` 的音乐接线（T8-4）: 建 player、轮询推送、命令入口、失败如实。"""
 
-    def _runtime(self, tmp, cli=None, enabled=True):
+    def _runtime(self, tmp, cli=None, enabled=True, lyric_offset_ms=0):
         import agent.main as main_module
         from agent.net import netease_cli
 
@@ -604,7 +727,8 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
             config={"music": {"enabled": enabled, "pc_host": "192.168.137.1",
                               "pc_user": "Anorak",
                               "library_file": os.path.join(tmp, "music_library.jsonl"),
-                              "count_after_s": 30, "poll_interval_s": 0.05}},
+                              "count_after_s": 30, "poll_interval_s": 0.05,
+                              "lyric_offset_ms": lyric_offset_ms}},
             start_native=False, start_terminal=False,
             log=logging.getLogger("test.music"))
         return runtime
@@ -840,6 +964,55 @@ class TestRuntimeWiring(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(pushed, [], "没在放、也没曲目 -> 不推")
             runtime._push_music({"title": "A", "playing": True})
             self.assertEqual(len(pushed), 1)
+        finally:
+            await runtime.stop()
+
+    async def test_a_lyric_arriving_while_paused_still_pushes(self):
+        """T15-16: 暂停时曲目与播放状态都没变 —— 只有歌词变了也必须推出去。
+
+        （这正是 `_push_music()` 去重键要带 `lyric_rev` 的原因。）
+        """
+        tmp = tempfile.mkdtemp(prefix="music-rt-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = self._runtime(tmp)
+        pushed = []
+        runtime.on_music = lambda snapshot: pushed.append(snapshot)
+        await runtime._start_music()
+        try:
+            runtime._push_music({"title": "A", "playing": False, "lyric_rev": 0})
+            self.assertEqual(len(pushed), 1)
+            runtime._push_music({"title": "A", "playing": False, "lyric_rev": 0})
+            self.assertEqual(len(pushed), 1, "一模一样的快照不重复推")
+            runtime._push_music({"title": "A", "playing": False, "lyric_rev": 1})
+            self.assertEqual(len(pushed), 2, "只有歌词变了 -> 也要推")
+        finally:
+            await runtime.stop()
+
+    async def test_the_offset_key_reaches_the_player(self):
+        tmp = tempfile.mkdtemp(prefix="music-rt-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = self._runtime(tmp, lyric_offset_ms=300)
+        await runtime._start_music()
+        try:
+            self.assertEqual(runtime.music.lyric_offset_ms, 300)
+        finally:
+            await runtime.stop()
+
+    async def test_music_state_for_the_model_has_no_lyric_table(self):
+        """T15-16: `music_state()` 会进工具结果（喂模型）—— 上百行歌词不该跟着进去。"""
+        tmp = tempfile.mkdtemp(prefix="music-rt-")
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        runtime = self._runtime(tmp)
+        await runtime._start_music()
+        try:
+            runtime.music.play("1", meta={"name": "A"})
+            runtime.music.ensure_lyric()
+            self.assertTrue(runtime.music.snapshot()["lyric_ok"], "推送那条路有歌词")
+            self.assertTrue(runtime.music.snapshot()["lyric_lines"])
+            state = runtime.music_state()
+            self.assertNotIn("lyric_lines", state)
+            self.assertIn("lyric_ok", state, "有没有歌词这个结论留着（不占地方）")
+            self.assertIn("lyric_reason", state)
         finally:
             await runtime.stop()
 

@@ -39,9 +39,14 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 from ..media import music_library as lib
 from ..net.netease_cli import NeteaseCli, NeteaseCliError
+from . import lyrics as lrc
 
 __all__ = ["MusicPlayer", "MusicError", "DEFAULT_POLL_INTERVAL_S",
-           "tracks_from_search"]
+           "DEFAULT_LYRIC_BACKOFF_S", "tracks_from_search"]
+
+#: 歌词拉失败后多久不再试（秒）。歌词是**锦上添花**: 不通时不该每 3 秒去敲一次
+#: PC 的 sshd（一次 `track lyric` 也是一趟 ssh，和 status 一样贵）。
+DEFAULT_LYRIC_BACKOFF_S = 300.0
 
 
 def tracks_from_search(payload: Any, artist: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -91,6 +96,17 @@ _END_MARGIN_S = 1.5
 _MIN_ADVANCE_S = 5.0
 
 
+def _text_of(payload: Any, key: str) -> Optional[str]:
+    """从 neteasecli 的 `track lyric` 返回里取一段文本（形状不对就当没有）。"""
+    value = payload.get(key) if isinstance(payload, Mapping) else None
+    return value if isinstance(value, str) else None
+
+
+def _translated_count(parsed: Mapping[str, Any]) -> int:
+    """有译文的行数（只给日志用）。"""
+    return sum(1 for row in (parsed.get("lines") or []) if row.get("tr"))
+
+
 class MusicError(ValueError):
     """音乐动作失败（没在放 / 库里没有 / PC 那边出问题）。
 
@@ -105,16 +121,19 @@ class MusicPlayer:
     def __init__(self, cli: NeteaseCli, library_file: str,
                  count_after_s: int = 30,
                  poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
+                 lyric_offset_ms: int = 0,
                  log: Optional[logging.Logger] = None,
                  clock: Optional[Callable[[], float]] = None) -> None:
         """
         @param clock 可选: "现在几点"的替身（默认 `time.monotonic`）—— 只给测试用,
                       让"进度外推 / 计次阈值"能被确定性地验
+        @param lyric_offset_ms 歌词对轴补偿（毫秒，**正值 = 提前**）—— 见 `ensure_lyric()`
         """
         self.cli = cli
         self.library_file = library_file
         self.count_after_s = max(1, int(count_after_s))
         self.poll_interval_s = float(poll_interval_s)
+        self.lyric_offset_ms = int(lyric_offset_ms or 0)
         self.log = log or _log
         self._clock = clock or time.monotonic
         #: 当前这首的 id / 元数据（库里那一行）
@@ -134,6 +153,14 @@ class MusicPlayer:
         #: 自动补歌（T10-4）: 目标长度（0 = 不补）+ 每个歌手搜失败的时间（退避用）
         self._autofill_target = 0
         self._search_failed_at: Dict[str, float] = {}
+        #: 歌词（T15-16）: **一份跟着当前这首**的状态 + 失败退避。
+        #:   `id`       = 这份状态说的是哪首（None = 还没为任何一首拉过）
+        #:   `rev`      = 版本号: **内容真的变了**才 +1（GUI 靠它重设时间轴）
+        #:   `failed_at`= 上次拉失败的时刻（退避用）
+        self._lyric: Dict[str, Any] = {"id": None, "lines": [], "ok": False,
+                                       "reason": "", "rev": 0, "failed_at": None}
+        #: 歌词那条日志的"上次说过的话"（同一条原因只记一次）
+        self._lyric_note = ""
 
     # ------------------------------------------------------------ 本地库 ---
     def tracks(self) -> List[Dict[str, Any]]:
@@ -715,9 +742,11 @@ class MusicPlayer:
         """给推送用的状态（**不碰 PC**: 上次真值 + 本地外推）。
 
         @return {"track_id","title","artist","album","position_s","duration_s",
-                 "playing","plays","tags"}
+                 "playing","plays","tags", "lyric_ok","lyric_lines","lyric_rev","lyric_reason"}
         @note `position_s` 是"锚定在 mpv 真值上的估算": 每次 refresh 都重新对齐,
               中间靠本地时钟走（暂停就停住、不超过时长）。
+        @note 歌词那四个字段由 `_lyric_view()` 给: **只报属于当前这首的** ——
+              换歌那一瞬（还没拉到新歌词）报"未知"，绝不会把上一首的歌词继续推下去。
         """
         now = self._clock() if now is None else now
         position = float(self._truth.get("position") or 0.0)
@@ -730,7 +759,7 @@ class MusicPlayer:
         record = self.current or {}
         if duration <= 0 and record.get("duration_ms"):
             duration = float(record["duration_ms"]) / 1000.0
-        return {
+        payload = {
             "track_id": self.current_id,
             "title": record.get("name") or "",
             "artist": record.get("artists") or "",
@@ -741,6 +770,88 @@ class MusicPlayer:
             "plays": int(record.get("plays") or 0),
             "tags": record.get("tags") or {},
         }
+        payload.update(self._lyric_view())
+        return payload
+
+    # ------------------------------------------------------------ 歌词 ---
+    def ensure_lyric(self, now: Optional[float] = None,
+                     force: bool = False) -> Dict[str, Any]:
+        """拉一次**当前这首**的歌词（**会走 ssh** —— 只在轮询线程池里调）。
+
+        @param now 可选时钟（测试注入）
+        @param force True = 忽略"已经是这首了"与退避，硬拉一次
+        @return `{"fetched","ok","reason","lines","why"}`（`why` 是"这次没拉"的原因，给日志看）
+        @note **换歌才拉**：同一首反复调用只读缓存（一曲一趟 ssh 已经够贵了，
+              一次 `track lyric` 和 `player status` 是同一量级的往返）。
+        @note 失败按 `DEFAULT_LYRIC_BACKOFF_S` 退避: 歌词是锦上添花, 不通时不该每 3 秒
+              去敲一次 PC 的 sshd; 退避到点后**会自动再试**（PC 回来了就自己好）。
+        @note 不做多首缓存: prev/next 来回切会各重拉一次 —— 省下的复杂度值这个价。
+        """
+        track_id = str(self.current_id or "")
+        if not track_id:
+            self._set_lyric(None, None, ok=False, reason="")
+            return {"fetched": False, "ok": False, "reason": "", "lines": [],
+                    "why": "没有在放的曲目"}
+        if not force and self._lyric["id"] == track_id and self._lyric["ok"]:
+            return {"fetched": False, "ok": True, "reason": self._lyric["reason"],
+                    "lines": self._lyric["lines"], "why": ""}
+        moment = self._clock() if now is None else now
+        failed_at = self._lyric["failed_at"]
+        if not force and failed_at and moment - float(failed_at) < DEFAULT_LYRIC_BACKOFF_S:
+            return {"fetched": False, "ok": False, "reason": self._lyric["reason"],
+                    "lines": [], "why": "退避中"}
+        try:
+            data = self.cli.lyric(track_id)
+        except NeteaseCliError as exc:
+            reason = "歌词取不到（%s）" % exc
+            self._set_lyric(track_id, None, ok=False, reason=reason, failed_at=moment)
+            self._note_lyric(reason)
+            return {"fetched": True, "ok": False, "reason": reason, "lines": [], "why": reason}
+        parsed = lrc.parse_lrc(_text_of(data, "lrc"), _text_of(data, "tlyric"),
+                               offset_ms=self.lyric_offset_ms)
+        ok = bool(parsed["has_lyric"])
+        reason = "" if ok else (parsed["reason"] or "这首歌没有歌词")
+        self._set_lyric(track_id, parsed, ok=ok, reason=reason)
+        if ok:
+            note = "歌词就绪: %d 行（%d 行有译文）" % (len(parsed["lines"]),
+                                                 _translated_count(parsed))
+        else:
+            note = reason
+        self._note_lyric(note)
+        return {"fetched": True, "ok": ok, "reason": reason,
+                "lines": parsed["lines"], "why": ""}
+
+    def _set_lyric(self, track_id: Optional[str], parsed: Optional[Mapping[str, Any]],
+                   *, ok: bool, reason: str, failed_at: Optional[float] = None) -> None:
+        """换一份歌词状态。**内容真的变了才 +1 版本号**。
+
+        @note 版本号不能每轮都加: `_push_music()` 拿它当去重键的一部分, 每轮都变
+              就等于"每轮都推"。所以这里逐字段比一遍, 一样就直接返回。
+        """
+        lines = list((parsed or {}).get("lines") or []) if ok else []
+        reason = reason or ""
+        if (self._lyric["id"] == track_id and self._lyric["ok"] == bool(ok)
+                and self._lyric["reason"] == reason and self._lyric["lines"] == lines
+                and self._lyric["failed_at"] == failed_at):
+            return
+        self._lyric = {"id": track_id, "lines": lines, "ok": bool(ok), "reason": reason,
+                       "rev": int(self._lyric["rev"]) + 1, "failed_at": failed_at}
+
+    def _lyric_view(self) -> Dict[str, Any]:
+        """推送给 GUI 的四个歌词字段（**只报当前这首的**）。"""
+        state = self._lyric
+        if state["id"] is None or state["id"] != str(self.current_id or ""):
+            # 换歌了 / 还没为这首拉过: 报"未知"（reason 空 => 界面知道是"还没取到"）
+            return {"lyric_ok": False, "lyric_lines": [], "lyric_rev": int(state["rev"]),
+                    "lyric_reason": ""}
+        return {"lyric_ok": bool(state["ok"]), "lyric_lines": state["lines"],
+                "lyric_rev": int(state["rev"]), "lyric_reason": state["reason"]}
+
+    def _note_lyric(self, note: str) -> None:
+        """歌词那条日志: **同一条原因只记一次**（否则每 3 秒刷一行）。"""
+        if note and note != self._lyric_note:
+            self.log.info("music: %s", note)
+        self._lyric_note = note
 
     def __repr__(self) -> str:
         return "<MusicPlayer current=%s playing=%s queue=%d>" % (

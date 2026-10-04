@@ -386,7 +386,7 @@ class Runtime:
         self.on_music: Optional[Callable[[Dict[str, Any]], Any]] = None
         self._music_task: Optional[asyncio.Task] = None
         #: 上次推过的 (title, playing)，用来决定"这次要不要推"（进度每次都推）
-        self._last_music_push: Tuple[str, bool] = ("", False)
+        self._last_music_push: Tuple[str, bool, int] = ("", False, 0)
 
         #: B 站视频（T11-6）: 队列 + 游戏观察器 + 缓冲代理。
         #: **None = 没开**（`bilibili.enabled=false`）—— 与音乐同一条口径。
@@ -1171,7 +1171,7 @@ class Runtime:
         """
 
         async def _start() -> None:
-            from agent.core.music import MusicPlayer
+            from agent.core.music import DEFAULT_POLL_INTERVAL_S, MusicPlayer
             from agent.media.music_library import resolve_library_file
             from agent.net.netease_cli import NeteaseCli
 
@@ -1183,6 +1183,10 @@ class Runtime:
             self.music = MusicPlayer(
                 cli, library_file,
                 count_after_s=int(self._cfg("music", "count_after_s", default=30) or 30),
+                poll_interval_s=float(self._cfg("music", "poll_interval_s",
+                                                default=DEFAULT_POLL_INTERVAL_S)
+                                      or DEFAULT_POLL_INTERVAL_S),
+                lyric_offset_ms=int(self._cfg("music", "lyric_offset_ms", default=0) or 0),
                 log=self.log)
             # T10-4: 自动补歌（先吃本地库, 不够**按歌手**去 PC 搜）—— 目标长度 30（可配）
             autofill = self._cfg("music", "autofill", default={}) or {}
@@ -1618,8 +1622,9 @@ class Runtime:
         while True:
             try:
                 await asyncio.sleep(interval)
-                snapshot = await loop.run_in_executor(None, self.music.refresh)
-                self._push_music(snapshot)
+                # T15-16: 状态与歌词一起在一趟线程池里问（两者都是 ssh，都会阻塞）
+                await loop.run_in_executor(None, self._refresh_music_with_lyric)
+                self._push_music(self.music.snapshot())
                 # T10-4: 队列短于目标就补（先本地库、不够按歌手去 PC 搜）——
                 # 走线程池: 搜那一段是 ssh, 不能堵事件循环。
                 await loop.run_in_executor(None, self._music_autofill)
@@ -1627,6 +1632,15 @@ class Runtime:
                 raise
             except Exception as exc:        # noqa: BLE001 - 轮询失败不该把任务搞死
                 self.log.warning("music: 轮询失败 (已忽略): %r", exc)
+
+    def _refresh_music_with_lyric(self) -> None:
+        """轮询线程里的一步: 问状态 + 拉歌词（两者都是 ssh, 所以一起丢线程池）。
+
+        @note 顺序有讲究: `refresh()` 先跑 —— 它可能**自动接下一首**（`current_id` 变了），
+              然后 `ensure_lyric()` 拉的才是**新的那首**的歌词。
+        """
+        self.music.refresh()
+        self.music.ensure_lyric()
 
     def _music_autofill(self) -> Optional[Dict[str, Any]]:
         """把队列补到目标长度（**同步**, 由轮询丢线程池跑）。
@@ -1671,13 +1685,16 @@ class Runtime:
         return result
 
     def _push_music(self, snapshot: Dict[str, Any]) -> bool:
-        """把状态推给 GUI（**变化才推**: 曲目/播放状态一变必推, 播放中每次带新进度推）。"""
+        """把状态推给 GUI（**变化才推**: 曲目/播放状态/歌词一变必推, 播放中每次带新进度推）。"""
         if self.on_music is None:
             return False
-        key = (str(snapshot.get("title") or ""), bool(snapshot.get("playing")))
+        # ⚠ T15-16: key 里必须带 `lyric_rev` —— 否则"暂停时歌词到了"这条推送发不出去
+        #   （暂停中曲目与播放状态都没变，只有歌词变了）。
+        key = (str(snapshot.get("title") or ""), bool(snapshot.get("playing")),
+               int(snapshot.get("lyric_rev") or 0))
         previous = self._last_music_push
         if key == previous and not key[1]:
-            return False                       # 没在放、曲目也没变 -> 不重复推
+            return False                       # 没在放、曲目与歌词都没变 -> 不重复推
         try:
             self.on_music(dict(snapshot))
             self._last_music_push = key
@@ -1694,10 +1711,17 @@ class Runtime:
 
     # ---- 音乐动作（GUI 命令与工具都走这里）----
     def music_state(self) -> Dict[str, Any]:
-        """当前播放状态（**不碰 PC**: 缓存真值 + 本地外推）。"""
+        """当前播放状态（**不碰 PC**: 缓存真值 + 本地外推）。
+
+        @note T15-16: **不带歌词行表** —— 那是给界面画的（一首歌上百行，塞进工具结果
+              只会白烧上下文）。这里只留 `lyric_ok` / `lyric_reason` 这两个"有没有"的结论；
+              要行表请直接看 `music.snapshot()`（推送那条路）。
+        """
         if self.music is None:
             return {"ok": False, "error": "音乐没开（config.yaml 的 music.enabled）"}
-        return self.music.snapshot()
+        state = self.music.snapshot()
+        state.pop("lyric_lines", None)
+        return state
 
     def music_control(self, action: str, **kwargs: Any) -> Dict[str, Any]:
         """播放控制（play_pause / pause / resume / stop / next / prev / seek / volume）。

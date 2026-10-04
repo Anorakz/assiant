@@ -45,6 +45,7 @@ tests/test_tag_index.py
 tests/test_music_library.py
 tests/test_music_player.py
 tests/test_netease_cli.py
+tests/test_lyrics.py
 tests/test_bilibili_api.py
 tests/test_bilibili_queue.py
 tests/test_bilibili_buffer.py

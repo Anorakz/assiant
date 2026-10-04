@@ -25,7 +25,10 @@ tests/test_ipc_protocol.py — agent/ipc/protocol.py 单测
 """
 
 import json
+import os
+import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -33,6 +36,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from agent.core.music import MusicPlayer  # noqa: E402
 from agent.ipc import protocol as p  # noqa: E402
 
 
@@ -402,7 +406,13 @@ class TestWireContract(unittest.TestCase):
             (p.TOPIC_STATUS, {"mode": "STUDY", "connected": True}),
             (p.TOPIC_LLM, {"text": "已经切换到学习模式。"}),
             (p.TOPIC_WALLPAPER, {"path": "/home/kickpi/wallpapers/04.jpg", "index": 3}),
-            (p.TOPIC_MUSIC, {"title": "夜曲", "playing": True}),
+            (p.TOPIC_MUSIC, {"track_id": "186016", "title": "晴天", "artist": "周杰伦",
+                             "album": "叶惠美", "position_s": 70.3, "duration_s": 269.0,
+                             "playing": True, "plays": 12, "tags": {"mood": ["calm"]},
+                             "lyric_ok": True,
+                             "lyric_lines": [{"t": 0.0, "text": "作词 : 周杰伦", "tr": ""},
+                                             {"t": 28.95, "text": "故事的小黄花", "tr": ""}],
+                             "lyric_rev": 1, "lyric_reason": ""}),
             (p.TOPIC_SCHEDULE, {
                 "kind": "fired",
                 "event": {"state": "study", "date": "2026-09-22",
@@ -429,6 +439,64 @@ class TestWireContract(unittest.TestCase):
         # 防止"文档加了条目但测试漏了"（9 个 topic + 16 条命令 = 25）
         documented = set(p.TOPICS) | set(p.COMMANDS)
         self.assertEqual(len(documented), 25)
+
+class TestTheMusicRowMatchesTheCode(unittest.TestCase):
+    """§3 的 `music` 行必须列全 `MusicPlayer.snapshot()` 真正推的字段（T15-16）。
+
+    ⚠ 为什么值得一条机械守卫: 这份文档自称"唯一真源"，但在 T15-16 之前它只写了
+      `title`/`playing` —— `artist`/`album`/`position_s`/`plays`/`tags` 代码早就在推了。
+      人写文档会漏，所以让测试来对账（两个方向都查：文档多写 / 代码多推）。
+    """
+
+    DOC = _PROJECT_ROOT / "docs" / "ipc-protocol.md"
+
+    def documented_fields(self):
+        """§3 表里 `music` 那几行（含 `| |` 续行）第 2 列的反引号字段名。"""
+        rows = []
+        for line in self.DOC.read_text(encoding="utf-8").splitlines():
+            if re.match(r"\|\s*`music`\s*\|", line):
+                rows.append(line)
+                continue
+            if rows and line.startswith("| |"):
+                rows.append(line)
+                continue
+            if rows:
+                break
+        fields = set()
+        for row in rows:
+            cells = row.split("|")
+            if len(cells) > 2:
+                fields.update(re.findall(r"`([a-z_]+)`", cells[2]))
+        return fields
+
+    def code_fields(self):
+        """`snapshot()` 的键（它**不碰 PC**，所以 cli 给 None 就行）。"""
+        with tempfile.TemporaryDirectory() as folder:
+            player = MusicPlayer(None, os.path.join(folder, "music_library.jsonl"))
+            return set(player.snapshot())
+
+    def test_the_two_sides_are_the_same_set(self):
+        documented = self.documented_fields()
+        code = self.code_fields()
+        self.assertEqual(
+            documented, code,
+            "§3 的 music 行与 MusicPlayer.snapshot() 对不上：\n"
+            "  · 文档写了、代码没推: %s\n"
+            "  · 代码推了、文档没写: %s"
+            % (sorted(documented - code) or "无", sorted(code - documented) or "无"))
+
+    def test_the_comparison_is_not_vacuous(self):
+        """反空转: 提取规则坏了（正则/行首匹配变了）不能变成"两边都空 -> 绿"。"""
+        documented = self.documented_fields()
+        self.assertGreaterEqual(len(documented), 13, "只从文档里认出 %d 个字段" % len(documented))
+        for must in ("title", "playing", "position_s", "lyric_ok", "lyric_lines",
+                     "lyric_rev", "lyric_reason"):
+            self.assertIn(must, documented, "提取结果里少了 %s" % must)
+        self.assertGreaterEqual(len(self.code_fields()), 13)
+
+
+class TestLineFormat(unittest.TestCase):
+    """NDJSON 行格式: 一条消息一行、多条能按换行切（原"字节级契约"那组的尾巴）。"""
 
     def test_one_message_is_exactly_one_line(self):
         # NDJSON 的前提: 消息里不能出现裸换行

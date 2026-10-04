@@ -136,8 +136,26 @@ GUI 收到后按 `topic` 分发。**不认识的 topic 忽略**。
 > 所以刚打开的 GUI 主区不再是兜底底色，直接就是当前那张。补推**不受状态权限表约束**
 > （它是"同步显示"，不是"换一张"）：Agent 正处在 SLEEP/GAME 时也照补。
 > 从来没换过任何一张时，补推会**顺手选第一张**当初始画面。
-| `music` | `title` | string | 当前曲目标题 |
+| `music` | `title` | string | 当前曲目标题（空 = 没有曲目信息，界面显示"未播放"） |
 | | `playing` | bool | 是否正在播放 |
+| | `track_id` | string｜null | 当前这首在**本地库**里的 id（对账用；没有曲目时 `null`） |
+| | `artist` / `album` | string | 歌手 / 专辑（库里那一行的值，可能是空串） |
+| | `position_s` / `duration_s` | number | **进度 / 总时长**（秒，1 位小数）。⚠ `position_s` 是"锚在 mpv 真值上的估算"：每轮轮询重新对齐，中间靠本地时钟走（暂停就停住、不超过时长） |
+| | `plays` | number | 这首在本地库里的播放次数 |
+| | `tags` | object | 本地库给这首打的标签（`{轴: [标签…]}`） |
+| | `lyric_ok` | bool | **这首歌有没有歌词**（T15-16）。`false` 时 `lyric_lines` 必为空 |
+| | `lyric_lines` | array | 歌词时间轴：`[{t, text, tr}…]`，按 `t` 升序。`t` 是秒（**已算进 `music.lyric_offset_ms` 的补偿**，客户端不用再移）、`text` 原文、`tr` 译文（**可能为空串** = 这一行没有译文，显示时回退原文）。⚠ **一条只推一次**，不跟进度重复推 |
+| | `lyric_rev` | number | 歌词**版本号**：内容真的变了才 +1。客户端拿它判断"要不要重设时间轴"（Agent 侧也拿它当推送去重的键之一）—— 换个写法收到新 `rev` 就该整份换掉 |
+| | `lyric_reason` | string | 没有歌词时给人看的一句话（`没有歌词` / `歌词取不到（…）`）。**空串 = 还没有结果**：新曲目刚起播、歌词还没拉回来的那几秒 |
+
+> ⚠ `music` 是**变化时推**：曲目、播放状态、歌词（`lyric_rev`）任一变就推；**播放中每轮都推**
+> （带上新的 `position_s`，默认 3 s 一轮，见配置键 `music.poll_interval_s`）。GUI 刚连上时
+> 补推一次当前状态（`push_current_music`）。
+> ⚠ **歌词只在换歌时去 PC 拉一次**（一次 ssh，和 `player status` 同量级）—— 所以它不是"跟着进度
+> 流式推"的，客户端要**自己按 `position_s` 在时间轴里选行**（见 `docs/gui-agent-integration.md`）。
+> 取不到会退避 5 分钟再试，期间 `lyric_reason` 一直挂着同一句话（同一条原因 Agent 也只记一行日志）。
+> 对轴补偿是配置键 `music.lyric_offset_ms`（**正值 = 歌词提前**，与 LRC 自己的 `[offset:]` 同号）。
+> ⚠ 老 Agent 不带 `lyric_*` 四个字段 —— 按 §2 规则 2 忽略即可（客户端当"没有歌词"处理）。
 | `bilibili` | `queue` | array | **B 站预览队列**（T11-6）：每条 `{bvid,title,author,duration_s,play,cover,url}`。窗口 = **3×预览栏格数**（见 `bilibili_viewport`）；**只存地址, 不下载视频** |
 | | `index` | number | 当前第几条（在 `queue` 里的下标） |
 | | `current` | object｜null | 当前那条（字段同上）；队列空时 `null` |
@@ -221,7 +239,7 @@ GUI 收到后按 `topic` 分发。**不认识的 topic 忽略**。
 {"topic":"status","data":{"mode":"STUDY","connected":true},"timestamp":1234567890.123}
 {"topic":"llm","data":{"text":"已经切换到学习模式。"},"timestamp":1234567890.456}
 {"topic":"wallpaper","data":{"path":"/home/kickpi/wallpapers/04.jpg","index":3},"timestamp":1234567891.0}
-{"topic":"music","data":{"title":"夜曲","playing":true},"timestamp":1234567891.5}
+{"topic":"music","data":{"track_id":"186016","title":"晴天","artist":"周杰伦","album":"叶惠美","position_s":70.3,"duration_s":269.0,"playing":true,"plays":12,"tags":{"mood":["calm"]},"lyric_ok":true,"lyric_lines":[{"t":0.0,"text":"作词 : 周杰伦","tr":""},{"t":28.95,"text":"故事的小黄花","tr":""}],"lyric_rev":1,"lyric_reason":""},"timestamp":1234567891.5}
 {"topic":"schedule","data":{"kind":"fired","event":{"state":"study","date":"2026-09-22","scheduled_at":"2026-09-22T13:00","fired_at":"2026-09-22T13:00:03","actions":[{"type":"state","state":"study","ok":true,"steps":[{"from":"idle","to":"study"}],"why":"日程: 13:00 → study","current":"study"}]}},"timestamp":1234567891.8}
 {"topic":"schedule","data":{"kind":"state","now":"2026-09-22T13:05:00","limit":50,"fired":[{"state":"study","date":"2026-09-22","scheduled_at":"2026-09-22T13:00","fired_at":"2026-09-22T13:00:03","actions":[{"type":"state","state":"study","ok":true,"steps":[{"from":"idle","to":"study"}],"why":"日程: 13:00 → study","current":"study"}]}]},"timestamp":1234567891.9}
 ```
