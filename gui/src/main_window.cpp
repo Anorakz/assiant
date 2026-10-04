@@ -1117,7 +1117,13 @@ void MainWindow::demoLyrics(const QString& which)
     payload.insert(QStringLiteral("playing"), true);
     payload.insert(QStringLiteral("position_s"), 30.0);
     payload.insert(QStringLiteral("duration_s"), 269.0);
-    if (which == QStringLiteral("有词")) {
+    // ⚠ 值要同时认 ASCII 别名：板端 locale 不是 UTF-8 时，Qt 会把 argv 里的中文按
+    //   8-bit 解成另一个串（实测：板上传 "有词" 匹配不上，宿主上却能）—— 验收脚本用
+    //   `has|inst|none` 就绕开这件事。
+    const QString key = which.trimmed().toLower();
+    const bool wantedLyrics = which == QStringLiteral("有词") || key == QStringLiteral("has");
+    const bool instrumental = which == QStringLiteral("纯音乐") || key == QStringLiteral("inst");
+    if (wantedLyrics) {
         QJsonArray rows;
         rows.append(row(0.0, QStringLiteral("作词 : 周杰伦"), QString()));
         rows.append(row(28.95, QStringLiteral("故事的小黄花"), QStringLiteral("The little yellow flower")));
@@ -1126,7 +1132,7 @@ void MainWindow::demoLyrics(const QString& which)
         payload.insert(QStringLiteral("lyric_ok"), true);
         payload.insert(QStringLiteral("lyric_rev"), 1);
         payload.insert(QStringLiteral("lyric_lines"), rows);
-    } else if (which == QStringLiteral("纯音乐")) {
+    } else if (instrumental) {
         payload.insert(QStringLiteral("lyric_ok"), false);
         payload.insert(QStringLiteral("lyric_rev"), 2);
         payload.insert(QStringLiteral("lyric_reason"), QStringLiteral("没有歌词"));
