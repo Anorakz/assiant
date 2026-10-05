@@ -197,6 +197,12 @@ private:
     bool agentUp_ = false;
     bool debug_ = false;
     OnboardCtl* onboard_ = nullptr;
+    // T15-17 bug①：eglfs（无 X）下 Qt 虚拟键盘必须用 Application 集成 ——
+    //   VK 的 Desktop 集成要把键盘放进**独立顶层窗口**，而 eglfs 不支持多顶层窗口 ✗
+    //   ⇒ 面板窗口永远建不出来（板上实证：IM_VISIBLE=0、WINDOW_COUNT=1）✓
+    //   这里用一个**全窗、鼠标穿透**的 QQuickWidget 承载只含 InputPanel 的 QML ✓
+    //   ⚠ 懒创建：只有非 xcb 平台才会建 ⇒ 有 X 时行为与以前完全一致 ✓
+    class QQuickWidget* vkPanel_ = nullptr;
     QString configPath_;
     bool onboardAuto_ = true;
     /// 当前已经让给虚拟键盘的高度（px，0 = 没让）；只用于"变化了才打日志"

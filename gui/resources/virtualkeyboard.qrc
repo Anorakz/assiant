@@ -1,0 +1,17 @@
+<!-- ============================================================================
+      gui/resources/virtualkeyboard.qrc
+
+      把虚拟键盘的承载 QML **编进二进制**（T15-17 / bug ①）。
+
+      ⚠ 为什么用资源而不是装文件 ✓：板端部署走的是 `.new` + `mv -f` 覆盖**单个二进制**（见
+        docs/deploy.md），把 QML 放进 qrc 就**不需要额外部署步骤** ✓，也不会出现
+        "二进制更新了、QML 忘了传"这种半新半旧的状态 ✗。
+      ⚠ 与现有 `icons.qrc` 同一套路 ✓（`CMAKE_AUTORCC ON` 已在 CMakeLists 打开 ✓）。
+
+      引用方式：`QQuickWidget::setSource(QUrl(QStringLiteral("qrc:/virtualkeyboard.qml")))`
+     ============================================================================ -->
+<RCC>
+    <qresource prefix="/">
+        <file>virtualkeyboard.qml</file>
+    </qresource>
+</RCC>

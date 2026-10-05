@@ -16,6 +16,7 @@
 //     **不在 `gui_widgets` 库里** ✗ ⇒ 本测试的 CMake 必须**额外编进 `../src/main_window.cpp`** ✓
 //     （见 `tests/CMakeLists.txt` 里单独的那一段 ✓）。
 // ============================================================================
+#include <QQuickWidget>   // T15-17 bug①：承载 QML 的可用性判据 ✓
 #include "ui/chat_panel.h"   // T6：气泡可区分性判据 ✓
 #include "core/config_store.h"   // 判据要构造一份配置交给 applyConfig() ✓
 #include <QSpinBox>     // 判据 1/3 设 regionIdleSpin() ✓
@@ -203,6 +204,46 @@ private slots:
         panel->appendAssistant(QStringLiteral("助手回的话"));
         const int afterBoth = panel->findChildren<QWidget*>(QStringLiteral("ChatBubbleUser")).size();
         QCOMPARE(afterBoth, afterUser);             // 助手气泡**不该**动到用户气泡计数 ✓
+    }
+
+    /// T15-17 bug①（A1）✓：**虚拟键盘的承载 QML 真的可用** ✓
+    /// —— eglfs 下 VK 必须用 Application 集成（官方 Deployment Guide）✓：
+    ///    Desktop 集成要把键盘放进**独立顶层窗口**，而 eglfs **不支持多顶层窗口** ✗
+    ///    ⇒ 面板窗口永远建不出来（板上实测：IM_VISIBLE=0 / WINDOW_COUNT=1）✓
+    ///    ⇒ 修法是用一个承载 `InputPanel` 的 QML（本用例测它**可加载**）✓
+    /// 板上验收另有两张截图与 `IM_VISIBLE=1` 为证（见 docs/gui.md §12.15）✓
+    void virtualKeyboardCarrierIsUsable()
+    {
+        // 1) 承载 QML 必须**编译进二进制**（qrc ✓）—— 部署只覆盖单个二进制，不能依赖外部文件 ✓
+        QFile qml(QStringLiteral(":/virtualkeyboard.qml"));
+        QVERIFY2(qml.exists(), "qrc:/virtualkeyboard.qml 不在二进制里 —— 部署后键盘必然不显示");
+        QVERIFY(qml.open(QIODevice::ReadOnly));
+        const QString text = QString::fromUtf8(qml.readAll());
+
+        // 2) 它必须真的是虚拟键盘的承载 ✓ —— ⚠ 断言要**够强** ✗：
+        //    只查 "InputPanel" 这个词是不够的 ✗（把行首注释掉，词还在 ⇒ 假绿 ✓ 已踩过 ✗）
+        //    ⇒ 要求**同时**具备两样关键内容，缺任一 ⇒ 承载就是坏的 ✓：
+        //       · `InputPanel {`            —— 真的实例化了面板 ✓
+        //       · `Qt.inputMethod.visible`  —— 按输入法可见性显隐（官方示例的关键一行 ✓）
+        QVERIFY2(text.contains(QStringLiteral("import QtQuick.VirtualKeyboard")),
+                 "承载 QML 没有 import QtQuick.VirtualKeyboard ✗");
+        QVERIFY2(text.contains(QStringLiteral("InputPanel {")),
+                 "承载 QML 里没有实例化 InputPanel ✗ —— 那就不是 Application 集成");
+        QVERIFY2(text.contains(QStringLiteral("Qt.inputMethod.visible")),
+                 "承载 QML 没有按 Qt.inputMethod.visible 显隐 ✗ —— 键盘不会跟着输入法出现/收起");
+
+        // 3) 宿主弱化版 ✓：框架与资源都被识别即可（`status() != Null`）✓
+        //    ⚠ **"真能渲染出键盘"这一条在板上验** ✓ —— 原因：宿主机的 QML 模块常装不全 ✗，
+        //      本机就缺 `QtQuick.VirtualKeyboard.Plugins` ✗ ⇒ 解析会停在 Error ✓（板上是**全套** ✓）。
+        //      板上证据：`IM_VISIBLE=1` ＋ GUI 自己的截图里"主界面 + 底部键盘"同屏 ✓
+        //      （`docs/gui.md §12.15`、截图 `vk-fixed2.png`）✓✓
+        QQuickWidget carrier;
+        carrier.setSource(QUrl(QStringLiteral("qrc:/virtualkeyboard.qml")));
+        QTest::qWait(1500);   // 给解析一点时间；宿主机停在 Error **不算失败** ✓
+        QVERIFY2(carrier.status() != QQuickWidget::Null,
+                 "QQuickWidget 连资源都没识别（Null）—— 说明 qrc 或框架有问题 ✗");
+        qInfo().noquote() << QStringLiteral("[test] 承载 QML 宿主加载状态=%1（0=Null 1=Loading 2=Ready 3=Error；Error 在宿主属正常 ✓）")
+                                 .arg(int(carrier.status()));
     }
 };
 

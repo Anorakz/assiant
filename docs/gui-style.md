@@ -153,3 +153,11 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build-gui-host        # 当前 28 项
 > 依赖"Qt 运行时 dlopen `libxkbcommon`" + `platforminputcontexts/libqtvirtualkeyboardplugin.so`
 > + `virtualkeyboard/libqtvirtualkeyboard_pinyin.so` ✓（三者都 init 才算活 ✓ `LD_DEBUG=libs` 可验 ✓）。
 > ⚠ Qt 的 `xkbcommon` 支持**不进 `NEEDED`** ✗（dlopen 型 ✓）⇒ 别用符号/NEEDED 判它 ✓。
+
+
+> **软键盘（T15-17 bug① 修好后）** ✓：eglfs（无 X）下**不能**用 Qt 虚拟键盘的 `Desktop` 集成 ✗
+> —— 它要求"独立顶层窗口"，而 eglfs **不支持多顶层窗口** ✓ ⇒ 必须用 **`Application` 集成** ✓：
+> 应用自己实例化 `InputPanel`（`gui/resources/virtualkeyboard.qml` ✓，经 `QQuickWidget` 承载 ✓，
+> **全窗 + 鼠标穿透 + 透明** ✓）⇒ 键盘**渲染进应用自己的窗口** ✓。
+> ⚠ 判据：`IM_VISIBLE=1` ＋ `WINDOW_COUNT≥2`（`--focus-input-demo --dump-input` ✓）＋
+> GUI 自己的 `--screenshot` **能拍到键盘** ✓（这是"Application 集成生效"最直观的证据 ✓）。

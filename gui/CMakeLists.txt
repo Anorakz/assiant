@@ -33,7 +33,8 @@ set(CMAKE_AUTORCC ON)
 
 # 板端 Qt 5.12; 用 REQUIRED 让版本不足时在配置阶段就报清楚,
 # 而不是编译到一半找不到符号。
-find_package(Qt5 5.12 REQUIRED COMPONENTS Core Network Widgets Multimedia MultimediaWidgets)
+find_package(Qt5 5.12 REQUIRED COMPONENTS Core Network Widgets Multimedia MultimediaWidgets
+             QuickWidgets)   # T15-17 bug①：eglfs 下虚拟键盘必须用 Application 集成（承载 InputPanel）
 
 # yaml-cpp: 只给 core/schedule_model.cpp **读** config.yaml 的 scheduler 段用
 #   (日程区)。写路径仍然只有 ConfigStore 的文本级替换 —— yaml-cpp 会重排+丢注释,
@@ -125,9 +126,14 @@ add_library(gui_widgets STATIC
     # T15-16 G-D-1：异常/加载两种状态视图（StateBanner + Skeleton）
     src/ui/state_views.h
     src/ui/state_views.cpp
+    # T15-17 bug①：虚拟键盘承载 QML（Application 集成）——
+    #   ⚠ 加在**静态库**里而不是可执行目标里：单测链接的是本库 ✓
+    #     （加给 agent_gui 的话，测试二进制里就没有这个资源，判据会红 ✓ 已踩过 ✗）
+    resources/virtualkeyboard.qrc
 )
 target_include_directories(gui_widgets PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(gui_widgets PUBLIC gui_services Qt5::Widgets Qt5::Multimedia Qt5::MultimediaWidgets)
+target_link_libraries(gui_widgets PUBLIC gui_services Qt5::Widgets Qt5::Multimedia Qt5::MultimediaWidgets
+                                      Qt5::QuickWidgets)   # T15-17 bug①：承载 InputPanel 的 QQuickWidget
 
 # ------------------------------------------------------------------ 可执行 ---
 # 阶段 3: Qt5 Widgets 主窗口 (上区域通栏 + 左区域导航 + 页面栈)。

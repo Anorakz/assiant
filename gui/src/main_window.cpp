@@ -11,6 +11,8 @@
 
 #include "main_window.h"
 
+#include <QQuickWidget>   // T15-17 bug①：eglfs 下承载 Qt 虚拟键盘（Application 集成）
+
 #include "core/bilibili_format.h"
 #include "core/config_store.h"
 #include "core/idle_watcher.h"
@@ -673,6 +675,26 @@ void MainWindow::showOnboard(const QString& why)
     // 直接把面板交给 Qt 的输入法（部署侧设 QT_IM_MODULE=qtvirtualkeyboard，由它接管弹出）。
     // ⚠ 别再走下面那条"探不到 onboard 就报错"的路：那在无 X 下是**正常的**，不是错误。
     if (QGuiApplication::platformName() != QLatin1String("xcb")) {
+        // T15-17 bug①：eglfs 下 VK 的 Desktop 集成开不出第二个顶层窗口 ⇒ 用 Application 集成 ✓
+        //   · 懒建一次 ✓；全窗 + **鼠标穿透** ⇒ 不挡任何输入 ✓
+        //   · 键盘的显隐交给 QML 自己（不可见时面板停在屏外）✓ ⇒ 无需改 hideOnboard ✓
+        if (vkPanel_ == nullptr) {
+            vkPanel_ = new QQuickWidget(this);
+            vkPanel_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+            // ⚠ QQuickWidget 默认**不透明**（clear color 是白 ✗）⇒ 它铺满整个窗口时
+            //   会把主界面**整块盖白** ✗（板上实测：截图上半部分是纯白 ✓）。
+            //   ⇒ 必须显式设透明 ✓（Qt 官方对"浮在 Widgets 之上"的 QQuickWidget 就是这么做的 ✓）。
+            vkPanel_->setClearColor(Qt::transparent);
+            vkPanel_->setAttribute(Qt::WA_AlwaysStackOnTop, true);
+            vkPanel_->setResizeMode(QQuickWidget::SizeRootObjectToView);
+            vkPanel_->setSource(QUrl(QStringLiteral("qrc:/virtualkeyboard.qml")));
+            vkPanel_->setGeometry(rect());
+            vkPanel_->show();
+            qInfo().noquote() << QStringLiteral("[ui] 已建虚拟键盘承载（Application 集成，qrc:/virtualkeyboard.qml）");
+        } else {
+            vkPanel_->setGeometry(rect());
+            vkPanel_->show();
+        }
         if (QGuiApplication::inputMethod() != nullptr) {
             QGuiApplication::inputMethod()->show();
         }

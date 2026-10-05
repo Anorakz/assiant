@@ -94,7 +94,11 @@ add_executable(test_main_window
     test_main_window.cpp
     ../src/main_window.cpp
 )
-target_sources(test_main_window PRIVATE ../resources/icons.qrc)
+target_sources(test_main_window PRIVATE
+    ../resources/icons.qrc
+    # T15-17 bug①：承载 QML —— ⚠ 必须在这里再声明一次 ✗
+    #   本测试**不链接 gui_widgets**，它自己汇编源文件 ✓ ⇒ 资源也要自己带上 ✓
+    ../resources/virtualkeyboard.qrc)
 target_link_libraries(test_main_window PRIVATE
     gui_widgets              # 各页面/区域本体
     gui_services             # LocalClient / IdleWatcher / ConfigStore

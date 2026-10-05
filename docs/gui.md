@@ -702,3 +702,48 @@ Qt 虚拟键盘有两种集成方式 ——
 （有 X 时仍走原 onboard 路径 ✓ 语义不变 ✓）；⑤ `applyKeyboardInset()` 接 `Qt.inputMethod.visible` ✓；
 ⑥ 判据 + **牙齿** ✓（注掉嵌入 ⇒ 必红 ✓；ctest 35 → 36 ✓）；
 ⑦ 交叉编 ⇒ 部署（`.new` + `mv -f` ✓ ＋ 核对大小/特征串 ✓）⇒ **上板验收** ✓。
+
+
+### 12.15 bug ① 软键盘：**修好了** ✓（A1：eglfs 下改用 Application 集成，2026-10-05 深夜）
+
+**根因** ✓（官方依据 ＋ 板上实证）：
+Qt 虚拟键盘有两种集成方式（Qt 5.15 [Deployment Guide](https://doc-snapshots.qt.io/qt5-5.15/qtvirtualkeyboard-deployment-guide.html)，
+*Integration Method*）：`Desktop`（键盘放在**独立顶层窗口**）与 `Application`（应用自己实例化 `InputPanel`，
+键盘**嵌进应用窗口**）。官方明确：**没有多顶层窗口支持的环境（嵌入式设备）上必须用 Application 集成** ✓。
+板子是 **eglfs** ✗（不支持多顶层窗口）⇒ 这正是"`setFocusObject(QLineEdit/ChatInput)` ✓ 与
+`showInputPanel()` ✓ 都发生、但 `IM_VISIBLE=0` ✗、`WINDOW_COUNT=1` ✗"的原因 ✓。
+（也解释了 `QT_VIRTUALKEYBOARD_DESKTOP_DISABLE=1` 为何无效 ✗ —— 官方说它只用于覆盖**桌面环境**的选择 ✓。）
+
+**修法** ✓（只走 eglfs 分支，有 X 时行为完全不变 ✓）：
+1. `gui/resources/virtualkeyboard.qml` ✓ —— 只含 `InputPanel` 的承载 QML，照官方 *Creating InputPanel* 示例 ✓；
+2. `gui/resources/virtualkeyboard.qrc` ✓ —— **编进二进制** ✓（部署只覆盖单个二进制，不依赖外部文件 ✓），
+   ⚠ 且必须加给**两个目标** ✗：`gui_widgets`（库）**与** `test_main_window`（它**不链接库**、自己汇编源文件 ✓）；
+3. `gui/CMakeLists.txt` ✓ —— `find_package` 加 `QuickWidgets` ✓、`gui_widgets` 链接 `Qt5::QuickWidgets` ✓；
+4. `gui/src/main_window.cpp` 的 `showOnboard()` **非 xcb 分支** ✓ —— 懒创建一个
+   **全窗 + `WA_TransparentForMouseEvents` + `WA_AlwaysStackOnTop` + `setClearColor(Qt::transparent)`**
+   的 `QQuickWidget` 承载该 QML ✓；
+   ⚠ `setClearColor(Qt::transparent)` **不可省** ✗ —— 默认白底会把主界面**整块盖白** ✓（板上实测过 ✓：见
+   `vk-fixed.png`（白底）与 `vk-fixed2.png`（正常）两张对照 ✓）；
+   ⚠ 键盘显隐**交给 QML** ✓（`y: Qt.inputMethod.visible ? parent.height - kb.height : parent.height`）
+   ⇒ **不需要改 `hideOnboard`** ✓（改动更小 ✓）；
+5. 宿主需装 `qtdeclarative5-dev` ✓（提供 `Qt5QuickWidgets` ✓ —— 宿主**默认没有** ✗）。
+
+**板上验收** ✓（项目自带钩子 `--focus-input-demo --dump-input` ✓）：
+| 判据 | 修前 | 修后 |
+|---|---|---|
+| `IM_VISIBLE` | **0** ✗（两次一致） | ★ **1** ✓ |
+| `WINDOW_COUNT` | **1** ✗ | ★ **2** ✓（多出承载键盘的 `QQuickWindow` ✓） |
+| GUI **自己的**截图里能看到键盘 | ✗（VK 那时是独立窗口，`--screenshot` 拍不到） | ★ **能** ✓✓（`vk-fixed2.png`：主界面 ＋ 底部键盘 ✓） |
+
+**判据与牙齿** ✓（`gui/tests/test_main_window.cpp::virtualKeyboardCarrierIsUsable`）：
+断言 ① 资源在二进制里 ✓（`:/virtualkeyboard.qml` exists —— 这条**两次抓到真实部署缺口** ✓✓）；
+② 内容含 `InputPanel {` 与 `Qt.inputMethod.visible` ✓（⚠ 只查 `"InputPanel"` 这个词**不够** ✗ ——
+行首加注释时词还在 ⇒ 假绿 ✓，已踩过 ✓）；③ 宿主弱化版：`QQuickWidget` 可构造且 `status() != Null` ✓。
+**牙齿**：把 QML 的 `InputPanel {` 换成 `Rectangle {` ⇒ **rc=8 必红** ✓✓（还原即绿 ✓）。
+⚠ 用例加在**既有 ctest 目标**里 ⇒ **用例数仍是 35** ✗（不是 36 ✓，如实说明 ✓）。
+
+**⚠ 如实标注的三点** ✗：
+- `QQuickWindow … visible=0` ✓（不影响显示 —— 键盘已渲染在应用窗口里 ✓），但值得备查 ✓；
+- **宿主机的 QML 模块常装不全** ✗（本机缺 `QtQuick.VirtualKeyboard.Plugins` ✓）⇒ "**真能渲染出键盘**"
+  这条判据**放在板上**更实在 ✓（板上是**全套** ✓）；
+- 板端二进制从 878,712 → **882,808 B** ✓；⚠ **每次 OTA/刷槽后必须重新部署 GUI** ✓（本轮踩过一次 ✓）。
