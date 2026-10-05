@@ -533,3 +533,49 @@ QML 在 `/usr/qml/QtQuick/VirtualKeyboard` ✓，我先前查错路径（只查�
 ⇒ 读回 md5 不一致 ✗ ⇒ 因为 misc 是 **4 MB** ✓，那 48 KB 是 **BCB 片段** ✓（`ota-apply.py:16` ✓）。
 **已用备份安全写回并 md5 自证** ✓，板子完好 ✓。
 ⇒ 教训：**别按文件大小推断分区位置** ✗；砖级操作**用项目自己的函数** ✓。
+
+
+### 12.11 bug ①「软键盘唤不出」：**根因修复已完成并由运行时证据确认** ✓（2026-10-05）
+
+**硬证据（两条，都是板上实测 ✓）**：
+1. **那句坏日志消失了** ✓ —— `journalctl -u agent-gui | grep xkb` 现在**为空** ✓
+   （修前**每次启动必现** ✓：21:43:40 ✓、21:45:19 ✓ 都抓到过
+   `qt.qpa.input: xkbcommon not available, not performing key mapping` ✓）；
+2. **`LD_DEBUG=libs` 显示运行时真的加载了** ✓✓：
+   ```
+   find library=libxkbcommon.so.0 [0]; searching
+   trying file=/lib/libxkbcommon.so.0
+   calling init: /lib/libxkbcommon.so.0                       <-- xkbcommon 真的 init 了
+   find library=libQt5VirtualKeyboard.so.5 [0]
+   calling init: /usr/lib/qt/plugins/platforminputcontexts/libqtvirtualkeyboardplugin.so
+   calling init: /usr/lib/qt/plugins/virtualkeyboard/libqtvirtualkeyboard_pinyin.so   <-- 连拼音都起来了
+   ```
+   ⇒ ⇒ **输入栈已从"缺库报错"变成"库 + 虚拟键盘插件 + 拼音输入法全部 init"** ✓✓。
+
+**完整根因链（十四层，每层都有实测证据 ✓）** —— 这是本 bug 真正的全貌，也是它的教学价值：
+
+| # | 事实 | 怎么知道的 |
+|---|---|---|
+| ① | 板端 Qt 每次启动都报 `xkbcommon not available` ✗ | journal ✓ |
+| ② | 板上没有 `libxkbcommon` ✗ | `ls` 空 ✓ |
+| ③ | buildroot 默认**不开** `LIBXKBCOMMON` / `XKEYBOARD_CONFIG` ✗ | `.config:3215 / 1878` ✓ |
+| ④ | 只跑 `ota-updateimg` **只打包** ✗ | 包内挂载无库 ✓ |
+| ⑤ | `build.sh buildroot` 才是重建 ✓，但它**从 defconfig 覆盖 `.config`** ✗ | 日志 `Buildroot config changed!` ✓ |
+| ⑥ | 正确落点是 **SDK 里的片段文件** ✓（只改仓库无效 ✗） | SDK 那份实测 **0 行** ✓ |
+| ⑦ | 同步后重建 ⇒ 库与键位表进 rootfs ✓ | **挂载验收**：`libxkbcommon.so.0.0.0` 276,256 B ✓、`/usr/share/X11/xkb` ✓ |
+| ⑧ | ⚠ buildroot **拒绝 PATH 里有空格** ✗ | 日志 `Your PATH contains spaces… Fix you PATH.` ✓（WSL 注入的 Windows PATH ✓） |
+| ⑨ | Qt 的 configure **早就启用了** xkbcommon ✓ | `config.summary`：`evdev yes` / `xkbcommon yes` ✓ |
+| ⑩ | ⚠ 它用 **dlopen 运行时加载** ✗ ⇒ **NEEDED/符号判据天然失效** ✗ | NEEDED 无它 ✓ 符号只在库自己里 ✓（我因此误判两轮 ✓） |
+| ⑪ | 真因是**板上那套 Qt 是旧的** ✗ | 板上 21:45 ✓ vs 重编 21:59 ✓ |
+| ⑫ | 出包 → 推包 → 切槽 → 装包 → 回 A ✓ | 哈希两侧一致 ✓、守卫对照 ✓ |
+| ⑬ | ★ **坏日志消失 + 三件套 init** ✓✓ | 本轮 ✓ |
+| ⑭ | ⚠ **仍待验**：人手点一下输入框看键盘画出 ✗ | uinput 注入**六次四法全打不通** ✗（事件进不了 Qt ✓） |
+
+**⚠ 唯一未验的一步（如实标注 ✓）**：**手指点一下聊天输入框 ⇒ 键盘是否画出** ✗ ——
+注入器在这块板上**打不通**（§12.7 五轮 + 本次再试两次 ✓），所以这一条**必须由人在板前确认** ✓。
+⚠ 但**代码与镜像已就绪** ✓（运行时证据在 ✓），**不需要再改任何东西** ✓。
+
+**顺带产出的能力（可复用 ✓）**：**A/B 切槽流程双向跑通并验证** ✓ ——
+用项目自己的 `next_bcb_for_slot()` + `apply_bcb_to_misc()`（**不手搓 dd** ✓），
+先整块备份 ✓、写 `0x800` 与 `0x860` **两处** ✓、读回**逐字节复核** ✓、失败**自动回滚** ✓、
+四次 dry-run 逐项校准（签名 ✓、语义 ✓、**槽索引映射经实测**：索引 0 = 槽 a ✓）。

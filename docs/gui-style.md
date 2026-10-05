@@ -147,3 +147,9 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build-gui-host        # 当前 28 项
 > **`ChatBubbleUser`**（用户/命令行说的 ✓）与助手气泡 ✓（`chat_panel.cpp:167-197` ✓）。
 > ⇒ GUI 侧按 `llm{role:"user"}` 分流 ✓（`main_window.cpp` 的 llm 分支 ✓）；
 > ⚠ 没有 `role` ⇒ 一律当助手气泡 ✓（**向后兼容** ✓）。
+
+
+> **输入栈（T15-17 bug①）** ✓：板上的软键盘走 **Qt 虚拟键盘** ✓ ——
+> 依赖"Qt 运行时 dlopen `libxkbcommon`" + `platforminputcontexts/libqtvirtualkeyboardplugin.so`
+> + `virtualkeyboard/libqtvirtualkeyboard_pinyin.so` ✓（三者都 init 才算活 ✓ `LD_DEBUG=libs` 可验 ✓）。
+> ⚠ Qt 的 `xkbcommon` 支持**不进 `NEEDED`** ✗（dlopen 型 ✓）⇒ 别用符号/NEEDED 判它 ✓。
