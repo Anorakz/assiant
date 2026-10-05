@@ -185,6 +185,10 @@ private:
     QComboBox* left_ = nullptr;
     QComboBox* right_ = nullptr;
     QSpinBox* regionIdle_ = nullptr;
+
+    /// T15-17 / T4：四区域卡片的**实时回显** ✓ —— 显示"当前真正生效的值" ✓
+    /// （由 T3 的 `notifyEdited` 刷新 ✓；`objectName` 固定为 `WakeEcho` ✓，判据靠它找 ✓）。
+    QLabel* wakeEcho_ = nullptr;
     QComboBox* overlayMode_ = nullptr;
     QSpinBox* overlayIdle_ = nullptr;
     QComboBox* startPage_ = nullptr;

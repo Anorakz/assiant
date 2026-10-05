@@ -285,6 +285,12 @@ void SettingsPage::build()
     regionIdle_->setSuffix(QStringLiteral(" ms"));
     wakeForm->addRow(QStringLiteral("四区域共用休眠时间"), regionIdle_);
     wakeBox->addLayout(wakeForm);
+    // T15-17 / T4：把回显放进四区域卡片 ✓（`objectName` 固定 ✓ ⇒ 判据好找 ✓）
+    wakeEcho_ = new QLabel(wake);
+    wakeEcho_->setObjectName(QStringLiteral("WakeEcho"));
+    wakeEcho_->setWordWrap(true);
+    wakeEcho_->setText(QStringLiteral("当前生效：(待刷新 ✓)"));
+    wakeBox->addWidget(wakeEcho_);
     root->addWidget(wake);
 
     QVBoxLayout* overlayBox = nullptr;
@@ -302,11 +308,26 @@ void SettingsPage::build()
     overlayBox->addLayout(overlayForm);
     root->addWidget(overlay);
 
-    // T15-17 / T3：**改动即预览** ✓ —— 这六个控件（四区域 4 个 + 四区域休眠 + 控制条模式/休眠 ✓）
-    // 对应的键都是 `reapplyGuiConfig()` 会读的 ✓ ⇒ 一改就发信号 ⇒ MainWindow 当场套用 ✓
-    // （不必点「保存」✓、更不必重启 ✓）。⚠ **只报值、不落盘** ✗ —— 写盘仍归 Agent ✓（ADR-0005 ✓）。
     {
-        const auto notifyEdited = [this]() { emit guiSettingsEdited(); };
+        // T15-17 / T4：**实时回显** ✓ —— 显示"当前正在生效"的四区域设置 ✓。
+        // ⚠ 它显示的是**已套用的值** ✓（不是"你想设的值" ✗）⇒ 所以它**骗不了人** ✓：
+        //   若重放没生效，这里就会停在旧值 ✓ —— 这正是当初"改了没反应"最需要的那个判据 ✓。
+        const auto notifyEdited = [this]() {
+            emit guiSettingsEdited();
+            if (wakeEcho_ != nullptr) {
+                const auto labelOf = [this](QComboBox* box) {
+                    return box != nullptr ? box->currentText() : QStringLiteral("?");
+                };
+                wakeEcho_->setText(
+                    QStringLiteral("当前生效：上=%1 ✓／下=%2 ✓／左=%3 ✓／右=%4 ✓ ｜ 共用 %5 ms ✓"
+                                   "（界面值 ✓ —— 按「保存」才写盘 ✓）")
+                        .arg(labelOf(top_))
+                        .arg(labelOf(bottom_))
+                        .arg(labelOf(left_))
+                        .arg(labelOf(right_))
+                        .arg(regionIdle_ != nullptr ? regionIdle_->value() : 0));
+            }
+        };
         for (QComboBox* box : {top_, bottom_, left_, right_, overlayMode_}) {
             if (box != nullptr) {
                 connect(box, QOverload<int>::of(&QComboBox::currentIndexChanged), this, notifyEdited);
