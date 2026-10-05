@@ -483,7 +483,7 @@ void MainWindow::paintEvent(QPaintEvent* event)
     Q_UNUSED(event);
     QPainter painter(this);
     const QRect target = rect();
-    painter.fillRect(target, QColor(0x1E, 0x1F, 0x22));   // 兜底底色（也算"占位底图"）
+    painter.fillRect(target, QColor(theme::kBg));   // 兜底底色（也算"占位底图"）
 
     // T15-16 G-B-5：淡入期间的**重绘帧数**（判据 ✓）
     //   ⚠ 放在这里而不是 `valueChanged` 回调里 ✗ —— 那数的是"动画要求重绘几次"，

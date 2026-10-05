@@ -79,12 +79,12 @@ QStringList grep(const QRegularExpression& re, bool skipThemeHeader = false)
 
 /// R3 的白名单（相对 `gui/src` 的路径 → 允许的**裸 QColor 次数**）
 /// ⚠ 这是棘轮：G-C-1 清一处就改小一处 ✓（清单清空时这条规则才算真正白守 ✓）
+/// ✅ **2026-10-05 G-C-1 已把它清空** ✓ —— 7 处裸 `QColor(0x…)`（`video_panel.cpp` 6 +
+///    `main_window.cpp` 1）全部改走 `theme::` 常量 ✓ ⇒ 从此这条规则要求 **一处都没有** ✓✓
+///    （清完必须来改这里 ✗ —— 不改它就会像 G-C-1 实测那样当场发火 ✓，这正是棘轮的作用 ✓）。
 const QHash<QString, int>& bareColourWhitelist()
 {
-    static const QHash<QString, int> kAllow = {
-        {QStringLiteral("ui/video_panel.cpp"), 6},   // 视频控制条几个按钮的图标染色
-        {QStringLiteral("main_window.cpp"), 1},      // 壁纸缺失时的兜底底色
-    };
+    static const QHash<QString, int> kAllow = {};
     return kAllow;
 }
 

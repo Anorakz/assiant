@@ -2,6 +2,7 @@
 //  gui/src/ui/video_panel.cpp — 视频区实现（画面 + 控制条 + 预览栏 + 真全屏）
 // ============================================================================
 #include "ui/video_panel.h"
+#include "ui/theme.h"    // T15-16 G-C-1：视觉常量（唯一来源）
 
 #include "ui/bilibili_preview.h"
 #include "ui/icons.h"
@@ -113,21 +114,21 @@ VideoPanel::VideoPanel(QWidget* parent)
 
     // T14：控制条改用自绘单色图标（不再依赖字体码位，彻底避开"⏸ 缺码位"那类问题）
     previous_ = makeButton(QString(), QStringLiteral("VideoCtl"), pill);
-    previous_->setIcon(ui::tintedIcon(QStringLiteral("prev"), QColor(0xE6, 0xE6, 0xE6)));
+    previous_->setIcon(ui::tintedIcon(QStringLiteral("prev"), QColor(theme::kText)));
     previous_->setIconSize(QSize(20, 20));
     previous_->setToolTip(QStringLiteral("上一集"));
     play_ = makeButton(QString(), QStringLiteral("VideoCtlPlay"), pill);
     // 这颗是蓝底深色字 → 图标用同色，否则浅色图标压在浅蓝上几乎看不见
-    play_->setIcon(ui::tintedIcon(QStringLiteral("play"), QColor(0x12, 0x14, 0x1A)));
+    play_->setIcon(ui::tintedIcon(QStringLiteral("play"), QColor(theme::kOnAccent)));
     play_->setIconSize(QSize(22, 22));
     next_ = makeButton(QString(), QStringLiteral("VideoCtl"), pill);
-    next_->setIcon(ui::tintedIcon(QStringLiteral("next"), QColor(0xE6, 0xE6, 0xE6)));
+    next_->setIcon(ui::tintedIcon(QStringLiteral("next"), QColor(theme::kText)));
     next_->setIconSize(QSize(20, 20));
     next_->setToolTip(QStringLiteral("下一集"));
     speed_ = new QToolButton(pill);
     speed_->setObjectName(QStringLiteral("VideoSpeed"));
     speed_->setText(QStringLiteral("1.0x"));
-    speed_->setIcon(ui::tintedIcon(QStringLiteral("speed"), QColor(0xD6, 0xDA, 0xE0)));
+    speed_->setIcon(ui::tintedIcon(QStringLiteral("speed"), QColor(theme::kBtnText2)));
     speed_->setIconSize(QSize(18, 18));
     speed_->setPopupMode(QToolButton::InstantPopup);
     speed_->setFixedHeight(40);
@@ -146,7 +147,7 @@ VideoPanel::VideoPanel(QWidget* parent)
     }
     speed_->setMenu(speedMenu);
     fullscreen_ = makeButton(QString(), QStringLiteral("VideoCtl"), pill);
-    fullscreen_->setIcon(ui::tintedIcon(QStringLiteral("fullscreen"), QColor(0xE6, 0xE6, 0xE6)));
+    fullscreen_->setIcon(ui::tintedIcon(QStringLiteral("fullscreen"), QColor(theme::kText)));
     fullscreen_->setIconSize(QSize(20, 20));
 
     pillBox->addWidget(previous_);
@@ -185,7 +186,7 @@ VideoPanel::VideoPanel(QWidget* parent)
         // 只画符号：▶ = 点了会播；|| = 点了会停（⏸ 在板端字体缺码位，不能用）
         // 图标 + 文字各留一份：图标给"动作"，文字（1.0x 之类）保持可读
         play_->setIcon(ui::tintedIcon(playing ? QStringLiteral("pause") : QStringLiteral("play"),
-                                      QColor(0x12, 0x14, 0x1A)));
+                                      QColor(theme::kOnAccent)));
         play_->setText(QString());
         emit playingChanged(playing);
     });
