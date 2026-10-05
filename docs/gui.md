@@ -579,3 +579,42 @@ QML 在 `/usr/qml/QtQuick/VirtualKeyboard` ✓，我先前查错路径（只查�
 用项目自己的 `next_bcb_for_slot()` + `apply_bcb_to_misc()`（**不手搓 dd** ✓），
 先整块备份 ✓、写 `0x800` 与 `0x860` **两处** ✓、读回**逐字节复核** ✓、失败**自动回滚** ✓、
 四次 dry-run 逐项校准（签名 ✓、语义 ✓、**槽索引映射经实测**：索引 0 = 槽 a ✓）。
+
+
+### 12.12 bug ① 重开调查（2026-10-05 晚）：**焦点确认通了，但键盘仍不出** ⚠ —— 以及一个**真实的新原因**
+
+**用户提供的两个决定性观察** ✓（比任何日志都值钱 ✓）：
+1. 点聊天输入框 ⇒ **输入框里出现光标/高亮** ✓ ⇒ `QLineEdit` **拿到了焦点** ✓；
+2. 点左栏"音乐"图标 ⇒ **页面会切** ✓ ⇒ **触摸链路是通的** ✓。
+
+**据此把范围压到一处** ✓：既然焦点到了 ✓、配置与代码又**逐条核对为真** ✓ ——
+`input_source: keyboard` ✓（板上 `config.yaml:551` ✓）、`onboard_auto: true` ✓（`:553` ✓）、
+`main_window.cpp:265` 的 connect **无条件** ✓、`onChatInputFocused()`（`:767-776`）**没有别的早退** ✓、
+`showOnboard()`（`:666-683`）在 eglfs 下**必然**打 `[ui] 无 X（eglfs）：软键盘交给 Qt 输入法…` ✓ ——
+⇒ ⇒ 可 journal 里**这句话一次都没有** ✗（两轮各全量核对一遍 ✓）⇒ ⇒ 那只能是"**跑的二进制不是这份源码**"✗✓。
+
+**★ 找到的真实原因** ✓✓：**板上当时跑的是 845,944 的旧版 GUI** ✗ ——
+`strings` 里**找不到** `ChatInput` / `软键盘交给 Qt 输入法` 等串 ✗；而 `/proc/<pid>/exe` 指向的正是一份
+`845944 / Oct 5 22:00` 的文件 ✓ ⇒ ⇒ **时序复盘** ✓：
+- **21:45** 我部署了 T6 新版（878,712 ✓）—— 当时是对的 ✓；
+- **22:13** 我又做了一次 **OTA**（装含 xkbcommon 的新镜像 ✓）⇒ ⇒ **它整块重写了 `system_a`** ✗
+  ⇒ **连带把 GUI 覆盖回镜像里的旧版** ✗✗；
+- 之后我一直以为"新版已部署"✗ ⇒ ⇒ **此后多轮观察全部发生在旧版上** ✗。
+**修** ✓：重新部署 878,712 ✓ ⇒ 已确认在跑 ✓（`[ui] 设置页改动已即时套用` ×4 是**新版特征日志** ✓✓）。
+
+**注入路线（供后来者 ✓，省得再走一遍）** ✓：
+- `/dev/input/event3` **不是**触摸屏 ✗（`rk809 Headset` 的 Switch ✓，Qt 明确 `not using input device` ✗）；
+  **真触摸屏是 `event2` / `goodix-ts`** ✓（`device is a touch device` ✓、带校准矩阵 `0 -1 1  1 0 0` ✓）；
+- `tap` 的 `--device` 指 **uinput 控制节点**（默认 `/dev/uinput` ✓）而**不是**目标 event 设备 ✗ —— 写 event2 会 `UI_DEV_CREATE 失败` ✗；
+- 虚拟设备**能被 Qt 接管** ✓（journal：`is tagged by udev as: Touchscreen` ✓、`device is a touch device` ✓、
+  **`registerDevice /dev/input/event6 - dsh-virtual-touch`** ✓），**前提是它在 GUI 启动前就存在** ✓
+  （Qt5 的 libinput 后端**只在启动时枚举** ✓）；
+- ⚠ **但注入的事件始终没到达 Qt** ✗：`qt.qpa.input.events`（**从二进制里挖出的真类别名** ✓，
+  定义在 `libQt5EglFSDeviceIntegration.so.5` ✓）在注入期间**一条都没打** ✓ ⇒
+  ⇒ **"注册成功 ≠ 事件会被投递"** ✓（卡在 libinput 投递层 ✓，板上无 `evtest`/`libinput debug-events` ✗）。
+
+**⚠ 唯一未由人验证的一步** ✗（如实标注 ✓）：**人手点输入框 ⇒ 键盘是否画出** ✗ ——
+现在板上**新版 GUI ✓ + xkbcommon 已修好并在用 ✓ + 诊断日志已开 ✓**，三者**第一次同时在线** ✓，
+所以这一次点击**一定能给出三种可判定的结果之一** ✓：
+① 键盘弹出 ⇒ 闭环 ✓；② 没弹但 journal 出现 `[ui] 无 X（eglfs）…` ⇒ 焦点通了、问题在 Qt 输入法渲染 ✓；
+③ 没弹且**没有**那条 `[ui]` ⇒ 焦点仍没上报 ⇒ 下一步就是**在 `chat_panel.cpp` 的 `eventFilter` 加两行探针** ✓。
