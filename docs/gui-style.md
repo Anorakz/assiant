@@ -98,7 +98,7 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build-gui-host        # 当前 28 项
 
 | # | 场景 | 触发条件 | 文案（界面上真出现的） | 图标 | 能重试 | 证据 |
 |---|---|---|---|---|---|---|
-| 1 | 没连上 Agent | 与 Agent 的链路断开 | 顶栏三态 + 琥珀横幅（QSS `#LinkBanner`） | 无（靠颜色 ✓） | 自动重连 ✓ | `top_bar.cpp` 的 `setLinkState()` ✓ —— ⚠ **本行无单测** ✗（2026-10-05 全 `gui/tests` 搜过：只有 `kTopBarHeight` 常数被引用 ✓，**没有**顶栏/横幅用例 ✗） |
+| 1 | 没连上 Agent | 与 Agent 的链路断开 | 顶栏三态 + 琥珀横幅（QSS `#LinkBanner`） | 无（靠颜色 ✓） | 自动重连 ✓ | `top_bar.cpp` 的 `setLinkState()` ✓ —— ✅ **已补单测**：`test_top_bar::linkStatesAreVisibleOnTheTopBar` ✓ —— 断言三态的文字 ✓、圆点颜色**取自 `theme::` 常量**（不写死十六进制 ✓），并**钉住「三态不许做成一个样」** ✗；**牙齿**：把「重连中」做成与「未连接」一样 ⇒ 当场红 ✓（原注：2026-10-05 全搜 `gui/tests` 时本行确实没有用例 ✗） |
 | 2 | 命令没发出去 | IPC 写失败 / 超时 | 对话区提示行 | 无 | 重发即重试 ✓ | `main_window.cpp:573` 附近 ✓ —— ⚠ **本行无单测** ✗（`MainWindow` 级测试不存在 ✓，见 G-B-4/B-6 的同一条限制 ✓） |
 | 3 | 壁纸读不到 | 图片解码失败 / 路径不存在 | 兜底底色（`theme::kBg` ✓）+ 灰字路径 | 无 | 换路径即重试 ✓ | `main_window.cpp:606,647,672` ✓ |
 | 4 | 系统页读不到 `/proc` | 权限/容器环境 | 页内 hint"读不到 /proc（路径：…）——请检查权限或容器环境" | 无 | 切页重进 ✓ | `sys_page.cpp:278` ✓ —— ⚠ **该页有单测** ✓（`test_sys_page` ✓）**但这句文案未被断言** ✗（2026-10-05 grep `读不到 /proc` 在 `gui/tests` 里**零命中** ✗） |
@@ -114,7 +114,7 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build-gui-host        # 当前 28 项
 
 | 项 | 状态 |
 |---|---|
-| 十行**现状与证据**写清 ✓ | ✅ 见上表（每行的**代码位置**都核过 ✓；有单测的 7 行已标 ✓，3 行只标代码位置 ✗） |
+| 十行**现状与证据**写清 ✓ | ✅ 见上表（每行的**代码位置**都核过 ✓；**8 行**已标有单测 ✓，**2 行**只标代码位置 ✗（第 2「命令没发出」/ 第 3「壁纸读不到」—— 这两处要 `MainWindow` 级测试 ✓，而整套里**没有** ✓）） |
 | `StateBanner` / `Skeleton` 组件 | ✅ **已做**（G-D-1 ✓，见 `gui/src/ui/state_views.{h,cpp}` + `test_state_banner` 5 条 ✓） |
 | 10 行**改走** `StateBanner` | ⬜ **未做** ✗（需动 6 个页面 ✓；本轮次未覆盖 ✓ —— 不当成"已完成"✗） |
 | 模型页/系统页/设置页的 `Skeleton` | ⚠ **逐页重判后**：`sys_page` **不该挂** ✗（实测证伪 ✓，见下）；`settings_page` 的 OTA 读取**该挂** ✓（真异步 ✓）；`model_page` **待核** ✗ |
