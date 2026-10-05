@@ -365,3 +365,35 @@ python3 -m agent.cli doctor             # 只看派生文件跟真源一不一�
 - **改法** ✓：把 `applyConfig()` 拆成「读盘 + 回填页面」（启动用 ✓，**唯一**会调 `loadFromConfig()` 的地方 ✗）与新的 `reapplyGuiConfig()`（**只套用运行时** ✓，**不碰页面控件** ✓ ⇒ **不会冲掉正在编辑的内容** ✓）；保存回执成功后重放 ✓；设置页**改控件就发信号** ⇒ 重放 ✓ ⇒ **当场生效** ✓。
 - **判据** ✓：`test_main_window` 三条 ✓（含 ★「重放不许冲掉正在编辑的内容」✓，其守卫"重放确实跑过吗"✓）＋ **两颗牙齿都咬** ✓（注掉 `emit` ⇒ 红 ✓；往信号路径塞 `restoreDefaults()` ⇒ ★ 判据红 ✓）。
 - **语义与边界** ✓：见 `docs/gui-style.md` §4 ✓。
+
+
+### 12.6 T15-17 上板真机取证（2026-10-05，板端 1280×800 ✓）
+
+**怎么抓（可复核 ✓，照抄即可）**
+```bash
+# 板上：停服务 ⇒ 用 unit 里的真实环境跑 ⇒ 抓完恢复服务
+ssh rk3568 'systemctl stop agent-gui; sleep 2'
+ssh rk3568 'cd /data/assistant; QT_QPA_PLATFORM=eglfs QT_QPA_EGLFS_INTEGRATION=eglfs_kms \
+  QT_QPA_EGLFS_ROTATION=90 timeout 40 /usr/lib/assistant/gui/agent_gui \
+  --config config/config.yaml --page home --screenshot /data/shots/t7-late.png --screenshot-delay 12000'
+ssh rk3568 'systemctl start agent-gui; sleep 6; systemctl is-active agent-gui'
+scp rk3568:/data/shots/t7-late.png .
+```
+> ⚠ 环境取自 `systemctl cat agent-gui`（**不是猜的** ✗）；`cd /data/assistant` 与 `--config config/config.yaml`
+> **缺一个就静默退出** ✗（G-B-5 那轮的教训 ✓）。覆盖运行中的二进制要 `.new` + `mv -f` ✓。
+
+**取到了什么 ✓**
+
+| 图 | 内容 | 证明了什么 |
+|---|---|---|
+| 设置页（延时 6 s） | 四区域卡片下方**新回显行** ✓：`当前生效：上=锁定（常显）✓／下=活动✓／左=活动✓／右=锁定✓ ｜ 共用 5000 ms ✓` | 回显在真机上**渲染正确** ✓；且它**不是**初始的「(待刷新)」✗ ⇒ **启动期**这条链在真机上通 ✓（`loadFromConfig` → 控件变化 → `guiSettingsEdited` → 回显刷新 ✓） |
+| `home`（延时 **2 s** ✓） | **导航栏四颗图标清楚可见** ✓（主页高亮 ✓、太阳 ✓） | 未到 5000 ms ⇒ **还没折叠** ✓（对照基线 ✓） |
+| `home`（延时 **12 s** ✓） | **整条导航栏不见** ✓；内容与底部音乐条**贴到左边缘** ✓ | 超过 5000 ms ⇒ **当场自动折叠** ✓✓ |
+
+⇒ ⇒ **结论** ✓：`gui.wake.left = active` ＋ `gui.wake.idle_ms = 5000` 这条链（`IdleWatcher` → `RegionHost` → 折叠 ✓）
+**在真机上真的生效** ✓✓ —— 不是只有单测里成立 ✓。
+
+**✗ 仍未取证（如实 ✓）**：**「改控件 ⇒ 当场生效」**那一步需要**一次触摸** ✗
+（板上 eglfs、没有 X ✓，我**无法远程点屏** ✗）⇒ 留给**人在板前**做 ✓：
+把「左（导航）」从**活动**改成**锁定** ✓ ⇒ **不重启** ⇒ 左栏应当**当场变常显** ✓；
+⚠ 同时看**回显行**是否**跟着变** ✓（它显示的是**真正生效**的值 ✓ ⇒ 骗不了人 ✓）。
