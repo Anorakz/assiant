@@ -67,7 +67,20 @@ private slots:
         // ⚠⚠ **必须像生产那样先接线** ✗→✓：T3 的 settingsPage_→MainWindow 接线住在 applyConfig() 里 ✓
         //   （生产是 main.cpp 调的 ✓）⇒ 不调它，信号就**没人接** ✓ ⇒ 重放不跑 ✓
         //   ⇒ 判据 1/3 当场红 ✓（**这条判据真的在测东西** ✓ —— 它自己把接线缺口照出来了 ✓）。
+        // ⚠ **必须先给一份真配置** ✗ —— 上一版我只断言、没给配置 ⇒ 空 configPath ⇒
+        //   `loadFromConfig()` 早退 ⇒ 控件没赋值 ⇒ **没有信号** ⇒ 回显停在"（待刷新）" ⇒ 判据**当场红** ✓
+        //   （是**判据前提不成立** ✗，不是产品 bug ✓ —— 真机上配置路径是真的 ✓）。
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString cfgPath = dir.filePath(QStringLiteral("config.yaml"));
+#ifdef SETTINGS_TEMPLATE_PATH
+        QVERIFY(QFile::copy(QStringLiteral(SETTINGS_TEMPLATE_PATH), cfgPath));
+#else
+        QSKIP("没有 SETTINGS_TEMPLATE_PATH 宏 ✗ —— 本判据不假绿 ✓");
+#endif
+        window.setConfigPath(cfgPath);                 // ★ 让启动套用**真的**发生 ✓（window 在上面已声明 ✓）
         core::ConfigStore store;
+        store.load(cfgPath);
         window.applyConfig(store);
         SettingsPage* page = window.settingsPage();
         QVERIFY(page != nullptr);

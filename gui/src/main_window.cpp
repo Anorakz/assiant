@@ -1215,7 +1215,12 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
     }
 
     if (settingsPage_ != nullptr) {
-        settingsPage_->loadFromConfig(configPath_);
+        // ⚠ T15-17 修正（真机 journal 查实 ✗→✓）：`loadFromConfig()` **必须放在下面三处 connect 之后** ✗。
+        //   原来它在这里 ⇒ 它回填控件时触发的 `guiSettingsEdited` **先于接线** ✓
+        //   ⇒ 收端收不到 ⇒ 真机上**从来没有**那句「设置页改动已即时套用」的日志 ✗
+        //   （无害 ✓：启动套用由 `applyConfig()` 自己接着做 ✓；但对将来往 lambda 里加逻辑的人是**静默陷阱** ✗）。
+        // ⚠ 如实说 ✓：修好之后**唯一可见的差别是那句日志** ✓（值本来就一样 ✓）⇒ 它是**正确性卫生** ✓，
+        //   我**不声称**有会红的判据盯着它 ✗。
         // T14-3：页面只发"要改哪些键"，落盘交给 Agent（唯一写入者，见 docs/adr/0005）。
         connect(settingsPage_, &SettingsPage::saveRequested, this,
                 [this](QJsonObject keys, QJsonObject credentials) {
@@ -1275,6 +1280,10 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
             qInfo().noquote() << QStringLiteral(
                 "[ui] 设置页改动已**即时套用** ✓（未落盘 ✓ —— 按「保存」才写盘 ✓）");
         }, Qt::UniqueConnection);
+
+        // ⚠ 放到**这三处 connect 之后** ✓（见本块开头那段 ✗→✓）：这样它回填控件时触发的信号
+        //   **收端已就位** ✓ ⇒ 启动期也能看到「即时套用」日志 ✓ ⇒ 以后一眼可查 ✓。
+        settingsPage_->loadFromConfig(configPath_);
     }
     if (modelPage_ != nullptr) {
         connect(modelPage_, &ModelPage::configSaveRequested, this,
