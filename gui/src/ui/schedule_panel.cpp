@@ -25,6 +25,37 @@ const QString kPastColor =
 /// 时间列宽度：足够放下 "00:00"
 constexpr int kTimeWidth = 92;
 
+/// T15-16 G-B-3：把**所有影响渲染的输入**拍成一串指纹 ✓。
+/// ⚠ 字段必须与 `core::ScheduleResult` 全对齐（漏一个 ⇒ 该变的时候没变 ✗）——
+///   本函数写于 2026-10-05，依据是 `core/schedule_model.h` 的实际字段 ✓。
+QStringList signatureOf(const core::ScheduleResult& result, int maxRows)
+{
+    QStringList out;
+    out << QStringLiteral("max=%1").arg(maxRows)
+        << QStringLiteral("ok=%1").arg(result.ok ? 1 : 0)
+        << QStringLiteral("err=%1").arg(result.error)
+        << QStringLiteral("wh=%1").arg(result.windowHours)
+        << QStringLiteral("we=%1").arg(result.windowEnd.toString(Qt::ISODate))
+        << QStringLiteral("wet=%1").arg(result.windowEndText)
+        << QStringLiteral("probs=%1").arg(result.problems.join(QLatin1Char(';')))
+        << QStringLiteral("total=%1").arg(result.totalInConfig);
+    int left = (maxRows > 0) ? maxRows : -1;      // 与 addSection/addRow 同一口径 ✓
+    for (const core::ScheduleDay& day : result.days) {
+        out << QStringLiteral("day=%1|%2|%3").arg(day.label, day.date.toString(Qt::ISODate))
+                   .arg(day.rows.size());
+        for (const core::ScheduleRow& row : day.rows) {
+            if (left == 0) {
+                break;
+            }
+            out << QStringLiteral("%1|%2|%3").arg(row.time, row.state).arg(row.past ? 1 : 0);
+            if (left > 0) {
+                --left;
+            }
+        }
+    }
+    return out;
+}
+
 QString rowTextOf(const core::ScheduleRow& row)
 {
     // T12-4: 一行 = **时间 + 状态**（日程的内容就是那几个状态之一：SLEEP/IDLE/STUDY/GAME）。
@@ -67,6 +98,17 @@ SchedulePanel::SchedulePanel(QWidget* parent)
 
 void SchedulePanel::setSchedule(const core::ScheduleResult& result, int maxRows)
 {
+    // T15-16 G-B-3：**输入指纹没变就整段跳过重建** ✓
+    //   每 60 s 的刷新里，大多数 tick 的行集合与状态都没变 ✗（改前一律全量 delete + new ✓）；
+    //   而"过了没过去"（`past`）或跨零点翻页这类**真变化**会改指纹 ⇒ 照旧走全量重建 ✓（正确性优先 ✗）。
+    //   ⚠ 指纹必须覆盖所有影响渲染的输入 ✓（见 signatureOf 的注解 ✓）。
+    const QStringList signature = signatureOf(result, maxRows);
+    if (signature == lastSignature_) {
+        ++refreshSkips_;
+        return;
+    }
+    lastSignature_ = signature;
+
     clearRows();
     sectionLabels_.clear();
     subtitleText_.clear();
@@ -200,6 +242,7 @@ void SchedulePanel::addSection(const QString& label, const core::ScheduleDay& da
 
 void SchedulePanel::addRow(const core::ScheduleRow& row)
 {
+    ++rowRebuilds_;                  // G-B-3：真建一行控件就记一笔 ✓
     auto* host = new QWidget(this);
     auto* box = new QHBoxLayout(host);
     box->setContentsMargins(0, 0, 0, 0);

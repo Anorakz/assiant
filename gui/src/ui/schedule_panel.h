@@ -69,6 +69,11 @@ public:
     QString noteText() const;
     bool noteIsWarning() const { return noteIsWarning_; }
 
+    /// T15-16 G-B-3：**真建过多少行控件** ✓（改前每 60 s 刷新一次就 +N ✗）
+    int rowRebuilds() const { return rowRebuilds_; }
+    /// T15-16 G-B-3：因"输入指纹没变"而**整段跳过重建**的次数 ✓
+    int refreshSkips() const { return refreshSkips_; }
+
     QLabel* titleLabel() const { return title_; }
     QLabel* subtitleLabel() const { return subtitle_; }
     QLabel* noteLabel() const { return note_; }
@@ -104,4 +109,7 @@ private:
     QString noteText_;
     bool noteIsWarning_ = false;
     int hiddenCount_ = 0;
+    int rowRebuilds_ = 0;      ///< `addRow` 真建新控件的次数（G-B-3 ✓）
+    int refreshSkips_ = 0;     ///< 指纹相同、整段跳过的次数（G-B-3 ✓）
+    QStringList lastSignature_;   ///< 上一次的输入指纹（G-B-3 ✓）
 };

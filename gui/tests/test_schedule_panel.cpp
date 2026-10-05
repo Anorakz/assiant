@@ -60,6 +60,45 @@ class TestSchedulePanel : public QObject {
     Q_OBJECT
 
 private slots:
+    /// T15-16 G-B-3：**输入指纹没变就不重建控件** ✓（改前每 60 s 一次全量 delete+new ✗）
+    void identicalInputDoesNotRebuildRows()
+    {
+        SchedulePanel panel;
+        const ScheduleResult result =
+            makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("study")),
+                        makeRow(QStringLiteral("19:00"), QStringLiteral("game"))},
+                       {makeRow(QStringLiteral("09:30"), QStringLiteral("sleep"))});
+
+        panel.setSchedule(result, 6);
+        const int buildsAfterFirst = panel.rowRebuilds();
+        QCOMPARE(buildsAfterFirst, 3);          // 三行 ⇒ 建三次 ✓（顺便自证计数口径 ✓）
+        const QStringList texts = panel.rowTexts();
+        const QString subtitle = panel.subtitleText();
+        const int hidden = panel.hiddenCount();
+
+        panel.setSchedule(result, 6);           // 同一份输入 ⇒ 一行都不该重建 ✓
+        QCOMPARE(panel.rowRebuilds(), buildsAfterFirst);
+        QCOMPARE(panel.refreshSkips(), 1);
+        QCOMPARE(panel.rowTexts(), texts);      // 跳过 ≠ 界面错 ✓
+        QCOMPARE(panel.subtitleText(), subtitle);
+        QCOMPARE(panel.hiddenCount(), hidden);
+    }
+
+    /// 指纹一变就必须重建 ✓（否则界面停在旧数据上 ✗）—— 用**最细的一处变化**试：`past` 翻转
+    void changedInputRebuildsRows()
+    {
+        SchedulePanel panel;
+        panel.setSchedule(
+            makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("study"))}, {}), 6);
+        const int before = panel.rowRebuilds();
+
+        panel.setSchedule(
+            makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("study"), true)}, {}), 6);
+        QVERIFY2(panel.rowRebuilds() > before,
+                 "past 变了却没重建 —— 指纹漏字段了 ✗");
+        QCOMPARE(panel.refreshSkips(), 0);
+    }
+
     void emptyScheduleShowsBothSectionsAndNoRows()
     {
         SchedulePanel panel;
