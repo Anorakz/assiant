@@ -33,8 +33,13 @@ cd gui && cmake -S . -B build && cmake --build build -j4
 `--dump-schedule`（打印日程区真实渲染的行）、`--dump-layout`（打印整棵控件树的
 `size/min/hint`，用来查"窗口为什么不是一屏"这类问题，见 §2.1）等。
 
-测试：`cd gui/build && ctest --output-on-failure`（**25 个测试**：核心逻辑 + 控件级 + 图标守卫
-+ 面板尺寸守卫 `test_page_heights` + 虚拟键盘让位守卫 `test_keyboard_inset` + e2e IPC）。
+测试：`cd gui/build && ctest --output-on-failure`（**28 个测试**：核心逻辑 + 控件级 + 图标守卫
++ 面板尺寸守卫 `test_page_heights` + 虚拟键盘让位守卫 `test_keyboard_inset`
++ **视觉常量黄金串守卫 `test_theme`** + **一致性守卫 `test_style_guard`**（G-A-1b/G-A-2 ✓）+ e2e IPC）。
+
+> ⚠ **动样式、加控件之前先读** [`docs/gui-style.md`](gui-style.md) ✓ —— 那里有三节约束：
+> **主题**（色值/字号的唯一来源是 `ui/theme.h` ✓、QSS 用 `@token@` ✓、判据是黄金串而**不是截图** ✗）、
+> **触摸目标**（强制 ≥44 px ✓ + 例外表 ✓）、**异常态**（现状 10 处就地文案 ✗ + G-D 的整改方向 ✓）。
 
 ### 1.0 GUI 的门禁到底在哪（T15-4 任务 12 实测改正）
 
@@ -42,8 +47,8 @@ cd gui && cmake -S . -B build && cmake --build build -j4
 
 | 路 | 命令 | 实测 |
 | --- | --- | --- |
-| **A. 宿主原生**（快，日常用这条） | `apt-get install qtmultimedia5-dev` 后 `cmake -S gui -B build-gui-host -DGUI_BUILD_TESTS=ON && ctest --test-dir build-gui-host` | 宿主 Qt **5.15.13**（与镜像的 5.15.11 同小版本）：配置 + 编译 rc=0，**25/25 全过**（15 s） |
-| **B. PC 交叉 + 板端跑**（发布前的真门禁） | `bash image/build-gui.sh --target <target 树>`（它固定 `GUI_BUILD_TESTS=OFF`）；要跑测试就照抄它的 cmake 参数、把 `-DGUI_BUILD_TESTS=ON`，再把 `tests/test_*` 拷到板上执行 | 板端（aarch64，Qt 5.15.11 运行时 + `libQt5Test` + `libqoffscreen.so`）：**24 个测试二进制、278 项通过**（明细与两处板端环境差异见 §1.0.1） |
+| **A. 宿主原生**（快，日常用这条） | `apt-get install qtmultimedia5-dev` 后 `cmake -S gui -B build-gui-host -DGUI_BUILD_TESTS=ON && ctest --test-dir build-gui-host` | 宿主 Qt **5.15.13**（与镜像的 5.15.11 同小版本）：配置 + 编译 rc=0，**28/28 全过**（15 s） |
+| **B. PC 交叉 + 板端跑**（发布前的真门禁） | `bash image/build-gui.sh --target <target 树>`（它固定 `GUI_BUILD_TESTS=OFF`）；要跑测试就照抄它的 cmake 参数、把 `-DGUI_BUILD_TESTS=ON`，再把 `tests/test_*` 拷到板上执行 | 板端（aarch64，Qt 5.15.11 运行时 + `libQt5Test` + `libqoffscreen.so`）：**24 个测试二进制、278 项通过**（明细与两处板端环境差异见 §1.0.1）<br>⚠ 这是 **2026-10-0x 的历史测量** ✗ —— G-A-1b/G-A-2 之后新增的 `test_theme`、`test_style_guard` **还没在板上跑过** ✗（宿主 28 项全绿 ✓ 是当前口径 ✓）|
 
 ⚠ **板子上编不了 C++**：这块 buildroot 镜像里**没有 `g++`/`cc1plus`、也没有 `cmake`**
 （只有 `make`/`gcc`(C)/`ctest`）—— 所以"在板上 cmake + ctest"这条路不存在；
@@ -105,6 +110,12 @@ sudo apt-get install -y qml-module-qtquick-virtualkeyboard \
 **常驻单元**：X 形态 = `systemd/agent-gui.service`（里面写着
 `Requires=display-manager.service`，**只加 drop-in 改平台会把 X 一起拉起来**，实测
 `pgrep -c Xorg` 0→1，两个显示栈抢 DRM master）；无 X 形态 = `systemd/agent-gui-nox.service`
+⚠ 上面这两份是**原型**（在 `systemd/` 根目录 ✓）；**镜像里跑的是另一套** ✗：
+`systemd/image/` 下 5 个单元（`agent` / `agent-gui` / `assistant-init` / `assistant-ota-confirm` / `ab-mark`，
+被 `assistant.target` 拉起 ✓，清单见 `docs/image.md` §5.7）——
+**改行为时要改镜像那一套** ✓（`systemd/image/`），根目录那套只在 PC 侧的脚本/实验里用 ✓。
+2026-10-05 复核：两处文件都还在 ✓（`systemd/{agent,agent-gui,agent-gui-nox,xrandr-startup}.service`
+与 `systemd/image/` 的 5 个 ✓）。
 （原型，T15-12 定稿）。
 
 **取证脚本（板端）**
