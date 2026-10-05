@@ -140,9 +140,14 @@ private slots:
         QVERIFY(page->inputSourceBox() != nullptr);
         QVERIFY(page->regionMode(QStringLiteral("left")) != nullptr);
 
-        page->inputSourceBox()->setCurrentIndex(1);                     // 比如切到「命令行」✓
+        // ⚠ **别写死索引** ✗ —— 第一版写死 1 ✗，而临时配置里那个键**恰好也是 1** ✓
+        //   ⇒ 牙齿（回填）看不出差别 ⇒ **牙齿没咬** ✓（不是靶心不灵 ✓，是我挑的值撞上了 ✗）。
+        //   ⇒ 改成"设成与当前**相反**的那个" ✓ ⇒ 与配置内容**无关** ✓ ⇒ 牙齿必定能咬 ✓。
+        // ⚠ 变量名**不能**叫 `base` ✗ —— 同函数里已有 `core::ConfigStore base;` ✓ ⇒ 重定义 ✗。
+        const int baseIndex = page->inputSourceBox()->currentIndex();
+        const int editingIndex = (baseIndex == 0) ? 1 : 0;
+        page->inputSourceBox()->setCurrentIndex(editingIndex);
         const QString editing = page->inputSourceBox()->currentText();
-        const int editingIndex = page->inputSourceBox()->currentIndex();
 
         QVERIFY(window.idleWatcher() != nullptr);
         const int beforeIdle = window.idleWatcher()->idleMs();
