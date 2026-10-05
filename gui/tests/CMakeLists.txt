@@ -106,6 +106,12 @@ if(MSVC)
 else()
     target_compile_options(test_main_window PRIVATE -Wall -Wextra)
 endif()
+# T15-17 / T5：判据 3 需要一份**保证能 load 成功**的配置 ✓ ⇒ 用仓库那份真模板 ✓
+# （与 test_settings_page 同一套路 ✓；没有它这条判据会 QSKIP ✓，绝不假绿 ✗）。
+target_compile_definitions(test_main_window PRIVATE
+    SETTINGS_TEMPLATE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../config/config.example.yaml"
+)
+
 add_test(NAME test_main_window COMMAND test_main_window)
 set_tests_properties(test_main_window PROPERTIES
     TIMEOUT 60
