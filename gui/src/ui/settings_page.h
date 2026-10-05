@@ -227,6 +227,8 @@ private:
     QCheckBox* wifiAutoconnect_ = nullptr;
     /// 最近一次 status 快照（决定「忘记」按钮要不要提示"会断链路"）
     QJsonObject wifiStatusData_;
+    /// T15-16 G-C-4：两步确认里的"待确认"ssid（空 = 没有待确认 ✓）
+    QString pendingForgetSsid_;
     /// 已扫到的 SSID -> 是否需要密码（开放网络不弹密码框）
     QHash<QString, bool> wifiSecured_;
     /// 下一次请求的 id（回执里原样带回；界面靠它认领）

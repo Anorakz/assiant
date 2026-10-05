@@ -30,7 +30,6 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
-#include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -544,22 +543,24 @@ void SettingsPage::build()
         }
         // ⚠ 板端只有这一条链路：忘记正在用的那个 = 板子失联，必须确认
         const QString active = wifiStatusData_.value(QStringLiteral("ssid")).toString();
-        if (ssid == active) {
-            const auto answer = QMessageBox::warning(
-                this, QStringLiteral("忘记网络"),
-                QStringLiteral("「%1」正在使用中 —— 忘记它之后板子会**立刻失联**，"
-                               "要重新连上得有人手动操作。确定忘记吗？").arg(ssid),
-                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-            if (answer != QMessageBox::Yes) {
-                wifiResult_->setText(QStringLiteral("已取消"));
-                return;
-            }
+        // T15-16 G-C-4：**不用系统模态** ✗ —— kiosk 上它挡住整屏、还不好点 ✓；
+        //   改成**两步确认** ✓：第一次点只提示 ✓（**绝不发请求** ✗），再点一次才真发 ✓。
+        //   （顺带：`wifiForgetButton` 在非当前网络时本就是**禁用**的 ✓ ⇒ 能点到这里的场合，
+        //     恰恰都是"需要确认"的那种 ✓。）
+        if (ssid == active && pendingForgetSsid_ != ssid) {
+            pendingForgetSsid_ = ssid;
+            wifiResult_->setText(
+                QStringLiteral("「%1」正在使用中 —— 忘记它之后板子会**立刻失联**。"
+                               "再点一次「忘记」确认").arg(ssid));
+            return;
         }
+        pendingForgetSsid_.clear();     // 第二次点（或换了网络 ✓）：真发 ✓
         QJsonObject payload;
         payload.insert(QStringLiteral("ssid"), ssid);
         askWifi(QStringLiteral("forget"), payload);
     });
     connect(wifiList_, &QListWidget::itemSelectionChanged, this, [this]() {
+        pendingForgetSsid_.clear();     // G-C-4：换了选中项 ⇒ 之前的"待确认"作废 ✓
         const QString ssid = selectedSsid();
         const bool secured = wifiSecured_.value(ssid, true);
         wifiPassword_->setEnabled(ssid.isEmpty() ? true : secured);

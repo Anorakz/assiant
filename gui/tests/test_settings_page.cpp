@@ -84,6 +84,8 @@ private slots:
     void wifiConnectSendsOnlyTheNeededFields();
     void wifiOpenNetworkNeedsNoPassword();
     void wifiForgetIsOnlyOfferedForTheActiveOne();
+    void wifiForgetNeedsASecondTap();
+    void wifiForgetPendingIsClearedByReselect();
     void wifiAckRendersTheAgentsWords();
     void wifiScanButtonAsksForAScan();
     // T15-14-a：「系统升级」块（OTA/槽状态）—— **只展示**，界面上没有发起升级的入口 ✓
@@ -576,6 +578,80 @@ void TestSettingsPage::wifiForgetIsOnlyOfferedForTheActiveOne()
     QVERIFY2(!page.wifiForgetButton()->isEnabled(),
              "非当前网络的「忘记」应该禁用（板端只有一条链路，删档案要非常小心）");
     Q_UNUSED(spy);
+}
+
+namespace {
+
+/// 造一份"当前连着 Anorak_host + 邻居家"的 status/scan（照抄上面那条用例的写法 ✓）
+void feedWifiWithTwoNetworks(SettingsPage& page)
+{
+    QJsonObject status;
+    status.insert(QStringLiteral("kind"), QStringLiteral("status"));
+    status.insert(QStringLiteral("ssid"), QStringLiteral("Anorak_host"));
+    status.insert(QStringLiteral("connected"), true);
+    page.onWifiResult(status);
+
+    QJsonObject scan;
+    scan.insert(QStringLiteral("kind"), QStringLiteral("scan"));
+    QJsonArray points;
+    QJsonObject active;
+    active.insert(QStringLiteral("ssid"), QStringLiteral("Anorak_host"));
+    active.insert(QStringLiteral("signal"), 100);
+    active.insert(QStringLiteral("secured"), true);
+    active.insert(QStringLiteral("in_use"), true);
+    QJsonObject other;
+    other.insert(QStringLiteral("ssid"), QStringLiteral("邻居家"));
+    other.insert(QStringLiteral("signal"), 20);
+    other.insert(QStringLiteral("secured"), true);
+    other.insert(QStringLiteral("in_use"), false);
+    points.append(active);
+    points.append(other);
+    scan.insert(QStringLiteral("points"), points);
+    page.onWifiResult(scan);
+}
+
+} // namespace
+
+/// T15-16 G-C-4：破坏性操作（忘记当前网络 = 板子立刻失联）要**点两次** ✓，
+/// 而且**第一次绝不发请求** ✓ —— 这就是"不用系统模态也能防误触"的证据 ✓。
+void TestSettingsPage::wifiForgetNeedsASecondTap()
+{
+    SettingsPage page;
+    QSignalSpy spy(&page, &SettingsPage::wifiRequested);
+    feedWifiWithTwoNetworks(page);
+    QCOMPARE(page.selectedSsid(), QStringLiteral("Anorak_host"));
+
+    page.wifiForgetButton()->click();                 // 第一次：只提示 ✓
+    QCOMPARE(spy.count(), 0);                         // ⚠ 绝不能发 ✗
+    QVERIFY2(page.wifiResultLabel()->text().contains(QStringLiteral("再点一次")),
+             qPrintable(page.wifiResultLabel()->text()));
+
+    page.wifiForgetButton()->click();                 // 第二次：真发 ✓
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.at(0).at(0).toString(), QStringLiteral("forget"));
+    QCOMPARE(spy.at(0).at(1).toJsonObject().value(QStringLiteral("ssid")).toString(),
+             QStringLiteral("Anorak_host"));
+
+    page.wifiForgetButton()->click();                 // 第三次：pending 已清 ⇒ 又变回"第一次" ⇒ 不发 ✓
+    QCOMPARE(spy.count(), 1);
+}
+
+/// 换选中项要把"待确认"作废 ✓（否则过一会儿再点会**直接**失联 ✗）
+void TestSettingsPage::wifiForgetPendingIsClearedByReselect()
+{
+    SettingsPage page;
+    QSignalSpy spy(&page, &SettingsPage::wifiRequested);
+    feedWifiWithTwoNetworks(page);
+
+    page.wifiForgetButton()->click();                 // 待确认 ✓
+    QCOMPARE(spy.count(), 0);
+
+    page.wifiList()->setCurrentRow(1);                // 真的换了行 ⇒ 处理器必触发 ✓
+    page.wifiList()->setCurrentRow(0);
+    QCOMPARE(page.selectedSsid(), QStringLiteral("Anorak_host"));
+
+    page.wifiForgetButton()->click();                 // 又该是"第一次" ⇒ 不发 ✓
+    QCOMPARE(spy.count(), 0);
 }
 
 void TestSettingsPage::wifiAckRendersTheAgentsWords()
