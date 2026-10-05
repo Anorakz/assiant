@@ -662,3 +662,43 @@ WINDOW       QWidgetWindow  0,0 1280x800  visible=1        <-- 只有一个顶�
   要看日志就用 **systemd drop-in 覆盖 ExecStart** ✓（可逆 ✓，本次用过 ✓）；
 - ⚠ `qt.virtualkeyboard` 这个**日志类别名是从二进制里挖出来的** ✓
   （`strings libqtvirtualkeyboardplugin.so | grep qt.` ✓）—— 一开就能直接看到 `setFocusObject()` 认的是谁 ✓✓。
+
+
+### 12.14 bug ① 软键盘：**根因与修法都已板上实证** ✓（2026-10-05 深夜）
+
+**官方依据** ✓（Qt 5.15 Deployment Guide，*Integration Method* 一节）：
+Qt 虚拟键盘有两种集成方式 ——
+- **`Desktop`**：「the keyboard is shown in a **dedicated top-level window**」（无需改应用 ✓）；
+- **`Application`**：「embedded within the Qt application itself by instantiating an **`InputPanel`** item in QML」✓，
+  并且原文明确：「**This method is mandatory in environments where there is no support for multiple
+  top-level windows (such as embedded devices)**」✓✓。
+
+⇒ ⇒ **eglfs 正是"不支持多顶层窗口"的环境** ✗ ⇒ **必须用 Application 集成** ✓。
+这**完美解释**了此前的全部观测：`setFocusObject(QLineEdit/ChatInput)` ✓ 与 `showInputPanel()` ✓ 都正常发生，
+**但面板窗口建不出来** ✗（`IM_VISIBLE 0` ✗、`WINDOW_COUNT 1` ✗）——
+因为 Desktop 集成要开**第二个顶层窗口**，而 eglfs 开不出来 ✓。
+（也解释了 `QT_VIRTUALKEYBOARD_DESKTOP_DISABLE=1` 为何**无效** ✗：官方说它只用于**覆盖桌面环境**的选择 ✓，
+  对 eglfs 这种非桌面环境不适用 ✓。）
+
+**板上实证** ✓✓（这是决定性的）：写一个**最小的 Application 集成 QML** ✓
+（`TextInput` ＋ **`InputPanel`**，照官方 *Creating InputPanel* 示例 ✓），用**板上自带的 `qmlscene`** 跑 ✓
+⇒ ⇒ ★ **键盘完整显示出来了** ✓✓（截图存证：`E:\rk3568\tmp\gd-shots\vk-min.png` ✓ ——
+四排 QWERTY 键位 ✓、`&123` ✓、语言键显示 **"American English"** ✓）。
+⇒ 与之前"`showInputPanel()` 调了却没窗口"✗ 形成对照 ✓ ⇒ **根因与修法同时确证** ✓✓。
+
+**前提核查** ✓：
+- 板上 **`libQt5QuickWidgets.so.5.15.11`（87,840 B）在** ✓✓ ⇒ **不需要重建 Qt、不需要改镜像** ✓；
+  板上还有 `libQt5Quick` / `QuickControls2` / `QuickParticles` / `QuickShapes` / `QuickTemplates2` ✓
+  与 `/usr/bin/qmlscene` ✓、`QtQuick/VirtualKeyboard/qmldir` ✓（其 depends：QtQuick 2.0 / QtQuick.Window 2.2 /
+  QtQuick.Layouts 1.0 / Qt.labs.folderlistmodel 2.1 ✓ —— 最小验证成功即证明它们都在 ✓）；
+- ⚠ **宿主机没有 QuickWidgets** ✗（lib / headers / cmake 三处均无 ✓），而交叉编的 sysroot **有** ✓
+  （`…/sysroot/usr/include/qt5/QtQuickWidgets` ✓ ＋ `libQt5QuickWidgets.so` ✓）
+  ⇒ ⇒ 要保住"**宿主 0 error + 全量 ctest**"这条纪律 ✓，就得在**开发机**上装 `libqt5quickwidgets5-dev` ✓
+  （**开发机依赖** ✓，不是产品改动 ✗）。
+
+**待批准的方案（A1）** ✓：GUI 仍是 Qt Widgets ⇒ 加一层 QML 承载 ✓ ——
+① 宿主装 `qtquickwidgets5-dev` ✓；② 新增只含 `InputPanel` 的 QML ✓（**做成 `.qrc` 资源** ✓ 编进二进制 ✓，
+部署不用装文件 ✓）；③ `CMakeLists.txt` 链接 `Qt5::QuickWidgets` ✓；④ 在 **eglfs 分支**里创建 `QQuickWidget` 承载它 ✓
+（有 X 时仍走原 onboard 路径 ✓ 语义不变 ✓）；⑤ `applyKeyboardInset()` 接 `Qt.inputMethod.visible` ✓；
+⑥ 判据 + **牙齿** ✓（注掉嵌入 ⇒ 必红 ✓；ctest 35 → 36 ✓）；
+⑦ 交叉编 ⇒ 部署（`.new` + `mv -f` ✓ ＋ 核对大小/特征串 ✓）⇒ **上板验收** ✓。

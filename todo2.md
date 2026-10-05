@@ -471,3 +471,19 @@ Agent 也**认**这些键 ✓（`agent/core/config_tiers.py:61-65` ✓），但 
 `QT_VIRTUALKEYBOARD_DESKTOP_DISABLE`、`QT_VIRTUALKEYBOARD_FORCE_EVENTS_WITHOUT_FOCUS`、
 `QT_VIRTUALKEYBOARD_LAYOUT_PATH`、`QT_VIRTUALKEYBOARD_STYLE`。
 （本次试过 `DESKTOP_DISABLE=1` ⇒ **无效** ✗；其余三个**未试** ✓。）
+
+
+## 5.7 bug ① 软键盘排查的**第三轮教训**（2026-10-05 深夜）
+
+21. ★★ **先查权威资料** ✓✓ —— 这一轮的突破完全来自读 **Qt 官方 Deployment Guide** ✓：
+    它一句话就说清了「**embedded 设备上没有多顶层窗口支持 ⇒ 必须用 Application 集成**」✓，
+    而这正是我们摸索了一整晚才逼近的结论 ✓。⚠ 前面十几轮的"盲试环境变量/注入"✗ 早该先做这一步 ✗。
+22. ★ **用"最小可复现验证"证明修法** ✓✓ —— 板上有 `qmlscene` ✓ ⇒ 一个**十几行的 QML** ✓
+    就证明了"嵌入 `InputPanel` 后键盘能显示" ✓（`vk-min.png` ✓）。
+    ⇒ ⇒ 这比"直接在整块 GUI 上改"✗ 便宜得多 ✓，也**不碰产品代码** ✓。
+23. **库的"存在性"要按角色分别查** ✗ —— **板上**有 `libQt5QuickWidgets` ✓ 而**宿主**没有 ✗；
+    交叉编的 **sysroot** 又有 ✓。三处**各查一遍** ✓ 才知道方案的真正代价 ✓。
+24. **官方环境变量不一定管用** ✗ —— `QT_VIRTUALKEYBOARD_DESKTOP_DISABLE` ✓ 只对**桌面环境**有效 ✓；
+    在 eglfs 上试它**本来就不会有用** ✓ ⇒ ⇒ **先读懂它的适用范围** ✓ 再试 ✓。
+25. **`grep`/载荷里的中文与括号会毁掉远程命令** ✗ —— 本轮又栽一次（命令被 PowerShell 本地执行 ✓）。
+    ⇒ ⇒ 规距：**远程命令只用 ASCII** ✓；要中文注释就**写成脚本文件** ✓。
