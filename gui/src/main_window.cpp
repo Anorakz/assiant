@@ -11,6 +11,8 @@
 
 #include "main_window.h"
 
+#include <QInputMethod>   // T15-17 bug①后续：跟着输入法可见性摆承载层 ✓
+#include <QQuickItem>     // T15-17 bug①后续：rootObject()->property("kbHeight") 需要**完整类型** ✓
 #include <QQuickWidget>   // T15-17 bug①：eglfs 下承载 Qt 虚拟键盘（Application 集成）
 
 #include "core/bilibili_format.h"
@@ -680,20 +682,77 @@ void MainWindow::showOnboard(const QString& why)
         //   · 键盘的显隐交给 QML 自己（不可见时面板停在屏外）✓ ⇒ 无需改 hideOnboard ✓
         if (vkPanel_ == nullptr) {
             vkPanel_ = new QQuickWidget(this);
-            vkPanel_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-            // ⚠ QQuickWidget 默认**不透明**（clear color 是白 ✗）⇒ 它铺满整个窗口时
-            //   会把主界面**整块盖白** ✗（板上实测：截图上半部分是纯白 ✓）。
-            //   ⇒ 必须显式设透明 ✓（Qt 官方对"浮在 Widgets 之上"的 QQuickWidget 就是这么做的 ✓）。
+            // ⚠ 这里**不能**设 WA_TransparentForMouseEvents ✗ ——
+            //   板上实测：设了它 ⇒ 触摸**穿透**键盘落到下面的控件 ✓
+            //   ⇒ 表现为"点键盘没反应，整个画面却在移动" ✗（底下某处收到点击/拖拽 ✓）
+            //   ⇒ 键盘必须**收得到点击**才可交互 ✓，所以**不设穿透** ✓；
+            //     遮挡问题改由"只盖键盘高度的底部条 + 不可见时隐藏"解决 ✓（见下 ✓）。
+            // ⚠ QQuickWidget 默认不透明（白底 ✗）⇒ 必须设透明 ✓
+            //   （否则会把它覆盖到的区域**整块盖白** ✗ —— 板上实测过 ✓）。
             vkPanel_->setClearColor(Qt::transparent);
             vkPanel_->setAttribute(Qt::WA_AlwaysStackOnTop, true);
             vkPanel_->setResizeMode(QQuickWidget::SizeRootObjectToView);
             vkPanel_->setSource(QUrl(QStringLiteral("qrc:/virtualkeyboard.qml")));
-            vkPanel_->setGeometry(rect());
-            vkPanel_->show();
-            qInfo().noquote() << QStringLiteral("[ui] 已建虚拟键盘承载（Application 集成，qrc:/virtualkeyboard.qml）");
-        } else {
-            vkPanel_->setGeometry(rect());
-            vkPanel_->show();
+            vkPanel_->setVisible(false);                  // 先在隐藏态，等 visibleChanged 摆好 ✓
+
+            // 键盘显隐 / 几何：跟着输入法可见性走 ✓（⚠ 只在这里连一次 ✓）
+            // ⚠ 关键教训（本轮板上实测 ✗）：**`visibleChanged` 触发时 QML 还没布局** ✗
+            //   ⇒ 当场读 `kbHeight` 会得到 0 ✗ ⇒ 几何算成 0×0 且被隐藏 ✓
+            //   ⇒ 所以：**先按输入法可见性显/隐** ✓，几何则**延迟数拍重试** ✓ 读到高度再摆底部条 ✓
+            if (QGuiApplication::inputMethod() != nullptr) {
+                // ⚠ 为什么先给"整窗"再收成"底部条" ✗→✓：
+                //   根 `Item` 若没有尺寸，QQuickWidget 里 `InputPanel` 的高度可能一直是 0 ✗
+                //   （能工作的最小验证 QML 根 Item 是**有明确宽高**的 ✓，见截图 vk-min.png ✓）
+                //   ⇒ 先摆满整窗让 QML 完成布局 ✓ ⇒ 再把几何收成底部一条 ✓
+                auto layoutVk = [this](int attempt) {
+                    if (vkPanel_ == nullptr) {
+                        return;
+                    }
+                    QInputMethod* im2 = QGuiApplication::inputMethod();
+                    const bool imVisible = (im2 != nullptr) && im2->isVisible();
+                    if (!imVisible) {
+                        vkPanel_->hide();     // 收起来 ⇒ 不遮挡、不拦截输入 ✓
+                        return;
+                    }
+                    const bool haveRoot = (vkPanel_->rootObject() != nullptr);
+                    const int kbH = haveRoot ? vkPanel_->rootObject()->property("kbHeight").toInt() : -1;
+                    // ★ 诊断：每一次尝试都记下来 ✓（含 kbH<=0 ✗）⇒ 能分出"取不到属性"还是"高度真是 0" ✓
+                    qInfo().noquote() << QStringLiteral("[ui] 键盘承载尝试 #%1：root=%2 kbHeight=%3 现几何=%4,%5 %6x%7")
+                                             .arg(attempt).arg(haveRoot ? 1 : 0).arg(kbH)
+                                             .arg(vkPanel_->x()).arg(vkPanel_->y())
+                                             .arg(vkPanel_->width()).arg(vkPanel_->height());
+                    if (kbH <= 0) {
+                        // 还没布局好：**先保持整窗尺寸**（这样 QML 才有空间算高度 ✓）
+                        vkPanel_->setGeometry(rect());
+                        vkPanel_->show();
+                        return;
+                    }
+                    // 只盖**底部一条** ✓ —— 用户要的"覆盖在底层画面之上、GUI 不动" ✓
+                    vkPanel_->setGeometry(0, height() - kbH, width(), kbH);
+                    vkPanel_->show();
+                    qInfo().noquote() << QStringLiteral("[ui] 键盘承载已就位：kbHeight=%1 几何=%2,%3 %4x%5")
+                                             .arg(kbH).arg(vkPanel_->x()).arg(vkPanel_->y())
+                                             .arg(vkPanel_->width()).arg(vkPanel_->height());
+                };
+                connect(QGuiApplication::inputMethod(), &QInputMethod::visibleChanged, this,
+                        [this, layoutVk]() {
+                            QInputMethod* im = QGuiApplication::inputMethod();
+                            if (im != nullptr && im->isVisible()) {
+                                vkPanel_->setGeometry(rect());   // 先整窗 ✓ 让 QML 布局 ✓
+                                vkPanel_->show();
+                            } else {
+                                vkPanel_->hide();                // 不遮挡、不拦截输入 ✓
+                            }
+                            // 延迟数拍重试：QML 布局完成后再收成"底部一条" ✓
+                            int n = 0;
+                            for (int d : {50, 150, 400, 900, 1800}) {
+                                ++n;
+                                const int k = n;
+                                QTimer::singleShot(d, this, [layoutVk, k]() { layoutVk(k); });
+                            }
+                        });
+            }
+            qInfo().noquote() << QStringLiteral("[ui] 已建虚拟键盘承载（Application 集成，qrc:/virtualkeyboard.qml，覆盖式 ✓）");
         }
         if (QGuiApplication::inputMethod() != nullptr) {
             QGuiApplication::inputMethod()->show();
@@ -757,6 +816,12 @@ void MainWindow::hideOnboard(const QString& why)
 void MainWindow::applyKeyboardInset()
 {
     ++insetRequests_;               // G-B-6：进来的每一次都记（含重复 ✓，与"真改布局"分开数 ✓）
+    // T15-17 bug①后续（用户明确要求 ✓）：eglfs 下我们的键盘是**覆盖式** ✓
+    //   —— 承载用的 QQuickWidget 浮在窗口**底部一条**上 ✓ ⇒ **GUI 不移动** ✓
+    //   ⇒ 这里不再给内容"让开" ✓（仍然保留上面的计数，观测语义不变 ✓）
+    if (vkPanel_ != nullptr) {
+        return;
+    }
     QInputMethod* im = QGuiApplication::inputMethod();
     QRect kb;
     int covered = 0;

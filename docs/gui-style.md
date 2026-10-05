@@ -161,3 +161,11 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build-gui-host        # 当前 28 项
 > **全窗 + 鼠标穿透 + 透明** ✓）⇒ 键盘**渲染进应用自己的窗口** ✓。
 > ⚠ 判据：`IM_VISIBLE=1` ＋ `WINDOW_COUNT≥2`（`--focus-input-demo --dump-input` ✓）＋
 > GUI 自己的 `--screenshot` **能拍到键盘** ✓（这是"Application 集成生效"最直观的证据 ✓）。
+
+
+> **软键盘的覆盖语义（T15-17 bug① 后续 ✓）**：eglfs 下键盘是**覆盖式** ✓ ——
+> 承载层（`QQuickWidget`）**只占屏幕底部一条**（高度 = QML 暴露的 `kbHeight` ✓，板上实测 400px ✓），
+> **透明**（`setClearColor(Qt::transparent)` ✓）＋ **置顶**（`WA_AlwaysStackOnTop` ✓）＋
+> **不设** `WA_TransparentForMouseEvents` ✗（否则触摸穿透 ⇒ 点键盘会打到下面的界面 ✓）。
+> **唤起时 GUI 不移动** ✓：`applyKeyboardInset()` 在承载层生效时直接返回 ✓（覆盖式，不给内容让位 ✓）。
+> ⚠ 判据：**承载窗口几何非 0** ✓（`IM_VISIBLE=1` **不足以**说明它真的显示了 ✗）。

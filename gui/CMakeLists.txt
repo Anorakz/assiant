@@ -126,10 +126,10 @@ add_library(gui_widgets STATIC
     # T15-16 G-D-1：异常/加载两种状态视图（StateBanner + Skeleton）
     src/ui/state_views.h
     src/ui/state_views.cpp
-    # T15-17 bug①：虚拟键盘承载 QML（Application 集成）——
-    #   ⚠ 加在**静态库**里而不是可执行目标里：单测链接的是本库 ✓
-    #     （加给 agent_gui 的话，测试二进制里就没有这个资源，判据会红 ✓ 已踩过 ✗）
-    resources/virtualkeyboard.qrc
+    # ⚠ T15-17 bug①：承载 QML **不能**放静态库里 ✗ ——
+    #   静态库中的 .qrc 会被链接器当「没人引用」丢掉 ⇒ 二进制里没有该资源 ✗
+    #   （板上实测过：strings 找不到 virtualkeyboard.qml ⇒ 键盘不显示 ✓）
+    #   ⇒ 每个**可执行目标**各自带上它 ✓（见下方 agent_gui 与 tests/CMakeLists.txt ✓）
 )
 target_include_directories(gui_widgets PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gui_widgets PUBLIC gui_services Qt5::Widgets Qt5::Multimedia Qt5::MultimediaWidgets
@@ -144,6 +144,7 @@ add_executable(agent_gui
     src/main_window.h
     src/main_window.cpp
     resources/icons.qrc          # T14：单色 SVG 图标集（22 个）
+    resources/virtualkeyboard.qrc  # T15-17 bug①：虚拟键盘承载 QML（编进二进制，部署无需装文件）
 )
 target_link_libraries(agent_gui PRIVATE gui_services gui_widgets)
 

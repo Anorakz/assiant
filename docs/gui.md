@@ -747,3 +747,51 @@ Qt 虚拟键盘有两种集成方式（Qt 5.15 [Deployment Guide](https://doc-sn
 - **宿主机的 QML 模块常装不全** ✗（本机缺 `QtQuick.VirtualKeyboard.Plugins` ✓）⇒ "**真能渲染出键盘**"
   这条判据**放在板上**更实在 ✓（板上是**全套** ✓）；
 - 板端二进制从 878,712 → **882,808 B** ✓；⚠ **每次 OTA/刷槽后必须重新部署 GUI** ✓（本轮踩过一次 ✓）。
+
+
+### 12.16 bug ① 后续：**可交互 ＋ 覆盖式（画面不动）** ✓（2026-10-06 凌晨）
+
+用户实测（12.15 修好"能弹出"之后 ✓）：**点键盘没反应** ✗，而且**整个画面会移动** ✗；
+要求：键盘唤起后 **GUI 不移动** ✓，键盘只是**覆盖在底层画面之上** ✓。
+
+**两个根因** ✓（都在代码里对上号 ✓）：
+1. 承载层我当初设了 `Qt::WA_TransparentForMouseEvents` ✗（怕它挡住输入 ✓）
+   ⇒ 触摸**穿透**键盘落到下面的控件 ✗ ⇒ 触发底下的滚动/拖拽 ⇒ 表现为"点键盘整个画面移动" ✓；
+2. 既有的 `applyKeyboardInset()`（`main_window.cpp:757`）在输入法可见时给内容"让位"✗ ⇒ 画面移动 ✓。
+
+**修法** ✓：
+- **去掉** `WA_TransparentForMouseEvents` ✓ ⇒ 键盘**收得到点击** ✓（可交互 ✓）；
+- 承载层从"全窗"改成"**只盖键盘高度的底部条**" ✓（用户要的覆盖式 ✓），几何由 QML 暴露的
+  `kbHeight` 决定 ✓，并连 `QGuiApplication::inputMethod()` 的 `visibleChanged` ✓
+  控制 show/hide（不可见时隐藏 ✓ ⇒ 不遮挡、不拦截输入 ✓）；
+- `applyKeyboardInset()` 里：**承载层生效时直接返回** ✓ ⇒ **GUI 不移动** ✓（计数语义保留 ✓）。
+
+**⚠⚠ 两个踩过的坑（都很值 ✓）**：
+- **静态库里的 `.qrc` 会被链接器丢掉** ✗✓ —— 我为了"让单测也能拿到资源"把 qrc 挪进 `gui_widgets`
+  （静态库）✗ ⇒ `strings agent_gui | grep virtualkeyboard.qml` **找不到** ✗ ⇒ 板上键盘**不显示** ✓
+  （Qt 经典坑：静态库资源需要 `Q_INIT_RESOURCE(...)` ✓）。
+  ⇒ **正解**：**每个可执行目标各自带上 qrc** ✓ —— 与项目既有做法一致 ✓
+  （`icons.qrc` 就是 `agent_gui` 与 `test_main_window` **各自**列的 ✓✓）。
+  ⇒ 教训：**改了构建结构必须干净重编** ✗（`rm -rf` build 目录 ✓），**且部署前先核特征串** ✓✓。
+- **`visibleChanged` 触发时 QML 还没布局** ✗✓ —— 当场读 `kbHeight` 会得到 **0** ✗
+  ⇒ 几何算成 `0×0` 且被隐藏 ✓（板上两轮实测：`QQuickWindow 0,0 0x0` ✗）。
+  ⇒ **正解**：输入法可见时**先给整窗尺寸**（让 QML 完成布局 ✓）⇒ 再**延迟数拍**读 `kbHeight`
+  ⇒ 读到后收成底部条 ✓。
+  （佐证：能工作的最小验证 QML 根 `Item` 是**有明确宽高**的 ✓，见 `vk-min.png` ✓。）
+
+**板上验收** ✓（`886,904 B`）：
+```
+[ui] 已建虚拟键盘承载（Application 集成，qrc:/virtualkeyboard.qml，覆盖式 ✓）
+[ui] 键盘承载尝试 #1：root=1 kbHeight=400 现几何=0,0 1280x800
+[ui] 键盘承载已就位：kbHeight=400 几何=0,400 1280x400          ← ★ 只盖底部 400px ✓
+…  #2…#5 全部稳定在 0,400 1280x400 ✓
+qt.virtualkeyboard: PlatformInputContext::setFocusObject(): QLineEdit(name = "ChatInput")
+qt.virtualkeyboard: PlatformInputContext::showInputPanel()
+```
+＋ GUI 自己的截图 `vk-interactive.png` ✓：**主界面位置完全未动** ✓、**键盘只在底部** ✓✓。
+
+**⚠ 判据的修正** ✓：`IM_VISIBLE=1` **只说明"VK 认为面板该显示"** ✗ ——
+**不能**证明"承载层真把它显示出来了"✗（本轮就出现过 `IM_VISIBLE 1` ＋ `QQuickWindow 0×0` ✗）。
+⇒ 判据要加 **`QQuickWindow` 的几何非 0** ✓✓。
+
+**⚠ 仍待人工确认** ✗：**真手指敲键盘能否输入** ✓（触控投递这一环只有人手能验 ✓）。
