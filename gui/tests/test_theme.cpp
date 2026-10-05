@@ -37,9 +37,9 @@ namespace {
 ///   码点数是 10049、UTF-8 是 11047（差 998 ≈ 499 个汉字的额外字节 ✓）；
 ///   而 `QString::size()`（UTF-16 单元）又是 10050 —— 三者**都不一样** ✗✓。
 ///   统一到 UTF-8 字节：它和下面 sha256 的输入口径**完全一致** ✓。
-constexpr int kGoldenLength = 11047;
+constexpr int kGoldenLength = 11710;
 const char* const kGoldenSha256 =
-    "1b397f57775ea3ae4c7e21fa5dfa76015595670ce37fb9861dcbd05c55b5ab15";
+    "3cae183de8c0f844222db63ce6ab5ba7acad21621b6422824abc25168ed23350";
 // ⚠ 这个哈希的口径 = **旧字符串本身**（含 raw string 结尾 `)"` 之前那个换行 ✓）✗
 //   我第一版填的是 `3c5524fb…` —— 那是把结尾换行**剔掉**后算的 ✗（Python 提取写成了
 //   `text[i:index('\n)"')]` ⇒ 少 1 字节 ✗）。定位方式：把 C++ 展开结果 dump 出来

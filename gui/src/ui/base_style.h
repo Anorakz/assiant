@@ -214,6 +214,31 @@ QFrame#SysTile {
 QLabel#SysValue { color: @text@; font-size: @font_xxl@px; font-weight: bold; background: transparent; }
 QLabel#SysValueSmall { color: @text@; font-size: @font_md2@px; background: transparent; }
 QLabel#SysLabel { color: @label_dim@; font-size: @font_sm2@px; background: transparent; }
+/* ---- T15-16 G-D-1/D-3：两个状态视图（StateBanner / Skeleton）----
+   三态靠文字颜色区分（信息=柔和白 / 警告=琥珀 / 错误=离线灰），不另造背景色令牌 ✓ */
+#StateBanner {
+    background: @panel@;
+    border: 1px solid @divider@;
+    border-radius: 6px;
+}
+#StateBannerText {
+    color: @text_soft@;
+    font-size: @font_sm@px;
+    background: transparent;
+}
+#StateBanner[kind="warn"] #StateBannerText {
+    color: @warn@;
+}
+#StateBanner[kind="error"] #StateBannerText {
+    color: @offline@;
+}
+#StateBannerRetry {
+    min-height: 44px;                /* G-C-3：触摸目标 ≥44 ✓ */
+}
+#Skeleton {
+    background: transparent;
+}
+
 )";
 
 } // namespace theme
