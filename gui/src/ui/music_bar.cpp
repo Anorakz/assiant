@@ -236,7 +236,9 @@ void MusicBar::setProgress(double positionS, double durationS)
         time_->setText(known ? QStringLiteral("%1 / %2").arg(formatClock(positionS),
                                                            formatClock(durationS))
                              : QStringLiteral("—:— / —:—"));
-        time_->setStyleSheet(known ? QString() : QStringLiteral("color:%1;").arg(QLatin1String(theme::kTextDimDrift)));
+        applyStyle(time_, &timeStyle_,
+                   known ? QString()
+                         : QStringLiteral("color:%1;").arg(QLatin1String(theme::kTextDimDrift)));
     }
     if (progress_ != nullptr) {
         progress_->setEnabled(known);
@@ -295,6 +297,19 @@ void MusicBar::setConnected(bool connected)
     }
 }
 
+void MusicBar::applyStyle(QLabel* label, QString* cache, const QString& style)
+{
+    // T15-16 G-B-1：**内容没变就一次都不写** ✓
+    //   改前这里每秒都会走一遍 setStyleSheet（值往往和上次完全一样 ✗）——
+    //   而 setStyleSheet 会触发样式重算 + 重绘 ✓（music_bar.cpp:239 与 refreshLyrics 的四个分支 ✓）。
+    if (label == nullptr || cache == nullptr || *cache == style) {
+        return;
+    }
+    *cache = style;
+    ++styleWrites_;                  // 单测靠它判断"有没有白写" ✓
+    label->setStyleSheet(style);
+}
+
 void MusicBar::refreshLyrics()
 {
     if (lyrics_ == nullptr || nextLyrics_ == nullptr) {
@@ -302,7 +317,7 @@ void MusicBar::refreshLyrics()
     }
     if (provider_ == nullptr) {
         lyrics_->setText(QStringLiteral("歌词未接入"));
-        lyrics_->setStyleSheet(QString());
+        applyStyle(lyrics_, &lyricsStyle_, QString());
         nextLyrics_->clear();
         return;
     }
@@ -311,15 +326,17 @@ void MusicBar::refreshLyrics()
         const QString reason = provider_->reason();
         if (reason.isEmpty()) {
             lyrics_->setText(QStringLiteral("♪"));
-            lyrics_->setStyleSheet(QStringLiteral("color:%1;").arg(QLatin1String(theme::kTextDimDrift)));
+            applyStyle(lyrics_, &lyricsStyle_,
+                       QStringLiteral("color:%1;").arg(QLatin1String(theme::kTextDimDrift)));
         } else {
             lyrics_->setText(reason);
-            lyrics_->setStyleSheet(QStringLiteral("color:%1;").arg(QLatin1String(theme::kWarn)));
+            applyStyle(lyrics_, &lyricsStyle_,
+                       QStringLiteral("color:%1;").arg(QLatin1String(theme::kWarn)));
         }
         nextLyrics_->clear();
         return;
     }
     lyrics_->setText(provider_->currentLine());
-    lyrics_->setStyleSheet(QString());
+    applyStyle(lyrics_, &lyricsStyle_, QString());
     nextLyrics_->setText(provider_->nextLine());
 }

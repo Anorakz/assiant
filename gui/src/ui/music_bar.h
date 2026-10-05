@@ -74,6 +74,10 @@ public:
     /// 中间那颗大的播放/暂停按钮（图标显示 ▶ / ⏸）
     QPushButton* playButton() const { return play_; }
 
+    /// T15-16 G-B-1：**真正写进控件的样式次数** ✓
+    /// 单测判据：同一输入连调两次，这个数**不该增长** ✓（改前每次都写 ⇒ 会涨 ✗）。
+    int styleWrites() const { return styleWrites_; }
+
 signals:
     /// 上一首 / 播放暂停 / 下一首（主窗口接上现成的三条命令）
     void prevClicked();
@@ -82,6 +86,13 @@ signals:
 
 private:
     void refreshLyrics();
+
+    /// T15-16 G-B-1：内容没变就不写样式 ✓（`cache` 指向上次写进去的那串 ✓）
+    void applyStyle(QLabel* label, QString* cache, const QString& style);
+
+    QString timeStyle_;             ///< 上次写进 time_ 的样式（相同 ⇒ 跳过 ✓）
+    QString lyricsStyle_;           ///< 上次写进 lyrics_ 的样式（相同 ⇒ 跳过 ✓）
+    int styleWrites_ = 0;           ///< 真正写样式的次数（单测/打点用 ✓）
 
     QLabel* lyrics_ = nullptr;      ///< 右列第一行：当前那句
     QLabel* nextLyrics_ = nullptr;  ///< 右列第二行：下一句（灰）

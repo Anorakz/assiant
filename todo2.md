@@ -278,13 +278,13 @@ buildroot 2024.02、Qt 5.15.11（联网拉）；**K1Mini 是一等目标**（`.c
 | **G-A-1a** | 新增 `gui/src/ui/theme.h`：21 个不透明色 + 10 档字号 + 圆角/网格 + **令牌表** + `styleSheet()` | ✅ 完成 |
 | **G-A-1b** | 字面量收敛：QSS 主段（**159 处**）搬进 `gui/src/ui/base_style.h` + 6 个文件内联点（26 处）+ 黄金串守卫 `gui/tests/test_theme.cpp` | ✅ 完成（提交 `b9b909e` ✓ ctest **27/27** ✓ CI 绿 ✓；判据：展开结果与重构前**逐字节相同** ✓）|
 | **G-A-2** | 一致性守卫测试（新 ctest）：R1 色值只许在 `theme.h`（**跳过注释行** ✓）、R2 不许 `font-size: Npx`、R3 裸 `QColor(0x…)` 走**逐文件计数白名单**（`video_panel.cpp` 6 + `main_window.cpp` 1 = 7 ✓，清一处就要改小清单 ✓）；**含牙齿演示** ✓（插违规 ⇒ 红、撤回 ⇒ 绿 ✓） | ✅ **完成**（提交 `2a16dd7` ✓ ctest 27→**28** ✓ 棘轮零新增 ✓ CI 绿 ✓；顺带抓出并修掉 `base_style.h:102` 的 `font-size: 13px` 漏网 ✓ —— 补 `font_xs2` 令牌后**黄金 sha256 不变** ✓，顺证"令牌化不改像素" ✓） |
-| **G-A-3** | `docs/gui.md` 三处更正：测试数 25→**27** ✓、图标 22→**23** ✓、区分 `systemd/` 与 `systemd/image/` 两套单元 ✓；新增"主题/触摸目标/异常态"三节 | ⬜ **未做** |
+| **G-A-3** | `docs/gui.md` 三处更正（测试数 25→**28** ✓、宿主 25/25→**28/28** ✓、板端 278 项标注为历史 ✗）+ 区分 `systemd/`（原型）与 `systemd/image/`（镜像那 5 个 ✓）；新增 `docs/gui-style.md` 三节（主题/触摸目标/异常态 ✓）并在 `gui.md` 加指路 | ✅ **完成**（提交 `d26d975` ✓ CI 绿 ✓；纯文档 ✓） |
 
 ### G-B 性能（每项都要 G-B-0 探针的前后数字 ✓）
 | # | 任务 | 状态 |
 |---|---|---|
-| **G-B-0** | 统一探针 `scripts/gui-probe.sh`（cgroup `cpu.stat` + `VmHWM` + 打点计数）| ⬜ |
-| **G-B-1** | 音乐条：文本/状态没变就不 `setStyleSheet`（`music_bar.cpp:304,313,316,322`）+ 进度改局部 `update()` | ⬜ |
+| **G-B-0** | 统一探针 `scripts/gui-probe.sh`（cgroup `cpu.stat` 差分 + `VmHWM` + 可选 `GUI-MARK` 计数 ✓；PID 用 `systemctl show -p MainPID` ✓）| ✅ **完成** ✓ 板端基线：`cpu_pct=1.42`（30 s）/ `1.50`（15 s）· `hwm_kb=113544` · `marks=0`（pid 573 ✓）—— 与 T15-1d 历史"GUI 均值 ≈1.0%" ✓ 同量级，口径可信 ✓ |
+| **G-B-1** | 音乐条：**状态没变就不写样式** ✓（新增 `applyStyle()` 缓存助手 ✓，替掉 `time_`(原 `:239`) 与 `refreshLyrics()` 的 4 个分支(原 `:305/314/317/322`) ✓；另加 `styleWrites()` 计数给单测 ✓） | ✅ **完成** ✓（提交见下 ✓）—— 判据 = **计数**（`test_music_bar`：同状态连调两次计数不涨 ✓；**牙齿**：去掉缓存判断 ⇒ `ctest rc=8` 红 ✓，装回 ⇒ `rc=0` 绿 ✓）；⚠ **CPU 测不出** ✗：改前 1.42/1.50% → 改后 1.57/1.54%（**噪声内**，不声称收益 ✗）；RSS 113,544 → 112,076 kB |
 | **G-B-2** | `tintedIcon()` 加 (图标,颜色,尺寸) 缓存（`icons.cpp:43`）| ⬜ |
 | **G-B-3** | 日程**复用行控件**（`schedule_panel.cpp:161-166,198-214`）| ⬜ |
 | **G-B-4** | 系统页不可见即停定时器（`main_window.cpp:551-558,1365-1367`）| ⬜ |
