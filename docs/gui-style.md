@@ -141,3 +141,9 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build-gui-host        # 当前 28 项
 - ⚠ **回执路径目前没有单测** ✗ ⇒ 它由**上板真机**（真按一次「保存」✓）覆盖 ✓，这条**不遮掩** ✗。
 
 **回显** ✓：四区域卡片下有一行 `WakeEcho` ✓，显示的是**当前真正生效**的值 ✓（不是"你想设的值" ✗）⇒ 所以它**骗不了人** ✓：重放没生效，它就停在旧值 ✓。
+
+
+> **气泡语义（T15-17 bug②）** ✓：聊天区两类气泡靠 `objectName` 区分 ——
+> **`ChatBubbleUser`**（用户/命令行说的 ✓）与助手气泡 ✓（`chat_panel.cpp:167-197` ✓）。
+> ⇒ GUI 侧按 `llm{role:"user"}` 分流 ✓（`main_window.cpp` 的 llm 分支 ✓）；
+> ⚠ 没有 `role` ⇒ 一律当助手气泡 ✓（**向后兼容** ✓）。
