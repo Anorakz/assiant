@@ -16,6 +16,7 @@
 //     **不在 `gui_widgets` 库里** ✗ ⇒ 本测试的 CMake 必须**额外编进 `../src/main_window.cpp`** ✓
 //     （见 `tests/CMakeLists.txt` 里单独的那一段 ✓）。
 // ============================================================================
+#include "ui/chat_panel.h"   // T6：气泡可区分性判据 ✓
 #include "core/config_store.h"   // 判据要构造一份配置交给 applyConfig() ✓
 #include <QSpinBox>     // 判据 1/3 设 regionIdleSpin() ✓
 #include "core/idle_watcher.h"   // 判据 1/3 读 idleWatcher()->idleMs() ✓
@@ -182,6 +183,26 @@ private slots:
 
         QCOMPARE(page->inputSourceBox()->currentIndex(), editingIndex);
         QCOMPARE(page->inputSourceBox()->currentText(), editing);
+    }
+
+    /// T15-17 / bug②（T6）✓：**用户气泡与助手气泡可区分** ✓
+    /// —— 这是"CLI 说的话显示成用户气泡"这条需求的**形态前提** ✓；
+    /// ⚠ 真正的 `role` 分流在 `MainWindow::onMessage()`（**私有** ✗）⇒ 它由 **T7 上板**验证 ✓。
+    void userAndAssistantBubblesAreDistinguishable()
+    {
+        MainWindow window;
+        ChatPanel* panel = window.chatPanel();
+        QVERIFY(panel != nullptr);
+        panel->clear();
+        const int before = panel->findChildren<QWidget*>(QStringLiteral("ChatBubbleUser")).size();
+
+        panel->appendUser(QStringLiteral("从命令行说的话"));
+        const int afterUser = panel->findChildren<QWidget*>(QStringLiteral("ChatBubbleUser")).size();
+        QCOMPARE(afterUser, before + 1);            // 用户气泡 +1 ✓
+
+        panel->appendAssistant(QStringLiteral("助手回的话"));
+        const int afterBoth = panel->findChildren<QWidget*>(QStringLiteral("ChatBubbleUser")).size();
+        QCOMPARE(afterBoth, afterUser);             // 助手气泡**不该**动到用户气泡计数 ✓
     }
 };
 

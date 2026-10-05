@@ -1106,7 +1106,15 @@ void MainWindow::onMessage(const QString& topic, const QJsonObject& data)
         if (topic == QLatin1String("llm") && mainPage_->chatPanel() != nullptr) {
             mainPage_->chatPanel()->setThinking(false);   // 回复到了，收起"思考中…"
             if (view_.hasLlm()) {
-                mainPage_->chatPanel()->appendAssistant(view_.llmText());
+                // T15-17 / bug②：**区分"谁说的"** ✓ —— Agent 会把**非 gui 来源**（例如命令行 ✓）
+                // 的输入回显成 `llm{text, role:"user"}` ✓ ⇒ 那种要显示成**用户气泡** ✓，
+                // 其余（**没有** role ✓）= 助手回复 ⇒ 照旧助手气泡 ✓ ⇒ **向后兼容** ✓✓
+                //（老 Agent 不推 role ⇒ 行为与今天一模一样 ✓）。判据见 test_main_window ✓。
+                if (data.value(QStringLiteral("role")).toString() == QLatin1String("user")) {
+                    mainPage_->chatPanel()->appendUser(view_.llmText());
+                } else {
+                    mainPage_->chatPanel()->appendAssistant(view_.llmText());
+                }
             }
         }
     }
