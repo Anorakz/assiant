@@ -112,7 +112,12 @@ private slots:
 
     /// T15-17 / T5-3 ★：**重放不许冲掉正在编辑的内容** ✓✓ —— 这条钉的是 T1 的靶心 ✓
     /// 做法：先改一个**与四区域无关**的编辑项（输入源 ✓），再改四区域触发重放 ✓，
-    /// 断言那个编辑项**没被改回去** ✓。⚠ 反过来（把 `loadFromConfig` 塞进重放 ✗）它会**红** ✓。
+    /// 断言那个编辑项**没被改回去** ✓。
+    /// ✅ **牙齿已验** ✓（2026-10-05）：往 **`guiSettingsEdited` 信号 lambda** 里塞一句
+    /// `settingsPage_->restoreDefaults();` ⇒ 本条判据**当场红** ✗（`rc=8` ✓），撤掉 ⇒ 绿 ✓。
+    /// ⚠ **注射点必须与判据走同一条路** ✗ —— 我先往「配置回执」那段注入 ✗，连试三种都不咬 ✓，
+    /// 因为**测试里根本没有回执**（没有 Agent ✓）；最后靠「在两条路里各插一条 qInfo」
+    /// 才看清哪条真在跑 ✓✓。这条教训已写进 `todo2.md` §5.3 ✓。
     void theLiveReplayDoesNotClobberWhatYouAreEditing()
     {
         // ⚠⚠ 这条判据**第一版是空过的** ✗：没有 configPath ⇒ MainWindow 里那段重放
@@ -134,7 +139,12 @@ private slots:
         // ⚠ 接线同样要照生产来 ✓（见判据 1 的注释 ✓）
         core::ConfigStore base;
         window.applyConfig(base);
-        window.setConfigPath(cfgPath);          // ★ 关键：让重放真的会跑 ✓
+        window.setConfigPath(cfgPath);          // 见下注：它服务的是**回执路径** ✗
+        // ⚠ **如实说明** ✗：上面这份临时 configPath 只对**配置回执**那条路有意义 ✓
+        //   （回执里带 ok ⇒ 重新读盘 ⇒ 重放 ✓）；而**本条判据走的是信号路径** ✗
+        //   —— 信号路径用不上 `configPath_` ✓ ⇒ 这份临时配置在本判据里**没有参与** ✗。
+        //   我不删它的理由 ✓：等以后有人给「回执路径」补判据时，这里就是现成的入口 ✓；
+        //   ⚠ 回执路径本身**目前没有单测** ✗ ⇒ 它由 **T7 上板**（真的按一次「保存」✓）覆盖 ✓。
         SettingsPage* page = window.settingsPage();
         QVERIFY(page != nullptr);
         QVERIFY(page->inputSourceBox() != nullptr);
