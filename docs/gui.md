@@ -795,3 +795,16 @@ qt.virtualkeyboard: PlatformInputContext::showInputPanel()
 ⇒ 判据要加 **`QQuickWindow` 的几何非 0** ✓✓。
 
 **⚠ 仍待人工确认** ✗：**真手指敲键盘能否输入** ✓（触控投递这一环只有人手能验 ✓）。
+
+
+### 12.16.1 板上证据截图（已入库 ✓）
+
+| 图 | 说明 |
+|---|---|
+| ![](images/vk-min.png) | **最小 Application 集成验证**（板端 `qmlscene` 跑十几行 QML ✓）：
+键盘**完整显示** ✓ —— 这一步证明了"改用 Application 集成"是正解 ✓ |
+| ![](images/vk-fixed-keyboard-white-bg.png) | ⚠ **反面教材**：承载层还是**全窗 + 默认白底**时，
+主界面被**整块盖白** ✓ ⇒ 所以 `setClearColor(Qt::transparent)` **不可省** ✓ |
+| ![](images/vk-fixed-transparent.png) | 设为**透明**后：主界面正常 ✓ ＋ 键盘在底部 ✓ |
+| ![](images/vk-overlay-bottom-strip.png) | ★ **覆盖式**（最终形态 ✓）：主界面**位置完全未动** ✓，
+键盘**只占底部 400px** ✓（与日志 `几何=0,400 1280x400` 吻合 ✓） |
