@@ -286,6 +286,23 @@ void SettingsPage::build()
     overlayBox->addLayout(overlayForm);
     root->addWidget(overlay);
 
+    // T15-17 / T3：**改动即预览** ✓ —— 这六个控件（四区域 4 个 + 四区域休眠 + 控制条模式/休眠 ✓）
+    // 对应的键都是 `reapplyGuiConfig()` 会读的 ✓ ⇒ 一改就发信号 ⇒ MainWindow 当场套用 ✓
+    // （不必点「保存」✓、更不必重启 ✓）。⚠ **只报值、不落盘** ✗ —— 写盘仍归 Agent ✓（ADR-0005 ✓）。
+    {
+        const auto notifyEdited = [this]() { emit guiSettingsEdited(); };
+        for (QComboBox* box : {top_, bottom_, left_, right_, overlayMode_}) {
+            if (box != nullptr) {
+                connect(box, QOverload<int>::of(&QComboBox::currentIndexChanged), this, notifyEdited);
+            }
+        }
+        for (QSpinBox* spin : {regionIdle_, overlayIdle_}) {
+            if (spin != nullptr) {
+                connect(spin, QOverload<int>::of(&QSpinBox::valueChanged), this, notifyEdited);
+            }
+        }
+    }
+
     // ------------------------------------------------------- 学习监督 (T13-9) ---
     QVBoxLayout* studyBox = nullptr;
     QFrame* study = makeCard(this, QStringLiteral("学习监督"), &studyBox);

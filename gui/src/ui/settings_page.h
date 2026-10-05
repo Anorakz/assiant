@@ -148,6 +148,11 @@ signals:
     /// ⚠ 走 IPC 让 **Agent** 去调 nmcli —— GUI 不做系统动作（docs/adr/0005）。
     void wifiRequested(QString action, QJsonObject payload);
 
+    /// T15-17 / T3：设置页上**与 gui.* 有关的控件被改动**时发出 ✓（**只报"我改了"** ✓，**不落盘** ✗）。
+    /// 语义 ✓：让 `MainWindow` 立刻用「磁盘为底 + 界面覆盖」的内存配置重放一次 ✓ ⇒ **改动即预览** ✓
+    /// （不必点保存 ✓、更不必重启 ✓）；不保存的话，重启会回落到磁盘上的值 ✓（**不假装已保存** ✗）。
+    void guiSettingsEdited();
+
 protected:
     /// 每次显示都把滚动拉回顶部：焦点落在第一个控件上会被 QScrollArea 滚进视野，
     /// 首卡片标题因此被裁（实测）——这是机制层面的修法，不是靠边距遮。

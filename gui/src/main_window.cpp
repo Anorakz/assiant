@@ -5,6 +5,9 @@
 //  2. 四区域包进 RegionHost，接 IdleWatcher：空闲折叠 / 点击唤醒（T3）
 //  3. 一份**最小**高级灰样式（配色见方案 §8），T15 再统一打磨
 // ============================================================================
+#include <QComboBox>   // T15-17 / T3：读设置页的四个区域模式 ✓
+#include <QSpinBox>    // T15-17 / T3：读休眠时间 ✓
+
 #include "main_window.h"
 
 #include "core/bilibili_format.h"
@@ -1221,6 +1224,45 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
                 [this](QString action, QJsonObject payload) {
                     sendWifiRequest(action, payload);
                 }, Qt::UniqueConnection);
+        // T15-17 / T3：**改动即预览** ✓ —— 设置页一改（**还没落盘** ✓）就当场重放一次 ✓。
+        // ⚠⚠ **必须以磁盘那份为底** ✗：`reapplyGuiConfig()` 对每个键都带 fallback ✓，
+        //     若内存里只有改动的那几个键 ✗ ⇒ **别的键会走默认值** ✗✗（等于"改一处、悄悄重置别处" ✗）
+        //     ⇒ 所以先 `load(configPath_)` 铺底 ✓，再叠加界面上的当前值 ✓。
+        // ⚠ 不落盘 ✓：写盘仍要按「保存」✓（唯一写入者 = Agent ✓，见 docs/adr/0005）。
+        connect(settingsPage_, &SettingsPage::guiSettingsEdited, this, [this]() {
+            core::ConfigStore store;
+            if (!configPath_.isEmpty()) {
+                store.load(configPath_);          // 底：磁盘 ✓（读不到也不致命 ✓，只是少一层底 ✓）
+            }
+            const auto modeOf = [this](const QString& region) {
+                QComboBox* box = settingsPage_->regionMode(region);
+                return box != nullptr ? box->currentData().toString() : QString();
+            };
+            const auto putIfSet = [&store](const QString& key, const QString& value) {
+                if (!value.isEmpty()) {
+                    store.set(key, value);
+                }
+            };
+            putIfSet(QStringLiteral("gui.wake.top"), modeOf(QStringLiteral("top")));
+            putIfSet(QStringLiteral("gui.wake.bottom"), modeOf(QStringLiteral("bottom")));
+            putIfSet(QStringLiteral("gui.wake.left"), modeOf(QStringLiteral("left")));
+            putIfSet(QStringLiteral("gui.wake.right"), modeOf(QStringLiteral("right")));
+            if (settingsPage_->regionIdleSpin() != nullptr) {
+                store.set(QStringLiteral("gui.wake.idle_ms"),
+                          QString::number(settingsPage_->regionIdleSpin()->value()));
+            }
+            if (settingsPage_->overlayMode() != nullptr) {
+                putIfSet(QStringLiteral("gui.video_overlay.mode"),
+                         settingsPage_->overlayMode()->currentData().toString());
+            }
+            if (settingsPage_->overlayIdleSpin() != nullptr) {
+                store.set(QStringLiteral("gui.video_overlay.idle_ms"),
+                          QString::number(settingsPage_->overlayIdleSpin()->value()));
+            }
+            reapplyGuiConfig(store);
+            qInfo().noquote() << QStringLiteral(
+                "[ui] 设置页改动已**即时套用** ✓（未落盘 ✓ —— 按「保存」才写盘 ✓）");
+        }, Qt::UniqueConnection);
     }
     if (modelPage_ != nullptr) {
         connect(modelPage_, &ModelPage::configSaveRequested, this,
