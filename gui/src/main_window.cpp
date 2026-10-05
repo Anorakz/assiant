@@ -6,6 +6,7 @@
 //  3. 一份**最小**高级灰样式（配色见方案 §8），T15 再统一打磨
 // ============================================================================
 #include <QComboBox>   // T15-17 / T3：读设置页的四个区域模式 ✓
+#include <QCheckBox>   // T15-17 / T3b：读 Debug 勾选框 ✓
 #include <QSpinBox>    // T15-17 / T3：读休眠时间 ✓
 
 #include "main_window.h"
@@ -1258,6 +1259,14 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
             if (settingsPage_->overlayIdleSpin() != nullptr) {
                 store.set(QStringLiteral("gui.video_overlay.idle_ms"),
                           QString::number(settingsPage_->overlayIdleSpin()->value()));
+            }
+            // T15-17 / T3b：通用卡片里那两项 ✓（`startPage_` 故意不覆盖 ✗ —— 它不在本函数读的键里 ✓）
+            if (settingsPage_->debugCheck() != nullptr) {
+                store.setBool(QStringLiteral("gui.debug"), settingsPage_->debugCheck()->isChecked());
+            }
+            if (settingsPage_->inputSourceBox() != nullptr) {
+                putIfSet(QStringLiteral("gui.input_source"),
+                         settingsPage_->inputSourceBox()->currentData().toString());
             }
             reapplyGuiConfig(store);
             qInfo().noquote() << QStringLiteral(

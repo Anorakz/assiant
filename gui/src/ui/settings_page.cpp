@@ -252,6 +252,22 @@ void SettingsPage::build()
     generalBox->addLayout(generalForm);
     root->addWidget(general);
 
+    // T15-17 / T3b：通用卡片里**页面上真有**的那两项也接进"改动即预览" ✓
+    //   · `debug_`         → `gui.debug` ✓（`reapplyGuiConfig()` 读它 ✓）
+    //   · `inputSource_`   → `gui.input_source` ✓（同上 ✓，并且它还会立刻改输入框的输入类型 ✓）
+    // ⚠ `startPage_`（`gui.start_page` ✓）**故意不挂** ✗ —— `reapplyGuiConfig()` **不读**这个键 ✓
+    //   （它只在启动时决定默认页 ✓）⇒ 挂了也不会即时生效 ✓，挂上反而会让人以为"改动即预览"覆盖了它 ✗。
+    // ⚠ `gui.monitor_interval_ms` 是 GUI 私有项 ✓，页面上**没有**控件 ✗ ⇒ 走"保存回执 + T2"那条路 ✓。
+    {
+        const auto notifyEdited = [this]() { emit guiSettingsEdited(); };
+        if (debug_ != nullptr) {
+            connect(debug_, &QCheckBox::toggled, this, notifyEdited);
+        }
+        if (inputSource_ != nullptr) {
+            connect(inputSource_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, notifyEdited);
+        }
+    }
+
     QVBoxLayout* wakeBox = nullptr;
     QFrame* wake = makeCard(this, QStringLiteral("四区域 活动/锁定 + 休眠时间"), &wakeBox);
     auto* wakeForm = new QFormLayout();
