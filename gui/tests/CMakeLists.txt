@@ -135,6 +135,18 @@ if(Python3_Interpreter_FOUND)
                      --gui $<TARGET_FILE:agent_gui>
                      --socket /tmp/agent_e2e_ctest.sock)
     set_tests_properties(e2e_ipc PROPERTIES TIMEOUT 60)
+
+    # ------------------------------- T15-16 矩阵第 2 行: 没 Agent 的失败路径 ---
+    # ⚠ 为什么走端到端 ✓：那句「命令没发出去」的**接线**在 `applyConfig()`（私有 ✗）里，
+    #   裸造窗口跑不到它 ⇒ 界面静默（第 119-120 轮查实 ✓）；带 `--config` 走产品入口即可，
+    #   **不改任何产品 API** ✓。脚本在 socket 存在时退出 77 ⇒ 标成 Skipped ✓（绝不假绿 ✗）。
+    add_test(NAME e2e_failure_matrix
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e_failure_matrix.py
+                     --gui $<TARGET_FILE:agent_gui>)
+    set_tests_properties(e2e_failure_matrix PROPERTIES
+        TIMEOUT 90
+        SKIP_RETURN_CODE 77
+    )
 endif()
 
 # 每个用例都要起/杀 python 进程, 给足超时; 卡死时 ctest 不会一直挂着。
