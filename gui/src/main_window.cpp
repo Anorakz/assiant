@@ -359,12 +359,30 @@ MainWindow::MainWindow(QWidget* parent)
     // T10：系统页按配置的 gui.monitor_interval_ms 定时刷新（不看时才不刷）
     monitorTimer_ = new QTimer(this);
     connect(monitorTimer_, &QTimer::timeout, this, [this]() {
+        ++monitorTicks_;             // G-B-4：先记一笔"醒了" ✓（可见性判断之后就不算醒了 ✗）
         if (sysPage_ != nullptr && stack_ != nullptr && stack_->currentWidget() == sysPage_) {
             sysPage_->refresh();
         }
     });
     monitorTimer_->setInterval(1000);   // applyConfig() 里会按配置改写
-    monitorTimer_->start();
+
+    // T15-16 G-B-4：**系统页不可见就不让定时器醒** ✓
+    //   改前它每秒都触发（只是进 lambda 后什么都不干 ✗）—— 板端实测隐藏态自愿唤醒 4.13 次/s ✓。
+    if (stack_ != nullptr) {
+        connect(stack_, &QStackedWidget::currentChanged, this, [this](int) {
+            if (monitorTimer_ == nullptr) {
+                return;
+            }
+            if (sysPageVisible()) {
+                monitorTimer_->start();
+            } else {
+                monitorTimer_->stop();          // 停 ⇒ 隐藏期间一次都不醒 ✓
+            }
+        });
+    }
+    if (sysPageVisible()) {
+        monitorTimer_->start();                 // 启动时若就在系统页 ⇒ 立刻开 ✓
+    }
 
     // S5：日程区每 60 秒重读一次（窗口往前滑 / 跨零点翻页）。
     // 启动时的那一次在 applyConfig() 末尾（main.cpp 会调它）。
@@ -833,6 +851,11 @@ void MainWindow::applyInputType(const QString& type)
     }
 }
 
+bool MainWindow::sysPageVisible() const
+{
+    return stack_ != nullptr && sysPage_ != nullptr && stack_->currentWidget() == sysPage_;
+}
+
 ChatPanel* MainWindow::chatPanel() const
 {
     return (mainPage_ != nullptr) ? mainPage_->chatPanel() : nullptr;
@@ -1174,6 +1197,12 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
     if (monitorTimer_ != nullptr) {
         const int intervalMs = gui.intValue(QStringLiteral("gui.monitor_interval_ms"), 1000);
         monitorTimer_->setInterval(intervalMs > 200 ? intervalMs : 200);
+        // T15-16 G-B-4：改完间隔要**按可见性**决定启停 ✓（否则会把刚停掉的又拉起来 ✗）
+        if (sysPageVisible()) {
+            monitorTimer_->start();
+        } else {
+            monitorTimer_->stop();
+        }
         qInfo().noquote() << QStringLiteral("[gui] 系统页刷新间隔: %1ms").arg(intervalMs);
     }
     // 默认：上/右 锁定（常显），左/下 活动（空闲折叠）

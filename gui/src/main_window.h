@@ -108,6 +108,12 @@ public:
     SchedulePanel* schedulePanel() const;
     BottomBar* bottomBar() const;
     SysPage* sysPage() const { return sysPage_; }
+    /// T15-16 G-B-4：`monitorTimer_` **触发过的次数** ✓
+    /// ⚠ 数"定时器触发"而不是 `SysPage::refresh()` ✗ —— 后者本来就只在可见时调 ✓，
+    ///   数它等于数一个本来就为 0 的量 ✗（证明不了任何事 ✓）。
+    int monitorTicks() const { return monitorTicks_; }
+    /// 系统页当前是不是活动页（探针/日志用 ✓）
+    bool sysPageVisible() const;
     ModelPage* modelPage() const { return modelPage_; }
     SettingsPage* settingsPage() const { return settingsPage_; }
     /// 仓库根（配置同步与服务脚本都相对它定位）
@@ -189,6 +195,7 @@ private:
     bool overlayAutoHide_ = true;
     bool videoFullscreen_ = false;
     SysPage* sysPage_ = nullptr;
+    int monitorTicks_ = 0;        ///< G-B-4：定时器触发次数（不可见时应该不再增长 ✓）
     ModelPage* modelPage_ = nullptr;
     SettingsPage* settingsPage_ = nullptr;
     QString repoRoot_;
