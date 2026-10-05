@@ -87,6 +87,31 @@ foreach(gui_test test_main_page test_bottom_bar test_video_panel test_bilibili_p
     )
 endforeach()
 
+# ------------------------------- T15-16 最后一条遗留: MainWindow 级测试 ---
+# ⚠ 必须**单独**建目标 ✓：`MainWindow` 在 `gui/CMakeLists.txt` 的 `add_executable(agent_gui …)` 里 ✓，
+#   **不在 `gui_widgets` 库** ✗ ⇒ 只链库会 `undefined reference` ✗ ⇒ 这里把那个 .cpp 一起编进来 ✓。
+add_executable(test_main_window
+    test_main_window.cpp
+    ../src/main_window.cpp
+)
+target_sources(test_main_window PRIVATE ../resources/icons.qrc)
+target_link_libraries(test_main_window PRIVATE
+    gui_widgets              # 各页面/区域本体
+    gui_services             # LocalClient / IdleWatcher / ConfigStore
+    Qt5::Widgets
+    Qt5::Test
+)
+if(MSVC)
+    target_compile_options(test_main_window PRIVATE /W4)
+else()
+    target_compile_options(test_main_window PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME test_main_window COMMAND test_main_window)
+set_tests_properties(test_main_window PROPERTIES
+    TIMEOUT 60
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+)
+
 # S5: 图标守卫要核对源码目录里的 *.svg 清单（qrc 是编译进二进制的，运行期列不出来）。
 # ⚠ 必须放在创建 test_icons 的 foreach **之后** —— 否则 CMake 会报
 #   "Cannot specify compile definitions for target ... which is not built by this project"。
