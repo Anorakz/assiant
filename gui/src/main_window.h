@@ -190,6 +190,7 @@ private:
     bool onboardAuto_ = true;
     /// 当前已经让给虚拟键盘的高度（px，0 = 没让）；只用于"变化了才打日志"
     int keyboardInset_ = -1;
+    int insetRequests_ = 0;        ///< G-B-6：`applyKeyboardInset` 被叫了几次（含重复 ✓）
     /// 当前输入源（S10：焦点策略要知道它；由 applyInputType/applyConfig 维护）
     QString inputSource_ = QStringLiteral("keyboard");
     QPixmap wallpaper_;

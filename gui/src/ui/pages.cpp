@@ -203,6 +203,7 @@ void MainPage::setKeyboardInset(int px)
         return;                     // 值没变就别折腾布局（键盘矩形会连着报好几次）
     }
     keyboardInset_ = px;
+    ++insetLayoutPasses_;          // G-B-6：走过防护才计数 ⇒ 数的是"真改了布局" ✓
     if (px <= 0) {                                          // 收起键盘：一切复原
         chatFrame_->setMaximumHeight(QWIDGETSIZE_MAX);
         if (modeFrame_ != nullptr) {

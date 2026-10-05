@@ -65,6 +65,30 @@ private slots:
         QCOMPARE(kKeyboardHeight, 400);
     }
 
+    /// T15-16 G-B-6：**同一值连着喂不会反复折腾布局** ✓
+    /// （Qt 虚拟键盘的矩形会连着报好几次 ✓；`setKeyboardInset` 开头有防护 ✓，这里把它钉住 ✓）
+    void repeatedInsetDoesNotRelayout()
+    {
+        MainPage page;
+        settle(page);
+
+        page.setKeyboardInset(kKeyboardHeight);        // 第一次：真改布局 ✓
+        const int afterFirst = page.insetLayoutPasses();
+        QCOMPARE(afterFirst, 1);                       // 口径自证：0 → 1 ✓（防"永远 0"空断言 ✗）
+
+        page.setKeyboardInset(kKeyboardHeight);        // 同一值 ⇒ 一次都不该再改 ✓
+        page.setKeyboardInset(kKeyboardHeight);
+        QCOMPARE(page.insetLayoutPasses(), afterFirst);
+
+        page.setKeyboardInset(0);                      // 收起键盘 ⇒ 真改一次 ✓
+        QCOMPARE(page.insetLayoutPasses(), afterFirst + 1);
+        page.setKeyboardInset(0);                      // 再重复 ⇒ 不涨 ✓
+        QCOMPARE(page.insetLayoutPasses(), afterFirst + 1);
+
+        page.setKeyboardInset(kKeyboardHeight - 40);   // 键盘高度**变了** ⇒ 必须真改一次 ✓
+        QCOMPARE(page.insetLayoutPasses(), afterFirst + 2);
+    }
+
     /// 核心不变式：让位后对话卡下沿 ≤ 键盘上沿（输入行就露在键盘上方）
     void chatCardEndsAboveTheKeyboard()
     {

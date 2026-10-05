@@ -712,6 +712,7 @@ void MainWindow::hideOnboard(const QString& why)
 
 void MainWindow::applyKeyboardInset()
 {
+    ++insetRequests_;               // G-B-6：进来的每一次都记（含重复 ✓，与"真改布局"分开数 ✓）
     QInputMethod* im = QGuiApplication::inputMethod();
     QRect kb;
     int covered = 0;
@@ -724,10 +725,15 @@ void MainWindow::applyKeyboardInset()
         }
     }
     if (mainPage_ != nullptr) {
-        mainPage_->setKeyboardInset(covered);
     }
     if (covered != keyboardInset_) {
         keyboardInset_ = covered;
+        // T15-16 G-B-6：**只在值真的变了才往下传** ✓
+        //   改前这行在判断**之前**（先调用、后判断 ✗）—— 页面那层虽有防护 ✓，
+        //   但"请求"会一路走到页面函数里再被弹回来 ✓，多花几何计算 ✗。
+        if (mainPage_ != nullptr) {
+            mainPage_->setKeyboardInset(covered);
+        }
         qInfo().noquote() << QStringLiteral("[ui] %1：虚拟键盘盖住 %2 px -> 对话区高度上限 "
                                            "让开（键盘矩形 %3,%4 %5x%6，窗口 %7x%8）")
                                  .arg(QGuiApplication::platformName())

@@ -89,6 +89,10 @@ public:
     /// `px` = 本页被键盘盖住的高度（本页坐标）；px<=0 恢复原样。
     void setKeyboardInset(int px);
 
+    /// T15-16 G-B-6：**真的改了几次布局** ✓（`px` 与上次相同直接返回、不计 ✓）
+    /// —— 单测用它钉住"键盘矩形连着报好几次时不会反复折腾布局" ✓。
+    int insetLayoutPasses() const { return insetLayoutPasses_; }
+
 private:
     RegionHost* bottomRegion_ = nullptr;
     RegionHost* rightRegion_ = nullptr;
@@ -111,6 +115,7 @@ private:
     QSpacerItem* tailSpacer_ = nullptr;
     /// 当前已经让出去的高度（-1 = 还没设过），避免重复改上限触发重排
     int keyboardInset_ = -1;
+    int insetLayoutPasses_ = 0;    ///< G-B-6：真改布局的次数（判据 ✓）
 };
 
 /// 造一个带标题的区域容器（占位用）。objectName 供后续样式表定位。
