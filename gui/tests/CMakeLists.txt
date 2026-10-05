@@ -65,7 +65,7 @@ target_compile_definitions(test_schedule_model PRIVATE
 # QApplication + Widgets，跑的时候用 offscreen 平台插件。
 # T15-16 G-A-1b：test_theme 是**纯头文件**测试（theme.h / base_style.h 只用到 QString ✓，
 # 它自己用 QTEST_GUILESS_MAIN ✓）—— 放进这一组只是为了顺带拿到 gui_widgets 的 include 目录 ✓。
-foreach(gui_test test_main_page test_bottom_bar test_video_panel test_bilibili_preview test_cover_loader test_sys_page test_model_page test_bench_runner test_settings_page test_schedule_panel test_icons test_page_heights test_keyboard_inset test_theme test_style_guard test_music_bar)
+foreach(gui_test test_main_page test_bottom_bar test_video_panel test_bilibili_preview test_cover_loader test_sys_page test_model_page test_bench_runner test_settings_page test_schedule_panel test_icons test_page_heights test_keyboard_inset test_theme test_style_guard test_music_bar test_icon_cache)
     add_executable(${gui_test} ${gui_test}.cpp)
     # 控件测试里用到图标（VideoPanel/MusicBar）→ 把资源一起编进来
     target_sources(${gui_test} PRIVATE ../resources/icons.qrc)

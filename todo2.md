@@ -285,7 +285,7 @@ buildroot 2024.02、Qt 5.15.11（联网拉）；**K1Mini 是一等目标**（`.c
 |---|---|---|
 | **G-B-0** | 统一探针 `scripts/gui-probe.sh`（cgroup `cpu.stat` 差分 + `VmHWM` + 可选 `GUI-MARK` 计数 ✓；PID 用 `systemctl show -p MainPID` ✓）| ✅ **完成** ✓ 板端基线：`cpu_pct=1.42`（30 s）/ `1.50`（15 s）· `hwm_kb=113544` · `marks=0`（pid 573 ✓）—— 与 T15-1d 历史"GUI 均值 ≈1.0%" ✓ 同量级，口径可信 ✓ |
 | **G-B-1** | 音乐条：**状态没变就不写样式** ✓（新增 `applyStyle()` 缓存助手 ✓，替掉 `time_`(原 `:239`) 与 `refreshLyrics()` 的 4 个分支(原 `:305/314/317/322`) ✓；另加 `styleWrites()` 计数给单测 ✓） | ✅ **完成** ✓（提交见下 ✓）—— 判据 = **计数**（`test_music_bar`：同状态连调两次计数不涨 ✓；**牙齿**：去掉缓存判断 ⇒ `ctest rc=8` 红 ✓，装回 ⇒ `rc=0` 绿 ✓）；⚠ **CPU 测不出** ✗：改前 1.42/1.50% → 改后 1.57/1.54%（**噪声内**，不声称收益 ✗）；RSS 113,544 → 112,076 kB |
-| **G-B-2** | `tintedIcon()` 加 (图标,颜色,尺寸) 缓存（`icons.cpp:43`）| ⬜ |
+| **G-B-2** | `ui::tintedIcon()` 加缓存 ✓ —— 键 = **(图标, 颜色 HexArgb)** ✓（⚠ 计划里写的"(图标,颜色,**尺寸**)"是错的 ✗：实测签名只有 `(name, color)` ✓，尺寸来自 SVG 固有大小 ✓；用 HexArgb 把 **alpha** 也算进键 ✓）；另加 `tintedIconRenders()` 计数与 `resetTintedIconCache()` ✓ | ✅ **完成** ✓ —— 判据 = **计数**（`test_icon_cache`：同 `(图标,颜色)` 调 3 次只渲染 1 次 ✓；换色/换 alpha/换名字都必须重渲染 ✓；外加 `theCounterActuallyMoves` 防空断言 ✓；**牙齿**：去掉缓存查询 ⇒ `rc=8` 红 ✓，装回 ⇒ `rc=0` 绿 ✓）；ctest 29→**30** ✓、棘轮零新增 ✓；⚠ **CPU 不可测** ✗（图标重染只发生在状态切换时，探针 30 s 窗口抓不到 ⇒ 不声称数字 ✓）|
 | **G-B-3** | 日程**复用行控件**（`schedule_panel.cpp:161-166,198-214`）| ⬜ |
 | **G-B-4** | 系统页不可见即停定时器（`main_window.cpp:551-558,1365-1367`）| ⬜ |
 | **G-B-5** | 壁纸淡入限帧/局部重绘（`main_window.cpp:581-593`）| ⬜ |

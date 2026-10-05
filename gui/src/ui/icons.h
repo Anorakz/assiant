@@ -18,7 +18,14 @@ namespace ui {
 QIcon icon(const QString& name);
 
 /// 取图标并染成指定颜色（alpha 由 SVG 的描边决定）
+/// ⚠ T15-16 G-B-2：同一 `(图标, 颜色)` 只**真渲染一次** ✓（结果带缓存 ✓）
 QIcon tintedIcon(const QString& name, const QColor& color);
+
+/// T15-16 G-B-2：**真正渲染过的次数**（命中缓存不算 ✓）—— 单测 / 打点判据 ✓
+int tintedIconRenders();
+
+/// 清空染色缓存并把计数归零（单测用 ✓）
+void resetTintedIconCache();
 
 /// 全部图标名（验收/文档用）
 QStringList iconNames();
