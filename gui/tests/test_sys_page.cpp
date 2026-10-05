@@ -5,6 +5,7 @@
 //  而不是 0（方案 §7：读不到不许装成 0）。
 // ============================================================================
 #include <QDir>
+#include "ui/state_views.h"   // T15-16 ②：hint 换成 StateBanner ⇒ 要完整类型 ✓
 #include <QFile>
 #include <QLabel>
 #include <QPushButton>
@@ -18,6 +19,8 @@ class TestSysPage : public QObject {
     Q_OBJECT
 
 private slots:
+    /// T15-16 ②：读不到 /proc ⇒ 状态条出现并说清原因 ✓；**读到时要收掉** ✓（防横幅赖着不走 ✗）
+    void hintBannerAppearsOnFailureAndClearsWhenHealthy();
     void showsFakeValues();
     void unreadableShowsPlaceholderNotZero();
     void watchdogIsPlaceholder();
@@ -77,8 +80,8 @@ void TestSysPage::unreadableShowsPlaceholderNotZero()
     QCOMPARE(page.metricText(QStringLiteral("npu")), QStringLiteral("不可读"));
     QCOMPARE(page.metricText(QStringLiteral("temp_soc")), QStringLiteral("不可读"));
     // 关键来源读不到 → 页面上要有可读的提示
-    QVERIFY(page.hintLabel() != nullptr);
-    QVERIFY(page.hintLabel()->text().contains(QStringLiteral("/proc")));
+    QVERIFY(page.hintBanner() != nullptr);
+    QVERIFY(page.hintBanner()->text().contains(QStringLiteral("/proc")));
 }
 
 void TestSysPage::watchdogIsPlaceholder()
@@ -94,6 +97,34 @@ void TestSysPage::watchdogIsPlaceholder()
     QVERIFY(page.watchdogButton()->text().contains(QStringLiteral("未接入")));
     page.triggerWatchdog();
     QVERIFY(page.watchdogButton()->text().contains(QStringLiteral("未启用")));
+}
+
+
+/// T15-16 ②：三段断言 —— ① 读不到 ⇒ 有横幅且说了原因 ✓；② 给**读到**的页面**先塞一条旧错误** ✓
+/// 再 `refresh()` ⇒ **旧横幅必须被收掉** ✓（这条直接冲着 `clear()` 去 ✓，也是牙齿打的位置 ✓）。
+void TestSysPage::hintBannerAppearsOnFailureAndClearsWhenHealthy()
+{
+    QTemporaryDir empty;                        // 空目录 ⇒ 读不到 ✓
+    QVERIFY(empty.isValid());
+    SysPage bad(core::SystemStats(empty.path()));
+    QVERIFY(bad.hintBanner() != nullptr);
+    QVERIFY2(!bad.hintBanner()->isEmpty(), "读不到 /proc 却没出状态条 ✗");
+    QVERIFY2(bad.hintBanner()->text().contains(QStringLiteral("读不到 /proc")),
+             qPrintable(bad.hintBanner()->text()));
+
+    QTemporaryDir good;                         // 有假 /proc ⇒ 读得到 ✓
+    QVERIFY(good.isValid());
+    writeFake(good);
+    SysPage ok(core::SystemStats(good.path()));
+    QVERIFY(ok.hintBanner() != nullptr);
+    QVERIFY2(ok.hintBanner()->isEmpty(), "一开始就读得到，却已经有横幅了 ✗");
+
+    // ⚠ 关键一条：**旧错误必须被收掉** ✗（否则用户会一直看到"读不到 /proc"✓ 而其实早就好了 ✓）
+    ok.hintBanner()->setState(StateBanner::Error, QStringLiteral("上一次的错误"));
+    ok.refresh();
+    QVERIFY2(ok.hintBanner()->isEmpty(),
+             qPrintable(QStringLiteral("refresh 成功了，上一次的错误横幅还留着 ✗：%1")
+                            .arg(ok.hintBanner()->text())));
 }
 
 QTEST_MAIN(TestSysPage)

@@ -2,6 +2,7 @@
 //  gui/src/ui/sys_page.cpp — 系统与网络页实现
 // ============================================================================
 #include "ui/sys_page.h"
+#include "ui/state_views.h"    // T15-16 ②：hint 用 StateBanner ✓
 
 #include <QDebug>
 #include <QFrame>
@@ -85,9 +86,9 @@ void SysPage::build()
     leftBox->addLayout(grid);
     leftBox->addStretch(1);
 
-    hint_ = new QLabel(left);
-    hint_->setObjectName(QStringLiteral("ChatSystem"));
-    hint_->setWordWrap(true);
+    // T15-16 遗留②：hint 换成 StateBanner ✓ —— 这是**关键故障**（读不到 /proc ✓），
+    //   一行灰字太不显眼 ✓；空文本时它**自己整条隐藏** ✓（比手工判断省心 ✓）。
+    hint_ = new StateBanner(left);
     leftBox->addWidget(hint_);
     root->addWidget(left, 3);
 
@@ -274,9 +275,15 @@ bool SysPage::refresh()
     }
 
     const bool criticalOk = cpuOk || mem.totalKb > 0;
-    if (hint_ != nullptr && !criticalOk) {
-        hint_->setText(QStringLiteral("读不到 /proc（路径：%1）——请检查权限或容器环境")
-                           .arg(stats_.rootPrefix()));
+    if (hint_ != nullptr) {
+        if (!criticalOk) {
+            hint_->setState(StateBanner::Error,
+                            QStringLiteral("读不到 /proc（路径：%1）——请检查权限或容器环境")
+                                .arg(stats_.rootPrefix()));
+        } else {
+            // ⚠ **恢复时一定要收掉** ✗ —— 否则上一次"读不到"的横幅会留在屏幕上 ✓（我会为这条写牙齿 ✓）
+            hint_->clear();
+        }
     }
     return criticalOk;
 }
@@ -297,7 +304,8 @@ void SysPage::triggerWatchdog()
     noteText_ = nowOn ? QStringLiteral("看门狗启停未接入（协议暂无对应命令，先占位）")
                       : QStringLiteral("看门狗已回到未启用（占位）");
     if (hint_ != nullptr) {
-        hint_->setText(noteText_);
+        // T15-16 ②：另一处写 hint 的地方 ✓（差点漏掉 ✗）—— 空文本 ⇒ 它自己隐藏 ✓ 与原行为等价 ✓
+        hint_->setState(StateBanner::Info, noteText_);
     }
     qInfo().noquote() << "[sys] 看门狗占位:" << noteText_;
 }

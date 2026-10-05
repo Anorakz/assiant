@@ -15,6 +15,7 @@
 #include "core/system_stats.h"
 
 class QLabel;
+class StateBanner;   // T15-16 ②：hint 换状态条 ✓
 class QPushButton;
 class QGridLayout;
 class QTimer;
@@ -41,7 +42,9 @@ public:
     // 供单测/验收核对界面上真实显示的值（取不到返回空）
     QString metricText(const QString& key) const;
 
-    QLabel* hintLabel() const { return hint_; }
+    /// T15-16 遗留②：这条现在是**状态条** ✓（不再是裸 `QLabel` ✗）
+    /// ⚠ 名字从 `hintLabel()` 改成 `hintBanner()` ✓ —— 它的 `text()` 与可见性语义都变了 ✓。
+    StateBanner* hintBanner() const { return hint_; }
 
 private:
     void build();
@@ -54,7 +57,7 @@ private:
     bool hasLastCpu_ = false;
 
     QHash<QString, QLabel*> values_;
-    QLabel* hint_ = nullptr;
+    StateBanner* hint_ = nullptr;   ///< T15-16 ②：读不到 /proc 时的错误条 ✓
     QLabel* streamHost_ = nullptr;
     QPushButton* watchdog_ = nullptr;
     QString noteText_;
