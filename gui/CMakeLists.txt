@@ -122,6 +122,9 @@ add_library(gui_widgets STATIC
     src/ui/settings_page.cpp
     src/ui/icons.h
     src/ui/icons.cpp
+    # T15-16 G-D-1：异常/加载两种状态视图（StateBanner + Skeleton）
+    src/ui/state_views.h
+    src/ui/state_views.cpp
 )
 target_include_directories(gui_widgets PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gui_widgets PUBLIC gui_services Qt5::Widgets Qt5::Multimedia Qt5::MultimediaWidgets)

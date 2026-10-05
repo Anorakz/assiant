@@ -81,6 +81,7 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build-gui-host        # 当前 28 项
 | `region_host` 的折叠 | `setMinimumHeight(0)` | **区域折叠必须能到 0** ✓（这是折叠语义 ✓，不是控件高度 ✓） |
 | `top_bar` 的模式徽标 | `setFixedHeight(36)` | **纯文字徽标、不可点** ✓ |
 | `main_window` 的分隔线 | `setFixedHeight(1)` | **1px 分隔线** ✓（不是控件 ✓） |
+| `state_views` 的加载骨架 | `setMinimumHeight(12)` | **占位条、不可点** ✓（D-1 的 `Skeleton` ✓；它只是"正在加载"的视觉 ✓） |
 
 > ⚠ 加进这张表**必须写理由** ✓ —— 守卫里的白名单是 `(文件|命中片段)` 的形式 ✓（用片段不用行号 ✓，
 > 因为行号会漂移 ✗）。

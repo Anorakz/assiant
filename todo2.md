@@ -303,7 +303,7 @@ buildroot 2024.02、Qt 5.15.11（联网拉）；**K1Mini 是一等目标**（`.c
 ### G-D 异常态与收口
 | # | 任务 | 状态 |
 |---|---|---|
-| **G-D-1** | `StateBanner`（信息/警告/错误 + 可选重试）+ `Skeleton`（加载中）两组件 + 单测 | ⬜ |
+| **G-D-1** | 两个状态视图 ✓（**一对文件** `gui/src/ui/state_views.{h,cpp}` ✓ —— 它们同属"状态视图" ✓，省一处 CMake 改动 ✓）：**`StateBanner`**（Info/Warn/Error + 可选「重试」✓；**空文本 ⇒ 整条隐藏** ✓ 调用方不必自己判断 ✓；三态用 `kind` **动态属性** + `unpolish/polish` 让 QSS 重算 ✓；重试按钮 `setMinimumHeight(44)` ✓）+ **`Skeleton`**（脉冲占位 ✓；`start()/stop()` ✓ + **析构也停表** ✓ —— G-B-4 的教训 ✓；`pulses()` 计数当判据 ✓） | ✅ **完成** —— 判据 = **5 条用例 + 牙齿**：`bannerShowsWhatItIsTold` ✓、`emptyTextHidesTheWholeBanner` ✓、`theRetrySignalOnlyComesFromTheRealButton` ✓（不给重试 ⇒ 点了也**发不出去** ✓；收起来 ⇒ 点不动 ✓）、`skeletonPulsesWhileRunningAndStopsWhenStopped` ✓（跑起来涨 ✓／**停下来不涨** ✓）、`thePulseCounterActuallyMoves` ✓（防 0==0 ✓）；**牙齿**：注掉 `Skeleton::stop()` 的停表 ⇒ `rc=8` 红 ✓、还原 ⇒ `rc=0` 绿 ✓；ctest **30→31** ✓、棘轮零新增 ✓。⚠ 四条如实记录：① **我预判并先修掉一个测试陷阱** ✗→✓ —— `clickRetry()` 原判 `isVisible()`，而**裸控件的它恒为 false** ⇒ 单测永远点不动 ⇒ 改用 `!isHidden()` ✓；② 两个**真编译错**：三目 `const char*`→`QVariant` ✗ 与**缺 `#include <QVariant>`** ✗（后者隐蔽 ✓）；③ **`BUILD-RC=0` 撒谎两次** ✗✗（编译失败仍报 0 ✓）⇒ 一律按日志里的 `error` 行数判 ✓ —— §5.3 的"假绿"同源 ✓；④ **守卫 R4 又抓到一个真的** ✓✓：`Skeleton` 的 `setMinimumHeight(12)` 当场红 ✓ ⇒ 按"它**不是**触摸目标"加白名单 + 写理由 ✓（**不改大** ✓）、`docs/gui-style.md` 例外表补第 5 行 ✓。⚠ **未做（留给 G-D-3）**：QSS 规则还没加 ✓ ⇒ 两组件目前是**默认外观**✗（颜色不跟主题 ✓）；也**未接入任何页面** ✓（D-2/D-3 才用 ✓）|
 | **G-D-2** | **10 行异常态矩阵**逐行落地（无 Agent / IPC 断 / 后端命令失败 / /proc 读不到 / 日程读不到 / 视频未接入 / 播放失败 / 音乐未连 / OTA 读不到 / 封面失败）| ⬜ |
 | **G-D-3** | 模型页/系统页/设置页补 loading 骨架 | ⬜ |
 | **G-D-4** | 16 张改前/改后对照图脚本（`--screenshot-seq` × 四页）+ `docs/gui.md` 收口 | ⬜ |

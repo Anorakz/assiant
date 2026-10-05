@@ -97,6 +97,7 @@ const QSet<QString>& smallSizeWhitelist()
         QStringLiteral("ui/region_host.cpp|setMinimumHeight(0)"),   // 区域折叠必须能到 0
         QStringLiteral("ui/top_bar.cpp|setFixedHeight(36)"),        // 模式徽标（纯文字、不可点）
         QStringLiteral("main_window.cpp|setFixedHeight(1)"),        // 1px 分隔线（不是控件，点它没意义 ✓）
+        QStringLiteral("ui/state_views.cpp|setMinimumHeight(12)"),  // 加载骨架（占位条，不可点 ✓）
     };
     return kAllow;
 }
