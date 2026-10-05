@@ -239,7 +239,18 @@ void ChatPanel::setInputType(const QString& type)
         wanted = QString::fromUtf8(kDefaultInputType);
     }
 
+    // ⚠ 临时取证日志 ✓：**请求值 → 生效值** ✓（回落就藏不住了 ✗）
+    qInfo().noquote() << QStringLiteral("[ui] ChatPanel::setInputType：请求=[%1] ⇒ 生效=[%2]")
+                             .arg(type, wanted);
     inputType_ = wanted;
+    // ★ T15-17 bug① 后续（用户明确要求 ✓）：**命令行模式下禁用发送按键** ✓
+    //   · 「键盘」⇒ 发送可用 ✓
+    //   · 「命令行」⇒ 发送禁用 ✓（⚠ 只禁发送，不禁输入框本身 —— 用户只要求发送 ✓）
+    //   ⚠ 放在这里而不是 MainWindow::applyInputType ✓：本函数是**公开**接口 ✓
+    //     ⇒ 单测可直接验证 ✓；且"用户点下拉"与"applyConfig 回填"两条路都经过它 ✓
+    if (send_ != nullptr) {
+        send_->setEnabled(wanted == QLatin1String("keyboard"));
+    }
     QString label = wanted;
     for (QAction* action : actions) {
         const bool hit = (action->data().toString() == wanted);

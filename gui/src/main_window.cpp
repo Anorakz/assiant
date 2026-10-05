@@ -57,6 +57,7 @@
 #include <QShowEvent>
 #include <QStackedWidget>
 #include <QStringList>
+#include <QSignalBlocker>  // T15-17 bug① 后续：回填期间屏蔽信号 ✓
 #include <QTimer>
 #include <QVariantAnimation>
 #include <QVBoxLayout>
@@ -711,17 +712,28 @@ void MainWindow::showOnboard(const QString& why)
             //   ⇒ 当场读 `kbHeight` 会得到 0 ✗ ⇒ 几何算成 0×0 且被隐藏 ✓
             //   ⇒ 所以：**先按输入法可见性显/隐** ✓，几何则**延迟数拍重试** ✓ 读到高度再摆底部条 ✓
             if (QGuiApplication::inputMethod() != nullptr) {
-                // ⚠ 为什么先给"整窗"再收成"底部条" ✗→✓：
-                //   根 `Item` 若没有尺寸，QQuickWidget 里 `InputPanel` 的高度可能一直是 0 ✗
-                //   （能工作的最小验证 QML 根 Item 是**有明确宽高**的 ✓，见截图 vk-min.png ✓）
-                //   ⇒ 先摆满整窗让 QML 完成布局 ✓ ⇒ 再把几何收成底部一条 ✓
-                auto layoutVk = [this](int attempt) {
+                // ★ 常驻同步（T15-17 bug① 后续 ✓，2026-10-06 用户实测两个状态机 bug ✓）：
+                //   ⚠ 原来"visibleChanged + 固定几次延迟重试（50ms~1.8s）"有两个毛病 ✗：
+                //     ① 首次切到键盘时 QML 引擎初始化慢 ⇒ `kbHeight` 一直 0 ⇒ 重试**窗口用完** ✗
+                //        ⇒ 承载层永远 0×0 且隐藏 ⇒ **两种模式都唤不起** ✓
+                //     ② 一旦成功 show 过，hide 只依赖 `inputMethod()->isVisible()` ✗，
+                //        而它激活后**可能不再回 false** ⇒ **不管什么模式都显示** ✓
+                //   ⇒ 改成**常驻 250ms 同步** ✓ ＋ **隐藏条件必须同时看输入源** ✓✓
+                auto syncVk = [this](int attempt) {
                     if (vkPanel_ == nullptr) {
                         return;
                     }
                     QInputMethod* im2 = QGuiApplication::inputMethod();
                     const bool imVisible = (im2 != nullptr) && im2->isVisible();
-                    if (!imVisible) {
+                    // ★ 隐藏条件**同时看输入源** ✓：命令行模式**无条件**隐藏 ✓（用户诉求 ✓）
+                    const bool sourceWants = OnboardCtl::wantsOnboard(inputSource_) && onboardAuto_;
+                    if (!imVisible || !sourceWants) {
+                        if (vkPanel_->isVisible()) {
+                            qInfo().noquote() << QStringLiteral(
+                                "[ui] 键盘承载隐藏：输入法可见=%1 输入源=[%2] 自动=%3")
+                                    .arg(imVisible ? 1 : 0).arg(inputSource_)
+                                    .arg(onboardAuto_ ? 1 : 0);
+                        }
                         vkPanel_->hide();     // 收起来 ⇒ 不遮挡、不拦截输入 ✓
                         return;
                     }
@@ -747,23 +759,16 @@ void MainWindow::showOnboard(const QString& why)
                                              .arg(kbH).arg(vkPanel_->x()).arg(vkPanel_->y())
                                              .arg(vkPanel_->width()).arg(vkPanel_->height());
                 };
+                // ① 输入法可见性一变就同步一次 ✓
                 connect(QGuiApplication::inputMethod(), &QInputMethod::visibleChanged, this,
-                        [this, layoutVk]() {
-                            QInputMethod* im = QGuiApplication::inputMethod();
-                            if (im != nullptr && im->isVisible()) {
-                                vkPanel_->setGeometry(rect());   // 先整窗 ✓ 让 QML 布局 ✓
-                                vkPanel_->show();
-                            } else {
-                                vkPanel_->hide();                // 不遮挡、不拦截输入 ✓
-                            }
-                            // 延迟数拍重试：QML 布局完成后再收成"底部一条" ✓
-                            int n = 0;
-                            for (int d : {50, 150, 400, 900, 1800}) {
-                                ++n;
-                                const int k = n;
-                                QTimer::singleShot(d, this, [layoutVk, k]() { layoutVk(k); });
-                            }
-                        });
+                        [syncVk]() { syncVk(1); });
+                // ② ★ 常驻 250ms 同步 ✓ —— 首次 QML 布局慢也能等到 ✓（没有"窗口用完"这回事 ✗）
+                {
+                    QTimer* vkSync = new QTimer(this);
+                    vkSync->setInterval(250);
+                    connect(vkSync, &QTimer::timeout, this, [syncVk]() { syncVk(2); });
+                    vkSync->start();
+                }
             }
             qInfo().noquote() << QStringLiteral("[ui] 已建虚拟键盘承载（Application 集成，qrc:/virtualkeyboard.qml，覆盖式 ✓）");
         }
@@ -866,6 +871,10 @@ void MainWindow::applyKeyboardInset()
 
 void MainWindow::onChatInputFocused(bool focused)
 {
+    // ⚠ 临时取证日志 ✓：把决策输入打出来 ✓（"该不该弹"一眼可查 ✓）
+    qInfo().noquote() << QStringLiteral("[ui] 焦点=%1 自动=%2 输入源=[%3] ⇒ shouldShow=%4")
+                             .arg(focused ? 1 : 0).arg(onboardAuto_ ? 1 : 0).arg(inputSource_)
+                             .arg(OnboardCtl::shouldShow(onboardAuto_, inputSource_, focused) ? 1 : 0);
     if (OnboardCtl::shouldShow(onboardAuto_, inputSource_, focused)) {
         showOnboard(QStringLiteral("输入框获得焦点"));
         return;
@@ -974,6 +983,9 @@ void MainWindow::applyInputType(const QString& type)
 {
     // ★ bug 乙修复 ✓：这是**用户在界面上做的选择** ⇒ 记下来 ✓
     //   后续 applyConfig()（配置广播/保存回读）**不得**把它覆盖回配置里的旧值 ✗
+    // ⚠ 临时取证日志（T15-17 bug① 后续 ✓）：只打印 ✓，不改行为 ✗
+    qInfo().noquote() << QStringLiteral("[ui] applyInputType：type=[%1] ⇒ inputSource_=[%2]")
+                             .arg(type, type);
     inputSourceLocal_ = true;
     inputSource_ = type;
 
@@ -1403,7 +1415,17 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
 
         // ⚠ 放到**这三处 connect 之后** ✓（见本块开头那段 ✗→✓）：这样它回填控件时触发的信号
         //   **收端已就位** ✓ ⇒ 启动期也能看到「即时套用」日志 ✓ ⇒ 以后一眼可查 ✓。
-        settingsPage_->loadFromConfig(configPath_);
+        // ★ T15-17 bug① 后续修复 ✓：**回填控件不是「用户改动」** ✗
+        //   `loadFromConfig()` 里 `selectByData()` 填下拉 ✓，值匹配不上时会**静默落到第 0 项** ✗
+        //   （`settings_page.cpp:56` ✓，第 0 项 = `keyboard` ✓）⇒ 触发 `guiSettingsEdited`
+        //   ⇒ `main_window.cpp:1395-1399` 把下拉值当用户选择写回 store ✗
+        //   ⇒ `reapplyGuiConfig()` ⇒ **`inputSource_` 变成 keyboard** ✗
+        //   ⇒ 命令行模式下点输入框**仍弹键盘** ✓（用户实测 ✓）
+        //   ⇒ 用 `QSignalBlocker` 包住回填 ✓（与项目里那个"静默陷阱"同族 ✓）
+        {
+            const QSignalBlocker blocker(settingsPage_);
+            settingsPage_->loadFromConfig(configPath_);
+        }
     }
     if (modelPage_ != nullptr) {
         connect(modelPage_, &ModelPage::configSaveRequested, this,

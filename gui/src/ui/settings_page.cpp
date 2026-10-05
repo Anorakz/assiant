@@ -53,6 +53,11 @@ QComboBox* makeModeBox(QWidget* parent)
 void selectByData(QComboBox* box, const QString& data)
 {
     const int index = box->findData(data);
+    if (index < 0) {
+        // ★ T15-17 bug① 后续 ✓：**静默**落到第 0 项会**悄悄改掉语义** ✗ ⇒ 至少留痕 ✓
+        qWarning().noquote() << QStringLiteral("[ui] 下拉里没有值「%1」⇒ 回落到第 0 项「%2」")
+                                    .arg(data, box->itemData(0).toString());
+    }
     box->setCurrentIndex(index >= 0 ? index : 0);
 }
 

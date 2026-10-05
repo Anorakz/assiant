@@ -245,6 +245,20 @@ private slots:
         qInfo().noquote() << QStringLiteral("[test] 承载 QML 宿主加载状态=%1（0=Null 1=Loading 2=Ready 3=Error；Error 在宿主属正常 ✓）")
                                  .arg(int(carrier.status()));
     }
+
+    /// T15-17 bug① 后续 ✓（用户明确要求）：**命令行模式下禁用发送按键** ✓
+    /// 语义：键盘模式可发 ✓；命令行模式禁用 ✓；切回来要**恢复** ✓
+    void sendIsDisabledInCommandLineMode()
+    {
+        ChatPanel panel;
+        QVERIFY2(panel.sendButton() != nullptr, "发送按钮不存在 ⇒ 判据写错了");
+        panel.setInputType(QStringLiteral("keyboard"));
+        QVERIFY2(panel.sendButton()->isEnabled(), "键盘模式下发送应当**可用** ✗");
+        panel.setInputType(QStringLiteral("terminal"));
+        QVERIFY2(!panel.sendButton()->isEnabled(), "命令行模式下发送应当**禁用** ✗");
+        panel.setInputType(QStringLiteral("keyboard"));
+        QVERIFY2(panel.sendButton()->isEnabled(), "切回键盘后发送应当**恢复可用** ✗");
+    }
 };
 
 
