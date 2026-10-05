@@ -99,7 +99,7 @@ QLabel#MusicPlaceholder { color: @text_faint@; font-size: @font_md@px; backgroun
 QLabel#MusicState { background: transparent; }
 QLabel#PlaceholderTag {
     background: @divider@; color: @text_dim@; border-radius: 4px;
-    padding: 1px 6px; font-size: 13px;
+    padding: 1px 6px; font-size: @font_xs2@px;
 }
 QProgressBar#MusicProgress {
     background: @input_bg@; border: 1px solid @divider@; border-radius: 5px;
