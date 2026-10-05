@@ -61,6 +61,10 @@ constexpr int kDefaultScheduleRows = 6;
 /// 日程区刷新间隔（S5）：让窗口往前滑（新条目进来、已过的滑出去）+ 跨零点翻页
 constexpr int kScheduleRefreshMs = 60 * 1000;
 
+/// T15-16 G-B-5：壁纸淡入的**最小重绘间隔**（≈30 fps ✓）
+/// 改前每个 valueChanged（60 Hz）都重绘 ⇒ 200 ms 要画 **12 帧**、每帧 1 次全屏填充 + 2 次全屏 blit ✗
+constexpr qint64 kWallpaperFadeMinFrameMs = 33;
+
 /// 方案 §8 配色：底 #1E1F22 / 面板 #2B2D31 / 分隔 #3A3D42 / 主文字 #E6E6E6 /
 /// 次文字 #9AA0A6 / 强调 #7AA2F7。
 
@@ -411,13 +415,21 @@ MainWindow::MainWindow(QWidget* parent)
     wallpaperAnim_->setEndValue(1.0);
     connect(wallpaperAnim_, &QVariantAnimation::valueChanged, this,
             [this](const QVariant& value) {
-                wallpaperFade_ = value.toReal();
-                update();
+                wallpaperFade_ = value.toReal();     // 进度**每次都更新** ✓（不然淡入会跳 ✓）
+                // T15-16 G-B-5：**限帧到 ~30 fps** ✓ —— 只把重复的重绘请求合并掉 ✗，
+                //   动画时长仍是 200 ms ✓（不拖长 ✓）；本次淡入的第一帧一定画 ✓。
+                const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+                if (wallpaperFadeLastMs_ == 0
+                    || nowMs - wallpaperFadeLastMs_ >= kWallpaperFadeMinFrameMs) {
+                    wallpaperFadeLastMs_ = nowMs;
+                    update();
+                }
             });
     connect(wallpaperAnim_, &QVariantAnimation::finished, this, [this]() {
         prevWallpaper_ = QPixmap();      // 淡入结束就把旧图丢掉
         wallpaperFade_ = 1.0;
-        update();
+        wallpaperFadeLastMs_ = 0;        // G-B-5：下一次淡入的首帧一定画 ✓
+        update();                        // ⚠ 这里**无条件**更新 ✓（否则最后一帧可能被节流吞掉 ✗）
     });
 
     onboard_ = new OnboardCtl(this);
@@ -473,6 +485,13 @@ void MainWindow::paintEvent(QPaintEvent* event)
     const QRect target = rect();
     painter.fillRect(target, QColor(0x1E, 0x1F, 0x22));   // 兜底底色（也算"占位底图"）
 
+    // T15-16 G-B-5：淡入期间的**重绘帧数**（判据 ✓）
+    //   ⚠ 放在这里而不是 `valueChanged` 回调里 ✗ —— 那数的是"动画要求重绘几次"，
+    //     这里是"真的画了几帧" ✓（合并/丢弃的重绘不该算进去 ✓）。
+    if (wallpaperFade_ < 1.0) {
+        ++wallpaperFadePaints_;
+    }
+
     // 交叉淡入：旧图在下、新图按 fade 叠上去
     if (!prevWallpaper_.isNull() && wallpaperFade_ < 1.0) {
         painter.setOpacity(1.0 - wallpaperFade_);
@@ -497,6 +516,15 @@ void MainWindow::setVideoSource(const QString& path)
     mainPage_->videoPanel()->setSource(path);
     qInfo().noquote() << "[ui] 视频源:"
                       << (path.isEmpty() ? QStringLiteral("(未接入)") : path);
+}
+
+void MainWindow::demoWallpaperFade()
+{
+    // T15-16 G-B-5：与真换图**同一对动作** ✓（见 setWallpaperFromPath() 里的 stop()+start() ✓）
+    if (wallpaperAnim_ != nullptr) {
+        wallpaperAnim_->stop();
+        wallpaperAnim_->start();
+    }
 }
 
 void MainWindow::demoNextBilibili()

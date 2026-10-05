@@ -97,6 +97,12 @@ public:
     /// 验收辅助：灌一份**假的** music 载荷（不依赖 PC）—— 走与真推送同一条路。
     /// @param which "有词" / "纯音乐" / "取不到"（其它值按"取不到"处理）
     void demoLyrics(const QString& which);
+
+    /// T15-16 G-B-5 验收辅助：触发**一次**壁纸交叉淡入 ✓
+    /// （与真换图走同一条路：`setWallpaperFromPath()` 里就是 `stop()+start()` ✓，见 main_window.cpp:463-464 ✓）
+    void demoWallpaperFade();
+    /// T15-16 G-B-5：**淡入期间重绘了多少帧** ✓（判据：一次淡入的帧数 ✓）
+    int wallpaperFadePaints() const { return wallpaperFadePaints_; }
     /// 验收辅助：切换全屏
     void demoFullscreen();
     /// 设置视频源（本地文件路径或 URL）；空字符串 = 回到"视频源未接入"占位
@@ -190,6 +196,9 @@ private:
     QPixmap prevWallpaper_;
     QString wallpaperPath_;
     qreal wallpaperFade_ = 1.0;
+    /// T15-16 G-B-5：上一次淡入重绘的毫秒时间戳（0 = 本次淡入还没画过 ✓）
+    qint64 wallpaperFadeLastMs_ = 0;
+    int wallpaperFadePaints_ = 0;   ///< G-B-5：淡入期间的重绘帧数（`wallpaperFade_ < 1.0` 时自增 ✓）
     QVariantAnimation* wallpaperAnim_ = nullptr;
     core::IdleWatcher* overlayWatcher_ = nullptr;   ///< 内嵌控制条自己的空闲计时（不与四区域共享）
     bool overlayAutoHide_ = true;

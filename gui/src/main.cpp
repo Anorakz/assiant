@@ -98,6 +98,7 @@ struct Options {
     QString inputTypeDemo;         ///< 非空 = 启动后切到这个输入源（验收用）
     bool inputMenuDemo = false;    ///< 启动后展开输入源菜单（配合 scrot 抓图）
     QString lyricDemo;             ///< 非空 = 灌一份假 music 载荷（有词|纯音乐|取不到，验收用）
+    bool wallpaperDemoFade = false;  ///< true = 启动后触发一次壁纸交叉淡入（T15-16 G-B-5 取证用）
     bool nextBilibiliDemo = false;  ///< 启动后点一下视频区"下一集"（验收用）
     bool prevBilibiliDemo = false;  ///< 启动后点一下视频区"上一集"（验收用）
     int bilibiliPickDemo = -1;      ///< >=0 时点一下预览栏第 N 格（验收用）
@@ -149,6 +150,7 @@ void printUsage()
         "  --input-type-demo <terminal|keyboard>  启动后切到该输入源（验收用）\n"
         "  --input-menu-demo    启动后展开输入源菜单（配 --scrot 抓图）\n"
         "  --lyric-demo <有词|纯音乐|取不到>  灌一份假 music 载荷（不依赖 PC；验收用）\n"
+        "  --wallpaper-demo     启动后触发一次壁纸交叉淡入（T15-16 G-B-5 取证用）\n"
         "  --video <文件>       主区视频源（本地文件；验收用）\n"
         "  --next-bilibili-demo 启动后点一下视频区「下一集」（验收用）\n"
         "  --prev-bilibili-demo 启动后点一下视频区「上一集」（验收用）\n"
@@ -235,6 +237,8 @@ Options parseArgs(int argc, char** argv)
                 optionValue(arg, QStringLiteral("--input-type-demo"), i, argc, argv, opt);
         } else if (arg == QLatin1String("--input-menu-demo")) {
             opt.inputMenuDemo = true;
+        } else if (arg == QLatin1String("--wallpaper-demo")) {
+            opt.wallpaperDemoFade = true;
         } else if (arg == QLatin1String("--lyric-demo")
                    || arg.startsWith(QLatin1String("--lyric-demo="))) {
             opt.lyricDemo = optionValue(arg, QStringLiteral("--lyric-demo"), i, argc, argv, opt);
@@ -872,6 +876,14 @@ int runGuiMode(const Options& opt, int argc, char** argv)
                         shot.width(), shot.height());
             std::fflush(stdout);
             QCoreApplication::exit(ok ? 0 : 3);
+        });
+    }
+    if (opt.wallpaperDemoFade) {
+        // T15-16 G-B-5：启动后触发**一次**淡入 ✓（1600ms 与别的 demo 同款，留够窗口建好的时间 ✓）
+        QTimer::singleShot(1600, &window, [&window]() { window.demoWallpaperFade(); });
+        // T15-16 G-B-5：淡入 200ms ⇒ 2.4s 后把"这次淡入画了几帧"打出来 ✓（判据就在这行日志里 ✓）
+        QTimer::singleShot(2400, &window, [&window]() {
+            qInfo().noquote() << "[ui] 壁纸淡入重绘帧数:" << window.wallpaperFadePaints();
         });
     }
     if (!opt.lyricDemo.isEmpty()) {
