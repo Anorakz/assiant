@@ -9,6 +9,7 @@
 //  "缺段按模板新建"补上 —— 页面自己绝不拼 YAML，只给出"键 + 值"。
 // ============================================================================
 #include "ui/settings_page.h"
+#include "ui/state_views.h"    // T15-16 G-D-3：加载骨架 ✓
 #include "ui/theme.h"    // T15-16 G-A-1b：视觉常量（唯一来源）
 
 #include "core/config_store.h"
@@ -116,6 +117,12 @@ void SettingsPage::buildOtaCard(QVBoxLayout* root)
         (*target)->setText(text);
         otaBox->addWidget(*target);
     };
+    // T15-16 G-D-3：OTA 状态靠 Agent **推** topic 才来 ✓ ⇒ 这里是**真异步窗口** ✓
+    //   （`sys_page` 相反 ✗ —— 构造期同步读完，挂骨架被判据证伪并已回退 ✓）
+    otaSkeleton_ = new Skeleton(card);
+    otaBox->addWidget(otaSkeleton_);
+    otaSkeleton_->start();
+
     line(&otaSlot_, QStringLiteral("槽状态：还不知道（等 Agent 推 ota_state）"));
     line(&otaMisc_, QStringLiteral("misc 元数据：还不知道"));
     line(&otaLast_, QStringLiteral("最近一次 OTA：还没有记录"));
@@ -125,6 +132,11 @@ void SettingsPage::buildOtaCard(QVBoxLayout* root)
 
 void SettingsPage::setOtaState(const QJsonObject& state)
 {
+    // G-D-3：**收到就停骨架** ✓（不管数据好坏都停 ✓ —— 只在成功路径停的话，
+    //   推来坏数据时它会一直脉冲 ✗ ⇒ 白烧唤醒 ✓，见 G-B-4）
+    if (otaSkeleton_ != nullptr) {
+        otaSkeleton_->stop();
+    }
     // ⚠ 不在这里建控件：卡片由 build() -> buildOtaCard() 建好（见头文件里的注解 ✓）。
     if (otaSlot_ == nullptr) {
         return;

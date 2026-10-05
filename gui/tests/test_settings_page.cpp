@@ -11,6 +11,7 @@
 //  全部不碰生产配置（只读一份临时 config.yaml）。
 // ============================================================================
 #include <QCheckBox>
+#include "ui/state_views.h"   // G-D-3：完整类型（判据要用 isRunning ✓）
 #include <QComboBox>
 #include <QDir>
 #include <QDoubleSpinBox>
@@ -68,6 +69,8 @@ class TestSettingsPage : public QObject {
     Q_OBJECT
 
 private slots:
+    /// T15-16 G-D-3：OTA 卡在等 Agent 推 ota_state 时有加载感 ✓，收到就停 ✓
+    void theOtaCardLoadsUntilTheFirstPush();
     void loadFromConfigFillsWidgets();
     void missingConfigDoesNotCrash();
     void saveButtonEmitsTheRequest();
@@ -688,6 +691,22 @@ void TestSettingsPage::wifiScanButtonAsksForAScan()
     page.wifiReconnectButton()->click();
     QCOMPARE(spy.count(), 1);
     QCOMPARE(spy.takeFirst().at(0).toString(), QStringLiteral("reconnect"));
+}
+
+
+/// T15-16 G-D-3：`settings_page` 的 OTA 卡**真有异步窗口** ✓（构造完成 → 收到 topic ✓），
+/// 与 `sys_page` 正相反 ✗（那页构造期同步读完 ⇒ 挂骨架被同一套判据证伪并已回退 ✓）。
+void TestSettingsPage::theOtaCardLoadsUntilTheFirstPush()
+{
+    SettingsPage page;
+    QVERIFY2(page.findChild<Skeleton*>() != nullptr, "OTA 卡没有加载骨架 ✗");
+    QVERIFY2(page.findChild<Skeleton*>()->isRunning(), "还没收到 ota_state，骨架该在跑 ✓");
+
+    QJsonObject state;
+    state.insert(QStringLiteral("slot"), QStringLiteral("b"));
+    page.setOtaState(state);               // 收到（哪怕字段不全 ✓）就该停 ✓
+    QVERIFY2(!page.findChild<Skeleton*>()->isRunning(),
+             "收到 ota_state 之后骨架还在跑 ✗ —— 那会白烧唤醒（见 G-B-4 的教训）");
 }
 
 QTEST_MAIN(TestSettingsPage)

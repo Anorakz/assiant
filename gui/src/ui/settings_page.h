@@ -39,6 +39,7 @@ class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
+class Skeleton;   // T15-16 G-D-3：OTA 卡的首刷骨架（前向声明 ✓）
 class QLineEdit;
 class QListWidget;
 class QPushButton;
@@ -187,6 +188,7 @@ private:
     // ---- T15-14-a：OTA/槽状态（**只展示**；数据来自 topic `ota_state`）----
     // 四个标签各管一块，`setOtaState()` 一次刷完 ✓（缺字段就显示"还不知道" ✓）。
     QLabel* otaSlot_ = nullptr;      ///< 当前槽 + 两槽的 prio/tries/successful/可引导
+    Skeleton* otaSkeleton_ = nullptr;   ///< G-D-3：等 Agent 推 ota_state 时的加载感 ✓
     QLabel* otaMisc_ = nullptr;      ///< `misc` 里的 A/B 元数据合不合法
     QLabel* otaLast_ = nullptr;      ///< 最近一次 OTA（step / 目标槽 / 时间）
     QLabel* otaConfirm_ = nullptr;   ///< 确认服务的判定（ok / 耗时 / 时间）
