@@ -1518,7 +1518,8 @@ class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
         self.assertIn("助手: 回：你好 世界", out.getvalue())      # 多段自动用空格连接
         self.assertTrue(await self.agent.wait_for_command())
         self.assertEqual(self.agent.commands[0],
-                         (COMMAND_CHAT_INPUT, {"text": "你好 世界"}))
+                         (COMMAND_CHAT_INPUT, {"text": "你好 世界",
+                                              "source": "terminal"}))
 
     async def test_chat_no_wait_returns_without_reply(self):
         self.agent.record_only()
@@ -1533,7 +1534,9 @@ class TestCliAgainstRealServer(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已发送：在吗", out.getvalue())
         self.assertNotIn("助手:", out.getvalue())
         self.assertTrue(await self.agent.wait_for_command())
-        self.assertEqual(self.agent.commands[0][1], {"text": "在吗"})
+        # T15-17 / bug②：chat 载荷**新增 `source`** ✓（CLI 如实声明来源 ✓；缺省仍是 gui ✓
+        # ⇒ 老客户端与既有行为不受影响 ✓）⇒ 断言随协议更新 ✓。
+        self.assertEqual(self.agent.commands[0][1], {"text": "在吗", "source": "terminal"})
 
     async def test_chat_without_reply_is_an_error(self):
         self.agent.record_only()                 # 收到但不回
