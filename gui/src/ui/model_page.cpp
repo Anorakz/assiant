@@ -2,6 +2,7 @@
 //  gui/src/ui/model_page.cpp — 模型测试页实现（T11）
 // ============================================================================
 #include "ui/model_page.h"
+#include "ui/state_views.h"    // T15-16 G-D-3：加载骨架 ✓
 
 #include "core/config_store.h"
 // ⚠ 这里原来还有一条 `#include "core/config_sync.h"` —— T14-3 删掉了 config_sync.*，
@@ -117,6 +118,12 @@ void ModelPage::build()
     auto* content = new QWidget(scroll_);
     scroll_->setWidget(content);
     outer->addWidget(scroll_);
+
+    // T15-16 G-D-3：跑分/扫描都是**异步**的（IPC 回调才回来 ✓，跑分还是**秒级** ✓）⇒ 该有加载感 ✓
+    //   放外层布局 ⇒ 不随内容滚走 ✓；⚠ 默认 hide ✓（没干活时不露 ✓，`start()` 里会 show ✓）
+    skeleton_ = new Skeleton(this);
+    outer->addWidget(skeleton_);
+    skeleton_->hide();
 
     // 下面所有卡片都挂这个布局：它的宿主是滚动区里的 content（不再是本页自己）
     auto* root = new QVBoxLayout(content);
@@ -475,6 +482,12 @@ void ModelPage::runScript(const QString& script)
 
 void ModelPage::onServiceResult(const QJsonObject& result)
 {
+    // G-D-3：**收到任何服务结果就收骨架** ✓（跑分/扫描/脚本共用这条路 ✓）
+    //   ⚠ `stop()` 只停表**不隐藏** ✗ ⇒ 必须补 `hide()` ✓，否则那条灰杠会一直挂着 ✓
+    if (skeleton_ != nullptr) {
+        skeleton_->stop();
+        skeleton_->hide();
+    }
     const QString action = result.value(QStringLiteral("action")).toString();
     const bool ok = result.value(QStringLiteral("ok")).toBool(false);
     const QString message = result.value(QStringLiteral("message")).toString();
@@ -498,6 +511,10 @@ bool ModelPage::benchRunning() const
 
 void ModelPage::startBenchmark(const QString& which)
 {
+    // G-D-3：发起 = 开始等 ✓（结果由 onServiceResult 送回来 ✓）
+    if (skeleton_ != nullptr) {
+        skeleton_->start();
+    }
     if (repoRoot_.isEmpty()) {
         appendLog(QStringLiteral("没设置仓库根，无法跑基准测试"));
         return;

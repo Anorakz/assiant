@@ -8,6 +8,7 @@
 //  所以这里盯的是：载入配置照显示、请求内容对、失败路径有明确日志、不崩。
 // ============================================================================
 #include <QComboBox>
+#include "ui/state_views.h"   // G-D-3：完整类型（判据用 isRunning ✓）
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFile>
@@ -29,6 +30,8 @@ class TestModelPage : public QObject {
     Q_OBJECT
 
 private slots:
+    /// T15-16 G-D-3：跑分是异步的 ⇒ 发起时有加载感 ✓、收到结果就收 ✓
+    void theBenchmarkShowsALoadingSkeleton();
     void loadFromConfigFillsWidgets();
     void saveEmitsTheRequest();
     void serviceButtonsAskTheAgent();
@@ -166,6 +169,26 @@ void TestModelPage::siglipIsReadOnlyText()
     QVERIFY(page.siglipLabel() != nullptr);
     QVERIFY(page.siglipLabel()->text().contains(QStringLiteral("siglip_full.rknn")));
     QVERIFY(page.siglipLabel()->text().contains(QStringLiteral("不提供任何开关")));
+}
+
+
+/// T15-16 G-D-3：`model_page` 的跑分/扫描走 IPC **回调** ✓（跑分还是秒级 ✓）⇒ 窗口真实存在 ✓；
+/// 判据用 `findChild<Skeleton*>()` ✓ —— 不在头文件上为测试开洞 ✓。
+void TestModelPage::theBenchmarkShowsALoadingSkeleton()
+{
+    ModelPage page;
+    Skeleton* bar = page.findChild<Skeleton*>();
+    QVERIFY2(bar != nullptr, "模型页没有加载骨架 ✗");
+    QVERIFY2(!bar->isRunning(), "还没干活就不该在跑 ✓");
+
+    page.startBenchmark(QStringLiteral("cpu"));      // 走真实入口 ✓
+    QVERIFY2(bar->isRunning(), "发起跑分后骨架该在跑 ✓（这就是「秒级等待」的加载感 ✓）");
+
+    QJsonObject result;
+    result.insert(QStringLiteral("ok"), true);
+    page.onServiceResult(result);                    // 收到结果 ✓
+    QVERIFY2(!bar->isRunning(),
+             "收到结果后骨架还在跑 ✗ —— 会白烧唤醒（见 G-B-4 的教训）");
 }
 
 QTEST_MAIN(TestModelPage)

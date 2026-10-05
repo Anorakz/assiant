@@ -20,6 +20,7 @@
 
 class QComboBox;
 class QLabel;
+class Skeleton;   // T15-16 G-D-3：跑分/扫描的加载骨架（前向声明 ✓）
 class QLineEdit;
 class QPlainTextEdit;
 class QProcess;
@@ -84,6 +85,8 @@ public:
     void stopBenchmark();
     /// 找最新的基准报告（<root>/llm/qwen3.5_bench、multimodal_bench 下的 *.md）并显示
     bool showLatestReport();
+
+    Skeleton* skeleton_ = nullptr;   ///< G-D-3：跑分/扫描时的加载条 ✓（判据用 findChild 拿 ✓）
 
 private:
     void build();
