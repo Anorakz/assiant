@@ -451,3 +451,23 @@ Agent 也**认**这些键 ✓（`agent/core/config_tiers.py:61-65` ✓），但 
     ⇒ 判据要用 **`qt.qpa.input.events`** ✓（真类别名在 `libQt5EglFSDeviceIntegration.so.5` 里 ✗ 不在 `libQt5Gui` ✓）。
 15. **`systemd` drop-in 是很好用的临时诊断开关** ✓（`QT_LOGGING_RULES` ✓ 例子见 §12.12 ✓）：
     它让 Qt 的日志进 journal ✓，用完即删 ✓，**不需要改产品** ✓。
+
+
+## 5.6 bug ① 软键盘排查的**新教训（第二轮）**（2026-10-05 深夜）
+
+16. **先翻项目自带的取证钩子** ✗ —— `--focus-input-demo --dump-input`（`IM_VISIBLE` / `WINDOW`）
+    一次就说清了"键盘窗口有没有出现" ✓；我前二十轮却在用**截图 + 触摸注入**硬碰 ✗。
+17. **Qt 的日志类别名从二进制里挖** ✓：`strings <lib> | grep "qt\."` ⇒
+    本次挖到 `qt.virtualkeyboard`（在 `libqtvirtualkeyboardplugin.so` ✓）与
+    `qt.qpa.input` / `qt.qpa.input.events`（在 `libQt5EglFSDeviceIntegration.so.5`，**不在** `libQt5Gui` ✓）。
+18. **手动启动 vs 服务：日志去向不同** ✗ —— 只有**服务模式**的输出进 journal ✓；
+    手动启动时连 `QT_LOGGING_RULES` 都看不到 Qt 类别日志 ✓ ⇒ 要看日志就得 **drop-in 覆盖 ExecStart** ✓。
+19. **"注册成功 ≠ 事件被投递"** ✓（uinput 虚拟触摸屏会被 Qt `registerDevice` ✓，但注入的事件没到 Qt ✗）；
+    **`--device` 是 uinput 节点** ✗ 不是目标 event 设备 ✓；**虚拟设备必须早于 GUI 启动** ✓。
+20. **排除法也要记账** ✓ —— 本阶段排除了 6 个假设（旧版二进制 ✓ 与 xkbcommon ✓ 是**真的、已修**；
+    其余 4 个被推翻 ✓）。⚠ 记下来，才不会下一轮又试一遍 ✗。
+
+**★ `QT_VIRTUALKEYBOARD_*` 环境变量（从库里挖到 ✓，供后人参考）**：
+`QT_VIRTUALKEYBOARD_DESKTOP_DISABLE`、`QT_VIRTUALKEYBOARD_FORCE_EVENTS_WITHOUT_FOCUS`、
+`QT_VIRTUALKEYBOARD_LAYOUT_PATH`、`QT_VIRTUALKEYBOARD_STYLE`。
+（本次试过 `DESKTOP_DISABLE=1` ⇒ **无效** ✗；其余三个**未试** ✓。）

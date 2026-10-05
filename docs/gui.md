@@ -618,3 +618,47 @@ QML 在 `/usr/qml/QtQuick/VirtualKeyboard` ✓，我先前查错路径（只查�
 所以这一次点击**一定能给出三种可判定的结果之一** ✓：
 ① 键盘弹出 ⇒ 闭环 ✓；② 没弹但 journal 出现 `[ui] 无 X（eglfs）…` ⇒ 焦点通了、问题在 Qt 输入法渲染 ✓；
 ③ 没弹且**没有**那条 `[ui]` ⇒ 焦点仍没上报 ⇒ 下一步就是**在 `chat_panel.cpp` 的 `eventFilter` 加两行探针** ✓。
+
+
+### 12.13 bug ① 软键盘（2026-10-05 深夜）：**焦点全通、VK 被要求显示，但面板窗口不出现** ⚠
+
+**用户实测** ✓：点聊天输入框 ⇒ **输入框有光标** ✓（焦点到了 ✓）、左栏**可切页** ✓（触摸通 ✓）⇒ 而**键盘不出现** ✗。
+
+**服务模式 journal 实证（每一步都有行 ✓）**：
+```
+[ui] 无 X（eglfs）：软键盘交给 Qt 输入法（QT_IM_MODULE=qtvirtualkeyboard，输入框获得焦点）   <-- showOnboard() 走了
+qt.virtualkeyboard: PlatformInputContext::setFocusObject(): QLineEdit(0x…, name = "ChatInput")  <-- VK 认了输入框
+qt.virtualkeyboard: PlatformInputContext::showInputPanel()                                      <-- VK 被要求显示面板
+```
+**但项目自带的取证钩子说面板从没出现** ✗（`--focus-input-demo --dump-input`，跑两次一致 ✓）：
+```
+IM_VISIBLE   0
+WINDOW_COUNT 1
+WINDOW       QWidgetWindow  0,0 1280x800  visible=1        <-- 只有一个顶层窗口，没有"1280x(高)"的键盘窗口
+```
+⇒ ⇒ **结论** ✓：链路走到 **`showInputPanel()` 为止全是通的** ✓✓，
+**断点只剩一处** ✗：**VK 的 `InputPanel`（独立顶层窗口）显示不出来** ✗。
+最可疑：**eglfs 只支持单个全屏窗口** ✗（`WINDOW_COUNT=1` 与它吻合 ✓）——⚠ 但**尚未证实** ✗（见下）。
+
+**本阶段排除掉的（每条都有实测 ✓）**：
+| 假设 | 结果 |
+|---|---|
+| 板上跑的是旧版 GUI | ✅ **成立且已修**（`845944` → 重新部署 `878712`） |
+| xkbcommon 缺失 | ✅ **成立且已修**（`Using xkbcommon for key mapping`） |
+| `NavButton` 抢输入法焦点 | ❌ **推翻**（VK 日志显示焦点是 `QLineEdit(ChatInput)`） |
+| `Layouts/`、`Content/` 缺失 | ❌ **推翻**（Qt 5.15 起布局编译进 `libQt5VirtualKeyboard.so`） |
+| 桌面模式（`QT_VIRTUALKEYBOARD_DESKTOP_DISABLE=1`） | ❌ **实测无效**（`IM_VISIBLE` 仍 0） |
+| 平台对照（`linuxfb` / `minimal`） | ❌ **无结论**（`linuxfb` core dump；`minimal` 是无头平台，本就不显示） |
+
+**⚠ 下一轮从这里接着走** ✓（两条路，均涉及改 GUI 或查官方配置 ✓）：
+1. **把 VK 的 `InputPanel` 嵌入应用自己的窗口** ✓（Qt 在 eglfs 上的官方做法 ✓，需 GUI 代码改动 ✓ ⇒ 先报方案 ✓）；
+2. 查 **Qt 官方"eglfs + 虚拟键盘"的推荐配置** ✓（怀疑还缺某个平台/VK 参数 ✓ —— 会话内未找到 ✓）。
+
+**★ 排查工具（务必先看这里 ✓）**：项目**自带**无 X 下软键盘的取证钩子 ✓（`gui/src/main.cpp` 注释原文 ✓）：
+- `--focus-input-demo` ✓：启动 1.5s 后把焦点给对话输入框 ✓（"软键盘应当**这时**才弹" ✓）；
+- `--dump-input` ✓：逐秒打印 `INPUT_SAMPLE`（输入框文本 ✓）、**`IM_VISIBLE`**（输入法面板可见性 ✓）、
+  **`WINDOW`**（每个顶层窗口的类名/几何/可见性 ✓，"键盘窗口会以 **1280×(高度)** 出现" ✓）；
+- ⚠ 只有**服务模式**的 `qInfo`/Qt 类别日志会进 **journal** ✗；**手动启动**抓不到（T14-8 自管会话日志 ✗）⇒
+  要看日志就用 **systemd drop-in 覆盖 ExecStart** ✓（可逆 ✓，本次用过 ✓）；
+- ⚠ `qt.virtualkeyboard` 这个**日志类别名是从二进制里挖出来的** ✓
+  （`strings libqtvirtualkeyboardplugin.so | grep qt.` ✓）—— 一开就能直接看到 `setFocusObject()` 认的是谁 ✓✓。
