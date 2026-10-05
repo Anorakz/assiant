@@ -1216,6 +1216,12 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
                 [this](QString action) { sendLlmServiceRequest(action); }, Qt::UniqueConnection);
     }
 
+    // T15-17：套用交给 reapplyGuiConfig() —— **一份实现** ✓（启动与在线改动走同一条路 ✓）。
+    reapplyGuiConfig(gui);
+}
+
+void MainWindow::reapplyGuiConfig(const core::ConfigStore& gui)
+{
     const auto isActive = [&gui](const QString& key, bool fallback) {
         const QString value = gui.value(QStringLiteral("gui.wake.") + key);
         if (value.isEmpty()) {

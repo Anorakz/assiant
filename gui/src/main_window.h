@@ -58,7 +58,18 @@ public:
     /// 当前页 key。
     QString currentPage() const;
     /// 按配置应用界面：gui.wake.*（四区域/统一休眠）+ gui.debug（[D] 指示）。
+    /// ⚠ T15-17：它现在是「**读盘 + 回填页面**（唯一会调 `settingsPage_->loadFromConfig()` 的地方 ✗）
+    /// ＋ 调 `reapplyGuiConfig()`」⇒ **只在启动时**用 ✓。
     void applyConfig(const core::ConfigStore& gui);
+
+    /// T15-17：**只**把配置套用到运行时 ✓（可重复调用 ✓，天然幂等 ✓）。
+    ///
+    /// 与 `applyConfig()` 的分工（这是 T15-17 的靶心 ✓）：
+    ///   · 保存回执成功后 ✓、设置页改动时 ✓ 都调**本函数** ✓ ⇒ **立即生效** ✓，不必重启 ✓。
+    ///
+    /// ⚠ **它绝不碰页面控件** ✗ —— 否则会冲掉用户正在编辑的内容 ✗（T5 的第一条判据就钉这个 ✓）。
+    /// ⚠ 它与 `applyConfig()` 共享**同一份实现** ✓（不复制逻辑 ✗），启动与在线改动因此**行为一致** ✓。
+    void reapplyGuiConfig(const core::ConfigStore& gui);
 
     /// 重新读一遍日程并灌进右区域的日程区（S5）。
     /// 触发时机：启动（applyConfig 末尾）、设置页保存后、每 60 秒一次
