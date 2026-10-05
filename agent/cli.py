@@ -321,7 +321,11 @@ async def cmd_chat(args: argparse.Namespace) -> int:
     arrived = asyncio.Event()
 
     def on_message(topic: str, data: dict) -> None:
-        if topic == TOPIC_LLM and not arrived.is_set():
+        # T15-17 / bug②：⚠ **跳过"用户气泡"回显** ✗ —— Agent 会把**非 gui 来源**（例如命令行自己 ✓）
+        # 的输入推成 `llm{text, role:"user"}` ✓（给 GUI 画用户气泡 ✓）；那条是**广播** ✓
+        # ⇒ 本 CLI 也会收到 ✓ ⇒ 若不跳过，`assistant chat 你好` 会打印「助手: 你好」✗
+        #（自己跟自己说话 ✓ —— 板端实测过 ✓）。⇒ 只认**没有 role=user** 的 `llm` = 真助手回复 ✓。
+        if topic == TOPIC_LLM and data.get("role") != "user" and not arrived.is_set():
             reply.clear()
             reply.update(data)
             arrived.set()
