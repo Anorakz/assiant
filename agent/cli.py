@@ -334,7 +334,9 @@ async def cmd_chat(args: argparse.Namespace) -> int:
         return EXIT_ERROR
 
     try:
-        await client.send_command(COMMAND_CHAT_INPUT, {"text": text})
+        # T15-17 / bug②：**如实声明来源** ✓ —— CLI 本来就知道自己是命令行 ✓
+        # ⇒ Agent 才能把它和 GUI 说的话区分开 ✓（缺省 "gui" ⇒ GUI 侧协议不用动 ✓）。
+        await client.send_command(COMMAND_CHAT_INPUT, {"text": text, "source": "terminal"})
         if args.no_wait:
             print("已发送：%s" % text)
             return EXIT_OK

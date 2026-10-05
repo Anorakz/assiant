@@ -783,7 +783,7 @@ def _make_command_handler(bus: Any, runtime: Any = None, push: Any = None):
 
     async def _on_command(action: str, payload: dict) -> None:
         if action == COMMAND_CHAT_INPUT:
-            await _handle_chat_input(bus, payload)
+            await _handle_chat_input(bus, payload, push)
             return
 
         if action == COMMAND_SWITCH_MODE:
@@ -987,7 +987,7 @@ def _handle_query_schedule(runtime: Any, push: Any) -> None:
     push(TOPIC_SCHEDULE, data)
 
 
-async def _handle_chat_input(bus: Any, payload: dict) -> None:
+async def _handle_chat_input(bus: Any, payload: dict, push: Any = None) -> None:
     """GUI 发来的聊天输入 -> bus (source="gui")。"""
     text = payload.get("text")
     if not isinstance(text, str) or not text.strip():
@@ -998,7 +998,15 @@ async def _handle_chat_input(bus: Any, payload: dict) -> None:
         return
 
     # 只取文本, 不透传整个 payload: bus 事件是给 LLM 看的, 多塞字段只会让它分心
-    event = await bus.push("gui", text)
+    # T15-17 / bug②：**来源如实取** ✓（缺省 "gui" ✓ ⇒ GUI 侧不用改协议 ✓）。
+    source = str(payload.get("source") or "gui")
+    event = await bus.push(source, text)
+    # T15-17 / bug②：**非 GUI 来源的输入要回显给 GUI** ✓ ——
+    #   复用它已经在渲染的 `llm` 通道 ✓，加 `role="user"` 标成"用户气泡" ✓
+    #   （老客户端忽略未知字段不会坏 ✓）。
+    if source != "gui" and push is not None:
+        push(TOPIC_LLM, {"text": text, "role": "user"})
+        _log.debug("ipc: 非 gui 来源的输入已回显给 GUI: source=%s", source)
     _log.debug("ipc: chat_input 已入队: %r", event.get("text"))
 
 
