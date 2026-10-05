@@ -9,6 +9,7 @@
 //  "缺段按模板新建"补上 —— 页面自己绝不拼 YAML，只给出"键 + 值"。
 // ============================================================================
 #include "ui/settings_page.h"
+#include "ui/theme.h"    // T15-16 G-A-1b：视觉常量（唯一来源）
 
 #include "core/config_store.h"
 #include "core/cookie_store.h"
@@ -183,15 +184,15 @@ void SettingsPage::build()
 {
     // 本页的输入控件直接挂样式：全局表里 QComboBox 的规则在这条控件树上没吃住
     // （实测下拉框仍是系统浅色主题、字看不清），就近设置最稳。
-    setStyleSheet(QStringLiteral(
+    setStyleSheet(theme::styleSheet(
         "QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {"
-        "  background: #232428; border: 1px solid #3A3D42; border-radius: 6px;"
-        "  color: #E6E6E6; padding: 4px 8px; font-size: 15px; min-height: 26px; }"
+        "  background: @input_bg@; border: 1px solid @divider@; border-radius: 6px;"
+        "  color: @text@; padding: 4px 8px; font-size: @font_sm2@px; min-height: 26px; }"
         "QComboBox::drop-down { border: none; width: 22px; }"
         "QComboBox QAbstractItemView {"
-        "  background: #232428; color: #E6E6E6; border: 1px solid #3A3D42;"
-        "  selection-background-color: #3A3D42; }"
-        "QCheckBox { color: #E6E6E6; font-size: 16px; spacing: 8px; }"));
+        "  background: @input_bg@; color: @text@; border: 1px solid @divider@;"
+        "  selection-background-color: @divider@; }"
+        "QCheckBox { color: @text@; font-size: @font_md@px; spacing: 8px; }"));
 
     // 内容比窗口高（多张卡 + 滚动）：整页放进 QScrollArea，避免卡片标题被裁掉
     auto* outer = new QVBoxLayout(this);

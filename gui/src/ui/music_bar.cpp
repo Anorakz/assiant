@@ -5,6 +5,7 @@
 //  它不认识时钟（进度由调用方算好喂进来）、也不认识 IPC（命令由主窗口发）。
 // ============================================================================
 #include "ui/music_bar.h"
+#include "ui/theme.h"    // T15-16 G-A-1b：视觉常量（唯一来源）
 
 #include "core/lyrics.h"
 #include "ui/icons.h"
@@ -165,7 +166,7 @@ MusicBar::MusicBar(QWidget* parent)
     nextLyrics_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     nextLyrics_->setWordWrap(true);
     nextLyrics_->setAlignment(Qt::AlignTop | Qt::AlignLeft);
-    nextLyrics_->setStyleSheet(QStringLiteral("color:#9AA1A9; font-size:12px;"));
+    nextLyrics_->setStyleSheet(QStringLiteral("color:%1; font-size:%2px;").arg(QLatin1String(theme::kTextDimDrift)).arg(theme::kFontXs));
 
     rightBox->addWidget(lyrics_);
     rightBox->addWidget(nextLyrics_);
@@ -235,7 +236,7 @@ void MusicBar::setProgress(double positionS, double durationS)
         time_->setText(known ? QStringLiteral("%1 / %2").arg(formatClock(positionS),
                                                            formatClock(durationS))
                              : QStringLiteral("—:— / —:—"));
-        time_->setStyleSheet(known ? QString() : QStringLiteral("color:#9AA1A9;"));
+        time_->setStyleSheet(known ? QString() : QStringLiteral("color:%1;").arg(QLatin1String(theme::kTextDimDrift)));
     }
     if (progress_ != nullptr) {
         progress_->setEnabled(known);
@@ -310,10 +311,10 @@ void MusicBar::refreshLyrics()
         const QString reason = provider_->reason();
         if (reason.isEmpty()) {
             lyrics_->setText(QStringLiteral("♪"));
-            lyrics_->setStyleSheet(QStringLiteral("color:#9AA1A9;"));
+            lyrics_->setStyleSheet(QStringLiteral("color:%1;").arg(QLatin1String(theme::kTextDimDrift)));
         } else {
             lyrics_->setText(reason);
-            lyrics_->setStyleSheet(QStringLiteral("color:#F59E0B;"));
+            lyrics_->setStyleSheet(QStringLiteral("color:%1;").arg(QLatin1String(theme::kWarn)));
         }
         nextLyrics_->clear();
         return;

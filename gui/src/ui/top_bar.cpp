@@ -11,6 +11,7 @@
 //  SLEEP #6B7280 / IDLE #7AA2F7 / STUDY #4ADE80 / GAME #F59E0B。
 // ============================================================================
 #include "ui/top_bar.h"
+#include "ui/theme.h"    // T15-16 G-A-1b：视觉常量（唯一来源）
 
 #include <QHBoxLayout>
 #include <QLabel>
@@ -19,23 +20,23 @@
 
 namespace {
 
-const char* const kBars = "#1E1F22";   ///< 徽标上的文字色（深色，压在亮底上）
+const char* const kBars = theme::kBg;   ///< 徽标上的文字色（深色，压在亮底上）
 
 QString modeColor(const QString& mode)
 {
     if (mode == QLatin1String("SLEEP")) {
-        return QStringLiteral("#6B7280");
+        return QLatin1String(theme::kOffline);
     }
     if (mode == QLatin1String("IDLE")) {
-        return QStringLiteral("#7AA2F7");
+        return QLatin1String(theme::kAccent);
     }
     if (mode == QLatin1String("STUDY")) {
-        return QStringLiteral("#4ADE80");
+        return QLatin1String(theme::kOk);
     }
     if (mode == QLatin1String("GAME")) {
-        return QStringLiteral("#F59E0B");
+        return QLatin1String(theme::kWarn);
     }
-    return QStringLiteral("#3A3D42");
+    return QLatin1String(theme::kDivider);
 }
 
 QString modeLabel(const QString& mode)
@@ -117,16 +118,16 @@ void TopBar::setLinkState(LinkState state)
     QString text;
     switch (state) {
     case LinkState::Connected:
-        color = QStringLiteral("#4ADE80");
+        color = QLatin1String(theme::kOk);
         text = QStringLiteral("已连接");
         break;
     case LinkState::Reconnecting:
-        color = QStringLiteral("#F59E0B");
+        color = QLatin1String(theme::kWarn);
         text = QStringLiteral("重连中");
         break;
     case LinkState::Disconnected:
     default:
-        color = QStringLiteral("#6B7280");
+        color = QLatin1String(theme::kOffline);
         text = QStringLiteral("未连接");
         break;
     }
@@ -139,6 +140,6 @@ void TopBar::setMode(const QString& mode)
     modeBadge_->setText(modeLabel(mode));
     modeBadge_->setStyleSheet(
         QStringLiteral("background:%1; color:%2; border-radius:6px;"
-                       "padding:0 12px; font-size:16px; font-weight:bold;")
-            .arg(modeColor(mode), QLatin1String(kBars)));
+                       "padding:0 12px; font-size:%3px; font-weight:bold;")
+            .arg(modeColor(mode), QLatin1String(kBars), QString::number(theme::kFontMd)));
 }

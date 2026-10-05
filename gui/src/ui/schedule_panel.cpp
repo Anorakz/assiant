@@ -6,6 +6,7 @@
 //  警告提示色用内联样式 —— 与 music_bar 里"占位说明用琥珀色"是同一套做法。
 // ============================================================================
 #include "ui/schedule_panel.h"
+#include "ui/theme.h"    // T15-16 G-A-1b：视觉常量（唯一来源）
 
 #include <QFontMetrics>
 #include <QHBoxLayout>
@@ -16,9 +17,11 @@
 namespace {
 
 /// 琥珀色：与 music_bar / main_hint 的警示色一致
-const char* const kWarnColor = "color:#F59E0B; background:transparent;";
+const QString kWarnColor =
+    QStringLiteral("color:%1; background:transparent;").arg(QLatin1String(theme::kWarn));
 /// "已过"的行用 AreaHint 那档灰
-const char* const kPastColor = "color:#6F757C; background:transparent;";
+const QString kPastColor =
+    QStringLiteral("color:%1; background:transparent;").arg(QLatin1String(theme::kTextFaint));
 /// 时间列宽度：足够放下 "00:00"
 constexpr int kTimeWidth = 92;
 
@@ -179,7 +182,7 @@ void SchedulePanel::addSection(const QString& label, const core::ScheduleDay& da
     if (day.rows.isEmpty()) {
         auto* none = new QLabel(QStringLiteral("无"), this);
         none->setObjectName(QStringLiteral("AreaHint"));
-        none->setStyleSheet(QLatin1String(kPastColor));
+        none->setStyleSheet(kPastColor);
         sections_->addWidget(none);
         return;
     }
@@ -223,8 +226,8 @@ void SchedulePanel::addRow(const core::ScheduleRow& row)
     box->addWidget(widgets.state, 1);
 
     if (row.past) {
-        widgets.time->setStyleSheet(QLatin1String(kPastColor));
-        widgets.state->setStyleSheet(QLatin1String(kPastColor));
+        widgets.time->setStyleSheet(kPastColor);
+        widgets.state->setStyleSheet(kPastColor);
     }
 
     sections_->addWidget(host);
@@ -258,7 +261,7 @@ void SchedulePanel::setNote(const QString& text, bool warning)
     noteText_ = text;
     noteIsWarning_ = warning;
     note_->setText(text);
-    note_->setStyleSheet(warning ? QLatin1String(kWarnColor) : QString());
+    note_->setStyleSheet(warning ? kWarnColor : QString());
     note_->setVisible(!text.isEmpty());
 }
 

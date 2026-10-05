@@ -23,6 +23,8 @@
 #include "ui/cover_loader.h"
 #include "ui/mode_panel.h"
 #include "ui/music_bar.h"
+#include "ui/base_style.h"
+#include "ui/theme.h"          // T15-16 G-A-1b：视觉常量（QSS 的 @token@ 由 theme::styleSheet 展开）
 #include "ui/pages.h"
 #include "ui/region_host.h"
 #include "ui/icons.h"
@@ -61,202 +63,7 @@ constexpr int kScheduleRefreshMs = 60 * 1000;
 
 /// 方案 §8 配色：底 #1E1F22 / 面板 #2B2D31 / 分隔 #3A3D42 / 主文字 #E6E6E6 /
 /// 次文字 #9AA0A6 / 强调 #7AA2F7。
-const char* const kBaseStyle = R"(
-QWidget { color: #E6E6E6; font-size: 20px; }
-/* ⚠ 底色只给顶层窗口：子控件一律默认透明，卡片自己的 #2B2D31 才能透出来。
-   以前写成 `QWidget { background: #1E1F22 }` 会把卡片内部刷成页面底色
-   （T7 量色带时发现音乐卡内部不是面板色）。 */
-QMainWindow { background: #1E1F22; }
-QStackedWidget#PageStack { background: transparent; }
-QFrame#TopBar { background: rgba(43, 45, 49, 0.90); border: none; border-bottom: 1px solid #3A3D42; }
-QFrame#NavBar { background: rgba(35, 36, 40, 0.90); border: none; border-radius: 12px; }
-/* ⚠ 半透明：方案 §3 的全局壁纸要能透过面板看到（T8） */
-QFrame#AreaFrame { background: rgba(43, 45, 49, 0.90); border: 1px solid #3A3D42; border-radius: 8px; }
-/* 主区：非游戏模式不画背景与边框，完全留给全局壁纸（T8 接壁纸后即可见效果） */
-QFrame#AreaFrameBare { background: transparent; border: none; }
-QLabel#AreaTitle { color: #9AA0A6; font-size: 20px; font-weight: bold; background: transparent; }
-QLabel#AreaHint { color: #6F757C; font-size: 15px; background: transparent; }
-/* S5：日程区。时间列等宽一点（用同一档字号 + 固定最小宽度，见 SchedulePanel），
-   标题比提示亮一档 —— 和对话区气泡的层次保持一致。 */
-QLabel#ScheduleTime { color: #9AA0A6; font-size: 16px; background: transparent; }
-QLabel#ScheduleTitle { color: #E6E6E6; font-size: 17px; background: transparent; }
-/* 主区占位文字（T8/T9 落地后删除），做得很淡以免干扰壁纸 */
-QLabel#AreaTitleBare { color: #4A4E54; font-size: 18px; background: transparent; }
-QLabel#AreaHintBare { color: #3A3D42; font-size: 14px; background: transparent; }
-QLabel#TopBarText { color: #9AA0A6; font-size: 18px; background: transparent; }
-QLabel#TopBarClock { color: #E6E6E6; font-size: 20px; background: transparent; }
-QPushButton#NavButton {
-    background: transparent; border: none; color: #9AA0A6;
-    /* T14：加了图标后 96px 宽里要放"图标+4 个汉字"，字号与内边距都得收 */
-    padding: 14px 2px; font-size: 15px; text-align: center;
-}
-QPushButton#NavButton:hover { color: #E6E6E6; }
-QPushButton#NavButton:checked {
-    color: #E6E6E6; background: #2B2D31; border-left: 4px solid #7AA2F7;
-}
-/* T5：模式切换按钮区 */
-QPushButton#ModeButton {
-    background: #2B2D31; border: 1px solid #3A3D42; border-radius: 8px;
-    padding: 4px 10px; font-size: 18px; color: #E6E6E6; text-align: center;
-}
-QPushButton#ModeButton:hover { background: #35373B; }
-QPushButton#ModeButton:pressed { background: #7AA2F7; color: #1E1F22; }
-/* T5：对话区 */
-/* ⚠ 这条必须写在气泡规则之前并保持"只清列表背景"的语义：
-   它的特异度是 (0,1,2)，写成 QWidget#ChatList QWidget 会盖掉 (0,1,1) 的气泡背景，
-   导致用户气泡变透明 + 深色文字看不见（T5 出图时踩到）。所以气泡规则要带祖先前缀。 */
-QWidget#ChatList, QWidget#ChatList QWidget { background: transparent; }
-QWidget#ChatList QLabel#ChatBubbleUser { background: #7AA2F7; color: #1E1F22; border-radius: 10px;
-                                         padding: 10px 12px; font-size: 17px; }
-QWidget#ChatList QLabel#ChatBubbleAssistant { background: #35373B; color: #E6E6E6; border-radius: 10px;
-                                              padding: 10px 12px; font-size: 17px; }
-QLabel#ChatSystem { color: #9AA0A6; font-size: 15px; background: transparent; }
-QLabel#LinkBanner { background: #F59E0B; color: #1E1F22; padding: 6px 10px;
-                    border-radius: 6px; font-size: 15px; }
-QLineEdit#ChatInput { background: #232428; border: 1px solid #3A3D42; border-radius: 8px;
-                      padding: 8px 12px; color: #E6E6E6; font-size: 18px; }
-QPushButton#ChatSend { background: #7AA2F7; color: #1E1F22; border: none; border-radius: 8px;
-                       padding: 8px 16px; font-size: 18px; font-weight: bold; }
-QPushButton#ChatSend:disabled { background: #3A3D42; color: #6F757C; }
-/* T6：输入源小按钮 */
-QToolButton#InputTypeButton {
-    background: #232428; border: 1px solid #3A3D42; border-radius: 8px;
-    padding: 6px 10px; color: #E6E6E6; font-size: 16px;
-}
-QToolButton#InputTypeButton:hover { background: #2B2D31; }
-QToolButton#InputTypeButton::menu-indicator { image: none; }
-QScrollArea#ChatScroll { background: transparent; border: none; }
-/* T14-7b：模型测试页整页在滚动区里 → 视口与内容都要透明，壁纸才透得出来 */
-QScrollArea#ModelScroll, QScrollArea#ModelScroll > QWidget { background: transparent; border: none; }
-/* T14-9：设置页的网络卡片里的 SSID 列表 */
-QListWidget#WifiList {
-    background: #1E1F22; border: 1px solid #3A3D42; border-radius: 6px;
-    color: #E6E6E6; font-size: 16px;
-}
-QListWidget#WifiList::item { padding: 6px 8px; }
-QListWidget#WifiList::item:selected { background: #7AA2F7; color: #1E1F22; }
-/* T7：下区域音乐条 */
-QLabel#MusicTitle { color: #E6E6E6; font-size: 20px; font-weight: bold; background: transparent; }
-QLabel#MusicPlaceholder { color: #6F757C; font-size: 16px; background: transparent; }
-QLabel#MusicState { background: transparent; }
-QLabel#PlaceholderTag {
-    background: #3A3D42; color: #9AA0A6; border-radius: 4px;
-    padding: 1px 6px; font-size: 13px;
-}
-QProgressBar#MusicProgress {
-    background: #232428; border: 1px solid #3A3D42; border-radius: 5px;
-}
-QProgressBar#MusicProgress::chunk { background: #7AA2F7; border-radius: 4px; }
-/* T7 调整：控制按钮（协议无控制命令，点了只给"未接入"说明） */
-QPushButton#MusicCtl {
-    background: #2B2D31; border: 1px solid #3A3D42; border-radius: 10px;
-    padding: 0; color: #E6E6E6; font-size: 18px;
-}
-QPushButton#MusicCtl:hover { background: #35373B; }
-QPushButton#MusicCtlMain {
-    background: #2B2D31; border: 1px solid #7AA2F7; border-radius: 28px;
-    padding: 0; color: #E6E6E6; font-size: 24px;
-}
-QPushButton#MusicCtlMain:hover { background: #35373B; }
-QWidget#CoverPage { background: transparent; }
-/* T11：模型测试页 */
-QRadioButton#ModeRadio { color: #E6E6E6; font-size: 17px; spacing: 8px; }
-QPlainTextEdit#ModelLog {
-    background: rgba(20, 21, 24, 0.72); border: 1px solid #33363B; border-radius: 8px;
-    color: #C9CED6; font-size: 14px; padding: 6px;
-}
-QLabel#BenchBanner {
-    background: rgba(245, 158, 11, 0.16); border: 1px solid #F59E0B; border-radius: 6px;
-    color: #F59E0B; padding: 6px 10px; font-size: 15px;
-}
-QSpinBox, QDoubleSpinBox, QLineEdit {
-    background: rgba(35, 36, 40, 0.9); border: 1px solid #3A3D42; border-radius: 6px;
-    color: #E6E6E6; padding: 4px 8px; font-size: 15px; selection-background-color: #4A5568;
-}
-QSpinBox:disabled, QDoubleSpinBox:disabled { color: #6F757C; }
-QComboBox {
-    background: rgba(35, 36, 40, 0.92); border: 1px solid #3A3D42; border-radius: 6px;
-    color: #E6E6E6; padding: 4px 8px; font-size: 15px; min-height: 24px;
-}
-QComboBox::drop-down { border: none; width: 22px; }
-QComboBox QAbstractItemView {
-    background: #232428; color: #E6E6E6; border: 1px solid #3A3D42;
-    selection-background-color: #3A3D42; font-size: 15px;
-}
-QCheckBox { color: #E6E6E6; font-size: 16px; spacing: 8px; }
-QComboBox#ModelCombo {
-    background: rgba(35, 36, 40, 0.9); border: 1px solid #3A3D42; border-radius: 6px;
-    color: #E6E6E6; padding: 4px 8px; font-size: 15px;
-}
-/* 系统页的看门狗按钮（T7-3：原先是借「下一张」那条规则的，现在自己有一条） */
-QPushButton#WatchdogButton {
-    background: rgba(43, 45, 49, 0.85); border: 1px solid #3A3D42; border-radius: 8px;
-    padding: 6px 14px; color: #9AA0A6; font-size: 16px;
-}
-QPushButton#WatchdogButton:hover { color: #E6E6E6; background: rgba(53, 55, 59, 0.92); }
-/* T9：视频区 */
-QStackedWidget#VideoStage { background: transparent; }
-QLabel#VideoPlaceholder { color: #6F757C; font-size: 22px; background: transparent; }
-QPushButton#VideoCtl {
-    background: rgba(20, 21, 24, 0.72); border: 1px solid rgba(255, 255, 255, 0.10);
-    border-radius: 8px; padding: 0; color: #E6E6E6; font-size: 18px;
-}
-QPushButton#VideoCtl:hover { background: rgba(40, 42, 47, 0.86); }
-QPushButton#VideoCtlPlay {
-    background: rgba(122, 162, 247, 0.82); border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 20px; padding: 0; color: #12141A; font-size: 18px; font-weight: bold;
-}
-QPushButton#VideoCtlPlay:hover { background: rgba(140, 176, 250, 0.92); }
-QToolButton#VideoSpeed {
-    background: rgba(20, 21, 24, 0.72); border: 1px solid rgba(255, 255, 255, 0.10);
-    border-radius: 8px; padding: 0; color: #D6DAE0; font-size: 16px;
-}
-QToolButton#VideoSpeed:hover { background: rgba(40, 42, 47, 0.86); }
-QToolButton#VideoSpeed::menu-indicator { image: none; }
-/* T11-7：预览栏 + 地址栏 + 下区域封面 */
-QWidget#BilibiliPreview { background: transparent; }
-QLabel#BilibiliCaption { color: #9AA0A6; font-size: 14px; background: transparent; }
-QLineEdit#BilibiliAddress {
-    background: rgba(20, 21, 24, 0.72); border: 1px solid #3A3D42; border-radius: 6px;
-    color: #C9CED6; font-size: 14px; padding: 2px 8px;
-}
-QLineEdit#BilibiliAddress:read-only { color: #9AA0A6; }
-QLabel#BilibiliSource { color: #7AA2F7; font-size: 14px; background: transparent; }
-QLabel#BilibiliHint { color: #6F757C; font-size: 15px; background: transparent; padding-left: 4px; }
-QListWidget#BilibiliList {
-    background: transparent; border: none; outline: none;
-}
-QListWidget#BilibiliList::item {
-    background: rgba(20, 21, 24, 0.62); border: 1px solid #33363B; border-radius: 8px;
-    color: #C9CED6; font-size: 12px; padding: 2px;
-}
-QListWidget#BilibiliList::item:selected {
-    border: 1px solid #7AA2F7; background: rgba(122, 162, 247, 0.18); color: #E6E6E6;
-}
-QWidget#BilibiliCover { background: transparent; }
-QLabel#BilibiliCoverImage {
-    background: rgba(20, 21, 24, 0.62); border: 1px solid #33363B; border-radius: 8px;
-    color: #6F757C; font-size: 15px;
-}
-QLabel#BilibiliCoverTitle { color: #E6E6E6; font-size: 19px; font-weight: bold; background: transparent; }
-QLabel#BilibiliCoverMeta { color: #9AA0A6; font-size: 15px; background: transparent; }
-QLabel#BilibiliCoverPosition { color: #9AA0A6; font-size: 14px; background: transparent; }
-QLabel#BilibiliCoverSource { color: #7AA2F7; font-size: 14px; background: transparent; }
-/* 内嵌控制条：**没有整条背景**，只有一个半透明胶囊（验收：不要实体化） */
-QWidget#VideoOverlay { background: transparent; }
-QWidget#VideoPill {
-    background: rgba(20, 21, 24, 0.42); border-radius: 22px;
-}
-QWidget#VideoPage { background: #0B0C0E; }
-QStackedWidget#VideoStage { background: #0B0C0E; }
-/* T10：系统页指标瓷砖 */
-QFrame#SysTile {
-    background: rgba(35, 36, 40, 0.72); border: 1px solid #33363B; border-radius: 8px;
-}
-QLabel#SysValue { color: #E6E6E6; font-size: 22px; font-weight: bold; background: transparent; }
-QLabel#SysValueSmall { color: #E6E6E6; font-size: 17px; background: transparent; }
-QLabel#SysLabel { color: #8A9099; font-size: 15px; background: transparent; }
-)";
+
 
 } // namespace
 
@@ -264,7 +71,9 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
     setWindowTitle(QStringLiteral("板端助手"));
-    setStyleSheet(QString::fromUtf8(kBaseStyle));
+    // T15-16 G-A-1b：QSS 里的 `@token@` 在这里展开成 theme.h 的常量值 ——
+    // 展开结果与原字面量**逐字节相同**（零视觉变化 ✓），由 test_theme 的黄金串断言守住 ✓。
+    setStyleSheet(theme::styleSheet(theme::kBaseQss));
 
     auto* central = new QWidget(this);
     auto* root = new QVBoxLayout(central);
@@ -1478,7 +1287,7 @@ QWidget* MainWindow::buildNavBar()
             auto* sep = new QFrame(bar);
             sep->setObjectName(QStringLiteral("NavSep"));
             sep->setFixedHeight(1);
-            sep->setStyleSheet(QStringLiteral("background:#3A3D42;"));
+            sep->setStyleSheet(QStringLiteral("background:%1;").arg(QLatin1String(theme::kDivider)));
             box->addStretch(1);
             box->addWidget(sep);
         }

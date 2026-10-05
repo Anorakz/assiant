@@ -14,6 +14,7 @@
 //  T1 只保证"骨架与截图"，四个区域都是带标题的占位框。
 // ============================================================================
 #include "ui/pages.h"
+#include "ui/theme.h"    // T15-16 G-A-1b：视觉常量（唯一来源）
 
 #include "ui/bottom_bar.h"
 #include "ui/chat_panel.h"
@@ -260,7 +261,7 @@ void MainPage::setMainHint(const QString& text, bool warn)
     }
     mainHint_->setText(text);
     // 出错（例如壁纸读不到）要看得出来，别用那套"占位灰"
-    mainHint_->setStyleSheet(warn ? QStringLiteral("color:#F59E0B; background:transparent;")
+    mainHint_->setStyleSheet(warn ? QStringLiteral("color:%1; background:transparent;").arg(QLatin1String(theme::kWarn))
                                   : QString());
     // T3：空字符串 = 藏起来。壁纸一到位，主区那两行开发占位文字就该让位
     //     （否则它会压在壁纸上）。
