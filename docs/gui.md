@@ -324,7 +324,7 @@ python3 -m agent.cli doctor             # 只看派生文件跟真源一不一�
 | 字号档位 | 11 档 | **5 档** | `test_theme` 的黄金串 ✓ |
 | 裸 `QColor(0x…)` | 7 处 | **0 处** | `test_style_guard` R3（白名单为空 ✓） |
 | 触摸目标 <44px | 8 处 | **0 处** | `test_style_guard` R4 ✓ |
-| 可执行测试数 | 27 | **34** | `ctest` ✓（G-D 期间 +5：`test_state_banner` ✓ / `test_top_bar` ✓ / `test_failure_text` ✓ / **`test_main_window`** ✓（MainWindow 级**地基** ✓ —— 33→34 ✓）与既有文件里新增的用例 ✓） |
+| 可执行测试数 | 27 | **35** | `ctest` ✓（G-D 期间 +6：`test_state_banner` ✓ / `test_top_bar` ✓ / `test_failure_text` ✓ / **`test_main_window`**（MainWindow 级**地基** ✓ 33→34 ✓）/ **`e2e_failure_matrix`**（异常态矩阵**第 2 行** ✓ 34→35 ✓）与既有文件里新增的用例 ✓） |
 | 审计棘轮 | 145 条 | **144 条**（零新增 ✓） | `scripts/audit-code.py` ✓ |
 
 ### 12.3 两个工具（都要**在板子上**跑 ✓ —— 宿主没有 CJK 字体，中文是豆腐块 ✗）
