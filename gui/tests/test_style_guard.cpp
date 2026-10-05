@@ -88,6 +88,19 @@ const QHash<QString, int>& bareColourWhitelist()
     return kAllow;
 }
 
+/// R4 的白名单：**交互控件之外**的小尺寸（每条都要有理由 ✓）
+/// 键 = `相对路径|命中的调用片段` ✓（用片段而不是行号 ✓ —— 行号会漂移 ✗）
+const QSet<QString>& smallSizeWhitelist()
+{
+    static const QSet<QString> kAllow = {
+        QStringLiteral("ui/music_bar.cpp|setFixedHeight(10)"),      // 进度条（不是触摸目标）
+        QStringLiteral("ui/region_host.cpp|setMinimumHeight(0)"),   // 区域折叠必须能到 0
+        QStringLiteral("ui/top_bar.cpp|setFixedHeight(36)"),        // 模式徽标（纯文字、不可点）
+        QStringLiteral("main_window.cpp|setFixedHeight(1)"),        // 1px 分隔线（不是控件，点它没意义 ✓）
+    };
+    return kAllow;
+}
+
 int totalAllowedBareColours()
 {
     int total = 0;
@@ -160,6 +173,43 @@ private slots:
         QVERIFY2(problems.isEmpty(),
                  qPrintable(QStringLiteral("裸 QColor 与白名单不一致：\n%1\n（白名单总数 %2）")
                                 .arg(problems.join(QLatin1Char('\n'))).arg(totalAllowedBareColours())));
+    }
+
+    /// R4（T15-16 G-C-3）：**交互控件的触摸目标不许小于 44px** ✓
+    /// 板子是 1280×800 触摸屏、无鼠标 ✓ —— 低于 44 就是"点不准" ✗。
+    /// ⚠ 规则只抓**字面量** ✓（用常量的固定尺寸如封面 ✓、用变量的方形按钮 ✓ 不在射程内 ✓）。
+    void touchTargetsAreAtLeast44()
+    {
+        const QRegularExpression re(
+            QStringLiteral("set(?:MinimumHeight|FixedHeight|FixedSize)\\(\\s*(\\d+)"));
+        QStringList problems;
+        for (const QString& hit : grep(re)) {
+            // hit 形如 `ui/xxx.cpp:123  <该行文本>`
+            const QString file = hit.section(QLatin1Char(':'), 0, 0);
+            const QString line = hit.section(QLatin1Char(' '), 1).trimmed();
+            const QRegularExpressionMatch m = re.match(line);
+            const int px = m.captured(1).toInt();
+            if (px >= 44) {
+                continue;                        // 达标 ✓
+            }
+            // 命中片段取从 `set` 开始的那一段 ✓（与白名单的键对齐 ✓）
+            const QString snippet = line.mid(line.indexOf(QLatin1String("set")));
+            const QString key = file + QLatin1Char('|') + snippet;
+            bool allowed = false;
+            for (const QString& allow : smallSizeWhitelist()) {
+                if (key.startsWith(allow)) {
+                    allowed = true;
+                    break;
+                }
+            }
+            if (!allowed) {
+                problems << key;
+            }
+        }
+        QVERIFY2(problems.isEmpty(),
+                 qPrintable(QStringLiteral("这些触摸目标小于 44px（要么改大 ✓，"
+                                           "要么在 smallSizeWhitelist 里写明理由 ✓）：\n%1")
+                                .arg(problems.join(QLatin1Char('\n')))));
     }
 };
 

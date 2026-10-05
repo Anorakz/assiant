@@ -400,7 +400,7 @@ void SettingsPage::build()
     for (QPushButton* button : {wifiScan_, wifiReconnect_, wifiForget_}) {
         button->setObjectName(QStringLiteral("VideoCtl"));
         button->setCursor(Qt::PointingHandCursor);
-        button->setMinimumHeight(36);
+        button->setMinimumHeight(44);
         netButtons->addWidget(button);
     }
     netButtons->addStretch(1);
@@ -422,7 +422,7 @@ void SettingsPage::build()
     wifiConnect_ = new QPushButton(QStringLiteral("连接"), net);
     wifiConnect_->setObjectName(QStringLiteral("ChatSend"));
     wifiConnect_->setCursor(Qt::PointingHandCursor);
-    wifiConnect_->setMinimumHeight(40);
+    wifiConnect_->setMinimumHeight(44);
     netForm->addRow(QStringLiteral("密码"), wifiPassword_);
     netForm->addRow(QString(), wifiAutoconnect_);
     netBox->addLayout(netForm);
@@ -451,7 +451,7 @@ void SettingsPage::build()
     defaults_->setObjectName(QStringLiteral("VideoCtl"));
     for (QPushButton* button : {save_, defaults_}) {
         button->setCursor(Qt::PointingHandCursor);
-        button->setMinimumHeight(40);
+        button->setMinimumHeight(44);
         buttons->addWidget(button);
     }
     buttons->addStretch(1);
@@ -464,7 +464,7 @@ void SettingsPage::build()
     startAgent_ = new QPushButton(QStringLiteral("启动 Agent"), cfg);
     startAgent_->setObjectName(QStringLiteral("VideoCtl"));
     startAgent_->setCursor(Qt::PointingHandCursor);
-    startAgent_->setMinimumHeight(36);
+    startAgent_->setMinimumHeight(44);
     startAgent_->setVisible(false);          // 只在需要时出现
     cfgBox->addWidget(startAgent_);
     root->addWidget(cfg);

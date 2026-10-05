@@ -60,7 +60,7 @@ QPushButton* makeButton(const QString& text, const QString& objectName, QWidget*
     auto* button = new QPushButton(text, parent);
     button->setObjectName(objectName);
     button->setCursor(Qt::PointingHandCursor);
-    button->setFixedHeight(40);
+    button->setFixedHeight(44);
     button->setMinimumWidth(48);
     return button;
 }
@@ -131,7 +131,7 @@ VideoPanel::VideoPanel(QWidget* parent)
     speed_->setIcon(ui::tintedIcon(QStringLiteral("speed"), QColor(theme::kBtnText2)));
     speed_->setIconSize(QSize(18, 18));
     speed_->setPopupMode(QToolButton::InstantPopup);
-    speed_->setFixedHeight(40);
+    speed_->setFixedHeight(44);
     speed_->setMinimumWidth(56);
     speed_->setCursor(Qt::PointingHandCursor);
     auto* speedMenu = new QMenu(speed_);

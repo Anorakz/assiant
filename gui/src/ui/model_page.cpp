@@ -228,7 +228,7 @@ void ModelPage::build()
     for (QPushButton* button : {qwenPrecheck_, qwenFull_, multimodal_, stopBench_, report_}) {
         button->setObjectName(QStringLiteral("VideoCtl"));
         button->setCursor(Qt::PointingHandCursor);
-        button->setMinimumHeight(40);
+        button->setMinimumHeight(44);
         benchRow->addWidget(button);
     }
     benchRow->addStretch(1);
@@ -271,7 +271,7 @@ void ModelPage::build()
     status_->setObjectName(QStringLiteral("VideoCtl"));
     for (QPushButton* button : {save_, start_, stop_, status_}) {
         button->setCursor(Qt::PointingHandCursor);
-        button->setMinimumHeight(40);
+        button->setMinimumHeight(44);
         actions->addWidget(button);
     }
     actions->addStretch(1);
