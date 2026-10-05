@@ -55,9 +55,9 @@ inline constexpr const char* kStageBg   = "#0B0C0E";   ///< 视频区黑底
 inline constexpr const char* kOnAccent  = "#12141A";   ///< 压在强调色上的深色文字
 inline constexpr const char* kSelBg     = "#4A5568";   ///< 文本框选区
 inline constexpr const char* kBtnText2  = "#D6DAE0";   ///< 视频全屏按钮文字
-/// ⚠ **待收敛**：这是 `kTextDim` 的漂移值（只差 3 个低位）✗ ——
-///   G-C-0 会把它统一到 `kTextDim` ✓，**那会改像素**，所以要单独一项 + 单独对照 ✓。
-inline constexpr const char* kTextDimDrift = "#9AA1A9";
+// ⚠ 这里原来有个 `kTextDimDrift = "#9AA1A9"`（次文字的**漂移值**，只差末三位）✗ ——
+//   G-C-0 已把它**并入 `kTextDim`** ✓ ⇒ 色值现只剩一处 ✓。
+//   （它当年是 G-A-1b 实测抓出来的 ✓；当时故意不并 ✗，因为"并"会改像素 ⇒ 必须单独一步 ✓。）
 
 // ---- 字号（10 档；G-C-2 计划收敛到 5 档 ✓）--------------------------------
 inline constexpr int kFontXs   = 12;   ///< 唯一一处破档（`music_bar.cpp:168`）✗
@@ -123,8 +123,6 @@ inline constexpr Token kTokens[] = {
     {"on_accent",  kOnAccent},
     {"sel_bg",     kSelBg},
     {"btn_text2",  kBtnText2},
-    // ⚠ 漂移值单列一个令牌 ✗ —— G-C-0 才会把它并到 `text_dim`（那一步**会改像素**）
-    {"text_dim_drift", kTextDimDrift},
     // 字号（QSS 里写成 `font-size: @font_md@px`）
     {"font_xs",   "12"},
     // ⚠ 13 是 G-A-2 的守卫**抓出来的漏网之鱼** ✗ —— 第一版令牌表只有 12/14/15/…/24 ✓，

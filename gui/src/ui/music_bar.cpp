@@ -166,7 +166,7 @@ MusicBar::MusicBar(QWidget* parent)
     nextLyrics_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     nextLyrics_->setWordWrap(true);
     nextLyrics_->setAlignment(Qt::AlignTop | Qt::AlignLeft);
-    nextLyrics_->setStyleSheet(QStringLiteral("color:%1; font-size:%2px;").arg(QLatin1String(theme::kTextDimDrift)).arg(theme::kFontXs));
+    nextLyrics_->setStyleSheet(QStringLiteral("color:%1; font-size:%2px;").arg(QLatin1String(theme::kTextDim)).arg(theme::kFontXs));
 
     rightBox->addWidget(lyrics_);
     rightBox->addWidget(nextLyrics_);
@@ -238,7 +238,7 @@ void MusicBar::setProgress(double positionS, double durationS)
                              : QStringLiteral("—:— / —:—"));
         applyStyle(time_, &timeStyle_,
                    known ? QString()
-                         : QStringLiteral("color:%1;").arg(QLatin1String(theme::kTextDimDrift)));
+                         : QStringLiteral("color:%1;").arg(QLatin1String(theme::kTextDim)));
     }
     if (progress_ != nullptr) {
         progress_->setEnabled(known);
@@ -327,7 +327,7 @@ void MusicBar::refreshLyrics()
         if (reason.isEmpty()) {
             lyrics_->setText(QStringLiteral("♪"));
             applyStyle(lyrics_, &lyricsStyle_,
-                       QStringLiteral("color:%1;").arg(QLatin1String(theme::kTextDimDrift)));
+                       QStringLiteral("color:%1;").arg(QLatin1String(theme::kTextDim)));
         } else {
             lyrics_->setText(reason);
             applyStyle(lyrics_, &lyricsStyle_,

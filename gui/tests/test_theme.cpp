@@ -20,7 +20,9 @@
 //       —— G-A-1b 明确不收敛它 ✗（那会改像素，留给独立的 G-C-0 ✓）。
 // ============================================================================
 #include <QCryptographicHash>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QSet>
 #include <QString>
 #include <QtTest/QtTest>
@@ -127,13 +129,37 @@ private slots:
                                 .arg(unused.join(QStringLiteral(", ")))));
     }
 
-    /// ④ 漂移色**不许**被悄悄统一（G-A-1b 的第 ④ 条约束；G-C-0 会**故意**改这条 ✓）
-    void driftColourIsNotSilentlyUnified()
+    /// ④ **G-C-0 已完成**：漂移色已并入 `kTextDim` ✓（本用例是**故意改写**过来的 ✓）
+    /// 原来这里断言"`kTextDimDrift` 与 `kTextDim` 不许相等"✗ —— 那条的使命就是：
+    /// **谁要并它，就必须显式改这条测试** ✓（并会改像素 ⇒ 不许被顺手并掉 ✗）。现在并完了 ✓。
+    void driftColourIsGone()
     {
-        QVERIFY2(qstrcmp(theme::kTextDimDrift, theme::kTextDim) != 0,
-                 "kTextDimDrift 被并到 kTextDim 了 —— 那会改像素，必须单独做 G-C-0 ✗");
-        QCOMPARE(QString::fromLatin1(theme::kTextDimDrift), QStringLiteral("#9AA1A9"));
         QCOMPARE(QString::fromLatin1(theme::kTextDim), QStringLiteral("#9AA0A6"));
+
+        // ⚠ 顺带钉住：漂移字面量**不许从别处回流** ✗（原来它在 music_bar.cpp 三处 ✓）
+        // ⚠ `QDir(__FILE__)` 是**文件路径**✗（`../src` 会拼成 …/test_theme.cpp/../src ✓）
+        //   ⇒ 必须先取它所在**目录** ✓（与 test_style_guard.cpp 同一写法 ✓）。
+        const QDir here(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath());
+        const QDir src(here.absoluteFilePath(QStringLiteral("../src")));
+        for (const QString& rel : {QStringLiteral("ui/theme.h"), QStringLiteral("ui/music_bar.cpp")}) {
+            QFile file(src.absoluteFilePath(rel));
+            QVERIFY2(file.open(QIODevice::ReadOnly), qPrintable(rel));
+            // ⚠ 只看**代码行** ✓（注释里提这个值不算违规 ✓ —— 与 test_style_guard 的 R1 同一条规矩 ✓）
+            //   第一版没跳过，于是被我自己在 theme.h 注释里写的那个值误报了一次 ✗。
+            QStringList code;
+            for (const QString& line :
+                 QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'))) {
+                const QString trimmed = line.trimmed();
+                if (trimmed.startsWith(QLatin1String("//")) || trimmed.startsWith(QLatin1String("*"))
+                    || trimmed.startsWith(QLatin1String("/*"))) {
+                    continue;
+                }
+                code << line;
+            }
+            const QString text = code.join(QLatin1Char('\n'));
+            QVERIFY2(!text.contains(QStringLiteral("#9AA1A9")),
+                     qPrintable(QStringLiteral("%1 的**代码**里又出现了漂移色 #9AA1A9 ✗").arg(rel)));
+        }
     }
 };
 
