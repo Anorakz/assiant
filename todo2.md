@@ -389,3 +389,33 @@ Agent 也**认**这些键 ✓（`agent/core/config_tiers.py:61-65` ✓），但 
 >    据此**虚报**了一个不存在的"旋转值写坏"bug ✗；换通道 + `od -c` 十六进制复核 ⇒ 真值是 **`90`** ✓。
 >    ⇒ 规矩：**关键值要么看十六进制 ✓、要么换一条通道复核 ✓**；另：`systemctl show -p Environment`
 >    **看不到 `EnvironmentFile`** ✗ ⇒ 判"进程实际环境"必须读 `/proc/<pid>/environ` ✓。
+
+
+## 6.x bug ①「软键盘唤不出」：根因已钉死，**卡在"切一次槽"** ⚠（2026-10-05）
+
+**根因（铁证 ✓）**：buildroot 里两个开关**默认都没开** ✗ ——
+`BR2_PACKAGE_LIBXKBCOMMON`（`.config:3215` ✓）与 `BR2_PACKAGE_XKEYBOARD_CONFIG`（`:1878` ✓）
+⇒ 板上**无 `libxkbcommon`** ✗、**无键位表** ✗ ⇒ Qt 一直报
+`qt.qpa.input: xkbcommon not available, not performing key mapping` ✗ ⇒ **虚拟键盘建不了键位映射** ✓。
+
+**已做 ✓**：两个开关已加进仓库真源 `image/buildroot/configs/rockchip/products/kickpi-k1mini-release.config` ✓
+（提交 `6910ae9` ✓），SDK 的 `.config` 已同步 ✓，**新包已出** ✓
+（`update-…-2026100520.img` ✓），**包内 raw grep 验证** ✓：`libxkbcommon` 命中 **3** 次 ✓、键位表命中 **16** 次 ✓。
+
+**⚠ 卡点** ✗：包**只写 A 槽** ✓（清单 `ota-assistant-ab.txt` 就两行 ✓），而**板上当前就在 A 槽** ✓
+⇒ `ota-run.sh` 的**安全守卫拒绝执行** ✓✓（"写当前槽 = 正在运行的系统被覆盖" ✓）——
+**守卫按设计工作** ✓，我没有绕过它 ✗。
+
+**两条出路（都待用户点头 ✓）**：
+1. **做一份写 B 槽的包** ✓（清单改 `boot_b`/`system_b` ✓ ⇒ 重新出包 ✓）⇒ 当前 A 与包写 B 不冲突 ✓
+   ⇒ `ota-apply.py` **自己**会把 misc 指向 B ✓。⚠ 要**新增/修改产品清单文件** ✗ ⇒ 需点头 ✓；
+2. **用项目自己的库写 BCB** ✓（工具已备：`t3b-bcb.py` ✓，**默认 dry-run** ✗，`--go` 才动盘 ✓）：
+   调 `ota.next_bcb_for_slot()` ✓ + `ota.apply_bcb_to_misc()` ✓（**就是 `ota-apply.py:92` 用的那两个** ✓）
+   ⇒ 生成"指向 B"的**整块 4 MB misc** ✓ ⇒ 先整块备份 ✓ ⇒ 写回 ✓ ⇒ **`parse_bcb` 自校验** ✓。
+   ⚠ 仍要动 `misc` ✗ ⇒ 但**有备份 + 有自校验 + 失败即自动回滚** ✓✓。
+
+**⚠ 相关教训（真踩过 ✗）**：2026-10-05 我第一次切槽时**把 48 KB 的 `b-active-misc.img`
+直接 `dd` 到分区开头** ✗✗ —— 那是 **BCB 片段**的尺寸 ✓（`ota-apply.py:16` 说清了 ✓），
+必须**放进整块 misc 且主备两份一起改** ✓ ⇒ 读回 md5 不一致 ✗。
+**已用当时的整块备份安全写回** ✓（md5 自证 ✓），**板子完好** ✓、当前槽仍是 `_a` ✓。
+⇒ 教训：**"看文件大小就推断它在分区里的位置"是错的** ✗ —— 砖级操作要用**项目自己的函数** ✓。

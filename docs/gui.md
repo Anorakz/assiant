@@ -514,3 +514,22 @@ scp rk3568:/data/shots/t7-late.png .
 修法一行 ✓：CLI 的 `on_message` 跳过 `data.get("role") == "user"` ✓。
 ⇒ **单测看不到它** ✗（`ChatPanel` 可区分 ✓ 绿 ✓）、**CI 也看不到** ✗（Python 套件绿 ✓）——
 它是**跨端语义**上的 ✓ ⇒ **这是"上板验收不可省"的活证据** ✓✓。
+
+
+### 12.10 bug ①「软键盘唤不出」的取证结论与**当前卡点** ⚠（2026-10-05）
+
+**根因** ✓：buildroot 的 `BR2_PACKAGE_LIBXKBCOMMON` 与 `BR2_PACKAGE_XKEYBOARD_CONFIG` **默认都没开** ✗
+⇒ 板上没有 `libxkbcommon`、没有键位表 ⇒ Qt 报 `xkbcommon not available, not performing key mapping` ✗
+⇒ 虚拟键盘**建不了键位映射** ✓（**不是** GUI 代码 bug ✗，也**不是**缺 QML ✗ ——
+QML 在 `/usr/qml/QtQuick/VirtualKeyboard` ✓，我先前查错路径（只查了 `/usr/lib/qt/qml` ✗）并已**收回**该结论 ✓）。
+
+**已做** ✓：两个开关写进仓库真源（`kickpi-k1mini-release.config` ✓，提交 `6910ae9` ✓）+ SDK 同步 ✓
++ 重新出包 ✓ + **包内验证** ✓（`libxkbcommon` 3 次 ✓、键位表 16 次 ✓）。
+
+**⚠ 卡点** ✗：新包**只写 A 槽** ✓，而板上**当前就在 A 槽** ✓ ⇒ 安全守卫拒绝 ✓✓（**按设计工作** ✓，未绕过 ✓）。
+⇒ 要装新镜像必须先**切一次槽** ✓ ⇒ 方案见 `todo2.md` §6.x ✓（两条，均待用户点头 ✓）。
+
+**⚠ 本次一条翻车记录** ✗（如实 ✓）：我用 **48 KB** 的 `b-active-misc.img` 当"整个 misc"整块写 ✗✗，
+⇒ 读回 md5 不一致 ✗ ⇒ 因为 misc 是 **4 MB** ✓，那 48 KB 是 **BCB 片段** ✓（`ota-apply.py:16` ✓）。
+**已用备份安全写回并 md5 自证** ✓，板子完好 ✓。
+⇒ 教训：**别按文件大小推断分区位置** ✗；砖级操作**用项目自己的函数** ✓。
