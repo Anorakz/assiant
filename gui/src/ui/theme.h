@@ -124,19 +124,19 @@ inline constexpr Token kTokens[] = {
     {"sel_bg",     kSelBg},
     {"btn_text2",  kBtnText2},
     // 字号（QSS 里写成 `font-size: @font_md@px`）
-    {"font_xs",   "12"},
+    {"font_xs",   "14"},
     // ⚠ 13 是 G-A-2 的守卫**抓出来的漏网之鱼** ✗ —— 第一版令牌表只有 12/14/15/…/24 ✓，
     //   于是 `ui/base_style.h` 里那句 `font-size: 13px` 没被令牌化 ✓（不是视觉回归 ✗，
     //   因为它本来就是 13px ✓；但一致性漏了一档 ✓）。
-    {"font_xs2",  "13"},
+    {"font_xs2",  "14"},
     {"font_sm",   "14"},
-    {"font_sm2",  "15"},
+    {"font_sm2",  "16"},
     {"font_md",   "16"},
-    {"font_md2",  "17"},
+    {"font_md2",  "18"},
     {"font_lg",   "18"},
-    {"font_lg2",  "19"},
+    {"font_lg2",  "20"},
     {"font_xl",   "20"},
-    {"font_xxl",  "22"},
+    {"font_xxl",  "24"},
     {"font_huge", "24"},
 };
 

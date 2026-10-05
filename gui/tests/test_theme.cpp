@@ -39,7 +39,7 @@ namespace {
 ///   统一到 UTF-8 字节：它和下面 sha256 的输入口径**完全一致** ✓。
 constexpr int kGoldenLength = 11047;
 const char* const kGoldenSha256 =
-    "da2dc288f292fb96f3bfc3f2e0d48b1dcd226510b355acbf24548812555ca6b0";
+    "1b397f57775ea3ae4c7e21fa5dfa76015595670ce37fb9861dcbd05c55b5ab15";
 // ⚠ 这个哈希的口径 = **旧字符串本身**（含 raw string 结尾 `)"` 之前那个换行 ✓）✗
 //   我第一版填的是 `3c5524fb…` —— 那是把结尾换行**剔掉**后算的 ✗（Python 提取写成了
 //   `text[i:index('\n)"')]` ⇒ 少 1 字节 ✗）。定位方式：把 C++ 展开结果 dump 出来
