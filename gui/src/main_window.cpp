@@ -690,7 +690,18 @@ void MainWindow::showOnboard(const QString& why)
             // ⚠ QQuickWidget 默认不透明（白底 ✗）⇒ 必须设透明 ✓
             //   （否则会把它覆盖到的区域**整块盖白** ✗ —— 板上实测过 ✓）。
             vkPanel_->setClearColor(Qt::transparent);
-            vkPanel_->setAttribute(Qt::WA_AlwaysStackOnTop, true);
+            // ★ bug 甲修复 ✓（2026-10-06 用户实测）：承载层是**原生子窗口** ⇒ 被点会**夺走焦点** ✗
+            //   ⇒ 输入框失焦 ⇒ hideOnboard() ⇒ 键盘刚弹出就被收起 ✓
+            //   （用户原话：弹出来了，点一下键盘又缩回去了，输入框没有任何交互结果 ✓）
+            //   ⇒ 它**不需要** Qt 焦点 ✓（键盘靠输入法事件工作 ✓）⇒ 设 NoFocus ✓
+            vkPanel_->setFocusPolicy(Qt::NoFocus);
+            // ★★ T15-17 bug① 后续（2026-10-06 用户实测决定性反馈 ✓）：
+            //   ⚠ **不要**设 `Qt::WA_AlwaysStackOnTop` ✗ ——
+            //   它虽然让承载层**渲染**在最上面 ✓，但该模式下承载层**收不到鼠标/触摸事件** ✗
+            //   ⇒ 触摸按窗口层级投递 ⇒ 落到**下面的主窗口** ✓ ⇒ 下面的控件抢走焦点 ✗
+            //   ⇒ 输入框失焦 ⇒ `hideOnboard()` ⇒ **键盘刚弹出又被收起** ✓
+            //   （用户原话：弹出来了，点一下键盘又缩回去了，输入框没有任何交互结果 ✓）
+            //   ⇒ 正解：**普通子控件 + `raise()`** ✓ —— 既显示在上面 ✓，事件也到得了它 ✓✓
             vkPanel_->setResizeMode(QQuickWidget::SizeRootObjectToView);
             vkPanel_->setSource(QUrl(QStringLiteral("qrc:/virtualkeyboard.qml")));
             vkPanel_->setVisible(false);                  // 先在隐藏态，等 visibleChanged 摆好 ✓
@@ -725,11 +736,13 @@ void MainWindow::showOnboard(const QString& why)
                         // 还没布局好：**先保持整窗尺寸**（这样 QML 才有空间算高度 ✓）
                         vkPanel_->setGeometry(rect());
                         vkPanel_->show();
+                        vkPanel_->raise();
                         return;
                     }
                     // 只盖**底部一条** ✓ —— 用户要的"覆盖在底层画面之上、GUI 不动" ✓
                     vkPanel_->setGeometry(0, height() - kbH, width(), kbH);
                     vkPanel_->show();
+                    vkPanel_->raise();        // 显示层级靠 raise() 保证 ✓（不用 AlwaysStackOnTop ✗）
                     qInfo().noquote() << QStringLiteral("[ui] 键盘承载已就位：kbHeight=%1 几何=%2,%3 %4x%5")
                                              .arg(kbH).arg(vkPanel_->x()).arg(vkPanel_->y())
                                              .arg(vkPanel_->width()).arg(vkPanel_->height());
@@ -959,6 +972,9 @@ void MainWindow::startAgentService()
 
 void MainWindow::applyInputType(const QString& type)
 {
+    // ★ bug 乙修复 ✓：这是**用户在界面上做的选择** ⇒ 记下来 ✓
+    //   后续 applyConfig()（配置广播/保存回读）**不得**把它覆盖回配置里的旧值 ✗
+    inputSourceLocal_ = true;
     inputSource_ = type;
 
     // 1) S10：这里**只**负责"切到命令行时把已经弹出来的键盘收掉"。
@@ -1303,10 +1319,19 @@ void MainWindow::applyConfig(const core::ConfigStore& gui)
     onboardAuto_ = gui.boolValue(QStringLiteral("gui.onboard_auto"), true);
     const QString inputSource =
         gui.value(QStringLiteral("gui.input_source"), QStringLiteral("keyboard"));
-    inputSource_ = inputSource;      // S10：焦点策略要用它判断"要不要弹键盘"
-    if (mainPage_ != nullptr && mainPage_->chatPanel() != nullptr) {
-        // 只是把界面对齐配置；**不**在这里弹键盘（弹的时机是输入框获得焦点）
-        mainPage_->chatPanel()->setInputType(inputSource);
+    // ★ bug 乙修复 ✓：**用户刚选过**就不覆盖 ✗ ——
+    //   否则切成「命令行」后，任何一次配置回读都会把它改回 keyboard ✓ ⇒ 软键盘又被唤起 ✓
+    //   （保存成功后配置自己会跟上 ✓，不需要这里"纠正"用户 ✗）
+    if (inputSourceLocal_) {
+        qInfo().noquote() << QStringLiteral("[ui] 输入源=%1（**用户本地已选** ✓ 配置回读不覆盖 ✗）")
+                                 .arg(inputSource_);
+    } else {
+        inputSource_ = inputSource;  // S10：焦点策略要用它判断"要不要弹键盘"
+        qInfo().noquote() << QStringLiteral("[ui] 输入源=%1（来自配置 ✓）").arg(inputSource_);
+        if (mainPage_ != nullptr && mainPage_->chatPanel() != nullptr) {
+            // 只是把界面对齐配置；**不**在这里弹键盘（弹的时机是输入框获得焦点）
+            mainPage_->chatPanel()->setInputType(inputSource);
+        }
     }
 
     if (settingsPage_ != nullptr) {

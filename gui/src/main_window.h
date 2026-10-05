@@ -210,6 +210,10 @@ private:
     int insetRequests_ = 0;        ///< G-B-6：`applyKeyboardInset` 被叫了几次（含重复 ✓）
     /// 当前输入源（S10：焦点策略要知道它；由 applyInputType/applyConfig 维护）
     QString inputSource_ = QStringLiteral("keyboard");
+    /// ★ bug 乙修复 ✓：用户在界面上**刚选过**输入源 ⇒ 配置回读**不得**覆盖它 ✗
+    ///   （否则切成「命令行」后，任何一次 applyConfig 都会把它改回配置里的 keyboard ✓
+    ///    ⇒ 软键盘又被唤起 ✓ —— 用户实测到的 bug ✓）
+    bool inputSourceLocal_ = false;
     QPixmap wallpaper_;
     QPixmap prevWallpaper_;
     QString wallpaperPath_;

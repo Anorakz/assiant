@@ -808,3 +808,34 @@ qt.virtualkeyboard: PlatformInputContext::showInputPanel()
 | ![](images/vk-fixed-transparent.png) | 设为**透明**后：主界面正常 ✓ ＋ 键盘在底部 ✓ |
 | ![](images/vk-overlay-bottom-strip.png) | ★ **覆盖式**（最终形态 ✓）：主界面**位置完全未动** ✓，
 键盘**只占底部 400px** ✓（与日志 `几何=0,400 1280x400` 吻合 ✓） |
+
+
+### 12.17 bug ① 后续两修：**点键盘不再收起** ＋ **切「命令行」不再弹键盘** ✓（2026-10-06 凌晨）
+
+**bug 甲：点键盘 ⇒ 键盘又收起、输入框毫无反应** ✗（用户实测原话 ✓）
+- 根因 ✓：`Qt::WA_AlwaysStackOnTop` 让承载层**渲染**在最上面 ✓，但该模式下承载层**收不到鼠标/触摸事件** ✗
+  ⇒ 触摸按窗口层级投递 ⇒ 落到**下面的主窗口** ✓ ⇒ 下面控件**抢走焦点** ⇒ 输入框失焦
+  ⇒ `hideOnboard()` ⇒ **键盘刚弹出又被收起** ✓。
+- 去掉 `AlwaysStackOnTop` 后 ⇒ `QQuickWidget` 走**原生子窗口**路径 ✓（`QQuickWindow` 几何
+  从 `0,0 0x0` 变成 **`0,400 1280x400`** ✓ = 它**能收事件**了 ✓），
+  ⚠ 但原生子窗口**被点会夺走焦点** ✗ ⇒ 又出现"点了就收起" ✓（`IM_VISIBLE 0` ＋ 截图无键盘 ✓ 为证 ✓）。
+- **最终修法** ✓：去掉 `AlwaysStackOnTop` ✓（要收得到触摸 ✓）＋ **`vkPanel_->setFocusPolicy(Qt::NoFocus)`** ✓
+  （它**不需要** Qt 焦点 ✓：键盘靠输入法事件工作 ✓）＋ `raise()` 保证显示层级 ✓。
+- ⚠ 教训（表 ✓）：`AlwaysStackOnTop` ⇒ **能看到、点不到** ✗；原生子窗口 ⇒ **点得到、但会夺焦** ✗；
+  ⇒ 必须 **原生子窗口 + `NoFocus`** ✓✓。
+
+**bug 乙：把输入类型切成「命令行」后，软键盘**依然被唤起** ✗（用户实测 ✓）
+- 根因 ✓：`applyConfig()`（`main_window.cpp` 里 `inputSource_ = inputSource;` 那句）**无条件**把输入源
+  重置为**配置真源**的值 ✗ ⇒ 用户刚选的 `terminal` 被**回读覆盖**回 `keyboard` ✗
+  ⇒ `OnboardCtl::shouldShow(onboardAuto_, inputSource_, focused)` 又以为输入源是 keyboard ⇒ 照样弹 ✓。
+  （⚠ 切换输入类型是**异步**请 Agent 写配置 ✓ ⇒ 写回之前任何一次配置广播都会把它冲掉 ✓。）
+- **修法** ✓：加"本地已改"标记 `inputSourceLocal_` ✓ —— `applyInputType()` 置位 ✓；
+  `applyConfig()` **尊重**它（不覆盖、也不改界面 ✓）；并打日志
+  `[ui] 输入源=%1（**用户本地已选** ✓ 配置回读不覆盖 ✗）` ✓ ⇒ 板上可核 ✓。
+
+**板上证据** ✓（服务模式 = 用户真实路径 ✓，`886,904 B`）：
+```
+[ui] 键盘承载已就位：kbHeight=400 几何=0,400 1280x400      ← #1…#5 稳定 ✓
+[ui] 输入源=…（来自配置 ✓ / **用户本地已选** ✓ 配置回读不覆盖 ✗）
+```
+**⚠ 仍待人工确认** ✗：点键盘能否输入（键盘不收起 ✓）＋ 切「命令行」后是否真的不弹 ✓。
