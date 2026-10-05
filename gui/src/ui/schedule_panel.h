@@ -38,6 +38,7 @@
 #include "core/schedule_model.h"
 
 class QLabel;
+class StateBanner;   // T15-16 ②：提示行换状态条 ✓
 class QVBoxLayout;
 
 class SchedulePanel : public QWidget {
@@ -76,7 +77,6 @@ public:
 
     QLabel* titleLabel() const { return title_; }
     QLabel* subtitleLabel() const { return subtitle_; }
-    QLabel* noteLabel() const { return note_; }
 
 protected:
     /// 标题过长时按宽度加省略号（宽度还没定就先原样显示）
@@ -100,7 +100,7 @@ private:
     QLabel* title_ = nullptr;
     QLabel* subtitle_ = nullptr;
     QVBoxLayout* sections_ = nullptr;   ///< 两段的容器
-    QLabel* note_ = nullptr;
+    StateBanner* note_ = nullptr;   ///< T15-16 ②：尾部提示（info/warn）✓
 
     QVector<RowWidgets> rows_;
     QStringList sectionLabels_;

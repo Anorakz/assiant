@@ -6,6 +6,7 @@
 //  警告提示色用内联样式 —— 与 music_bar 里"占位说明用琥珀色"是同一套做法。
 // ============================================================================
 #include "ui/schedule_panel.h"
+#include "ui/state_views.h"    // T15-16 ②：提示行用 StateBanner ✓
 #include "ui/theme.h"    // T15-16 G-A-1b：视觉常量（唯一来源）
 
 #include <QFontMetrics>
@@ -16,9 +17,6 @@
 
 namespace {
 
-/// 琥珀色：与 music_bar / main_hint 的警示色一致
-const QString kWarnColor =
-    QStringLiteral("color:%1; background:transparent;").arg(QLatin1String(theme::kWarn));
 /// "已过"的行用 AreaHint 那档灰
 const QString kPastColor =
     QStringLiteral("color:%1; background:transparent;").arg(QLatin1String(theme::kTextFaint));
@@ -87,10 +85,8 @@ SchedulePanel::SchedulePanel(QWidget* parent)
     sections_->setSpacing(2);
     root->addLayout(sections_);
 
-    note_ = new QLabel(this);
-    note_->setObjectName(QStringLiteral("AreaHint"));
-    note_->setWordWrap(true);
-    note_->hide();
+    // T15-16 ②：提示行换成 StateBanner ✓ —— 它自己管"空文本就整条隐藏" ✓（省掉手工 hide ✓）
+    note_ = new StateBanner(this);
     root->addWidget(note_);
 
     root->addStretch(1);
@@ -301,11 +297,10 @@ void SchedulePanel::resizeEvent(QResizeEvent* event)
 
 void SchedulePanel::setNote(const QString& text, bool warning)
 {
-    noteText_ = text;
+    noteText_ = text;              // ⚠ 仍然存着 ✓ —— 两个访问器（与 8 条断言）就不必改 ✓
     noteIsWarning_ = warning;
-    note_->setText(text);
-    note_->setStyleSheet(warning ? kWarnColor : QString());
-    note_->setVisible(!text.isEmpty());
+    // 有内容就露（info / warn ✓）、空就整条收起 ✓ —— 这层判断从"手工 setVisible"交给组件 ✓
+    note_->setState(warning ? StateBanner::Warn : StateBanner::Info, text);
 }
 
 QStringList SchedulePanel::rowTexts() const

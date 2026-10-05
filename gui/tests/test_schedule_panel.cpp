@@ -6,6 +6,7 @@
 //  ScheduleModel 跑一份临时配置，证明"模型 → 控件"这条链是通的。
 // ============================================================================
 #include <QDate>
+#include "ui/state_views.h"   // T15-16 ②：完整类型（判据要查 kind() ✓）
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -60,6 +61,8 @@ class TestSchedulePanel : public QObject {
     Q_OBJECT
 
 private slots:
+    /// T15-16 ②：**警告语义真的传进了状态条** ✓（老断言只查自己存的标志 ✗，查不到这个 ✓）
+    void theNoteBecomesAWarningBanner();
     /// T15-16 G-B-3：**输入指纹没变就不重建控件** ✓（改前每 60 s 一次全量 delete+new ✗）
     void identicalInputDoesNotRebuildRows()
     {
@@ -339,6 +342,34 @@ private slots:
                  QStringLiteral("接下来 24 小时 · 到 明天 15:00 · 2 项 · 下一条 明天 09:30"));
     }
 };
+
+
+/// T15-16 ②：三条 —— 截断提示是 **Info** 且露着 ✓；坏配置是 **Warn** ✓；文案在里面 ✓。
+/// ⚠ 这一条是那 8 条 `noteText()`/`noteIsWarning()` 断言**抓不到**的 ✓（它们查的是自己存的标志 ✓）。
+void TestSchedulePanel::theNoteBecomesAWarningBanner()
+{
+    SchedulePanel panel;
+    StateBanner* banner = panel.findChild<StateBanner*>();
+    QVERIFY2(banner != nullptr, "日程区没有状态条 ✗（findChild 找不到 ⇒ 没挂进页面？）");
+
+    const ScheduleResult twoRows =
+        makeResult({makeRow(QStringLiteral("09:00"), QStringLiteral("study")),
+                    makeRow(QStringLiteral("19:00"), QStringLiteral("game"))},
+                   {});
+    panel.setSchedule(twoRows, 1);              // 截断 ⇒ 尾提示「还有 1 项」✓
+    QVERIFY(!panel.noteIsWarning());
+    QCOMPARE(banner->kind(), StateBanner::Info);
+    QVERIFY2(!banner->isEmpty(), "有提示却收起来了 ✗（用户就看不见了）");
+
+    ScheduleResult broken;                      // 整份读不出来 ⇒ warn ✓
+    broken.ok = false;
+    broken.error = QStringLiteral("读不到配置文件");
+    panel.setSchedule(broken, 1);
+    QVERIFY(panel.noteIsWarning());
+    QCOMPARE(banner->kind(), StateBanner::Warn);
+    QVERIFY2(banner->text().contains(QStringLiteral("读不到配置文件")),
+             qPrintable(banner->text()));
+}
 
 QTEST_MAIN(TestSchedulePanel)
 #include "test_schedule_panel.moc"
