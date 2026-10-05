@@ -188,6 +188,21 @@ MainWindow::MainWindow(QWidget* parent)
         const QString id = d.value(QStringLiteral("id")).toString();
         if (id.startsWith(QLatin1String("settings")) && settingsPage_ != nullptr) {
             settingsPage_->onConfigResult(d);
+            // T15-17 / T2：**保存即生效** ✓ —— Agent 落盘成功后，立刻把配置重新套用到运行时 ✓，
+            // 不必重启 GUI ✓。这正是 T15-17 要修的那个毛病：以前这里**只转给设置页** ✗，
+            // 而套用只在启动时发生（`main.cpp` 调 `applyConfig()` ✓）⇒ 改了要重启才生效 ✗。
+            // ⚠ 回执 `/` 只有 id／ok／error ✗（不带全量 gui.* ✓）⇒ 重新读盘 ✓；
+            //    回执是**落盘之后**才来的 ✓，所以此刻盘上就是新值 ✓。
+            // ⚠ `reapplyGuiConfig()` 不碰页面控件 ✓ ⇒ 不会冲掉正在编辑的内容 ✓（T1 就是为这条做的 ✓）。
+            if (d.value(QStringLiteral("ok")).toBool(false) && !configPath_.isEmpty()) {
+                core::ConfigStore store;
+                if (store.load(configPath_)) {
+                    reapplyGuiConfig(store);
+                    qInfo().noquote() << QStringLiteral("[ui] 配置已落盘并**立即套用** ✓（不必重启 ✓）");
+                } else {
+                    qWarning().noquote() << QStringLiteral("[ui] 配置落盘成功但重新读盘失败 ✗，本次先不套用");
+                }
+            }
         } else if (id.startsWith(QLatin1String("model")) && modelPage_ != nullptr) {
             modelPage_->onConfigResult(d);
         } else if (id.startsWith(QLatin1String("input-source"))) {
