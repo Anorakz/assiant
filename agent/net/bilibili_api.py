@@ -540,7 +540,11 @@ class BilibiliApi(object):
 
     def _dash_stream(self, bvid: str, cid: int) -> Dict[str, Any]:
         """DASH（音视频分离，高清走这条）。@raise BilibiliError 一条流都没有。"""
-        data = self._playurl_data(bvid, cid, qn=112 if self.cookie_present else 80,
+        #: ⚠ 板上实测（2026-10-07）: 有 cookie 走 DASH 后码率 534 -> **1334 kbps** ✓，
+        #:   但清晰度跟着上去 ⇒ 像素量↑ ⇒ GUI 的 `vqueue:src` 从 ~24% 飙到 **94%** ✗
+        #:   ⇒ **帧率反而更差**。所以要的是"DASH 的稳（音视频分离、限速少）＋ 低像素量"，
+        #:   于是这里把档位也钉在 **360P（qn=16）**，与匿名单文件那条路一致。
+        data = self._playurl_data(bvid, cid, qn=16,
                                   fnval=16, platform="pc")
         dash = data.get("dash") or {}
         videos = sorted((dash.get("video") or []), key=lambda d: -_int(d.get("id")))
