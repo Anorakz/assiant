@@ -144,13 +144,23 @@ GstVideoWidget::GstVideoWidget(QWidget* parent) : QOpenGLWidget(parent) {
     tick_ = new QTimer(this);
     tick_->setInterval(25);
     connect(tick_, &QTimer::timeout, this, [this]() { tickPaint(); });
-    qInfo() << "[gstvideo] 控件建立（GUI 线程 25ms 心跳驱动 ✓；handoff 只做原子换手 ✓）";
+    qInfo() << "[gstvideo] 控件建立 this=" << this
+            << "（GUI 线程 25ms 心跳驱动 ✓；handoff 只做原子换手 ✓）";
 }
-GstVideoWidget::~GstVideoWidget() { teardown(); }
+GstVideoWidget::~GstVideoWidget() {
+    qInfo() << "[gstvideo] 控件析构 this=" << this
+            << "收到 handoff=" << handoffN_ << "心跳=" << tickN_ << "paintGL=" << paintN_;
+    teardown();
+}
 
 void GstVideoWidget::teardown() {
     if (tick_ != nullptr) tick_->stop();
     Gst* g = gst();
+    //: ★ 诊断（第 69 轮）：`teardown()` 会**清空单槽** ✓ ⇒ 如果它被反复调用（例如源地址每次都变 ✓），
+    //:   就会表现为"帧到达很多、但槽总是空的" ✗ ⇒ 所以这里必须打点 ✓（带 `this=` ✓）。
+    if (pipeline_ != nullptr)
+        qInfo() << "[gstvideo] teardown this=" << this
+                << "（清空单槽；此前 handoff=" << handoffN_ << "paintGL=" << paintN_ << "✓）";
     while (!queue_.isEmpty() && g && g->buffer_unref) g->buffer_unref(queue_.dequeue());
     //: ★ 单槽里若还压着一帧，也要还回去 ✓（否则每换一次源就漏一个 buffer ✓）
     if (g && g->buffer_unref) {
@@ -172,13 +182,16 @@ void GstVideoWidget::onHandoff(void*, void* buffer, void*, void* user) {
     Gst* g = gst();
     if (!self || !g || !buffer) return;
     //: ★ 到达速率打点（每 120 帧一行 ✓，用来对照"到达 vs 绘制"）
-    static int cbCount = 0;
-    if (++cbCount % 120 == 0) qInfo() << "[gstvideo] handoff#" << cbCount << "（回调线程到达打点 ✓）";
+    //:   ⚠ 计数**改成每实例**（原来是 `static` ✗ ⇒ 多实例时会把流量混起来 ✓），并打 `self=` ✓
+    void* old = self->pending_.fetchAndStoreOrdered(g->buffer_ref(buffer));
+    if (++self->handoffN_ % 120 == 0)
+        qInfo() << "[gstvideo] handoff#" << self->handoffN_ << "self=" << self
+                << "槽内旧帧=" << (old != nullptr)
+                << "（回调线程到达打点 ✓）";
     //: ★★★ 崩溃修复（2026-10-07）：**绝不在这里碰 `queue_`** ✗ ——
     //:   以前回调线程 enqueue、GUI 线程 dequeue，`QQueue` 无锁 ⇒ 内存破坏 ⇒ 段错误 ⇒ 无限重启 ✗。
     //:   现在只做**一次原子换手** ✓：把新帧放进单槽，把**旧的**（若还没被消费）取回来 unref 掉 ✓
     //:   ⇒ 语义 = **丢最旧** ✓（延迟最小 ✓，不会积压 ✓）。
-    void* old = self->pending_.fetchAndStoreOrdered(g->buffer_ref(buffer));
     if (old != nullptr) g->buffer_unref(old);
     //: ★★★ 帧率修复（2026-10-08）：**这里过去还会 `invokeMethod(self, [self]{ repaint(); },
     //:   Qt::QueuedConnection)`** ✗ —— 那正是"每帧一个普通优先级事件"的来源 ✓，
@@ -207,6 +220,7 @@ bool GstVideoWidget::buildPipeline(const QString& url) {
 
 bool GstVideoWidget::setSource(const QString& url) {
     source_ = url;
+    qInfo() << "[gstvideo] setSource this=" << this << "url=" << (url.isEmpty() ? QStringLiteral("(清空)") : url);
     if (url.isEmpty()) { teardown(); update(); return true; }
     failed_ = false; eosSent_ = false; zeroCopyFrames_ = 0; framesShown_ = 0;
     if (!buildPipeline(url)) { emit failedOver(); return false; }
@@ -246,13 +260,16 @@ void GstVideoWidget::resizeGL(int, int) {
 
 //: ★ 25ms 心跳（GUI 线程）：**唯一**的重绘驱动 ✓（见 .h 顶部的定案 ✓）
 void GstVideoWidget::tickPaint() {
-    static int tickN = 0;
-    ++tickN;
+    ++tickN_;
     //: ★ 诊断（每 2 秒一行，80×25ms ✓）：一眼看出**定时器有没有在跑**、门条件卡在哪 ✓
-    if (tickN % 80 == 0) {
-        qInfo() << "[gstvideo] 心跳#" << tickN << "pipeline=" << (pipeline_ != nullptr)
+    //:   带上 `this=` ⇒ 多实例时不会看串 ✓
+    if (tickN_ % 80 == 0) {
+        qInfo() << "[gstvideo] 心跳#" << tickN_ << "this=" << this
+                << "pipeline=" << (pipeline_ != nullptr)
                 << "playing=" << playing_ << "有帧=" << (pending_.loadAcquire() != nullptr)
                 << "已画帧=" << framesShown_ << "零拷贝=" << zeroCopyFrames_
+                << "paintGL=" << paintN_
+                << "早退(无帧/无内存/非dmabuf)=" << retNoBuf_ << "/" << retNoMem_ << "/" << retNotDmabuf_
                 << "alwaysRepaint=" << alwaysRepaint_;
     }
     if (pipeline_ == nullptr) return;
@@ -310,17 +327,24 @@ void GstVideoWidget::paintGL() {
     //: ★ 取帧：**只在这里（GUI 线程）动这个槽** ✓ —— 原子换手，取走即"已消费" ✓
     void* buf = pending_.fetchAndStoreOrdered(nullptr);
     const int pendingCount = (buf != nullptr) ? 1 : 0;
-    static int paintCount = 0;
-    ++paintCount;
+    ++paintN_;
 
     if (!g || buf == nullptr) {
         //: ★ `PartialUpdate` 下**不能随便清屏** ✗（那会把上一帧擦掉 ⇒ 闪 ✓）：
         //:   只有"这一帧还没画过"（首帧 / 刚 resize ✓）才清黑 ✓，其余情况**原样保留** ✓。
+        ++retNoBuf_;
         if (!drewOnce_) { gl->glClearColor(0, 0, 0, 1); gl->glClear(GL_COLOR_BUFFER_BIT); }
         return;
     }
     void* mem = g->buffer_peek_memory(buf, 0);
-    if (!mem || !g->is_dmabuf_memory(mem)) {
+    if (!mem) {
+        ++retNoMem_;
+        g->buffer_unref(buf);
+        if (!drewOnce_) { gl->glClearColor(0, 0, 0, 1); gl->glClear(GL_COLOR_BUFFER_BIT); }
+        return;
+    }
+    if (!g->is_dmabuf_memory(mem)) {
+        ++retNotDmabuf_;
         g->buffer_unref(buf);
         if (!drewOnce_) { gl->glClearColor(0, 0, 0, 1); gl->glClear(GL_COLOR_BUFFER_BIT); }
         return;
@@ -419,20 +443,23 @@ void GstVideoWidget::paintGL() {
     gl->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     gl->glDisableVertexAttribArray(ap);
 
-    //: ★ 验收打点（每 120 帧一行 ✓，约 3 秒一行 ✓）：**帧率**、paintGL 内部耗时、在不在零拷贝 ✓
+    //: ★ 验收打点：每 120 次绘制一行 ✓。
+    //:   ⚠ 上一版这里有个算错的地方 ✗：额外加了"paintN_<=20 也打点"⇒ 前 20 帧会拿固定 120 当分子，
+    //:   算出 `fps=5000.0` 这种假值 ✗。现在**只在 120 的整数倍打点** ✓ ⇒ 分子分母都是真实的 ✓。
     const int kEvery = 120;
-    if (paintCount <= 20 || paintCount % kEvery == 0) {
-        static QElapsedTimer fpsT;
-        static int fpsAnchor = 0;
-        if (!fpsT.isValid()) { fpsT.start(); fpsAnchor = paintCount - kEvery; }
-        const qint64 el = fpsT.restart();
+    if (paintN_ <= 3)
+        qInfo() << "[gstvideo] 首次绘制 this=" << this << "paintGL=" << paintN_
+                << "size=" << width() << "x" << height();
+    if (paintN_ % kEvery == 0) {
+        if (!fpsClk_.isValid()) fpsClk_.start();
+        const qint64 el = fpsClk_.restart();
         const double fps = (el > 0) ? (1000.0 * kEvery / double(el)) : 0.0;
         qInfo() << "[gstvideo] 绘制帧率 fps=" << QString::number(fps, 'f', 1)
-                << "（每" << kEvery << "帧 " << el << "ms）内部耗时(ms)="
+                << "（每" << kEvery << "次绘制 " << el << "ms）this=" << this
+                << "内部耗时(ms)="
                 << QString::number(1000.0 * double(clock() - pt_t0) / double(CLOCKS_PER_SEC), 'f', 2)
                 << "零拷贝帧=" << zeroCopyFrames_ << "pending=" << pendingCount
+                << "早退(无帧/无内存/非dmabuf)=" << retNoBuf_ << "/" << retNoMem_ << "/" << retNotDmabuf_
                 << "size=" << width() << "x" << height();
-        fpsAnchor = paintCount;
-        Q_UNUSED(fpsAnchor);
     }
 }

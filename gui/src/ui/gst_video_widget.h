@@ -35,6 +35,7 @@
 
 #include <QAtomicPointer>
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QImage>
 #include <QOpenGLWidget>
 #include <QQueue>
@@ -106,6 +107,18 @@ private:
     QAtomicPointer<void> pending_;
     QTimer* tick_ = nullptr;        ///< 25ms 重绘心跳（只有它在驱动 paintGL ✓）
     bool alwaysRepaint_ = false;    ///< A/B 诊断：`DSH_GST_REPAINT_ALWAYS=1` ⇒ 每个 tick 都重画
+    //: ★★ 诊断（2026-10-08 第 69 轮）：计数器**必须是每实例的** ✗ ——
+    //:   上一轮把它们写成 `static` ✓，而当时同时存在"帧到达 27/s"与"心跳里槽是空的"这对矛盾 ✓，
+    //:   若进程里其实有**两个** `GstVideoWidget`（例如 GAME 模式重建过页面栈 ✓），
+    //:   `static` 计数就会把两个实例的流量**混在一起** ⇒ 正好能掩盖这种矛盾 ✓。
+    //:   ⇒ 现在每实例各数各的 ✓，并且每条日志都打 `this=` ✓ ⇒ 一次上板即可判定 ✓。
+    int handoffN_ = 0;              ///< 本实例收到的 handoff 次数
+    int tickN_ = 0;                 ///< 本实例的心跳次数
+    int paintN_ = 0;                ///< 本实例的 paintGL 次数
+    int retNoBuf_ = 0;              ///< 静默早退①：没有新帧（槽是空的）
+    int retNoMem_ = 0;              ///< 静默早退②：peek_memory 为空
+    int retNotDmabuf_ = 0;          ///< 静默早退③：不是 dmabuf 内存
+    QElapsedTimer fpsClk_;          ///< 帧率打点用（**每实例一份** ✓，不能用 static ✗）
     bool playing_ = false;
     bool failed_ = false;
     bool eosSent_ = false;
