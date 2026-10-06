@@ -520,10 +520,11 @@ class BilibiliApi(object):
 
         ⚠ 板上实测（2026-10-06）: 720P 时 GUI 的帧搬运线程 `vqueue:src` 要 0.24~0.85 核，
         且随后台负载剧烈波动 ⇒ 帧率偏低。像素量是帧搬运的唯一杠杆，所以这一路
-        **主动降到 480P**（`qn`: 16=360P / 32=480P / 64=720P / 80=1080P）。
-        取 32 是"画质还能看 + 像素量约降到 44%"的折中；要更流畅可再降到 16。
+        **主动降到 360P**（`qn`: 16=360P / 32=480P / 64=720P / 80=1080P）。
+        先试过 480P（32）仍偏卡，于是再降一级到 360P ⇒ 像素量约为 720P 的 25%。
+        想回升画质就改回 32。
         """
-        data = self._playurl_data(bvid, cid, qn=32, fnval=1, platform="html5")
+        data = self._playurl_data(bvid, cid, qn=16, fnval=1, platform="html5")
         seg = _first_durl(data)
         if seg is None:
             return None
