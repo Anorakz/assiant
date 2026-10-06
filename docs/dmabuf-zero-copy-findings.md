@@ -546,6 +546,53 @@ scp E:/rk3568/tmp/agent_gui.round73 rk3568:/data/assistant/gui-new/agent_gui
 ssh rk3568 "sh /data/assistant/board-deploy-probe.sh"     # 自愈式关卡（含 chmod 755）
 ```
 
+### 7.8.9 第 74 轮（2026-10-08）：**离线能查的假设已经全部判死** ⇒ 只剩上板
+
+把 §7.8.6 的 (A)/(B) 两支在**不上板**的前提下逐条查完 ✓：
+
+| 假设 | 判据（都在代码/已回传日志里 ✓） | 结论 |
+|---|---|---|
+| (A) 进程里有**两个** `GstVideoWidget` | `final-layout.log` 数控件树：`GstVideoSurface = 1` ✓ | **判死** ✗ |
+| (A') 有**第二个窗口**（`--dump-layout` 只走一棵树，查不到别的窗口 ✗） | `main.cpp` 只 `MainWindow window;`（第 598 行 ✓），全文没有第二处构造 ✓ | **判死** ✗ |
+| (A'') `gst_` 被 `setParent(nullptr)` 摘出树外 | `video_panel.cpp` 里只有 `video_->setParent(screen_)`（回退时挂回 ✓），**从不动 `gst_`** ✓ | **判死** ✗ |
+| (B①) `setSource()` 被反复调用（每次都 `teardown()` 清槽 ✓） | 它会把 `framesShown_`/`zeroCopyFrames_` **清零** ✓，而实测这两个数**单调增长**（113→138 ✓）⇒ 该窗口内**没发生过** ✓ | **判死**（该窗口内）✗ |
+| (B②) `teardown()` 被反复调用 | 同上：`teardown()` 后 `pipeline_ = nullptr` ⇒ 心跳会打 `pipeline=false` ✗，实测恒 `true` ✓ | **判死** ✗ |
+| (B③) `paintGL` 的静默早退把帧取走 | 实测 `已画帧` 增量 2.5/s ≈ `paintGL` 2.8/s ✓ ⇒ 早退**几乎没发生** ✓（第 72 轮已加独立计数，上板复核 ✓） | 存疑但**不像** |
+| "到达本来就是一阵一阵"（平均数骗人 ✓） | **本机无法判** ✗ ⇒ 只能靠第 73 轮新加的 `最大到达间隔(ms)=` 上板看 ✓ | **待上板** |
+
+★ 宿主侧测试的边界（顺带查清 ✓）：`scripts/test-host.ps1` 走的是 **MinGW g++ 的原生构建**
+（`-G "MinGW Makefiles"`，无 toolchain 文件 ✓），而**这台 PC 上没有 Windows Qt**
+（`C:\Qt`/`E:\Qt` 都不存在 ✓，`E:\rk3568\sysroot` 里是 **Linux** 的 Qt5.12.8 ✓ 不能在 Windows 跑 ✗）
+⇒ **`GstVideoWidget` 的 GL/事件路径无法在宿主侧验证** ✗ ⇒ 只能上板 ✓
+（宿主 CI 那套由 GitHub 的 `host-ci` 跑 ✓，本轮提交都是 **success** ✓。）
+
+⇒ ⇒ **结论：离线能做的已经做完** ✓ —— 诊断、候选修法（到达驱动 ✓）、
+可查假设的全部排除 ✓、以及每一步的产物/命令都落在文档里 ✓。
+**剩下的每一步都需要板子上电** ✗（板子是**用户要求断电**的 ✓，且这块板子没有远程开机 ✗）。
+
+**上电后照这个顺序走（一次播放即可判定＋顺手验收 ✓）**：
+
+```
+① scp E:/rk3568/tmp/agent_gui.round73 rk3568:/data/assistant/gui-new/agent_gui
+② ssh rk3568 "sh /data/assistant/board-deploy-probe.sh"        # 自愈式关卡（含 chmod 755 ✓）
+③ ssh rk3568 "sh /data/assistant/board-rate.sh"                # 取流 + 60 秒窗口
+④ 看四组数：绘制帧率 fps=（目标 ≥20）｜存活实例=（应恒 1）
+             回调= vs 存槽=（应同步）｜事件=（应 ~24/s）｜窗口到达=/最大到达间隔(ms)=
+             早退(无帧/无内存/非dmabuf)=
+⑤ 判：
+   · fps ≥20 且画面正确（无绿条/噪点、方向宽高比正常 ✓）⇒ **收口**
+   · 存槽 不涨 ⇒ 帧没进槽（查 buffer_ref/回调线程 ✓）
+   · 存槽 涨但 有帧=false 且早退涨 ⇒ 被 paintGL 静默早退取走（查 peek_memory/dmabuf ✓）
+   · 最大到达间隔 上千 ms ⇒ 到达本身一阵一阵（是**上游**问题：souphttpsrc/mpp 取流节奏 ✗，
+     不是 GUI 的锅 ✓）⇒ 那时该改的是"按块喂"的节奏（或给 sink 加 `sync=true`/队列 ✓）
+
+**收口清单（一旦达标就做，别再拖 ✓）**：
+1. `video_panel.cpp` 打开默认：`const bool gstEnabled = qEnvironmentVariable("DSH_GST_VIDEO") != QLatin1String("0");`
+   （只改这一行 ✓，注释里已写好理由 ✓）
+2. 板端删掉 `zz-gstvideo.conf`（不再需要显式开关 ✓）＋ 重跑一次确认 `vqueue:src = 0` ✓
+3. 本文档补 **最终 fps/CPU 数字**＋**用户目视结论** ✓（并把 §7.6 的旧结论标注为"已被 §7.8 更正" ✓ 已标 ✓）
+4. 提交（只 `git add` 改动文件 ✗ 禁止 `git add -A` ✓）＋ `push` ＋ `gh run list` ✓
+
 
 
 
