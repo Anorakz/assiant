@@ -2376,10 +2376,19 @@ class Runtime:
             try:
                 await asyncio.sleep(self._GAME_WATCH_TICK_S)
                 state = self.state.current().value if self.state is not None else ""
+                #: 视频播放 ↔ 画面识别**互斥**（同时只解一路）:
+                #:   · 在播 ⇒ 不抓帧，**且不常驻 SigLIP**（你定的：暂停才加载）
+                #:   · 暂停（或没在播）⇒ 恢复抓帧、把 SigLIP 加载回来
+                #: ⚠ 判据与 `toggle` 用的是**同一条真值**（`saw_playing and playing`）:
+                #:   起播前那几条 `playing=false` 不算"暂停"（见 `BilibiliBuffer.set_playing`）。
+                snap = self._buffer.snapshot() if self._buffer is not None else {}
+                video_playing = bool(snap.get("saw_playing")) and bool(snap.get("playing"))
                 if self._game_watch is not None:
-                    self._game_watch.ensure_model(state)          # 常驻/卸载
+                    self._game_watch.ensure_model("idle" if video_playing else state)
                 if state != "game" or self._game_watch is None or self.bilibili is None:
                     continue
+                if video_playing:
+                    continue                                     # 互斥：在播就不看画面
                 has_keyword = bool(self.bilibili.keyword) and self.bilibili.source == "dialogue"
                 if has_keyword:
                     continue                                     # 有对话关键词 -> 一帧都不抓
