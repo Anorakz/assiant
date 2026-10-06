@@ -336,11 +336,6 @@ void VideoPanel::relayoutStage()
         //:   用来分清 `paintGL` 只有 2fps 的真因 ✓：
         //:     ① 若缩小后 **fps 明显上升** ⇒ 是"每帧整窗 FBO 合成/blit 的成本" ✗
         //:     ② 若 fps **不变** ⇒ 是"paint 事件投递被合并" ✗（那就要绕开 Qt 合成 ✓）
-        if (qEnvironmentVariableIsSet("DSH_GST_SMALL")) {
-            gstHost_->setGeometry(0, 0, 320, 180);
-            if (overlay_ != nullptr) overlay_->setGeometry(0, videoH, w, kOverlayHeight);
-            return;
-        }
         const bool hostReady = (screen_ != nullptr && screen_->width() > 200 && screen_->height() > 200);
         if (hostReady) {
             gstHost_->setGeometry(origin.x(), origin.y(), w, videoH);
@@ -400,10 +395,13 @@ void VideoPanel::setSource(const QString& fileOrUrl)
         setStageVideo(false);
         return;
     }
-    // ★ 主路径：本机 http 流走 dmabuf 零拷贝（起不来就回退到下面的 QMediaPlayer ✓）
-    //   ⚠ 现状（2026-10-07）：零拷贝的 CPU 收益已实测（vqueue 0.82 核 ⇒ ≈0 ✓），但**画面还没画出来** ✗
-    //   —— 心跳日志证实父控件 `VideoScreen` 一直 invisible ✗（不是 GL 的问题 ✓）。
-    //   ⇒ 默认**关**（保证屏幕正常 ✗ 不回退体验 ✓），要用 `DSH_GST_VIDEO=1` 显式打开来继续调 ✓。
+    // ★ 主路径：本机 http 流走 dmabuf 零拷贝（起不来就自动回退到下面的 QMediaPlayer ✓）
+    //   ⚠ 现状（2026-10-08，第 68 轮）：重绘的**驱动方式**已定案并改成"GUI 线程 25ms 心跳" ✓
+    //   （真因：Qt 给 `QOpenGLWidget` 的重绘请求是 **`Qt::LowEventPriority`** 事件 ✓，过去被
+    //   handoff 的每帧 queued 调用饿死 ✗ —— 详见 docs §7.8 ✓）。**但"真的画出画面"的帧率
+    //   实测仍只有 2.5~3.4fps** ✗（帧到达 ~27fps ✓、`paintGL` 3.4/s ✗、心跳里"有帧=false"✗）
+    //   ⇒ **未达 ≥20fps 的验收线 ⇒ 默认仍**关**（不许把不达标的东西默认打开 ✗）✓，
+    //   继续调时用 `DSH_GST_VIDEO=1` 显式打开 ✓（板端脚本 board-*.sh 就是这么做的 ✓）。
     const bool gstEnabled = qEnvironmentVariableIsSet("DSH_GST_VIDEO")
                             && qEnvironmentVariable("DSH_GST_VIDEO") != QLatin1String("0");
     if (gstEnabled && gst_ != nullptr && (source_.startsWith(QLatin1String("http://"))

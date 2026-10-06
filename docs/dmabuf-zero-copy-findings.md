@@ -235,6 +235,12 @@ UV 16 对齐 368、`DSH_GST_VIDEO` 开关、自愈式部署关卡（异常自动
 
 ### 7.6 ★★★ 2fps/3.7fps 的**定案**（第 6 次实验，`clock()` 分段计时）
 
+> ★★ **本节结论已在 §7.8 被更正** ✗：当时判定的"**修法唯一 = 自建 EGLSurface**"是**错的** ✗。
+> 第 68 轮把 Qt 5.15.11 源码读通之后，真因是 **Qt 把 `QOpenGLWidget` 的重绘请求当
+> `Qt::LowEventPriority` 事件投递**，被 handoff 的"每帧一个 queued 调用"**饿死** ✗；
+> 而且 `eglCreateWindowSurface(winId())` 这条路**在 eglfs 上根本走不通**（§7.8 有崩的证据 ✓）。
+> 下面这段"paintGL 内部只要 1ms、瓶颈在外面"的**测量本身仍然成立** ✓，留着当过程证据 ✓。
+
 在 `paintGL()` 首尾用 `clock()` 计时并每 10 帧打印，实测（板端，360P，GAME，零拷贝启用）：
 
 ```
@@ -265,6 +271,11 @@ UV 16 对齐 368、`DSH_GST_VIDEO` 开关、自愈式部署关卡（异常自动
 `glGenTextures`+`glDeleteTextures` churn／每帧 `eglCreateImageKHR`（fd 缓存后 create 降到 11 次/2 分钟，fps 不升反降）。
 
 ### 7.7 ★ 开工清单（给下一个会话：一次做到 ≥20fps）
+
+> ★★ **本清单的 1~3 步（自建 EGLSurface）已被 §7.8 判死** ✗：`QWidget::winId()` 在 eglfs 下
+> 不是原生窗口（实测值 `0x14` ✓），真去调 `eglCreateWindowSurface` **把 GUI 搞崩了一次**
+> （`NRestarts=1` ✓）⇒ **别再做这条路** ✗。**第 4~5 步（构建/部署/关卡/算 fps）仍然有效** ✓，
+> 是每次上板都要走的闭环 ✓。
 
 **目标**：只在 `GstVideoWidget` 里加一条"自建 EGL 表面 ＋ 主动交换"的路（建议 `DSH_GST_EGL=1` 开关守卫，
 **默认不开**，确保不破坏现有可播路径）。绘制部分**原样复用** `paintGL` 里的逻辑。
@@ -298,6 +309,113 @@ wsl -e bash -lc "bash /mnt/e/rk3568/tmp/build-gui-br.sh 2>&1 | grep -a -e ' erro
   零拷贝开关未启用 ⇒ 可正常使用；部署新版本后**务必**保留回滚路径。
 - ★ 关键目标数据（必须复现）：`vqueue:src` = **0**；`agent_gui` CPU 从 112.7% 降到 ~15%；
   `paintGL` 内部耗时 ~1ms；**唯一待攻**：paint 间隔 ~300ms（Qt 合成/交换路径）。
+
+---
+
+## 7.8 ★★★ 第 68 轮（2026-10-08）：真因是"**重绘请求被饿死**"＋一次 A/B 实测
+
+### 7.8.1 真因（有 Qt 5.15.11 源码证据，不是猜）
+
+板子上的 Qt 源码树（buildroot 输出里就有一份 ✓）：
+`…/build/qt5base-da6e958319e95fe564d3b30c931492dd666bfaff/src/`
+
+1. `QOpenGLWidget` 的画面**只能**由 `paintEvent` 驱动：
+   `QOpenGLWidgetPrivate::render()` 的调用点只有 `QOpenGLWidget::paintEvent()` 与 `grabFramebuffer()`，
+   而 `render()` 又是 `invokeUserPaint()` ⇒ `paintGL()` 的**唯一**入口
+   （`widgets/kernel/qopenglwidget.cpp` 源码行 901/915/958/1327 ✓）。
+2. 谁给 `QOpenGLWidget` 发 `paintEvent`：`QWidgetRepaintManager::sync()` 里那条
+   "render-to-texture 控件不在常规脏表里"的分支 ⇒ `w->d_func()->sendPaintEvent(w->rect())`
+   （`widgets/kernel/qwidgetrepaintmanager.cpp` 源码行 924~975 ✓）。
+3. 上面那次 `sync()` 由"**UpdateRequest 事件**"触发，而那个事件是：
+   ```cpp
+   // qwidgetrepaintmanager.cpp  sendUpdateRequest()
+   case UpdateLater:
+       updateRequestSent = true;
+       QCoreApplication::postEvent(widget, new QEvent(QEvent::UpdateRequest), Qt::LowEventPriority); // ★★★
+       break;
+   case UpdateNow: {                       // repaint() 想走这条（同步 sendEvent ✓）
+       QEvent event(QEvent::UpdateRequest);
+       QCoreApplication::sendEvent(widget, &event);
+   ```
+   而且同一函数开头还有一条**降级**：窗口正在合成、且距上次合成 ≤ `1000/refreshRate` 毫秒时，
+   `UpdateNow` **被改成 `UpdateLater`** ⇒ **`repaint()` 并不保证同步** ✓。
+4. ⇒ **`Qt::LowEventPriority` 的事件只有在"队列里没有普通优先级事件"时才会被处理** ✓。
+   而 handoff 线程原本**每帧 post 一个 queued 调用**（24 个/s 的**普通**优先级事件 ✗）
+   ⇒ 队列永远不空 ⇒ 那条 UpdateRequest **被饿死** ⇒ 实测 **20 个请求/s 只换来 0.8 次 paint** ✗
+   = 历史上的 **2~3fps** ✓✓。这就是真因。
+
+### 7.8.2 一次上板把"驱动方式"逐档量完（诊断版 `6e0bb323`，GAME 模式，360P，零拷贝）
+
+用一个**运行时可切的模式文件**（`/data/assistant/gstvideo-mode`，500ms 轮询 ✓）把几种驱动方式
+在同一进程里逐档量（每档 25 秒，号志来自日志计数器的真实增量 ✓）：
+
+| 档位 | `paintGL` | 窗口合成 `frameSwapped` | 结论 |
+|---|---|---|---|
+| baseline（handoff 每帧 queued 调用 repaint ✗） | **1.2/s** | 2.4/s | 复现旧现象（2~3fps）✓ |
+| blank（只清屏、不导入 dmabuf） | 0.8/s | 3.2/s | **与画什么无关** ⇒ 排除"GL 工作慢" ✓ |
+| **GUI 线程自己 25ms QTimer 驱动 repaint**（仍是空白清屏） | **33.6/s** | 39.2/s | ★ 驱动方式一换就通 ✓ |
+| **同上 + 真画（dmabuf ⇒ 外部纹理 ⇒ 着色器）** | **35.6/s** | 41.6/s | ★★ **画什么不影响** ⇒ 瓶颈是驱动 ✓ |
+| finish（真画 + `glFinish()`） | 1.6/s | 4.0/s | `glFinish` 耗时 **1.9~10.0ms** ⇒ GPU 本身不慢 ✓ |
+
+★ 顺带用 `EGL探针` 判死了 §7.6/§7.7 的那条"唯一修法"：
+`widget-winId= 0x14`、`window-winId= 0x1`（**不是**原生窗口句柄 ✓）；真去调
+`eglCreateWindowSurface` ⇒ **进程崩了一次**（`NRestarts=1` ✓，靠"模式文件先清空"的自愈才没崩成循环 ✓）
+⇒ **自建 EGLSurface 这条路关闭** ✗。
+
+### 7.8.3 本轮改了产品代码（`gst_video_widget.{h,cpp}`）
+
+1. `onHandoff()`：**删掉** `QMetaObject::invokeMethod(self, [self]{ repaint(); }, Qt::QueuedConnection)`
+   —— 那正是"每帧一个普通优先级事件" ✗；现在回调里**只做一次原子换手**（单槽、丢最旧 ✓）。
+2. 新增 **GUI 线程 25ms `QTimer`** ⇒ `tickPaint()`：`pumpBus()`（EOS/错误照常上报 ✓）＋ `repaint()`。
+3. `DSH_GST_PARTIAL=1` / `DSH_GST_REPAINT_ALWAYS=1` 两个 A/B 开关（默认关 ✓，用于继续分档 ✓）。
+4. 打点：每 80 拍（2 秒）一行 **心跳**（pipeline / playing / **有帧** / **已画帧** / 零拷贝 ✓），
+   每 120 次绘制一行 `绘制帧率 fps=` ✓ ⇒ **"已画帧"增量就是真实绘制帧率** ✓（比数 paint 次数可靠 ✓）。
+5. 删掉死路与脚手架：EGL 自建表面探针 ✗、`DSH_GST_SMALL`、模式文件机制。
+
+### 7.8.4 ⚠ 仍未达标（**如实记录，别当成成功** ✗）
+
+同一 60 秒窗口里同时量（板端，`DSH_GST_VIDEO=1`，GAME 模式 ✓）：
+
+```
+帧到达   handoff#1560 @03:51:49 → #1800 @03:51:58   ⇒ ≈ 27 帧/s ✓（源就是这么快 ✓）
+paintGL  「每 120 帧 35212 ms」                     ⇒ 3.4 次/s ✗
+真的画出 心跳 已画帧 113 → 138 / 10 秒              ⇒ 2.5 帧/s ✗（零拷贝帧数与它同步 ✓）
+心跳里「有帧= false」几乎是每一拍               ✗ ← 槽在 tick 时是空的
+CPU      agent_gui 24.8%（QNetworkAccessManager 1.6%、vqueue=0 ✓、无 eglCreateImageKHR 失败 ✓）
+```
+
+⇒ **结论（写给下一个会话）**：
+- **驱动方式这一层已经定案并改对** ✓（"起播瞬间"的心跳是**每 24ms 一次绘制** = ~40fps ✓）；
+- **但稳态只有 2.5~3.4 帧/s** ✗，而且"**有帧=false**"说明：**帧到达 27/s、真正被消费/画出的只有 2.5/s**
+  ⇒ 下一步要查的是**"谁把单槽里的帧拿走了 / 为什么 tick 时槽是空的"** ✗，而不是再动合成路径 ✗。
+  优先怀疑（下轮按序排除）：① `paintGL` 的**静默早退分支**（`!mem || !is_dmabuf_memory` ⇒ 返回前
+  已经把帧消费掉 ✗ —— 现在**没有打点**，先给它加计数 ✓）；② 是否**存在两个 `GstVideoWidget`
+  实例**（`initializeGL` 一次运行里被调用两次 ✓ 需确认是不是同一个对象 ✓）；
+  ③ `setSource()` 是否被反复调用（每次都会 `teardown()` 清槽 ✓，URL 带 `?v=` 会绕过 `stream == source_` 守卫 ✗）。
+
+### 7.8.5 板端状态与"怎么交回用户"（截至本轮结束）
+
+- 当前板端**已回滚成出厂原版** ✓ `agent_gui` = `c67fb08ea277cd389960d4762e3c0358`
+  （`agent_gui.bak-1007` 同 md5 ✓）、**删掉** `zz-gstvideo.conf` ⇒ 与用户开工前一致 ✓、可正常播放 ✓。
+- 本轮构建出来的二进制留在板上：`/data/assistant/gui-new/agent_gui`（见提交信息里的 md5 ✓）。
+  一键部署（**自愈式关卡**，失败自动回滚 ✓）：
+  ```sh
+  scp agent_gui rk3568:/data/assistant/gui-new/agent_gui && \
+  ssh rk3568 "sed -i 's/\r\$//' /data/assistant/board-deploy-probe.sh; sh /data/assistant/board-deploy-probe.sh"
+  ```
+  （关卡脚本本体 `/data/assistant/board-deploy-probe.sh`，回滚件 `agent_gui.bak-1007` ✓）
+- 本轮踩到并修掉的**部署坑** ✗：从 Windows `scp` 上去的文件在板上是 **0644** ✓，
+  `cp -f` 覆盖目标后**丢掉可执行位** ⇒ systemd 报 `203/EXEC Permission denied` ✓
+  （**关卡正确拦下并回滚了** ✓）⇒ **每次拷完必须 `chmod 755`** ✓（脚本里已加 ✓）。
+- 本轮用到的板端脚本（都在 `/data/assistant/`）：`board-final.sh`（客观验收：关卡＋布局＋自截图 ✓）、
+  `board-ab.sh`（三档 A/B ✓）、`board-rate.sh`（同一窗口量"到达 vs 绘制" ✓）、
+  `board-brightness.sh`（临时调背光 ✓ 只写 sysfs ✓ 重启即恢复 ✓）。
+- 客观验收里 **布局那一项是过的** ✓：`GstVideoWidget#GstVideoSurface size=808x300 visible=1`
+  （`--dump-layout` 取证 ✓）⇒ 面板位置/可见性没问题 ✓；差的就是**稳态绘制帧率** ✗。
+- 另外：`window.grab()` 的 `--screenshot` 那次**段错误**（退出码 139 ✗）⇒ 以后别用 `--screenshot`
+  来验零拷贝画面 ✗（用"心跳里的已画帧增量"✓ 或人工目视 ✓）。
+
+
 
 
 
