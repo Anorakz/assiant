@@ -516,8 +516,14 @@ class BilibiliApi(object):
         return plain
 
     def _plain_stream(self, bvid: str, cid: int) -> Optional[Dict[str, Any]]:
-        """单文件 mp4（`platform=html5`）。拿不到就返回 None（**不抛**）。"""
-        data = self._playurl_data(bvid, cid, qn=80, fnval=1, platform="html5")
+        """单文件 mp4（`platform=html5`）。拿不到就返回 None（**不抛**）。
+
+        ⚠ 板上实测（2026-10-06）: 720P 时 GUI 的帧搬运线程 `vqueue:src` 要 0.24~0.85 核，
+        且随后台负载剧烈波动 ⇒ 帧率偏低。像素量是帧搬运的唯一杠杆，所以这一路
+        **主动降到 480P**（`qn`: 16=360P / 32=480P / 64=720P / 80=1080P）。
+        取 32 是"画质还能看 + 像素量约降到 44%"的折中；要更流畅可再降到 16。
+        """
+        data = self._playurl_data(bvid, cid, qn=32, fnval=1, platform="html5")
         seg = _first_durl(data)
         if seg is None:
             return None
