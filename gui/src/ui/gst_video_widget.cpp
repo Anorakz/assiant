@@ -59,6 +59,14 @@ struct GstVideoWidget::Gst {
     void* (*eglGetProcAddress)(const char*) = nullptr;
     void* (*eglCreateImageKHR)(void*, void*, int, void*, const int*) = nullptr;
     unsigned (*eglDestroyImageKHR)(void*, void*) = nullptr;
+    //: ★★ 为"自建 EGL 表面 ＋ 主动交换"预置（2026-10-07，第 66 轮）：
+    //:   实测已定案：`paintGL` 内部仅 ~1ms ✓，但帧率只有 3.2fps ✗ ⇒ 瓶颈在 **Qt 的
+    //:   `QOpenGLWidget` 合成/交换路径** ✓ ⇒ 修法=**自己持有 EGLSurface 并主动 swap** ✓。
+    //:   这四个是那条路要用到的（先取好 ✓，本轮**不改变任何行为** ✓）。
+    void* (*eglCreateWindowSurface)(void*, void*, void*, const int*) = nullptr;
+    int (*eglMakeCurrent)(void*, void*, void*, void*) = nullptr;
+    int (*eglSwapBuffers)(void*, void*) = nullptr;
+    int (*eglDestroySurface)(void*, void*) = nullptr;
     void (*glEGLImageTargetTexture2DOES)(unsigned, void*) = nullptr;
 };
 
@@ -113,6 +121,13 @@ GstVideoWidget::Gst* GstVideoWidget::gst() {
     if (!t.eglGetProcAddress) { qWarning() << "[gstvideo] 取不到 eglGetProcAddress ⇒ 回退"; return nullptr; }
     t.eglCreateImageKHR = (decltype(t.eglCreateImageKHR))t.eglGetProcAddress("eglCreateImageKHR");
     t.eglDestroyImageKHR = (decltype(t.eglDestroyImageKHR))t.eglGetProcAddress("eglDestroyImageKHR");
+    //: ★ 为自建 EGL 表面预置（本轮不改变行为 ✓）：这些都从 **libEGL/mali 本体**取（不是 eglGetProcAddress ✓）
+    if (t.hEgl != nullptr) {
+        t.eglCreateWindowSurface = (decltype(t.eglCreateWindowSurface))dlsym(t.hEgl, "eglCreateWindowSurface");
+        t.eglMakeCurrent = (decltype(t.eglMakeCurrent))dlsym(t.hEgl, "eglMakeCurrent");
+        t.eglSwapBuffers = (decltype(t.eglSwapBuffers))dlsym(t.hEgl, "eglSwapBuffers");
+        t.eglDestroySurface = (decltype(t.eglDestroySurface))dlsym(t.hEgl, "eglDestroySurface");
+    }
     t.glEGLImageTargetTexture2DOES =
         (decltype(t.glEGLImageTargetTexture2DOES))t.eglGetProcAddress("glEGLImageTargetTexture2DOES");
     if (!t.eglCreateImageKHR || !t.glEGLImageTargetTexture2DOES) {
@@ -168,12 +183,11 @@ void GstVideoWidget::onHandoff(void*, void* buffer, void*, void* user) {
         // 上一帧还没被 GUI 消费 ⇒ 丢掉它（丢帧而不排队 ✓）
         g->buffer_unref(old);
     }
-    //: ★★★ 帧率修复（2026-10-07，板端实测 **≈1.3 fps** ✗，用户反馈"一卡一卡"✓）：
-    //:   原来写的是 `QMetaObject::invokeMethod(self, **"update"**)` ✗ ——
-    //:   ★ `QWidget::update()` **既不是槽、也不是 `Q_INVOKABLE`** ✗ ⇒ 按名字查不到 ⇒ **静默失败** ✓✓
-    //:   （所以帧只靠 Qt 自己的重绘时机偶尔出来 ⇒ ≈1.3 fps ✓）
-    //:   ⇒ 改成 **函子重载**（Qt ≥5.10 ✓，本板 5.15 ✓）：一定调用成功，且仍是 queued（跨线程安全 ✓）✓
-    QMetaObject::invokeMethod(self, [self]() { self->update(); }, Qt::QueuedConnection);
+    //: ★★★ 帧率修复尝试②（2026-10-07）：`update()` 只是**排队等重绘** ✗ —— 在 eglfs 下这个队列
+    //:   明显被合并/饿死（实测缩小视频区 fps 也不变 ⇒ 不是绘制成本 ✓）。改成 **`repaint()`** ✓：
+    //:   它是**同步**绘制 ✓（立刻走 `paintGL` ✓），完全绕开排队 ✓。仍在 GUI 线程执行 ✓
+    //:   （`QueuedConnection` 的函子 ✓）⇒ 线程安全 ✓。若这招奏效 ⇒ 无需自建 EGL 表面 ✓
+    QMetaObject::invokeMethod(self, [self]() { self->repaint(); }, Qt::QueuedConnection);
 }
 
 bool GstVideoWidget::buildPipeline(const QString& url) {
@@ -266,6 +280,13 @@ void GstVideoWidget::pumpBus() {
 
 // ---------------------------------------------------------------- 关键：paintGL 里的零拷贝导入
 void GstVideoWidget::paintGL() {
+    //: ★★★ 分段计时（2026-10-07，第 6 次实验）：五步实验已排除 5 个假设（见文档 §7）✗，
+    //:   只剩"每次 paint 有一个 **~300ms 的固定阻塞**"（与尺寸无关 ✓、不吃 CPU/GPU ✓）。
+    //:   ⇒ 直接**量整个 paintGL 的耗时** ✓（用 `clock()` ✓，C 标准、无需额外头文件 ✓），
+    //:     与"两次 paint 的间隔"对比 ⇒ 就能分清"**paintGL 内部慢**"还是"**paintGL 之外被限速**" ✓
+    const clock_t pt_t0 = clock();
+    static int pt_n = 0;
+    ++pt_n;
     pumpBus();
     QOpenGLFunctions* gl = QOpenGLContext::currentContext()->functions();
     Gst* g = gst();
@@ -309,22 +330,30 @@ void GstVideoWidget::paintGL() {
         EGL_DMA_BUF_PLANE1_FD_EXT_, fd, EGL_DMA_BUF_PLANE1_OFFSET_EXT_, uvOff, EGL_DMA_BUF_PLANE1_PITCH_EXT_, stride,
         EGL_NONE_
     };
-    //: ★★★ 帧率修复（2026-10-07 板端实测：**回调 20.5fps ✓ 但绘制仅 2.0fps** ✗）：
-    //:   原来**每帧**都 `eglCreateImageKHR` ＋ `glGenTextures` ＋ **`glDeleteTextures`** ✗
-    //:   ⇒ Mali 上这套 churn 每帧约 500ms ⇒ **正好 2fps** ✓✓（与实测完全吻合 ✓）
-    //:   ⇒ 现在：**纹理只建一次** ✓；每帧只换 EGLImage ✓，并把**上一帧的 image 先销毁** ✓。
-    static GLuint s_tex = 0;
-    static void* s_img = nullptr;
-    if (s_img != nullptr && g->eglDestroyImageKHR != nullptr) {
-        g->eglDestroyImageKHR(dpy, s_img);
-        s_img = nullptr;
+    //: ★★★ 帧率修复尝试③（2026-10-07）：实测已排除"排队/调度"（同步 `repaint()` 也只有 3.4fps ✗）
+    //:   且"开销与像素无关"（视频区缩到 320×180 fps 不变 ✗）⇒ 剩下的是**每帧固定开销、不吃 CPU/GPU** ✗
+    //:   ⇒ 头号嫌疑 = **每帧 `eglCreateImageKHR`（＋我加的 destroy 上一帧 ✗）** ⇒ 驱动侧同步/串行 ~280ms ✓
+    //:   ⇒ 对策 ✓：**按 fd 缓存 EGLImage** —— 板端实测 fd 只在少数值间轮换（51/54/63/67… ✓）
+    //:     同一个 fd 再来就**直接复用** ✓，不再 create/destroy ✗
+    struct FdImage { int fd; void* img; };
+    static FdImage s_cache[8] = {};
+    static int s_cacheN = 0;
+    static GLuint s_tex = 0;   // ★ 纹理仍然只建一次 ✓（上一步的优化保留 ✓）
+    void* s_img = nullptr;
+    for (int i = 0; i < s_cacheN; ++i) {
+        if (s_cache[i].fd == fd) { s_img = s_cache[i].img; break; }
     }
-    s_img = g->eglCreateImageKHR(dpy, nullptr, EGL_LINUX_DMA_BUF_EXT_, nullptr, attrs);
     if (s_img == nullptr) {
-        static bool warned = false;
-        if (!warned) { warned = true; qWarning() << "[gstvideo] eglCreateImageKHR 失败（plane1/尺寸）"; }
-        g->buffer_unref(buf);
-        gl->glClearColor(0.1f, 0, 0, 1); gl->glClear(GL_COLOR_BUFFER_BIT); return;
+        s_img = g->eglCreateImageKHR(dpy, nullptr, EGL_LINUX_DMA_BUF_EXT_, nullptr, attrs);
+        if (s_img == nullptr) {
+            static bool warned = false;
+            if (!warned) { warned = true; qWarning() << "[gstvideo] eglCreateImageKHR 失败（plane1/尺寸）"; }
+            g->buffer_unref(buf);
+            gl->glClearColor(0.1f, 0, 0, 1); gl->glClear(GL_COLOR_BUFFER_BIT); return;
+        }
+        if (s_cacheN < 8) { s_cache[s_cacheN].fd = fd; s_cache[s_cacheN].img = s_img; ++s_cacheN; }
+        static int made = 0;
+        if (++made <= 5) qInfo() << "[gstvideo] 新建 EGLImage（fd=" << fd << "，缓存 " << s_cacheN << " 个）";
     }
     if (s_tex == 0) {
         gl->glGenTextures(1, &s_tex);
@@ -373,6 +402,8 @@ void GstVideoWidget::paintGL() {
     gl->glDisableVertexAttribArray(ap);
     //: ★ 不再每帧 `glDeleteTextures` ✗ —— 纹理已缓存（`s_tex` ✓，见上面的说明）
     //:   （这正是实测"回调 20.5fps ✓／绘制 2.0fps ✗"的主因 ✓）
-    if (framesShown_ == 1 || framesShown_ % 60 == 0)
-        qInfo() << "[gstvideo] 帧" << framesShown_ << "零拷贝成功" << zeroCopyFrames_;
+    if (pt_n % 10 == 0)
+        qInfo() << "[gstvideo] paintGL#" << paintCount << " 内部耗时(ms)="
+                << (1000.0 * double(clock() - pt_t0) / double(CLOCKS_PER_SEC))
+                << "pending=" << pendingCount << "size=" << width() << "x" << height();
 }
