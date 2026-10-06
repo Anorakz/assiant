@@ -171,3 +171,65 @@ logs/dmabuf4-raw.log                             ★ 含 `✅ 零拷贝导入成
 - §2 里"接进产品后省多少"仍是**预期**，需接入后实测。
 - `rot0`（无旋转）对照**没跑完** ⇒ "90° 旋转值多少"仍未知。
 - SigLIP 的"**暂停才加载**"只做了一半（循环里已 gate，`_enter_state` 那条路**待补**）。
+
+---
+
+## 7. 追加：GUI 接入的实测（2026-10-07，提交 `2a905ea` + `8ff4af9`）
+
+> 结论一句话：**零拷贝链路在 GUI 里已经打通**（`vqueue:src` 归零、CPU 降约 7.6 倍、画面正确），
+> **但 `paintGL` 只有 3.7 fps（目标 ≥20）** ✗ —— 卡在 **Qt 的绘制调度**上，不在 dmabuf/EGL/解码。
+
+### 7.1 已实测达成的数字（板端，360P 流、GAME 模式、`DSH_GST_VIDEO=1`）
+
+| 指标 | 改动前 | 现在 |
+|---|---|---|
+| **`vqueue:src`** | 0.82–0.94 核（82%） | ★ **0**（`ps -eLo comm \| grep -c vqueue` ⇒ 0） |
+| **`agent_gui` 进程** | 112.7% | ★ **14.8%**（约 **7.6 倍**；最好一轮 4.6%） |
+| `mpp_dec_parser` | — | ~2% |
+| 帧**到达**（`handoff` 回调） | — | ★ **22~27 fps**（≈源 24fps ⇒ 上游/解码/取流全部正常） |
+| 帧**绘制**（`paintGL`） | — | ✗ **3.7 fps**（117 帧 / 32 秒）｜ 改前 2.0 fps |
+
+画面 ✅：几何正确（808×300）、**绿条消失**、着色器 `link=1`、无 `eglCreateImageKHR` 失败；
+稳定性 ✅：自愈关卡两次取样 `is-active`/`NRestarts` 一致（多次零重启）。
+
+### 7.2 ★★ 七个真因（全部经板端证据定位并修复）
+
+| # | 真因 | 证据/表现 | 修法 |
+|---|---|---|---|
+| 1 | **`VideoPanel` 自身没被 `show()`** | 心跳日志：父可见而 `gst_` 仍 `isVisible=false` | `relayoutStage` 里对整条链 `show()`；**必须 GAME 模式** |
+| 2 | **`gst_bus_pop_filtered` 返回类型写成 `int`** | 指针被**截断** ⇒ `gst_message_unref` 拿到非法地址 ⇒ **段错误/无限重启** | 声明为 `void*` |
+| 3 | **用了控件尺寸当缓冲区尺寸**（808×300） | 画面**噪点** | 用真实值 **640×360、stride=640** |
+| 4 | **dmabuf 两个函数取错了库** | `gst_is_dmabuf_memory`/`gst_dmabuf_memory_get_fd` 在 **`libgstallocators-1.0.so.0`**（不在 libgstreamer）⇒ 恒 `nullptr` ⇒ 一有帧就段错误 | 从正确的库 `dlopen` |
+| 5 | **`queue_` 跨线程无锁** | GStreamer 回调线程 enqueue × GUI 线程 dequeue ⇒ 内存破坏/崩 | **`QAtomicPointer` 单槽换手**（满则丢最旧） |
+| 6 | **`update()` 按名字 `invokeMethod` 静默失败** | `QWidget::update()` 不是槽/`Q_INVOKABLE` | 改**函子重载** `invokeMethod(self, [self]{ self->update(); }, QueuedConnection)` |
+| 7 | **NV12 的 UV 平面要 16 对齐高度** | 用 360 ⇒ UV 从 Y 平面取样 ⇒ **顶部绿条**（着色器有 Y 翻转 ⇒ 底部的错显示在顶部） | `H=368`、`uvOff = 640×368` |
+
+★ 另做了两处（**非瓶颈**的优化，已在库）：纹理**只建一次**、每帧只换 EGLImage 并销毁上一帧。
+
+### 7.3 ✗ 已排除的方向（都有实验证据，别再试）
+
+| 方向 | 结论 |
+|---|---|
+| `QOpenGLWindow` ＋ `QWidget::createWindowContainer` | ✗ **eglfs 上启动即崩**（5 次重启 ⇒ `failed`，`paintGL`/`handoff` 一条日志都没有） |
+| "每帧整窗 FBO 合成/blit 太贵" | ✗ **缩小视频区到 320×180，fps 完全不变**（`DSH_GST_SMALL=1` 实验）⇒ 与绘制成本无关 |
+| "回退管线独占事件循环" | ⚠ **只对了一部分**：去掉 `player_->setMedia`（走零拷贝时）后 **`vqueue` 归零** ✓、fps 2.0⇒3.7 ✓，但不是全部 |
+| "重绘风暴" | ✗ 那是真因 2/4 的**假象**（Qt 本来就会合并同一轮的多次 `update()`） |
+
+### 7.4 ⏳ 剩下的唯一方向
+
+**绕开 Qt 的绘制调度**：自建 EGL 表面 ＋ 主动 `eglSwapBuffers`（不经过 QtWidgets 的 FBO/合成）。
+可直接复用的资产：dmabuf fd、**plane0＋plane1**、GLES2 着色器（`link=1`）、原子单槽换手、
+UV 16 对齐 368、`DSH_GST_VIDEO` 开关、自愈式部署关卡（异常自动回滚 `agent_gui.bak-1007`）。
+
+### 7.5 工程环境（这次踩出来的，务必沿用）
+
+- 板上**没有 g++/cmake** ⇒ 一切编译走 **PC 侧交叉编译**：
+  WSL 里 `bash /mnt/e/rk3568/tmp/build-gui-br.sh`（增量、产物稳定；**先 grep `' error'` 再看尾部**）。
+  工具链 = buildroot sysroot（**Qt 5.15.11，与板端一致**）；`E:/rk3568/sysroot` 是 5.12.8 ⇒ **弃用**。
+- 板上**缺 `app` 插件**（`appsink` 不可用）⇒ 用 **`fakesink signal-handoffs=true`**。
+- 部署纪律：**确认 `build rc=0` 且产物存在才部署**；每次上板都带**两次取样 + 自动回滚**；
+  播放前先备队列（`bilibili search`/`video next`），**别先切 IDLE**（会清 bilibili 会话 ⇒ 取不到 token）。
+- ⚠ **教训**：原型阶段的 `✅ 零拷贝导入成纹理 OK` **只查了 `glGetError` ＋ 一个像素**，
+  **不足以当作成功判据** ✗ —— 平面描述给错也照样"导入成功"（就是后来的"由黑变花"）。
+  ★ **画面正确才是判据**。
+
