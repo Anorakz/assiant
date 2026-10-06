@@ -717,8 +717,16 @@ class Runtime:
                     "music_tag": self.music_tag if self.music else None,
                     "music_control": self.music_control if self.music else None,
                     # B 站（T11-5/T11-6）: 工具只会"把关键词交给队列"这一件事。
-                    # ⚠ **没开就是 None** —— 那个工具会自己跳过（与音乐同款）。
-                    "bilibili_search": self.bilibili_search if self.bilibili else None,
+                    # ⚠ **这里不做 None 判断**（与下面 `schedule_*` 同款）: `bilibili`
+                    #   组件是**后面几步**才起的，而 `services` 字典是在**这一刻**求值的，
+                    #   所以 `if self.bilibili` 在这里**恒为假** ⇒ 传进去的是 `None`
+                    #   ⇒ `agent/tools/bilibili.py` 判"缺依赖" ⇒ **`bilibili_search`
+                    #   这个工具整个不注册** ⇒ 模型**看不到**它 ⇒ **B 站视频一次也播不了**。
+                    #   （板端实测: `ToolRouter 就绪 (4 个工具)` ＋ 每次启动都打
+                    #    `tools: bilibili_search 需要 services['bilibili_search'] —— 跳过`。）
+                    #   `bilibili_search()` 自己会判 `self.bilibili is None` 并如实回话
+                    #   （"B 站视频还没开：把 enabled 打开"），所以绑方法即可。
+                    "bilibili_search": self.bilibili_search,
                     # 日程（T12-6）: 工具 `set_schedule` 的增/查/删三条入口。
                     # ⚠ 调度器是后面几步才起的, 所以这里**不做 None 判断**（绑的是方法,
                     #   调用时才读 self.scheduler）—— 否则"调度器还没起来"会让工具整个消失。

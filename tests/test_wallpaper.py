@@ -980,10 +980,21 @@ class TestRuntimeStartBuildsTheDeck(unittest.IsolatedAsyncioTestCase):
             names = [t["name"] for t in runtime.tools.list_tools()]
             # T8-5b: 音乐没开 -> next_music 自己跳过; T12-6 起 set_schedule 总是装上
             # （它只有"配置文件 + 调度器"这两个依赖, 没有配置开关）
-            self.assertEqual(names, ["back_to_desktop", "next_wallpaper", "set_schedule"],
-                             "back_to_desktop + next_wallpaper + set_schedule"
-                             "（音乐没开时没有 next_music）")
-            self.assertEqual(len(runtime.tools), 3)
+            # T16 起 `bilibili_search` **也总是装上** —— 它与 `schedule_*` 同款:
+            #   `services["bilibili_search"]` 绑的是**方法**（**不做 None 判断**），
+            #   因为 `bilibili` 组件是**后面几步**才起的, 而 `services` 字典在
+            #   `_start_tools` 那一刻就求值 ⇒ 早先的 `if self.bilibili else None`
+            #   在这里**恒为假** ⇒ 工具被 `agent/tools/bilibili.py` 判"缺依赖"整个跳过
+            #   ⇒ **模型看不到它** ⇒ **B 站视频一次也播不了**（板端实测:
+            #   `ToolRouter 就绪 (4 个工具)` ＋ 每次启动都打「跳过」那一行）。
+            #   方法自己会判 `self.bilibili is None` 并如实回话, 所以绑方法即可。
+            self.assertEqual(names,
+                             ["back_to_desktop", "bilibili_search", "next_wallpaper",
+                              "set_schedule"],
+                             "back_to_desktop + bilibili_search + next_wallpaper"
+                             " + set_schedule（音乐没开时没有 next_music;"
+                             " B 站没开时工具仍在、调用会如实回话）")
+            self.assertEqual(len(runtime.tools), 4)
         finally:
             await runtime.stop()
 
