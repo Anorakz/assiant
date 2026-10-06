@@ -264,4 +264,40 @@ UV 16 对齐 368、`DSH_GST_VIDEO` 开关、自愈式部署关卡（异常自动
 "与尺寸相关的绘制成本"（视频区 320×180 fps 不变）／`update()` 排队被合并（同步 `repaint()` 同样 ~3.4fps）／
 `glGenTextures`+`glDeleteTextures` churn／每帧 `eglCreateImageKHR`（fd 缓存后 create 降到 11 次/2 分钟，fps 不升反降）。
 
+### 7.7 ★ 开工清单（给下一个会话：一次做到 ≥20fps）
+
+**目标**：只在 `GstVideoWidget` 里加一条"自建 EGL 表面 ＋ 主动交换"的路（建议 `DSH_GST_EGL=1` 开关守卫，
+**默认不开**，确保不破坏现有可播路径）。绘制部分**原样复用** `paintGL` 里的逻辑。
+
+1. **创建表面**（在 `initializeGL()` 里，或首次绘制时）：取 `winId()`（`QWidget::winId()` ⇒ `EGLNativeWindowType`）
+   ⇒ `eglCreateWindowSurface(dpy, cfg, winId, (EGLint[]){EGL_NONE})`；`cfg` 用与当前上下文兼容的 `EGLConfig`
+   （可用 `QOpenGLContext::format()` 匹配，或直接沿用 Qt 已选的 config）。
+2. **每帧**：`eglMakeCurrent(dpy, surf, surf, ctx)` ⇒ 复用绘制（dmabuf ⇒ `eglCreateImageKHR`(plane0+**plane1**)
+   ⇒ `glEGLImageTargetTexture2DOES` ⇒ 着色器画全屏四边形）⇒ **`eglSwapBuffers(dpy, surf)`**。
+3. **驱动**：`QTimer` ~25~40ms ⇒ 帧率 = 我们主动交换的次数（目标 ≥20）。
+4. **收尾**：`eglDestroySurface`／销毁上下文（或进程退出时随 Qt 释放）。
+
+**验证闭环（务必按序）**：
+```bash
+# 1) 构建（WSL，增量；先看 error 再看尾部）
+wsl -e bash -lc "bash /mnt/e/rk3568/tmp/build-gui-br.sh 2>&1 | grep -a -e ' error' -e 'build rc' -e 'agent_gui ' | head -12; md5sum /home/anorak/build-gui-br/agent_gui"
+# 2) 部署前**必须**确认 md5 变了（否则会白测旧版本）；然后：停服务 ⇒ scp 二进制 ⇒ 起服务
+#    ★ 别忘了这一步：scp /mnt/e/rk3568/tmp/zz-gstvideo.conf（DSH_GST_VIDEO=1）到
+#      /etc/systemd/system/agent-gui.service.d/  ⇒ systemctl daemon-reload
+# 3) assistant mode GAME（必须！否则面板不可见）⇒ 先备队列（bilibili search / video next）再取流
+# 4) 自愈式关卡：两次取样 is-active 与 NRestarts，异常就在同一条命令里回滚 agent_gui.bak-1007
+# 5) 算 fps：journalctl -u agent-gui --since=-80s | grep -a 'paintGL#'（打点间隔 ×120）
+```
+
+**本次会话留下的现成物**：
+- 分支 `main`：`8ff4af9`（链路打通＋致命 bug 修复）、`fc5ee59`/`407bbe5`（本文档 §7）、
+  `0c18271`（**已预置** `eglCreateWindowSurface`/`eglMakeCurrent`/`eglSwapBuffers`/`eglDestroySurface`，
+  并含 fd 缓存 EGLImage、`repaint()`、`paintGL` 计时、`DSH_GST_SMALL` 实验开关）
+- 最新可部署二进制：`~/build-gui-br/agent_gui` = `dd1eef4b3c3643660b0bdc8cba5fde02`（**未上板**）
+- 板端：**出厂原版** `c67fb08ea277cd389960d4762e3c0358`（`agent_gui.bak-1007` 同 md5），
+  零拷贝开关未启用 ⇒ 可正常使用；部署新版本后**务必**保留回滚路径。
+- ★ 关键目标数据（必须复现）：`vqueue:src` = **0**；`agent_gui` CPU 从 112.7% 降到 ~15%；
+  `paintGL` 内部耗时 ~1ms；**唯一待攻**：paint 间隔 ~300ms（Qt 合成/交换路径）。
+
+
 
