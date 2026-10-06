@@ -100,12 +100,17 @@ VideoPanel::VideoPanel(QWidget* parent)
     video_->setObjectName(QStringLiteral("VideoSurface"));
     video_->setMinimumSize(0, 0);        // 尺寸交给 relayoutStage() 算
 
-    // ---- 主路径：dmabuf 零拷贝渲染（与 video_ 并列，同一几何；只显示当前生效的那个）----
-    //   ★ 起不来/中途失败 ⇒ usingGst_ = false ⇒ 全部走回 QMediaPlayer + video_（不黑屏 ✓）
+    // ---- 主路径：dmabuf 零拷贝渲染 ----
+    //   ★ 实测教训（见文档 §6）：挂 `screen_`(页1 里的控件) 上时，只要 QStackedWidget 停在
+    //   **占位页**，整条链就 invisible ⇒ `paintGL` 永远不被调用（CPU 收益有、画面没有 ✗）。
+    //   ⇒ 所以把它挂到 **VideoPanel 自己**身上（不在 stage_ 的页里 ✓），页切换与它无关 ✓。
     gst_ = new GstVideoWidget(screen_);
-    gst_->setObjectName(QStringLiteral("GstVideoSurface"));
-    gst_->setMinimumSize(0, 0);
-    gst_->hide();                        // 默认不显示；setSource 成功后由 relayoutStage 决定
+    //: ★ 改回直接作为 QWidget 子控件（`QOpenGLWindow` ＋ `createWindowContainer` 在 eglfs 上崩 ✗，已判死 ✓）
+    //:   `gstHost_` 仍保留为"当前生效的承载控件"指针 ✓ ⇒ relayoutStage 里统一作用于它 ✓
+    gstHost_ = gst_;
+    gstHost_->setObjectName(QStringLiteral("GstVideoSurface"));
+    gstHost_->setMinimumSize(0, 0);
+    gstHost_->hide();                    // 默认不显示；setSource 成功后由 relayoutStage 决定
     connect(gst_, &GstVideoWidget::playingChanged, this, [this](bool playing) {
         play_->setIcon(ui::tintedIcon(playing ? QStringLiteral("pause") : QStringLiteral("play"),
                                       QColor(theme::kOnAccent)));
@@ -118,7 +123,7 @@ VideoPanel::VideoPanel(QWidget* parent)
         if (usingGst_) {
             qWarning() << "[video] 零拷贝路径失败 ⇒ 回退 QMediaPlayer";
             usingGst_ = false;
-            gst_->hide();
+            gstHost_->hide();
             video_->show();
             if (!source_.isEmpty()) player_->setMedia(QMediaContent(QUrl(source_)));
             relayoutStage();
@@ -322,9 +327,52 @@ void VideoPanel::relayoutStage()
     video_->setGeometry(0, 0, w, videoH);
     // 零拷贝控件与 video_ **同一几何**；只显示当前生效的那条路（不黑屏 ✓）
     if (gst_ != nullptr) {
-        gst_->setGeometry(0, 0, w, videoH);
-        if (usingGst_) { gst_->show(); video_->hide(); }
-        else           { gst_->hide(); video_->show(); }
+        // `gst_` 的父是 VideoPanel 自己 ⇒ 几何要按 screen_ 在 VideoPanel 里的位置换算 ✓
+        // `gst_` 的父是 VideoPanel 自己 ⇒ 几何要按 screen_ 在 VideoPanel 里的位置换算 ✓
+        //: ★ 实测坑：布局完成前 `screen_->width()` 只有 **100** ✗ ⇒ 画面被压成 `100x1` 的细线 ✗
+        //:   ⇒ 所以只要 `screen_` 还没拿到合理尺寸，就**退回用 VideoPanel 自己的矩形** ✓✓
+        const QPoint origin = (screen_ != nullptr) ? screen_->mapTo(this, QPoint(0, 0)) : QPoint(0, 0);
+        //: ★★ 判别实验（2026-10-07，临时 ✓）：`DSH_GST_SMALL=1` ⇒ 把视频区缩到 320x180 ✓
+        //:   用来分清 `paintGL` 只有 2fps 的真因 ✓：
+        //:     ① 若缩小后 **fps 明显上升** ⇒ 是"每帧整窗 FBO 合成/blit 的成本" ✗
+        //:     ② 若 fps **不变** ⇒ 是"paint 事件投递被合并" ✗（那就要绕开 Qt 合成 ✓）
+        if (qEnvironmentVariableIsSet("DSH_GST_SMALL")) {
+            gstHost_->setGeometry(0, 0, 320, 180);
+            if (overlay_ != nullptr) overlay_->setGeometry(0, videoH, w, kOverlayHeight);
+            return;
+        }
+        const bool hostReady = (screen_ != nullptr && screen_->width() > 200 && screen_->height() > 200);
+        if (hostReady) {
+            gstHost_->setGeometry(origin.x(), origin.y(), w, videoH);
+        } else {
+            gstHost_->setGeometry(0, 0, width(), qMax(1, height() - kOverlayHeight));
+        }
+        if (usingGst_) {
+            //: ★★ 实测真因（心跳日志）：**父可见而 `gst_` 仍 isVisible=false** ✗
+            //:   ⇒ `VideoPanel` 自己被隐藏了（`stage_->setCurrentWidget` 只管面板**内部** ✗）
+            //:   ⇒ `gst_` 是 VideoPanel 的**直接子控件** ⇒ 父不 show，子永远不可见 ✗
+            //:   修法：把面板与整条链都显式 show 出来 ✓（幂等 ✓）
+            show();
+            if (videoPage_ != nullptr) videoPage_->show();
+            //:   原因是 `video_`(QVideoWidget = **原生窗口** ✗) 与普通控件同层时会把可视链弄断
+            //:   （video_panel.h 里早写过"原生窗口会盖住兄弟控件" ✓）。
+            //:   ⇒ 对策：把原生窗口**整个从父链摘掉**（不是只 hide ✗），并把可视链显式叫醒 ✓。
+            //: ★★ 教训（2026-10-07 板端事故）：这里**绝不能再 `video_->setParent(nullptr)`** ✗
+            //:   —— 摘掉原生窗口后，如果某个时序没挂回去，就会出现"**位置在涨、屏幕没画面**" ✗
+            //:   （`QMediaPlayer` 照常解码，但输出到了一个不可见的顶层窗口 ✓）。
+            //:   正确做法：**只 hide()，永不动父子关系** ✓；让 `gst_` 与 `video_` 并列即可 ✓。
+            video_->hide();
+            if (screen_ != nullptr) screen_->show();
+            if (videoPage_ != nullptr) videoPage_->show();
+            gstHost_->show();
+            gstHost_->raise();
+            gst_->update();
+        } else {
+            if (video_->parentWidget() != screen_) video_->setParent(screen_);   // 回退时挂回来 ✓
+            gstHost_->hide();
+            video_->setGeometry(0, 0, w, videoH);
+            video_->show();
+        }
     }
     overlay_->setGeometry(0, videoH, w, kOverlayHeight);
 }
@@ -345,7 +393,7 @@ void VideoPanel::setSource(const QString& fileOrUrl)
     eofSent_ = false;                 // 换了源 = 新的一条，eof 要能再报一次
     if (source_.isEmpty()) {
         usingGst_ = false;
-        if (gst_ != nullptr) { gst_->setSource(QString()); gst_->hide(); }
+        if (gst_ != nullptr) { gst_->setSource(QString()); gstHost_->hide(); }
         player_->stop();
         player_->setMedia(QMediaContent());
         placeholder_->setText(QStringLiteral("视频源未接入"));
@@ -353,8 +401,13 @@ void VideoPanel::setSource(const QString& fileOrUrl)
         return;
     }
     // ★ 主路径：本机 http 流走 dmabuf 零拷贝（起不来就回退到下面的 QMediaPlayer ✓）
-    if (gst_ != nullptr && (source_.startsWith(QLatin1String("http://"))
-                            || source_.startsWith(QLatin1String("https://")))) {
+    //   ⚠ 现状（2026-10-07）：零拷贝的 CPU 收益已实测（vqueue 0.82 核 ⇒ ≈0 ✓），但**画面还没画出来** ✗
+    //   —— 心跳日志证实父控件 `VideoScreen` 一直 invisible ✗（不是 GL 的问题 ✓）。
+    //   ⇒ 默认**关**（保证屏幕正常 ✗ 不回退体验 ✓），要用 `DSH_GST_VIDEO=1` 显式打开来继续调 ✓。
+    const bool gstEnabled = qEnvironmentVariableIsSet("DSH_GST_VIDEO")
+                            && qEnvironmentVariable("DSH_GST_VIDEO") != QLatin1String("0");
+    if (gstEnabled && gst_ != nullptr && (source_.startsWith(QLatin1String("http://"))
+                                          || source_.startsWith(QLatin1String("https://")))) {
         if (gst_->setSource(source_) && !gst_->lastOpFailed()) {
             usingGst_ = true;
             qInfo().noquote() << QStringLiteral("[video] 走零拷贝主路径（dmabuf ⇒ Qt EGL）");
@@ -376,8 +429,14 @@ void VideoPanel::setSource(const QString& fileOrUrl)
     qInfo().noquote() << QStringLiteral("[video] 换源(%1): %2")
                              .arg(isUrl ? QStringLiteral("URL") : QStringLiteral("本地文件"),
                                   media.toString());
-    // ⚠ 即便走零拷贝，也照样把源设给 player_：那是**回退路径**，失败时能立刻接上（不黑屏 ✓）
-    player_->setMedia(media);
+    //: ★★★ 2fps 疑似元凶（2026-10-07 判别实验：**缩小视频区 fps 完全不变** ✗ ⇒ 不是合成成本 ✗，
+    //:   而是 **Qt 事件循环被饿死** ✗）：走零拷贝时**绝不能再把源交给 `player_`** ✗ ——
+    //:   那会让 `playbin` 也起一条完整管线（连着同一个流 ✓、也在解码取流 ✓）⇒
+    //:   ① `vqueue` 多一个空转实例 ✗ ② **事件循环被拖住** ⇒ `update()` 排不进 ⇒ 2fps ✗✓
+    //:   ⇒ 只在"确实要回退"（`!usingGst_`）时才 `setMedia` ✓
+    if (!usingGst_) {
+        player_->setMedia(media);
+    }
     setStageVideo(true);
     relayoutStage();                  // 让 gst_/video_ 的显隐生效
     play();

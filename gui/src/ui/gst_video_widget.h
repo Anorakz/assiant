@@ -19,12 +19,18 @@
 // ============================================================================
 #pragma once
 
+#include <QAtomicPointer>
 #include <QByteArray>
 #include <QImage>
 #include <QOpenGLWidget>
 #include <QQueue>
 #include <QString>
 
+//: ★★ 承载方式（2026-10-07 两次板端实测后的结论）：
+//:   · `QOpenGLWidget` ⇒ 实测 `handoff` 24fps ✓ 但 `paintGL` **只有 2fps** ✗（Mali 后端 0.8% ⇒ 没在画 ✗）
+//:   · 试过 `QOpenGLWindow` ＋ `createWindowContainer` ⇒ ★ **本平台（eglfs）上直接崩** ✗
+//:     （5 次重启 ⇒ failed ✓，启动早期就崩 ✗）⇒ **该路线关闭** ✓，改回 `QOpenGLWidget` ✓
+//:   ⇒ 2fps 的真因仍需用"**缩小视频区域**"这个便宜实验来判别 ✓（blit 成本 ✗ vs 事件投递 ✗）
 class GstVideoWidget : public QOpenGLWidget {
     Q_OBJECT
 
@@ -78,7 +84,11 @@ private:
     QString source_;
     void* pipeline_ = nullptr;      ///< GstElement*
     void* sink_ = nullptr;          ///< GstElement*
-    QQueue<void*> queue_;           ///< 已 ref 的 GstBuffer*（上限 3）
+    QQueue<void*> queue_;           ///< ⚠ 已废弃：跨线程访问它曾是崩溃根因（见 pending_）
+    /// ★★ 线程安全的"单槽"换手（2026-10-07 事故修复）：
+    ///   GStreamer 的 handoff 线程只做 `fetchAndStoreOrdered`，GUI 线程在 paintGL 里也只用
+    ///   `fetchAndStoreOrdered(nullptr)` 取走 —— **没有任何一方"读-改-写"共享容器** ⇒ 无竞争 ✓
+    QAtomicPointer<void> pending_;
     bool playing_ = false;
     bool failed_ = false;
     bool eosSent_ = false;

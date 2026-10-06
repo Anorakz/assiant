@@ -143,8 +143,10 @@ private:
     QWidget* videoPage_ = nullptr;       ///< 画面页容器（地址栏/画面/预览栏）
     QWidget* screen_ = nullptr;          ///< 画面那块（视频 + 控制条两个兄弟）
     QVideoWidget* video_ = nullptr;
-    /// 主路径：dmabuf 零拷贝（与 video_ 并列，同一几何，只显示当前生效的那个）
+    /// 主路径：dmabuf 零拷贝（QOpenGLWindow ⇒ 用 createWindowContainer 装回版面 ✓）
     GstVideoWidget* gst_ = nullptr;
+    /// ★ 承载 `gst_` 的容器控件（`QOpenGLWindow` 不是 QWidget ✗ ⇒ 几何/显隐/raise 都作用于它 ✓）
+    QWidget* gstHost_ = nullptr;
     /// 当前生效的是不是零拷贝那条路（false = 已回退到 QMediaPlayer）
     bool usingGst_ = false;
     QWidget* overlay_ = nullptr;         ///< 内嵌控制条（浮在画面下沿）
