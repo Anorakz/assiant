@@ -233,3 +233,35 @@ UV 16 对齐 368、`DSH_GST_VIDEO` 开关、自愈式部署关卡（异常自动
   **不足以当作成功判据** ✗ —— 平面描述给错也照样"导入成功"（就是后来的"由黑变花"）。
   ★ **画面正确才是判据**。
 
+### 7.6 ★★★ 2fps/3.7fps 的**定案**（第 6 次实验，`clock()` 分段计时）
+
+在 `paintGL()` 首尾用 `clock()` 计时并每 10 帧打印，实测（板端，360P，GAME，零拷贝启用）：
+
+```
+[gstvideo] paintGL#140 内部耗时(ms)= 1.11  pending=1 size=100x1
+[gstvideo] paintGL#150 内部耗时(ms)= 0.735 pending=1
+[gstvideo] paintGL#160 内部耗时(ms)= 1.202 pending=1
+[gstvideo] paintGL#170 内部耗时(ms)= 1.424 pending=1
+[gstvideo] paintGL#180 内部耗时(ms)= 1.717 pending=1
+[gstvideo] paintGL#190 内部耗时(ms)= 0.681 pending=1
+[gstvideo] paintGL#200 内部耗时(ms)= 4.975 pending=1
+[gstvideo] paintGL#210 内部耗时(ms)= 0.659 pending=1
+```
+
+- 同期帧率仍是 **≈3.2 fps**（`#140`@03:18:51 ⇒ `#210`@03:19:13 = 70 帧/22 秒）
+- 同轮：**`vqueue` = 0** ✓、`agent_gui` CPU **14.8%**（原版 112.7% ⇒ **7.6 倍**）
+
+⇒ ★★★ **结论**：**`paintGL` 内部只要 ~1ms** ✓ ⇒ **那 ~300ms 的间隔发生在 `paintGL` 之外** ✗，
+即 **Qt 的 `QOpenGLWidget`「FBO ⇒ 窗口合成 ⇒ 交换」路径**。
+
+★ 这与前面所有旁证一致：CPU 只有 10~15% ✓、Mali 后端线程 ≤0.8% ✗ ⇒ **不是算力，是阻塞/等待**。
+
+**⇒ 因此修法唯一**：**绕开 `QOpenGLWidget` 的交换路径** —— 自建 `EGLSurface`
+（`QWidget::winId()` ⇒ `eglCreateWindowSurface` ⇒ `eglMakeCurrent` ⇒ 画 ⇒ **主动 `eglSwapBuffers`**），
+绘制部分可直接复用现有资产（dmabuf fd、**plane0＋plane1**、GLES2 着色器、原子单槽换手、UV 16 对齐 368）。
+
+★ 已用实验排除的方向（**别再试**）：`QOpenGLWindow`＋`createWindowContainer`（eglfs 崩）／
+"与尺寸相关的绘制成本"（视频区 320×180 fps 不变）／`update()` 排队被合并（同步 `repaint()` 同样 ~3.4fps）／
+`glGenTextures`+`glDeleteTextures` churn／每帧 `eglCreateImageKHR`（fd 缓存后 create 降到 11 次/2 分钟，fps 不升反降）。
+
+
