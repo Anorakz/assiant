@@ -463,6 +463,60 @@ ssh rk3568 "sh /data/assistant/board-deploy-probe.sh"                          #
 **这条探针的构建物**：`~/build-gui-br/agent_gui` = **`34f4c3ad309d830365f41f3c4ae1d609`**（1,223,096 字节 ✓）
 ＋ Windows 侧留档 `E:\rk3568\tmp\agent_gui.round69` ✓（**未上板** —— 板子这一轮被用户要求断电了 ✓）。
 
+### 7.8.7 第 72 轮（2026-10-08，仍然离线）：先用**已有日志**判掉一个分叉 ＋ 换一条不依赖"槽"的主驱动
+
+**(1) 用已经下载到 PC 的日志，离线判掉了"两个实例"这个分叉** ✓
+
+`--dump-layout` 会把**整棵控件树**打出来（第 68 轮 run A 的 `final-layout.log` ✓ 已回传 ✓），
+按名字数一遍就知道有几个实例：
+
+```
+GstVideoSurface = 1     VideoScreen = 1     VideoPage = 1     PageStack = 1
+LAYOUT   GstVideoWidget#GstVideoSurface size=808x300 min=-1x-1 hint=-1x-1 visible=1
+```
+
+⇒ **只有一个 `GstVideoWidget`** ✓ ⇒ §7.8.6 的 **(A) 分支（帧写进另一个实例）判死** ✓。
+（顺带：`probe-modes-journal.log` 里 `initializeGL` 出现 **4 次** ✓ ⇒ 这个 `QOpenGLWidget`
+的 GL 上下文在一次会话里被 Qt **重建过多次** ✓ —— 值得记着，但**不是**"槽为空"的解释 ✓。）
+⇒ 剩下的只能是 **(B)**：**单槽被谁悄悄取走/清掉** ✓（`paintGL` 的静默早退？`teardown()`？）
+⇒ 第 69 轮那套探针（`id=` / `存活实例=` / `回调=` / `存槽=` / `槽内旧帧=` / 三个早退计数 ✓）
+就是为这个准备的 ✓，下一次上板一次即可定案 ✓。
+
+**(2) 同时换一条**不依赖"心跳那一刻槽里恰好有帧"**的主驱动** ✓（这是本轮的产品改动）
+
+```cpp
+// onHandoff()：存完帧之后，投一个**低优先级**事件给 GUI 线程 ✓
+QCoreApplication::postEvent(self, new QEvent(QEvent::User), Qt::LowEventPriority);
+// GstVideoWidget::event()：收到就 repaint() ✓
+if (e->type() == QEvent::User) { ++evtN_; if (playing_) repaint(); return true; }
+```
+
+为什么这条更稳 ✓：
+- 它是 **`Qt::LowEventPriority`** ✓ ⇒ 与 Qt 自己的重绘请求**同一条低优先级通道** ✓，
+  **不会**重演"每帧一个普通事件 ⇒ 把 Qt 的重绘请求饿死"那个真因 ✗（§7.8.1 ✓）；
+- 由**到达**触发（每帧恰好一次 ✓，~24/s ✓）⇒ 不再要求"25ms 心跳采样时槽里还有帧" ✓
+  —— 上一轮恰恰是这个条件不成立（`有帧=false` 占 5/6 ✗）⇒ 心跳驱动的实际绘制只有 2.5~3.4fps ✗；
+- 25ms 心跳**保留**做兜底 ✓；两条通道都失效才会退回旧现象 ✓。
+
+**(3) 顺手修掉一个真 bug**：`sink_` 来自 `gst_bin_get_by_name`（**多一个引用** ✓），
+以前的 `teardown()` 只把指针置空、**从不 unref** ✗ ⇒ **每换一次源就泄漏一个 sink** ✓（已修 ✓）。
+
+**本轮构建物**：`~/build-gui-br/agent_gui` = **`89ac038cda9e880616e3bc4a6df5ff87`**（1,223,408 字节 ✓）
+＋ Windows 留档 `E:\rk3568\tmp\agent_gui.round72` ✓（**未上板**：板子仍是断电的原版 ✓ ✓）。
+
+**下一个上板会话（一次播放即可判定 ✓＋顺手就是验收 ✓）**：
+
+```sh
+scp E:/rk3568/tmp/agent_gui.round72 rk3568:/data/assistant/gui-new/agent_gui
+ssh rk3568 "sh /data/assistant/board-deploy-probe.sh"        # 自愈式关卡 ✓ 内含 chmod 755 ✓
+# 然后取一条流看 60 秒日志：
+#   ① `绘制帧率 fps=`（**这次才是真验收数字** ✓ 目标 ≥20）与心跳里的 `已画帧=` 增量
+#   ② `存活实例=`（应恒为 1 ✓）、`回调=` vs `存槽=`（应同步增长 ✓，不同步就是"没存进去"）
+#   ③ `事件=` 是否跟帧率同阶（~24/s ✓）；`早退(无帧/无内存/非dmabuf)=` 三档有没有在涨
+#   ⇒ 若 fps ≥20 且画面正确 ⇒ 直接收口（默认打开零拷贝 + 更新文档 + 提交 ✓）
+#   ⇒ 若仍低 ⇒ 按 ② 的三对数定位到"取走"那一环 ✓
+```
+
 
 
 

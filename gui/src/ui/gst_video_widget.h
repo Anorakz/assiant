@@ -81,6 +81,8 @@ protected:
     void initializeGL() override;
     void paintGL() override;
     void resizeGL(int w, int h) override;
+    /// ★ 收"帧到达"的低优先级事件（`QEvent::User` ⇒ 请求重绘 ✓，见 .cpp 的 onHandoff ✓）
+    bool event(QEvent* e) override;
 
 private:
     // ---- GStreamer 运行时（dlopen 出来的函数指针）----
@@ -113,11 +115,14 @@ private:
     //:   `static` 计数就会把两个实例的流量**混在一起** ⇒ 正好能掩盖这种矛盾 ✓。
     //:   ⇒ 现在每实例各数各的 ✓，并且每条日志都打 `this=` ✓ ⇒ 一次上板即可判定 ✓。
     int handoffN_ = 0;              ///< 本实例收到的 handoff 次数
+    int storeN_ = 0;                ///< 本实例**真正写进单槽**的次数（与 handoffN_ 对照 ✓）
+    int id_ = 0;                    ///< 实例编号（日志里比裸 `this` 好认 ✓）
     int tickN_ = 0;                 ///< 本实例的心跳次数
     int paintN_ = 0;                ///< 本实例的 paintGL 次数
     int retNoBuf_ = 0;              ///< 静默早退①：没有新帧（槽是空的）
     int retNoMem_ = 0;              ///< 静默早退②：peek_memory 为空
     int retNotDmabuf_ = 0;          ///< 静默早退③：不是 dmabuf 内存
+    int evtN_ = 0;                  ///< 收到的"帧到达"事件数（主驱动 ✓）
     QElapsedTimer fpsClk_;          ///< 帧率打点用（**每实例一份** ✓，不能用 static ✗）
     bool playing_ = false;
     bool failed_ = false;

@@ -2,8 +2,10 @@
 // **GUI 线程 25ms 心跳**驱动重绘；paintGL 里 eglCreateImageKHR(plane0+plane1) ⇒ 贴外部纹理 ⇒ 画。
 #include "gst_video_widget.h"
 
+#include <QCoreApplication>
 #include <QDebug>
 #include <QElapsedTimer>
+#include <QEvent>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
 #include <QTimer>
@@ -23,6 +25,11 @@ const int EGL_DMA_BUF_PLANE0_PITCH_EXT_ = 0x3274;
 const int EGL_DMA_BUF_PLANE1_FD_EXT_ = 0x3275, EGL_DMA_BUF_PLANE1_OFFSET_EXT_ = 0x3276;
 const int EGL_DMA_BUF_PLANE1_PITCH_EXT_ = 0x3277;
 const unsigned FOURCC_NV12_ = 0x3231564eu;  // 'NV12'
+
+//: ★★ 诊断（2026-10-08 第 72 轮）：**"到底有几个 `GstVideoWidget`"** 是上一条矛盾（帧到达 26/s
+//:   但单槽常空 ✓）的头号分叉 ✓。这两个计数器只在 GUI 线程动（构造/析构 ✓）⇒ 普通 int 就够 ✓。
+int g_liveWidgets = 0;   ///< 当前存活的实例数（>1 就说明"帧写进了另一个实例" ✓）
+int g_nextWidgetId = 0;  ///< 给每个实例编号（比裸 `this` 好认 ✓）
 }  // namespace
 
 // ---------------------------------------------------------------- 函数指针表
@@ -144,12 +151,18 @@ GstVideoWidget::GstVideoWidget(QWidget* parent) : QOpenGLWidget(parent) {
     tick_ = new QTimer(this);
     tick_->setInterval(25);
     connect(tick_, &QTimer::timeout, this, [this]() { tickPaint(); });
-    qInfo() << "[gstvideo] 控件建立 this=" << this
+    id_ = ++g_nextWidgetId;
+    ++g_liveWidgets;
+    qInfo() << "[gstvideo] 控件建立 id=" << id_ << "this=" << this
+            << "存活实例=" << g_liveWidgets
             << "（GUI 线程 25ms 心跳驱动 ✓；handoff 只做原子换手 ✓）";
 }
 GstVideoWidget::~GstVideoWidget() {
-    qInfo() << "[gstvideo] 控件析构 this=" << this
-            << "收到 handoff=" << handoffN_ << "心跳=" << tickN_ << "paintGL=" << paintN_;
+    --g_liveWidgets;
+    qInfo() << "[gstvideo] 控件析构 id=" << id_ << "this=" << this
+            << "存活实例=" << g_liveWidgets
+            << "收到 handoff=" << handoffN_ << "存槽=" << storeN_
+            << "心跳=" << tickN_ << "paintGL=" << paintN_;
     teardown();
 }
 
@@ -169,6 +182,9 @@ void GstVideoWidget::teardown() {
     }
     if (g && pipeline_) {
         g->element_set_state(pipeline_, GST_STATE_NULL);
+        //: ★ 修掉一个引用泄漏（第 72 轮顺手）：`sink_` 来自 `gst_bin_get_by_name` ⇒ **多一个引用** ✓，
+        //:   以前只把指针置空、从不 unref ✗ ⇒ 每换一次源就漏一个 sink ✓（管线仍能正常销毁 ✓）。
+        if (sink_ && g->object_unref) g->object_unref(sink_);
         if (g->object_unref) g->object_unref(pipeline_);
     }
     pipeline_ = sink_ = nullptr;
@@ -182,10 +198,13 @@ void GstVideoWidget::onHandoff(void*, void* buffer, void*, void* user) {
     Gst* g = gst();
     if (!self || !g || !buffer) return;
     //: ★ 到达速率打点（每 120 帧一行 ✓，用来对照"到达 vs 绘制"）
-    //:   ⚠ 计数**改成每实例**（原来是 `static` ✗ ⇒ 多实例时会把流量混起来 ✓），并打 `self=` ✓
+    //:   ⚠ 计数**改成每实例**（原来是 `static` ✗ ⇒ 多实例时会把流量混起来 ✓），并打 `id=`/`self=` ✓
+    ++self->handoffN_;    //: 回调被调用的次数 ✓
     void* old = self->pending_.fetchAndStoreOrdered(g->buffer_ref(buffer));
-    if (++self->handoffN_ % 120 == 0)
-        qInfo() << "[gstvideo] handoff#" << self->handoffN_ << "self=" << self
+    ++self->storeN_;      //: ★ 真正"写进单槽"的次数（与回调次数分开数 ⇒ 一眼看出"存没存进去"✓）
+    if (self->storeN_ % 120 == 0)
+        qInfo() << "[gstvideo] handoff#" << self->handoffN_ << "存槽=" << self->storeN_
+                << "id=" << self->id_ << "self=" << self << "存活实例=" << g_liveWidgets
                 << "槽内旧帧=" << (old != nullptr)
                 << "（回调线程到达打点 ✓）";
     //: ★★★ 崩溃修复（2026-10-07）：**绝不在这里碰 `queue_`** ✗ ——
@@ -193,6 +212,14 @@ void GstVideoWidget::onHandoff(void*, void* buffer, void*, void* user) {
     //:   现在只做**一次原子换手** ✓：把新帧放进单槽，把**旧的**（若还没被消费）取回来 unref 掉 ✓
     //:   ⇒ 语义 = **丢最旧** ✓（延迟最小 ✓，不会积压 ✓）。
     if (old != nullptr) g->buffer_unref(old);
+    //: ★★★ 第 72 轮设计改法：**帧一到就投一个"低优先级"事件**给 GUI 线程 ✓ ——
+    //:   ① `Qt::LowEventPriority` ⇒ 它跟 Qt 自己的重绘请求**同一条低优先级通道** ✓，
+    //:      **不会**像过去那样把 Qt 的重绘请求饿死 ✗（§7.8.1 的真因 ✓）；
+    //:   ② 由"到达"触发 ⇒ 不再依赖"25ms 心跳那一刻槽里恰好有帧"这个不确定条件 ✓
+    //:      （上一轮就是这个条件不成立 ⇒ 心跳驱动的 grep 只有 2.5~3.4fps ✗）；
+    //:   ③ 每帧只投一个 ⇒ 事件量与帧率同阶（~24/s ✓），不是"每帧一个普通事件"那种洪水 ✓。
+    //:   ④ 心跳（25ms）**保留**当兜底 ✓（万一事件通道被别的低优先级事件挤住 ✓）。
+    QCoreApplication::postEvent(self, new QEvent(QEvent::User), Qt::LowEventPriority);
     //: ★★★ 帧率修复（2026-10-08）：**这里过去还会 `invokeMethod(self, [self]{ repaint(); },
     //:   Qt::QueuedConnection)`** ✗ —— 那正是"每帧一个普通优先级事件"的来源 ✓，
     //:   它把 Qt 的低优先级重绘请求**饿死**了 ✗（详见 .h 顶部与文档 §7.8 ✓）。
@@ -258,17 +285,18 @@ void GstVideoWidget::resizeGL(int, int) {
     drewOnce_ = false;
 }
 
-//: ★ 25ms 心跳（GUI 线程）：**唯一**的重绘驱动 ✓（见 .h 顶部的定案 ✓）
+//: ★ 25ms 心跳（GUI 线程）：兜底的重绘驱动 ✓（主驱动是"帧到达投的低优先级事件" ✓，见 onHandoff ✓）
 void GstVideoWidget::tickPaint() {
     ++tickN_;
     //: ★ 诊断（每 2 秒一行，80×25ms ✓）：一眼看出**定时器有没有在跑**、门条件卡在哪 ✓
     //:   带上 `this=` ⇒ 多实例时不会看串 ✓
     if (tickN_ % 80 == 0) {
-        qInfo() << "[gstvideo] 心跳#" << tickN_ << "this=" << this
+        qInfo() << "[gstvideo] 心跳#" << tickN_ << "id=" << id_ << "this=" << this
+                << "存活实例=" << g_liveWidgets
                 << "pipeline=" << (pipeline_ != nullptr)
                 << "playing=" << playing_ << "有帧=" << (pending_.loadAcquire() != nullptr)
                 << "已画帧=" << framesShown_ << "零拷贝=" << zeroCopyFrames_
-                << "paintGL=" << paintN_
+                << "paintGL=" << paintN_ << "回调=" << handoffN_ << "存槽=" << storeN_ << "事件=" << evtN_
                 << "早退(无帧/无内存/非dmabuf)=" << retNoBuf_ << "/" << retNoMem_ << "/" << retNotDmabuf_
                 << "alwaysRepaint=" << alwaysRepaint_;
     }
@@ -277,6 +305,16 @@ void GstVideoWidget::tickPaint() {
     if (!playing_) return;
     if (!alwaysRepaint_ && pending_.loadAcquire() == nullptr) return;  // 没新帧 ⇒ 不重画 ✓
     repaint();
+}
+
+//: ★ 帧到达事件（低优先级 ✓）：只做一件事 —— 立刻请求一次重绘 ✓
+bool GstVideoWidget::event(QEvent* e) {
+    if (e->type() == QEvent::User) {
+        ++evtN_;
+        if (playing_) repaint();
+        return true;
+    }
+    return QOpenGLWidget::event(e);
 }
 
 // ---------------------------------------------------------------- 查询
@@ -448,14 +486,14 @@ void GstVideoWidget::paintGL() {
     //:   算出 `fps=5000.0` 这种假值 ✗。现在**只在 120 的整数倍打点** ✓ ⇒ 分子分母都是真实的 ✓。
     const int kEvery = 120;
     if (paintN_ <= 3)
-        qInfo() << "[gstvideo] 首次绘制 this=" << this << "paintGL=" << paintN_
+        qInfo() << "[gstvideo] 首次绘制 id=" << id_ << "this=" << this << "paintGL=" << paintN_
                 << "size=" << width() << "x" << height();
     if (paintN_ % kEvery == 0) {
         if (!fpsClk_.isValid()) fpsClk_.start();
         const qint64 el = fpsClk_.restart();
         const double fps = (el > 0) ? (1000.0 * kEvery / double(el)) : 0.0;
         qInfo() << "[gstvideo] 绘制帧率 fps=" << QString::number(fps, 'f', 1)
-                << "（每" << kEvery << "次绘制 " << el << "ms）this=" << this
+                << "（每" << kEvery << "次绘制 " << el << "ms）id=" << id_ << "存活实例=" << g_liveWidgets
                 << "内部耗时(ms)="
                 << QString::number(1000.0 * double(clock() - pt_t0) / double(CLOCKS_PER_SEC), 'f', 2)
                 << "零拷贝帧=" << zeroCopyFrames_ << "pending=" << pendingCount
