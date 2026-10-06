@@ -30,6 +30,16 @@ const unsigned FOURCC_NV12_ = 0x3231564eu;  // 'NV12'
 //:   但单槽常空 ✓）的头号分叉 ✓。这两个计数器只在 GUI 线程动（构造/析构 ✓）⇒ 普通 int 就够 ✓。
 int g_liveWidgets = 0;   ///< 当前存活的实例数（>1 就说明"帧写进了另一个实例" ✓）
 int g_nextWidgetId = 0;  ///< 给每个实例编号（比裸 `this` 好认 ✓）
+
+//: ★ 帧到达事件的自定义类型 ✓ —— **不要用裸 `QEvent::User`** ✗（那是"用户事件"的基址，
+//:   别的库/别的代码也可能往控件上投同号事件 ⇒ 撞车 ✗）。用 `User + 77` 明确归属 ✓。
+const int kFrameEventType = QEvent::User + 77;
+
+/// 单调毫秒（诊断用 ✓；可被 handoff 线程调用 ⇒ C++11 的静态初始化是线程安全的 ✓）
+qint64 monoMs() {
+    static QElapsedTimer t = []() { QElapsedTimer e; e.start(); return e; }();
+    return t.elapsed();
+}
 }  // namespace
 
 // ---------------------------------------------------------------- 函数指针表
@@ -200,6 +210,16 @@ void GstVideoWidget::onHandoff(void*, void* buffer, void*, void* user) {
     //: ★ 到达速率打点（每 120 帧一行 ✓，用来对照"到达 vs 绘制"）
     //:   ⚠ 计数**改成每实例**（原来是 `static` ✗ ⇒ 多实例时会把流量混起来 ✓），并打 `id=`/`self=` ✓
     ++self->handoffN_;    //: 回调被调用的次数 ✓
+    //: ★ 到达"形状"打点（第 73 轮）：窗口内计数 ＋ 两次到达之间的最大间隔 ✓
+    {
+        const qint64 now = monoMs();
+        if (self->lastArriveMs_ != 0) {
+            const qint64 gap = now - self->lastArriveMs_;
+            if (gap > self->maxGapMs_) self->maxGapMs_ = gap;
+        }
+        self->lastArriveMs_ = now;
+        ++self->winArrivals_;
+    }
     void* old = self->pending_.fetchAndStoreOrdered(g->buffer_ref(buffer));
     ++self->storeN_;      //: ★ 真正"写进单槽"的次数（与回调次数分开数 ⇒ 一眼看出"存没存进去"✓）
     if (self->storeN_ % 120 == 0)
@@ -219,7 +239,8 @@ void GstVideoWidget::onHandoff(void*, void* buffer, void*, void* user) {
     //:      （上一轮就是这个条件不成立 ⇒ 心跳驱动的 grep 只有 2.5~3.4fps ✗）；
     //:   ③ 每帧只投一个 ⇒ 事件量与帧率同阶（~24/s ✓），不是"每帧一个普通事件"那种洪水 ✓。
     //:   ④ 心跳（25ms）**保留**当兜底 ✓（万一事件通道被别的低优先级事件挤住 ✓）。
-    QCoreApplication::postEvent(self, new QEvent(QEvent::User), Qt::LowEventPriority);
+    QCoreApplication::postEvent(self, new QEvent(static_cast<QEvent::Type>(kFrameEventType)),
+                                Qt::LowEventPriority);
     //: ★★★ 帧率修复（2026-10-08）：**这里过去还会 `invokeMethod(self, [self]{ repaint(); },
     //:   Qt::QueuedConnection)`** ✗ —— 那正是"每帧一个普通优先级事件"的来源 ✓，
     //:   它把 Qt 的低优先级重绘请求**饿死**了 ✗（详见 .h 顶部与文档 §7.8 ✓）。
@@ -298,7 +319,11 @@ void GstVideoWidget::tickPaint() {
                 << "已画帧=" << framesShown_ << "零拷贝=" << zeroCopyFrames_
                 << "paintGL=" << paintN_ << "回调=" << handoffN_ << "存槽=" << storeN_ << "事件=" << evtN_
                 << "早退(无帧/无内存/非dmabuf)=" << retNoBuf_ << "/" << retNoMem_ << "/" << retNotDmabuf_
+                << "窗口到达=" << winArrivals_ << "最大到达间隔(ms)=" << maxGapMs_
+                << "距上次到达(ms)=" << (lastArriveMs_ ? (monoMs() - lastArriveMs_) : -1)
                 << "alwaysRepaint=" << alwaysRepaint_;
+        winArrivals_ = 0;    // 窗口滚动 ✓（handoff 线程同时在写 ⇒ 诊断用，允许良性竞争 ✓）
+        maxGapMs_ = 0;
     }
     if (pipeline_ == nullptr) return;
     pumpBus();                                        // EOS/错误照常上报 ✓（与有没有新帧无关 ✓）
@@ -309,7 +334,7 @@ void GstVideoWidget::tickPaint() {
 
 //: ★ 帧到达事件（低优先级 ✓）：只做一件事 —— 立刻请求一次重绘 ✓
 bool GstVideoWidget::event(QEvent* e) {
-    if (e->type() == QEvent::User) {
+    if (e->type() == kFrameEventType) {
         ++evtN_;
         if (playing_) repaint();
         return true;

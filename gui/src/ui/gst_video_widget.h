@@ -123,6 +123,11 @@ private:
     int retNoMem_ = 0;              ///< 静默早退②：peek_memory 为空
     int retNotDmabuf_ = 0;          ///< 静默早退③：不是 dmabuf 内存
     int evtN_ = 0;                  ///< 收到的"帧到达"事件数（主驱动 ✓）
+    //: ★ 诊断（第 73 轮）：**到达的"形状"** ✓ —— "平均 26/s" 完全可能掩盖"一阵一阵" ✗，
+    //:   而"一阵一阵"正好能解释"心跳采样时槽是空的" ✓（bursty 到达 + 采样 = 大多采到空档 ✓）。
+    int winArrivals_ = 0;           ///< 本窗口（两次心跳之间）的到达数
+    qint64 lastArriveMs_ = 0;       ///< 上一次到达的单调毫秒（诊断用，允许良性竞争 ✓）
+    qint64 maxGapMs_ = 0;           ///< 本窗口内"两次到达之间"的最大间隔
     QElapsedTimer fpsClk_;          ///< 帧率打点用（**每实例一份** ✓，不能用 static ✗）
     bool playing_ = false;
     bool failed_ = false;
