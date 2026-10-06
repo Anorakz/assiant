@@ -24,6 +24,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QVideoWidget>
+#include "gst_video_widget.h"   // dmabuf 零拷贝主路径（失败回退 QMediaPlayer ✓）
 
 #include <functional>
 
@@ -98,6 +99,31 @@ VideoPanel::VideoPanel(QWidget* parent)
     video_ = new QVideoWidget(screen_);
     video_->setObjectName(QStringLiteral("VideoSurface"));
     video_->setMinimumSize(0, 0);        // 尺寸交给 relayoutStage() 算
+
+    // ---- 主路径：dmabuf 零拷贝渲染（与 video_ 并列，同一几何；只显示当前生效的那个）----
+    //   ★ 起不来/中途失败 ⇒ usingGst_ = false ⇒ 全部走回 QMediaPlayer + video_（不黑屏 ✓）
+    gst_ = new GstVideoWidget(screen_);
+    gst_->setObjectName(QStringLiteral("GstVideoSurface"));
+    gst_->setMinimumSize(0, 0);
+    gst_->hide();                        // 默认不显示；setSource 成功后由 relayoutStage 决定
+    connect(gst_, &GstVideoWidget::playingChanged, this, [this](bool playing) {
+        play_->setIcon(ui::tintedIcon(playing ? QStringLiteral("pause") : QStringLiteral("play"),
+                                      QColor(theme::kOnAccent)));
+        play_->setText(QString());
+        emit playingChanged(playing);
+    });
+    connect(gst_, &GstVideoWidget::endOfMedia, this, [this]() { notifyEndOfMedia(); });
+    connect(gst_, &GstVideoWidget::failedOver, this, [this]() {
+        // 零拷贝这条路失败 ⇒ 回退（若当前正用它）
+        if (usingGst_) {
+            qWarning() << "[video] 零拷贝路径失败 ⇒ 回退 QMediaPlayer";
+            usingGst_ = false;
+            gst_->hide();
+            video_->show();
+            if (!source_.isEmpty()) player_->setMedia(QMediaContent(QUrl(source_)));
+            relayoutStage();
+        }
+    });
 
     overlay_ = new QWidget(screen_);
     overlay_->setObjectName(QStringLiteral("VideoOverlay"));
@@ -294,6 +320,12 @@ void VideoPanel::relayoutStage()
     const int h = host->height();
     const int videoH = qMax(1, h - kOverlayHeight);
     video_->setGeometry(0, 0, w, videoH);
+    // 零拷贝控件与 video_ **同一几何**；只显示当前生效的那条路（不黑屏 ✓）
+    if (gst_ != nullptr) {
+        gst_->setGeometry(0, 0, w, videoH);
+        if (usingGst_) { gst_->show(); video_->hide(); }
+        else           { gst_->hide(); video_->show(); }
+    }
     overlay_->setGeometry(0, videoH, w, kOverlayHeight);
 }
 
@@ -312,11 +344,26 @@ void VideoPanel::setSource(const QString& fileOrUrl)
     noteText_.clear();
     eofSent_ = false;                 // 换了源 = 新的一条，eof 要能再报一次
     if (source_.isEmpty()) {
+        usingGst_ = false;
+        if (gst_ != nullptr) { gst_->setSource(QString()); gst_->hide(); }
         player_->stop();
         player_->setMedia(QMediaContent());
         placeholder_->setText(QStringLiteral("视频源未接入"));
         setStageVideo(false);
         return;
+    }
+    // ★ 主路径：本机 http 流走 dmabuf 零拷贝（起不来就回退到下面的 QMediaPlayer ✓）
+    if (gst_ != nullptr && (source_.startsWith(QLatin1String("http://"))
+                            || source_.startsWith(QLatin1String("https://")))) {
+        if (gst_->setSource(source_) && !gst_->lastOpFailed()) {
+            usingGst_ = true;
+            qInfo().noquote() << QStringLiteral("[video] 走零拷贝主路径（dmabuf ⇒ Qt EGL）");
+        } else {
+            usingGst_ = false;
+            qWarning().noquote() << QStringLiteral("[video] 零拷贝起不来 ⇒ 回退 QMediaPlayer");
+        }
+    } else {
+        usingGst_ = false;            // 本地文件（--video 验收）仍走 QMediaPlayer ✓
     }
     // T11-10：Agent 现在给的是**本机 http URL**（内存窗口 + chunked 边下边喂；板端实测
     //   `playbin` 对"不可 seek 的文件/FIFO"起不来，http 才行）。本地文件（`--video` 验收）
@@ -329,20 +376,31 @@ void VideoPanel::setSource(const QString& fileOrUrl)
     qInfo().noquote() << QStringLiteral("[video] 换源(%1): %2")
                              .arg(isUrl ? QStringLiteral("URL") : QStringLiteral("本地文件"),
                                   media.toString());
+    // ⚠ 即便走零拷贝，也照样把源设给 player_：那是**回退路径**，失败时能立刻接上（不黑屏 ✓）
     player_->setMedia(media);
     setStageVideo(true);
+    relayoutStage();                  // 让 gst_/video_ 的显隐生效
     play();
 }
 
 void VideoPanel::play()
 {
-    if (!source_.isEmpty()) {
-        player_->play();
+    if (source_.isEmpty()) {
+        return;
     }
+    if (usingGst_ && gst_ != nullptr) {
+        gst_->play();
+        return;
+    }
+    player_->play();
 }
 
 void VideoPanel::pause()
 {
+    if (usingGst_ && gst_ != nullptr) {
+        gst_->pause();
+        return;
+    }
     player_->pause();
 }
 
@@ -350,6 +408,10 @@ void VideoPanel::togglePlayPause()
 {
     if (source_.isEmpty()) {
         return;                     // 没源没啥可切的
+    }
+    if (usingGst_ && gst_ != nullptr) {
+        gst_->togglePlayPause();
+        return;
     }
     if (player_->state() == QMediaPlayer::PlayingState) {
         player_->pause();
@@ -360,6 +422,9 @@ void VideoPanel::togglePlayPause()
 
 bool VideoPanel::isPlaying() const
 {
+    if (usingGst_ && gst_ != nullptr) {
+        return gst_->isPlaying();
+    }
     return player_->state() == QMediaPlayer::PlayingState;
 }
 
@@ -405,6 +470,11 @@ void VideoPanel::reportVideoState()
 {
     if (source_.isEmpty()) {
         return;                     // 没在放就不回报（别让 Agent 以为"0 秒在放"）
+    }
+    // 位置/时长从**当前生效的那条路**取（零拷贝走 gst_，回退走 player_）
+    if (usingGst_ && gst_ != nullptr) {
+        emit videoStateReported(gst_->positionMs(), gst_->durationMs(), gst_->isPlaying(), false);
+        return;
     }
     emit videoStateReported(player_->position(), player_->duration(), isPlaying(), false);
 }

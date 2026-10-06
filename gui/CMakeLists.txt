@@ -109,6 +109,11 @@ add_library(gui_widgets STATIC
     src/ui/bottom_bar.cpp
     src/ui/video_panel.h
     src/ui/video_panel.cpp
+    # dmabuf 零拷贝视频控件（QOpenGLWidget ＋ 运行时 dlopen GStreamer/EGL）
+    #   ★ 用 dlopen 而不是链接 GStreamer：gui_widgets 被 20 个宿主侧测试链接，
+    #     宿主上没有 GStreamer ⇒ 直接链接会让那些测试全部链接失败 ✗
+    src/ui/gst_video_widget.h
+    src/ui/gst_video_widget.cpp
     src/ui/bilibili_preview.h
     src/ui/bilibili_preview.cpp
     src/ui/bilibili_cover.h
@@ -133,7 +138,9 @@ add_library(gui_widgets STATIC
 )
 target_include_directories(gui_widgets PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gui_widgets PUBLIC gui_services Qt5::Widgets Qt5::Multimedia Qt5::MultimediaWidgets
-                                      Qt5::QuickWidgets)   # T15-17 bug①：承载 InputPanel 的 QQuickWidget
+                                      Qt5::QuickWidgets ${CMAKE_DL_LIBS})
+#   ^ ${CMAKE_DL_LIBS}：gst_video_widget 用 dlopen 取 GStreamer/EGL（见那里的说明）；
+#     QOpenGLWidget/QOpenGLFunctions 分别在已链的 Qt5Widgets/Qt5Gui 里 ⇒ 不必再加 Qt5::OpenGL ✓
 
 # ------------------------------------------------------------------ 可执行 ---
 # 阶段 3: Qt5 Widgets 主窗口 (上区域通栏 + 左区域导航 + 页面栈)。

@@ -41,6 +41,7 @@ class QPushButton;
 class QStackedWidget;
 class QToolButton;
 class QVideoWidget;
+class GstVideoWidget;   ///< dmabuf 零拷贝渲染控件（主路径；失败回退 QMediaPlayer ✓）
 class BilibiliPreview;
 class CoverLoader;
 
@@ -142,6 +143,10 @@ private:
     QWidget* videoPage_ = nullptr;       ///< 画面页容器（地址栏/画面/预览栏）
     QWidget* screen_ = nullptr;          ///< 画面那块（视频 + 控制条两个兄弟）
     QVideoWidget* video_ = nullptr;
+    /// 主路径：dmabuf 零拷贝（与 video_ 并列，同一几何，只显示当前生效的那个）
+    GstVideoWidget* gst_ = nullptr;
+    /// 当前生效的是不是零拷贝那条路（false = 已回退到 QMediaPlayer）
+    bool usingGst_ = false;
     QWidget* overlay_ = nullptr;         ///< 内嵌控制条（浮在画面下沿）
     BilibiliPreview* preview_ = nullptr; ///< 预览栏 + 地址栏（T11-7）
     QMediaPlayer* player_ = nullptr;
