@@ -67,7 +67,9 @@ PY_MODULES = {
     "httpx2":    ("required", "prepare-openai.sh（openai 3.x 的 HTTP 客户端）", "openai 的运行时依赖"),
     "pydantic":  ("required", "prepare-openai.sh", "openai 的运行时依赖"),
     "jiter":     ("required", "prepare-openai.sh（aarch64 二进制轮子）", "openai 的运行时依赖"),
-    "tokenizers": ("optional", "镜像里没有（tokenizer.py 里懒加载）", "SigLIP 分词的可选后端"),
+    "tokenizers": ("required", "prepare-tokenizers.sh（PyPI 轮子，钉 0.20.3，--no-deps）",
+                   "★ 2026-10-07 改判：不是 optional ✗ —— moonlight 连上之后 study/认游戏那一路"
+                   "（SigLIP）直接报「缺少 tokenizers 库」⇒ 真帧喂不进 NPU ✗"),
     "cryptography": ("host", "只在 scripts/pair_analyze.py 用", "开发机分析工具"),
     "pytest":    ("host", "镜像里没有", "测试框架"),
     "pytest_asyncio": ("host", "镜像里没有", "测试框架"),
@@ -119,6 +121,7 @@ PY_IN_IMAGE = {
     "httpx2": "httpx2",
     "pydantic": "pydantic",
     "jiter": "jiter",
+    "tokenizers": "tokenizers",
 }
 
 
@@ -340,6 +343,10 @@ def chroot_smoke(target: Path, use_chroot: bool, verbose: bool = False) -> list:
             "/usr/bin/python3", "-c",
             "import openai, httpx2, pydantic, jiter;"
             "print('openai', openai.__version__, 'pydantic', pydantic.VERSION)"]),
+        #: ★ 2026-10-07（T15-2-10d）：tokenizers = study/认游戏（SigLIP）的必需后端 ✓
+        ("import tokenizers（SigLIP 分词）", [
+            "/usr/bin/python3", "-c",
+            "import tokenizers; print('tokenizers', tokenizers.__version__)"]),
         ("import rknnlite（NPU API）", [
             "/usr/bin/python3", "-c",
             "from rknnlite.api import RKNNLite; print('rknnlite ok', RKNNLite.__name__)"]),

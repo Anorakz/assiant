@@ -355,6 +355,18 @@ else
     exit 1
 fi
 
+# --- 3c) tokenizers（T15-2-10d，2026-10-07）----------------------------------
+#  moonlight 连上之后，study / 认游戏那一路报「SigLIP 加载失败: 缺少 tokenizers 库」✗
+#  （与 openai 同源：§5.6 记为 optional，但它挡的是一条真功能 ✓）
+if [ -x "$TOOLS/prepare-tokenizers.sh" ]; then
+    echo "== [assistant post-build] tokenizers"
+    bash "$TOOLS/prepare-tokenizers.sh" "$SDK" --target "$TARGET_DIR" \
+        || { echo "!! tokenizers 注入失败" >&2; exit 1; }
+else
+    echo "!! 找不到 $TOOLS/prepare-tokenizers.sh" >&2
+    exit 1
+fi
+
 # --- 4) payload：我们的 agent / GUI / native / 默认配置（T15-2-10b-5）---------
 #  这是"unit 文件早就指向、但一直没装"的那批东西（docs/image.md §5.9 的 F5）：
 #  缺了它 assistant.target 起得来、agent/gui 会一直重启（No module named agent）。

@@ -4,7 +4,7 @@
 > 它不是"设计稿"—— 每一条都要求能追到证据（命令、路径、数字、文件）。改这份文档 = 改镜像方案，
 > 所以每次改动都要说清"为什么"。
 >
-> 相关：[todo2.md](../todo2.md)（T15 任务顺序与验收口径）、[gui.md](gui.md) §1.1（无 X 形态）、
+> 相关：[镜像配方入口](../image/README.md)、[gui.md](gui.md) §1.1（无 X 形态）、
 > [deploy.md](deploy.md)（当前部署方式）、[bench.md](bench.md)（性能口径）。
 
 ---
@@ -1329,6 +1329,58 @@ SunshineError: 连接 192.168.137.1:47984 失败: [Errno 101] Network is unreach
 > 附带发现：`study` 那一路现在报 `game_watch: SigLIP 加载失败: 缺少 tokenizers 库` ✗
 > （镜像里 `tokenizers` 仍是 optional ✓，与 `openai` 那次同源 ✓）—— 想让「认游戏/学习监督」吃上真 moonlight 帧，
 > 得照 `prepare-openai.sh` 的套路把 `tokenizers==0.20.3` 也注入 ✓（还没做 ✗）。
+
+### 5.13.7 tokenizers 注入（T15-2-10d）＋ 一个**我自己造出来的坑**：别删 `.pyc` ✗
+
+**背景**：moonlight 连上之后，`study` / 认游戏那一路报
+`game_watch: SigLIP 加载失败: SiglipConfigError("缺少 tokenizers 库：No module named 'tokenizers'")` ✗ ——
+与 `openai` 同源（§5.6 记为 optional，但它挡的是**一条真功能** ✓）。
+
+**做法**（照 `prepare-openai.sh` 的套路，一个依赖一个脚本 ✓）：
+- `image/prepare-tokenizers.sh` ＋ `image/tokenizers-wheel.lock`（钉 `tokenizers==0.20.3`、`--no-deps` ✓；
+  轮子 `tokenizers-0.20.3-cp311-cp311-manylinux_2_17_aarch64…whl` = 2,892,476 B ✓ sha256 `ef820880…` ✓）
+- `post-build.sh` 新增 3c 步调用 ✓；`check-runtime-deps.py` 把 tokenizers **改判 required** ✓ ＋ chroot 真 `import` ✓
+- **判据（板上 ✓）**：进 GAME 后 agent 日志由「SigLIP 加载失败」变成 **「SigLIP 已加载（game 状态常驻）」** ✓✓
+
+**★ 坑（我造的 ✗）**：我在这两个注入脚本里各写了一段"清构建垃圾"：`find site-packages -name '*.pyc' -delete` ✗ ——
+这套镜像开着 **`BR2_PACKAGE_PYTHON3_PYC_ONLY=y`** ✓（buildroot 只留编译后的 `.pyc`、**删掉 `.py` 源码** ✓），
+也就是说 **`.pyc` 就是唯一副本** ✗。清掉之后：
+
+```
+import numpy  →  AttributeError: module 'numpy' has no attribute '__version__'  ✗
+                  （numpy / cv2 直接退化成**空命名空间包** ✓；chroot 冒烟当场红 3 条 ✓）
+```
+
+两条纪律 ✓：
+1. **任何往 site-packages 装东西的脚本，都不许删 `__pycache__` / `*.pyc`** ✗（两个脚本里那两行已删 ✓）。
+2. 一旦 `.pyc` 丢了 ⇒ **按 buildroot 的方式把对应包重装** ✓（删 `build/<pkg>-*` ＋ 删 target 里那几个目录 ＋ 重建 ✓）；
+   **`chroot` 冒烟是唯一能抓住它的检查** ✓（"在位"只看路径存在 ⇒ 空目录也能蒙过去 ✗）。
+   ⚠ 试过在 defconfig 里写 `# BR2_PACKAGE_PYTHON3_PYC_ONLY is not set`，**没生效** ✗
+   （整机 `.config` 仍是 `=y` ⇒ 被后面的片段/缺省压回来了 ✓，同 §5.2 的"最后一个赋值说了算" ✓）。
+
+**⚠ 比较法**：GUI 的 **md5 不是跨构建的身份判据** ✗ —— 两版 `agent_gui` 可以
+`.text/.rodata/.data/.data.rel.ro/.dynstr` **逐字节相同** ✓、只差 `.comment`（32 B 工具链串 ✓）
+⇒ md5 不同但功能一致 ✓。要比就比**段级哈希** ✓（本轮是直接解 ELF 段表比的 ✓）。
+
+**⚠ 仍未修的两个真缺口**（都跟 moonlight 有关，§5.13.6 也记了）：
+① `native` 只在 agent 启动时握手一次、失败**不重试** ✗ ⇒ 每次开机都要 `systemctl restart agent` 才有串流 ✓
+   （`agent.service` 里"只 `Wants` 不 `After` network-online"是**有意**的 ⇒ 修法应是 agent 内部退避重试 ✓）；
+② agent **只在状态变化时推 status** ✗ ⇒ moonlight 后来连上了也不补推 ⇒ **GUI 停在"重连中"** ✗
+   （`state_machine.is_connected()` 是懒查询 ✓）。临时办法：切一次模式逼它补推 ✓（`assistant mode GAME` ✓）。
+
+### 5.13.8 这一版（含 tokenizers）的板上最终验收
+
+```
+槽 = _a ✓（root=…54a9 = system_a）｜ GUI md5 = a986143f… ✓ ｜ weston 文件 0 ✓
+板端 import：tokenizers 0.20.3 ✓ numpy 1.25.0 ✓ cv2 4.9.0 ✓ openai 3.24.0 ✓
+SigLIP：进 GAME 后「SigLIP 已加载（game 状态常驻）」✓✓（注入前是「缺少 tokenizers 库」✗）
+moonlight：重启 agent 后 PairStatus=1 ✓ sessionUrl=rtspenc://192.168.137.1:48010 ✓
+           线程 VideoRecv/VideoDec/mpp_dec_parser/mpp_dec_hal/ReqIdrFrame ✓
+GUI：重连中 → 已连接（agent=已连接, 主机=已连接）✓
+镜像：rootfs 772,800,512 B / sha256 404d1d81e7cb9a7fce625f4716c35bc303f61feef970109cb092163ef4b2cd82 ✓
+      boot 54,307,328 B / sha256 953c6979ebd7e07c4df85b3e81a0dbf1826db11d346870eec128b13adcd43ac4 ✓
+      preflash-check：结论「通过」（在位缺 0、依赖缺 0、冒烟失败 0、payload 0/12）✓
+```
 
 **⚠ 还没做的：刷板**（`T15-2-11` 的正文 ✗）。这套 `update.img` 会**重排 eMMC 分区**
 （板上现有数据全丢 ✗，第一次还要 `mkfs.ext4` userdata ＋ 投放 4.9 GB 模型 ✓），

@@ -149,9 +149,11 @@ while read -r want_sum want_sz name; do
     unzip -o -q "$WHEELS/$name" -d "$SITE"
     echo "   + $name"
 done < "$LOCK"
-# 构建垃圾不进镜像：清掉随包带进来的 __pycache__ / *.pyc ✓（与 payload 同一条纪律 ✓）
-find "$SITE" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
-find "$SITE" -name '*.pyc' -delete 2>/dev/null || true
+# ⚠ **千万别清 `__pycache__` / `*.pyc`** ✗ —— 这套镜像开了 `BR2_PACKAGE_PYTHON3_PYC_ONLY=y` ✓，
+#    buildroot 只保留编译后的 `.pyc`、删掉 `.py` 源码 ⇔ **`.pyc` 就是唯一副本** ✗✓
+#    实测后果（2026-10-07 22:02 那次构建）：清了之后 numpy/cv2/openai/rknnlite 全退化成
+#    **空命名空间包** ⇒ `import numpy` 报 `module 'numpy' has no attribute '__version__'` ✗，
+#    chroot 冒烟当场红 3 条 ✓。原先这里那版"清构建垃圾"是错的 ✗，已删 ✓。
 
 mkdir -p "$STAMPDIR"
 printf '%s\n' "$LOCK_SUM" > "$STAMP"

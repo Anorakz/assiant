@@ -195,6 +195,9 @@ install_file image/build-llama.sh tools/assistant/build-llama.sh
 install_file image/prepare-rknnlite.sh tools/assistant/prepare-rknnlite.sh
 install_file image/prepare-openai.sh tools/assistant/prepare-openai.sh
 install_file image/openai-wheels.lock tools/assistant/openai-wheels.lock
+#: ★ 2026-10-07（T15-2-10d）：tokenizers —— moonlight 连上后暴露的同类缺口（SigLIP 缺它 ✗）
+install_file image/prepare-tokenizers.sh tools/assistant/prepare-tokenizers.sh
+install_file image/tokenizers-wheel.lock tools/assistant/tokenizers-wheel.lock
 install_file image/check-runtime-deps.py tools/assistant/check-runtime-deps.py
 install_file image/check-assistant-target.py tools/assistant/check-assistant-target.py
 # T15-2-10：两个检查器共用的"看哪棵 target 树"模块（imagelib.py），
