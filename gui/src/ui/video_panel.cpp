@@ -387,10 +387,17 @@ void VideoPanel::setSource(const QString& fileOrUrl)
     noteText_.clear();
     eofSent_ = false;                 // 换了源 = 新的一条，eof 要能再报一次
     if (source_.isEmpty()) {
+        const bool wasGst = usingGst_;
         usingGst_ = false;
         if (gst_ != nullptr) { gst_->setSource(QString()); gstHost_->hide(); }
-        player_->stop();
-        player_->setMedia(QMediaContent());
+        //: ★★ 第 78 轮（换流那一下的 SIGSEGV ✗）：走零拷贝时**根本不该碰 `QMediaPlayer`** ✓ ——
+        //:   它内部那条 GStreamer 管线（就是老路那条 `vqueue`）在"空源 ⇒ stop ⇒ setMedia(空)"
+        //:   的时候会被拆 ✗，而板端实测**恰恰是换流瞬间崩** ✓（换流 = 先清空源 ✓ 再给新的 ✓）。
+        //:   ⇒ 只有"确实在用老路"时才去 stop/清它 ✓（零拷贝模式下它本来就没媒体 ✓）。
+        if (!wasGst) {
+            player_->stop();
+            player_->setMedia(QMediaContent());
+        }
         placeholder_->setText(QStringLiteral("视频源未接入"));
         setStageVideo(false);
         return;

@@ -37,6 +37,7 @@
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QMutex>
 #include <QOpenGLWidget>
 #include <QQueue>
 #include <QString>
@@ -81,16 +82,14 @@ protected:
     void initializeGL() override;
     void paintGL() override;
     void resizeGL(int w, int h) override;
-    /// ★ 收"帧到达"的低优先级事件（`QEvent::User` ⇒ 请求重绘 ✓，见 .cpp 的 onHandoff ✓）
-    bool event(QEvent* e) override;
 
 private:
     // ---- GStreamer 运行时（dlopen 出来的函数指针）----
     struct Gst;                     ///< 函数指针表（定义在 .cpp）
     static Gst* gst();              ///< 懒加载；失败返回 nullptr
 
-    /// ★ 25ms 心跳：**GUI 线程**主动请求重绘（见上面"帧率定案"✓）。
-    ///   没新帧时**什么都不做** ✓ —— `PartialUpdate` 会把上一帧留在 FBO 里 ✓。
+    /// ★ 25ms 心跳：**GUI 线程**的唯一重绘驱动（第 75 轮实测：QTimer 里 repaint 是 1:1 ✓）。
+    ///   **无条件** repaint ✓；没新帧时 `paintGL` 直接返回 ✓（`PartialUpdate` 保住上一帧 ✓）。
     void tickPaint();
 
     void teardown();
@@ -102,13 +101,25 @@ private:
     QString source_;
     void* pipeline_ = nullptr;      ///< GstElement*
     void* sink_ = nullptr;          ///< GstElement*
-    QQueue<void*> queue_;           ///< ⚠ 已废弃：跨线程访问它曾是崩溃根因（见 pending_）
-    /// ★★ 线程安全的"单槽"换手（2026-10-07 事故修复）：
-    ///   GStreamer 的 handoff 线程只做 `fetchAndStoreOrdered`，GUI 线程在 paintGL 里也只用
-    ///   `fetchAndStoreOrdered(nullptr)` 取走 —— **没有任何一方"读-改-写"共享容器** ⇒ 无竞争 ✓
-    QAtomicPointer<void> pending_;
-    QTimer* tick_ = nullptr;        ///< 25ms 重绘心跳（只有它在驱动 paintGL ✓）
-    bool alwaysRepaint_ = false;    ///< A/B 诊断：`DSH_GST_REPAINT_ALWAYS=1` ⇒ 每个 tick 都重画
+    void* bus_ = nullptr;           ///< GstBus（**建管线时取一次 ✓、teardown 还回去 ✓** ——
+                                    ///< 以前每拍 `element_get_bus` 且从不 unref ⇒ 每拍泄漏 ⇒ 几分钟崩一次 ✗）
+    //: ★★ 帧缓冲（第 77 轮，**用户要求** ✓）：单槽"丢最旧"在到达一阵一阵时会让同一波里只剩一帧 ✗
+    //:   ⇒ 画帧间隔忽长忽短（用户看到的"速度不稳"✓）。换成**小队列**：
+    //:     · handoff 线程：入队；满了丢**最旧**（保延迟 ✓）并计数 ✓
+    //:     · GUI 线程：每个 25ms 拍子**按序**取一帧 ✓ ⇒ **画帧间隔稳定** ✓
+    //:     · 队列本身也是**背压** ✓（存满就让解码器等 ✓）
+    ///   `frameMutex_` 是跨线程访问它的唯一保护 ✓（上次崩溃就是"无锁共享容器"✗，别再犯 ✓）
+    QMutex frameMutex_;
+    QQueue<void*> frameQ_;
+    static const int kFrameQMax = 8;   ///< 缓冲深度（8 帧 ≈ 0.27 秒 @30fps ✓，够抹平波峰 ✓）
+    //: ★ 画帧间隔打点（用户要求"检查画帧间隔是否正确" ✓）
+    qint64 lastDrawMs_ = 0;
+    qint64 drawGapSumMs_ = 0;
+    qint64 drawGapMaxMs_ = 0;
+    int drawGapN_ = 0;
+    int dropN_ = 0;                 ///< 因"只取最新一帧"或缓冲满而丢掉的帧数 ✓（诊断）
+    qint64 lastPaintMs_ = 0;        ///< 上一拍重绘的时刻 ✓（固定 ~30ms 画帧节拍 ✓，防"倍速" ✓）
+    QTimer* tick_ = nullptr;        ///< 25ms 重绘心跳（**只有它**在驱动 paintGL ✓）
     //: ★★ 诊断（2026-10-08 第 69 轮）：计数器**必须是每实例的** ✗ ——
     //:   上一轮把它们写成 `static` ✓，而当时同时存在"帧到达 27/s"与"心跳里槽是空的"这对矛盾 ✓，
     //:   若进程里其实有**两个** `GstVideoWidget`（例如 GAME 模式重建过页面栈 ✓），
@@ -122,9 +133,9 @@ private:
     int retNoBuf_ = 0;              ///< 静默早退①：没有新帧（槽是空的）
     int retNoMem_ = 0;              ///< 静默早退②：peek_memory 为空
     int retNotDmabuf_ = 0;          ///< 静默早退③：不是 dmabuf 内存
-    int evtN_ = 0;                  ///< 收到的"帧到达"事件数（主驱动 ✓）
-    //: ★ 诊断（第 73 轮）：**到达的"形状"** ✓ —— "平均 26/s" 完全可能掩盖"一阵一阵" ✗，
-    //:   而"一阵一阵"正好能解释"心跳采样时槽是空的" ✓（bursty 到达 + 采样 = 大多采到空档 ✓）。
+    //: ★ 诊断（第 73 轮，**第 75 轮实测已证实**）：**到达的"形状"** ✓ —— "平均 26/s" 掩盖了
+    //:   "一阵一阵" ✗：板端实测 2 秒里来 56 帧、但**最大到达间隔 ≈1.25 秒** ✓✓
+    //:   ⇒ 这既解释了"心跳采样时槽常是空的"（采样落在空档 ✓），**也是"一卡一卡"的另一半原因** ✓。
     int winArrivals_ = 0;           ///< 本窗口（两次心跳之间）的到达数
     qint64 lastArriveMs_ = 0;       ///< 上一次到达的单调毫秒（诊断用，允许良性竞争 ✓）
     qint64 maxGapMs_ = 0;           ///< 本窗口内"两次到达之间"的最大间隔
