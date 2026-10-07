@@ -97,6 +97,11 @@ private:
     void teardown();
     bool buildPipeline(const QString& url);
     void pumpBus();                 ///< 处理 EOS/ERROR（在 paintGL 里顺带调）
+    /// ★★ 第 84 轮：**延迟重解**那些"加载期还是 NULL、等 EGL/GL 起来才有"的符号 ✓
+    ///   （板端实证：`eglGetCurrentDisplay` / `eglCreateImageKHR` / `glEGLImageTargetTexture2DOES`
+    ///    以及 `gst_element_get_static_pad` / `gst_memory_get_sizes` / `gst_element_get_state`
+    ///    在 `setSource` 那一刻全是 NULL ✗）。在 `initializeGL()` 里调一次 ✓。
+    void retryDeferredSymbols();
     static void onHandoff(void* fakesink, void* buffer, void* pad, void* user);
 
     QByteArray sourceBytes_;

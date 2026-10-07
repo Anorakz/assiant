@@ -595,7 +595,75 @@ ssh rk3568 "sh /data/assistant/board-deploy-probe.sh"     # 自愈式关卡（�
 
 ---
 
+## 7.10 ★★★ 第 84 轮：换流崩溃的**真正根因**（符号级实证）+ 收口
+
+### 7.10.1 根因：`gst_message_type` 在这个 GStreamer 构建里**没有导出** ✗
+
+```
+板端抓到（自包含 SIGSEGV 处理器 ✓ 写 gui.out ✓）：
+    si_addr = 0x0
+    出错指令 pc = **0x0**          ← 不是"读空指针"，是 **CPU 跳到 0 去执行** ✓
+    返回地址 lr = agent_gui(+0x7c14c)
+objdump 反汇编 `GstVideoWidget::pumpBus()` 的 +0x7c14c：
+    7c138: blr x3              ; g->bus_pop_filtered(bus, 3(EOS|ERROR), 0) ✓
+    7c140: cbz x0              ; 有消息才继续 ✓
+    7c144: ldr x1, [x20, #120] ; ★ g->message_type（结构里第 120 字节 ✓）
+    7c148: blr x1              ; ★★ **崩在这里**（x1 = 0 ⇒ 跳到 0 ✓✓）
+符号实证（sysroot 里 `nm -D`）：
+    gst_message_type        : **没有** ✗✗（这个构建根本没导出 ✓）
+    gst_message_parse_error : 有 ✓    gst_bus_pop_filtered : 有 ✓
+⇒ 因果链：`dlsym("gst_message_type")` 拿到 NULL ✗ ⇒ 那句**没判空** ✗ ⇒
+   总线里一有 **EOS/ERROR** 消息就 `blr 0` ⇒ 崩 ✓✓
+⇒ 而 EOS/ERROR **恰好只在"换流"时出现** ✓✓ ⇒ **"切视频偶发重启"的真正根因** ✓✓✓
+   （A/B 也印证：原版 QMediaPlayer 路不走我们这段代码 ⇒ 5 次换流 0 崩 ✓）
+```
+
+**修法（两处）**：
+1. `pumpBus()` **不再用 `gst_message_type`** ✓ —— 改成**分别 pop** `GST_MESSAGE_ERROR` 与
+   `GST_MESSAGE_EOS` ✓（`gst_bus_pop_filtered` 的第二个参数就是类型掩码 ✓，符号有 ✓），
+   连 `GstMessage` 的结构体布局都不用假设 ✓。
+2. **`gst()` 里逐条点名所有缺失符号** ✓（以前只查 3~4 个 ✗ ⇒ 这个 NULL 悄悄活了好几轮 ✓）：
+   缺"必需"项就直接回退 QMediaPlayer ✓ 不崩 ✓。
+
+### 7.10.2 第二个坑：**符号解析的时机**（差点又白折腾一轮 ✗）
+
+```
+[gstvideo] 符号缺失（必需）： eglGetCurrentDisplay      ✗
+[gstvideo] 符号缺失（可选）： gst_element_get_static_pad / gst_memory_get_sizes / gst_element_get_state ✗
+[gstvideo] 有必需符号缺失 ⇒ 回退 QMediaPlayer ✓            ← 明明上一版能跑，这一版却回退了 ✗
+原因：`gst()` 第一次是在 `setSource` 里被调的，**那时 EGL/GL 还没起来** ✗ ⇒
+      `eglGetCurrentDisplay` / `eglCreateImageKHR` / `glEGLImageTargetTexture2DOES`
+      在那**一刻全是 NULL** ✓（板端日志逐条点名实证 ✓）；同样那几个 GStreamer 符号
+      也是"**后来**才拿得到" ✓。
+修法：加 `retryDeferredSymbols()` ✓，在 `initializeGL()`（GL 上下文已就绪 ✓）里**重解一遍** ✓；
+      仍缺才认输回退 ✓。⇒ **教训：dlopen/dlsym 的"加载期"判断不能当成"能力判断"** ✓。
+```
+
+### 7.10.3 收口：默认打开 + 最终验收数字（板端实测 ✓）
+
+```
+默认开启    drop-in 里**没有** `zz-gstvideo.conf` ✓，日志仍是
+            `[video] 走零拷贝主路径（dmabuf ⇒ Qt EGL）` ✓ ⇒ 真默认 ✓
+            （要对照旧路用 `DSH_GST_VIDEO=0` ✓）
+绘制帧率    **25.1~25.2 次/s** ✓（每 120 次绘制 4770~4775ms ✓）⇒ ≥20fps 达标 ✓
+画帧节拍    平均 **39.8~41.9ms**、最大 53~81ms ✓（固定节拍 ⇒ 不再"倍速"✓）
+几何        `caps 尺寸 = 640 x 360` ✓（逐流解析 ✓，实测见过 360/320/272 三种高 ✓）
+不拉伸      letterbox（最大内接矩形居中 ✓）
+`vqueue`    **进程数 = 0** ✓✓（`vqueue:src` 那 0.82~0.94 核 ⇒ 0 ✓）
+CPU         agent_gui **16.8%**（原版 112.7% ⇒ 约 **6.7 倍**低 ✓）、mali-cmar-backe 4.7% ✓
+换流稳定性  **连续 15 次换流 0 崩** ✓（修前 2~3 次换流崩 1 次 ✗；NRestarts 全程 0 ✓）
+```
+
+**踩坑总表（都别再犯 ✗）**：`gst_message_type` 不存在 ✓；dlopen 后**必须逐条点名**缺失符号 ✓；
+EGL/GL 符号要等上下文起来再解析 ✓；`set_state` 异步、unref 前要 `get_state` 等 NULL ✓；
+`bus` 每拍 `get_bus` 会泄漏 ✓；退出/换流别 `eglDestroyImageKHR` ✓；
+`width=(int)` 是 11 字符（`+12` 会把 640 读成 40 ✓）；NV12 的 UV 要按**对齐高度** ✓；
+零拷贝建不起来要**自动回退** ✓（回退路径必须留 ✓）。
+
+---
+
 ## 7.9 ★★★ 第 75–79 轮（2026-10-07 上板实测）：从"能画但节奏乱"到"稳定节拍"
+
 
 ### 7.9.1 第 75 轮：**驱动方式确认 1:1，但"只画出 2.8 帧/s"**（同一 65 秒窗口）
 

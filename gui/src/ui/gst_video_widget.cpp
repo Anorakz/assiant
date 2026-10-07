@@ -12,6 +12,10 @@
 #include <QWindow>   // window()/windowHandle() 需要完整类型
 #include <cstdlib>   // atoi（解析 caps ✓）
 #include <cstring>   // strstr（解析 caps ✓）
+#include <csignal>   // ★ 第 82 轮：诊断用的 SIGSEGV 处理器 ✓
+#include <execinfo.h>  // ★ backtrace / backtrace_symbols_fd ✓
+#include <ucontext.h>  // ★ 第 83 轮：从信号上下文里取**出错指令地址** ✓（backtrace 跨不过信号帧 ✗）
+#include <unistd.h>  // ★ write（信号处理器里只能用它 ✓）
 #include <dlfcn.h>
 
 namespace {
@@ -58,6 +62,75 @@ qint64 monoMs() {
     static QElapsedTimer t = []() { QElapsedTimer e; e.start(); return e; }();
     return t.elapsed();
 }
+
+//: ★★★ 第 82 轮（**临时诊断，定位完删** ✓）：自包含的 SIGSEGV 处理器 + 周期性抢回 ✓
+//:   为什么放这儿 ✗：`core/crash_log.cpp` 那份处理器**被别人抢走了** ✗（崩溃日志里没有栈 ✓），
+//:   而"从控件里调 core 的接口"会把 `gui_widgets` 与 core 库的链接关系搞乱 ✗
+//:   （测试可执行文件不链 core ⇒ `undefined reference` ✗）。⇒ 就地写一份、**不依赖别的库** ✓。
+//:   谁来抢都不怕：借已有的 10ms 心跳**每 2 秒重装一次** ✓。
+#if defined(__linux__)
+void diagSegvHandler(int sig, siginfo_t* info, void* uc_) {
+    //: 只用**异步信号安全**的东西：`write` / `backtrace` / `backtrace_symbols_fd` ✓（不分配内存 ✓）
+    //: ★★ 第 83 轮：`backtrace()` **跨不过信号帧** ✗（glibc 的局限 ✓，只解出"处理器 + 跳板"两帧 ✗）
+    //:   ⇒ 那就直接从**信号上下文**里取**出错的那条指令地址** ✓（`ucontext` 的 `pc` ✓）
+    //:     再连同 `lr`（返回地址）与 `fp`（帧指针）一起打出来 ✓ ⇒ 用 addr2line 就能定位到函数/行 ✓✓。
+    ucontext_t* uc = static_cast<ucontext_t*>(uc_);
+    const unsigned long pc = uc ? static_cast<unsigned long>(uc->uc_mcontext.pc) : 0;
+    const unsigned long lr = uc ? static_cast<unsigned long>(uc->uc_mcontext.regs[30]) : 0;
+    const unsigned long fp = uc ? static_cast<unsigned long>(uc->uc_mcontext.regs[29]) : 0;
+    const unsigned long fault = static_cast<unsigned long>(reinterpret_cast<quintptr>(info ? info->si_addr : nullptr));
+    auto putHex = [](const char* label, unsigned long v) {
+        char buf[64];
+        int n = 0;
+        while (*label) buf[n++] = *label++;
+        buf[n++] = '0'; buf[n++] = 'x';
+        char hex[17];
+        int h = 0;
+        if (v == 0) hex[h++] = '0';
+        while (v > 0 && h < 16) { const int d = int(v & 0xF); hex[h++] = char(d < 10 ? '0' + d : 'a' + d - 10); v >>= 4; }
+        while (h > 0) buf[n++] = hex[--h];
+        buf[n++] = '\n';
+        ssize_t ignored = write(2, buf, size_t(n));
+        (void)ignored;
+    };
+    putHex("[gstvideo] SIGSEGV si_addr=", fault);
+    putHex("[gstvideo]   出错指令 pc=", pc);
+    putHex("[gstvideo]   返回地址 lr=", lr);
+    putHex("[gstvideo]   帧指针   fp=", fp);
+    //: ★ 把 pc / lr 也过一遍 `backtrace_symbols_fd` ✓ ⇒ 直接得到"**哪个模块 + 偏移**" ✓✓
+    //:   （之前那次栈里那一行 `agent_gui(+0x7a768)` 就是这么来的 ✓）
+    {
+        void* two[2] = { reinterpret_cast<void*>(pc), reinterpret_cast<void*>(lr) };
+        const char* l1 = "[gstvideo]   pc 符号化: ";
+        const char* l2 = "[gstvideo]   lr 符号化: ";
+        ssize_t ig = write(2, l1, strlen(l1));
+        backtrace_symbols_fd(&two[0], 1, 2);
+        ig = write(2, l2, strlen(l2));
+        backtrace_symbols_fd(&two[1], 1, 2);
+        (void)ig;
+    }
+    void* frames[64];
+    const int n = backtrace(frames, sizeof(frames) / sizeof(frames[0]));
+    const char* hdr = "[gstvideo] ===== SIGSEGV 调用栈（诊断用 ✓）=====\n";
+    const char* ftr = "[gstvideo] ===== 调用栈结束（pc/lr 用 addr2line 反查 ✓）=====\n";
+    ssize_t ignored = write(2, hdr, strlen(hdr));
+    backtrace_symbols_fd(frames, n, 2);
+    ignored = write(2, ftr, strlen(ftr));
+    (void)ignored;
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+void reclaimSegvHandler() {
+    //: 用 `sigaction` + `SA_SIGINFO` ✓ 才能拿到 `si_addr` ✓
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = diagSegvHandler;
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
+}
+#endif
 }  // namespace
 
 // ---------------------------------------------------------------- 函数指针表
@@ -133,7 +206,10 @@ GstVideoWidget::Gst* GstVideoWidget::gst() {
     t.element_query_position = (decltype(t.element_query_position))dlsym(t.hGst, "gst_element_query_position");
     t.element_query_duration = (decltype(t.element_query_duration))dlsym(t.hGst, "gst_element_query_duration");
     t.bus_pop_filtered = (decltype(t.bus_pop_filtered))dlsym(t.hGst, "gst_bus_pop_filtered");
-    t.message_type = (decltype(t.message_type))dlsym(t.hGst, "gst_message_type");
+    //: ⚠⚠ 第 84 轮教训（**真凶**）：这个构建里**没有 `gst_message_type`** ✗（`nm -D` 实证 ✓），
+    //:   而 `pumpBus()` 原来无条件调它 ⇒ 一有 EOS/ERROR 就跳到 0 执行 ⇒ 换流必崩 ✓✓。
+    //:   ⇒ 这一格**留着但不再使用** ✓，并**逐条点名**报出所有缺失符号 ✓（以后当场暴露 ✓）。
+    t.message_type = nullptr;
     t.message_parse_error = (decltype(t.message_parse_error))dlsym(t.hGst, "gst_message_parse_error");
     t.buffer_ref = (decltype(t.buffer_ref))dlsym(t.hGst, "gst_buffer_ref");
     t.buffer_unref = (decltype(t.buffer_unref))dlsym(t.hGst, "gst_buffer_unref");
@@ -151,6 +227,55 @@ GstVideoWidget::Gst* GstVideoWidget::gst() {
     t.free_ = (decltype(t.free_))dlsym(t.hGl, "g_free");
     if (!t.parse_launch || !t.element_set_state || !t.bin_get_by_name) {
         qWarning() << "[gstvideo] 关键 Gst 符号缺失 ⇒ 回退"; t.hGst = nullptr; return nullptr;
+    }
+    //: ★★★ 第 84 轮（**真凶留下的教训** ✓）：**逐条点名**报出所有缺失符号 ✓ ——
+    //:   以前只查了 3~4 个关键符号 ✗，于是 `gst_message_type` 悄悄是 NULL ✗，
+    //:   直到"换流时有 EOS/ERROR 消息"才在 `pumpBus` 里跳到 0 执行 ⇒ 崩 ✓✓（查了半天 ✓）。
+    //:   ⇒ 现在把**每一条**都点出来 ✓（缺到"会用"的就直接回退 ⇒ 退回 QMediaPlayer ✓ 不崩 ✓）。
+    {
+        struct { const char* name; const void* fp; bool need; } tbl[] = {
+            { "gst_init",                       reinterpret_cast<const void*>(t.init), true },
+            { "gst_parse_launch",               reinterpret_cast<const void*>(t.parse_launch), true },
+            { "gst_element_set_state",          reinterpret_cast<const void*>(t.element_set_state), true },
+            { "gst_bin_get_by_name",            reinterpret_cast<const void*>(t.bin_get_by_name), true },
+            { "gst_element_get_bus",            reinterpret_cast<const void*>(t.element_get_bus), true },
+            { "gst_bus_pop_filtered",           reinterpret_cast<const void*>(t.bus_pop_filtered), true },
+            { "gst_message_parse_error",        reinterpret_cast<const void*>(t.message_parse_error), true },
+            { "gst_message_unref",              reinterpret_cast<const void*>(t.message_unref), true },
+            { "gst_buffer_ref",                 reinterpret_cast<const void*>(t.buffer_ref), true },
+            { "gst_buffer_unref",               reinterpret_cast<const void*>(t.buffer_unref), true },
+            { "gst_buffer_peek_memory",         reinterpret_cast<const void*>(t.buffer_peek_memory), true },
+            { "gst_object_unref",               reinterpret_cast<const void*>(t.object_unref), true },
+            { "gst_element_get_static_pad",     reinterpret_cast<const void*>(t.element_get_static_pad), false },
+            { "gst_pad_get_current_caps",       reinterpret_cast<const void*>(t.pad_get_current_caps), false },
+            { "gst_caps_to_string",             reinterpret_cast<const void*>(t.caps_to_string), false },
+            { "gst_caps_unref",                 reinterpret_cast<const void*>(t.caps_unref), false },
+            { "gst_memory_get_sizes",           reinterpret_cast<const void*>(t.memory_get_sizes), false },
+            { "gst_element_get_state",          reinterpret_cast<const void*>(t.element_get_state), false },
+            { "g_signal_connect_data",          reinterpret_cast<const void*>(t.signal_connect), true },
+            { "g_object_set",                   reinterpret_cast<const void*>(t.object_set), true },
+            { "g_free",                         reinterpret_cast<const void*>(t.free_), false },
+            //: ⚠⚠ 第 84 轮实测：**所有 EGL/GL 符号在加载期都可能是 NULL** ✗ ——
+            //:   `gst()` 第一次是在 `setSource` 里被调的，那时 **EGL/GL 还没起来** ✓
+            //:   ⇒ 板端日志实证：`eglGetCurrentDisplay` / `eglCreateImageKHR` /
+            //:     `glEGLImageTargetTexture2DOES` 全是 NULL ✗；而且
+            //:     `gst_element_get_static_pad` / `gst_memory_get_sizes` / `gst_element_get_state`
+            //:     那时也拿不到 ✗（**后来**才拿得到 ✓）。
+            //:   ⇒ 它们一律只报"待解析" ✓，真正的解析在 `initializeGL()` 里**重试** ✓
+            //:     （见 `retryDeferredSymbols()` ✓）；仍取不到才认输回退 ✓。
+            { "eglGetCurrentDisplay",           reinterpret_cast<const void*>(t.eglGetCurrentDisplay), false },
+            { "eglCreateImageKHR",              reinterpret_cast<const void*>(t.eglCreateImageKHR), false },
+            { "eglDestroyImageKHR",             reinterpret_cast<const void*>(t.eglDestroyImageKHR), false },
+            { "glEGLImageTargetTexture2DOES",   reinterpret_cast<const void*>(t.glEGLImageTargetTexture2DOES), false },
+        };
+        bool missingNeed = false;
+        for (const auto& e : tbl) {
+            if (e.fp == nullptr) {
+                qWarning() << "[gstvideo] 符号缺失（" << (e.need ? "必需" : "可选") << "）：" << e.name;
+                if (e.need) missingNeed = true;
+            }
+        }
+        if (missingNeed) { qWarning() << "[gstvideo] 有必需符号缺失 ⇒ 回退 QMediaPlayer ✓"; t.hGst = nullptr; return nullptr; }
     }
     if (!t.is_dmabuf_memory || !t.dmabuf_get_fd) {
         qWarning() << "[gstvideo] 缺 dmabuf 分配器符号 ⇒ 回退"; t.hGst = nullptr; return nullptr;
@@ -196,6 +321,9 @@ GstVideoWidget::GstVideoWidget(QWidget* parent) : QOpenGLWidget(parent) {
     connect(tick_, &QTimer::timeout, this, [this]() { tickPaint(); });
     id_ = ++g_nextWidgetId;
     ++g_liveWidgets;
+#if defined(__linux__)
+    reclaimSegvHandler();   // ★ 第 82 轮诊断：先把 SIGSEGV 处理器抢过来 ✓（心跳里再周期性重装 ✓）
+#endif
     qInfo() << "[gstvideo] 控件建立 id=" << id_ << "this=" << this
             << "存活实例=" << g_liveWidgets
             << "（GUI 线程 25ms 心跳驱动 ✓；handoff 只做原子换手 ✓）";
@@ -401,6 +529,45 @@ bool GstVideoWidget::setSource(const QString& url) {
     return true;  // 真正的 PLAYING 在 initializeGL 之后（需要 GL 上下文）
 }
 
+/// ★★ 第 84 轮：把"加载期为 NULL"的那些符号在 GL/EGL 起来之后**重解一遍** ✓
+///   为什么必须这样 ✗：`gst()` 第一次是在 `setSource` 里被调的（EGL 还没起 ✓），
+///   那时 `eglGetCurrentDisplay` / `eglCreateImageKHR` / `glEGLImageTargetTexture2DOES`
+///   以及 `gst_element_get_static_pad` / `gst_memory_get_sizes` / `gst_element_get_state`
+///   **全是 NULL** ✗（板端日志逐条点名实证 ✓）；等 `initializeGL()` 之后它们才有 ✓。
+///   ⇒ 不重解就会"明明能跑却判定起不来 ⇒ 白白回退 QMediaPlayer" ✗（实测踩到过 ✓）。
+void GstVideoWidget::retryDeferredSymbols() {
+    Gst* g = gst();
+    if (!g) return;
+    if (g->hEgl) {
+        if (!g->eglGetCurrentDisplay)
+            g->eglGetCurrentDisplay = (decltype(g->eglGetCurrentDisplay))dlsym(g->hEgl, "eglGetCurrentDisplay");
+        if (!g->eglGetProcAddress)
+            g->eglGetProcAddress = (decltype(g->eglGetProcAddress))dlsym(g->hEgl, "eglGetProcAddress");
+    }
+    if (g->eglGetProcAddress) {
+        if (!g->eglCreateImageKHR)
+            g->eglCreateImageKHR = (decltype(g->eglCreateImageKHR))g->eglGetProcAddress("eglCreateImageKHR");
+        if (!g->eglDestroyImageKHR)
+            g->eglDestroyImageKHR = (decltype(g->eglDestroyImageKHR))g->eglGetProcAddress("eglDestroyImageKHR");
+        if (!g->glEGLImageTargetTexture2DOES)
+            g->glEGLImageTargetTexture2DOES =
+                (decltype(g->glEGLImageTargetTexture2DOES))g->eglGetProcAddress("glEGLImageTargetTexture2DOES");
+    }
+    if (g->hGst) {
+        if (!g->element_get_static_pad)
+            g->element_get_static_pad = (decltype(g->element_get_static_pad))dlsym(g->hGst, "gst_element_get_static_pad");
+        if (!g->memory_get_sizes)
+            g->memory_get_sizes = (decltype(g->memory_get_sizes))dlsym(g->hGst, "gst_memory_get_sizes");
+        if (!g->element_get_state)
+            g->element_get_state = (decltype(g->element_get_state))dlsym(g->hGst, "gst_element_get_state");
+    }
+    qInfo() << "[gstvideo] 延迟重解：eglGetCurrentDisplay=" << (g->eglGetCurrentDisplay != nullptr)
+            << " eglCreateImageKHR=" << (g->eglCreateImageKHR != nullptr)
+            << " glEGLImageTargetTexture2DOES=" << (g->glEGLImageTargetTexture2DOES != nullptr)
+            << " get_static_pad=" << (g->element_get_static_pad != nullptr)
+            << " get_state=" << (g->element_get_state != nullptr);
+}
+
 void GstVideoWidget::initializeGL() {
     qInfo() << "[gstvideo] initializeGL 被调用 ✓（GL 上下文已建立/重建）context="
             << (QOpenGLContext::currentContext() != nullptr);
@@ -409,6 +576,15 @@ void GstVideoWidget::initializeGL() {
     resetGlStateForNewContext();
     drewOnce_ = false;
     Gst* g = gst();
+    //: ★★ 第 84 轮（板端实测的坑 ✓）：EGL/GL 与部分 GStreamer 符号**只有到这里才拿得到** ✓
+    //:   ⇒ 先重解一遍 ✓（`gst()` 那次是在 `setSource` 里、EGL 还没起的时候调的 ✗）。
+    if (g) {
+        retryDeferredSymbols();
+        if (!g->eglCreateImageKHR || !g->glEGLImageTargetTexture2DOES || !g->eglGetCurrentDisplay) {
+            qWarning() << "[gstvideo] 重解后仍缺 EGL dmabuf 扩展 ⇒ 回退 QMediaPlayer";
+            failed_ = true; emit failedOver(); return;
+        }
+    }
     if (!g) { failed_ = true; emit failedOver(); return; }
     if (pipeline_ && g->element_set_state) {
         g->element_set_state(pipeline_, GST_STATE_PLAYING);
@@ -444,6 +620,11 @@ void GstVideoWidget::resizeGL(int, int) {
 //:   没新帧时由 `paintGL` 自己"什么都不做" ✓（`PartialUpdate` 保住上一帧 ✓，不闪 ✓）。
 void GstVideoWidget::tickPaint() {
     ++tickN_;
+#if defined(__linux__)
+    //: ★ 第 82 轮诊断：每 2 秒（10ms × 200 ✓）把 SIGSEGV 处理器**抢回来一次** ✓
+    //:   —— GStreamer / Mali / Qt 初始化时会把它换掉 ✗，换掉之后崩溃就没栈 ✗。
+    if (tickN_ % 200 == 0) reclaimSegvHandler();
+#endif
     //: ★ 诊断（每 2 秒一行，80×25ms ✓）：一眼看出**定时器有没有在跑**、门条件卡在哪 ✓
     //:   带上 `this=` ⇒ 多实例时不会看串 ✓
     if (tickN_ % 80 == 0) {
@@ -500,19 +681,26 @@ qint64 GstVideoWidget::durationMs() const {
 void GstVideoWidget::pumpBus() {
     Gst* g = gst();
     if (!g || !pipeline_) return;
-    //: ★★★ 第 78 轮崩溃真因（**引用泄漏**）：原来这里**每一拍都 `gst_element_get_bus()`**
-    //:   却**从不 unref** ✗ ⇒ 40 拍/秒 × 几分钟 = 泄漏上万个 bus 引用 ✓
-    //:   ⇒ 内存/对象压力越来越大 ⇒ **几分钟崩一次** ✓✓（与实测"每 4~6 分钟一次 SEGV"吻合 ✓）。
-    //:   ⇒ 改成**建管线时取一次、teardown 时还回去** ✓（见 buildPipeline / teardown ✓）。
+    //: ★★★ 第 84 轮**根因修复**（板端抓到 `pc=0` / `si_addr=0` ✓ ⇒ 跳到空函数指针执行 ✓）：
+    //:   这个 GStreamer 构建**没有导出 `gst_message_type`** ✗（`nm -D` 实证 ✓），
+    //:   而这里原来无条件调它 ✗ ⇒ 总线里一有 **EOS/ERROR** 消息就 `blr 0` ⇒ 崩 ✓✓。
+    //:   而 EOS/ERROR **恰好只在"换流"时出现** ⇒ 这就是"切视频偶发重启"的**真正根因** ✓✓✓。
+    //:   ⇒ 对策：**不用 `gst_message_type`** ✓ —— 分别 pop `ERROR` 与 `EOS` ✓
+    //:     （`gst_bus_pop_filtered` 的第二个参数就是类型掩码 ✓ 它的符号是有的 ✓），
+    //:     这样连 `GstMessage` 的结构体布局都不用假设 ✓。
     void* bus = bus_;
-    if (!bus) return;
+    if (!bus || !g->bus_pop_filtered) return;
     for (;;) {
-        void* m = reinterpret_cast<void*>(g->bus_pop_filtered(bus, GST_MESSAGE_EOS | GST_MESSAGE_ERROR, 0));
+        void* m = reinterpret_cast<void*>(g->bus_pop_filtered(bus, GST_MESSAGE_ERROR, 0));
+        bool isEos = false;
+        if (!m) {
+            m = reinterpret_cast<void*>(g->bus_pop_filtered(bus, GST_MESSAGE_EOS, 0));
+            isEos = (m != nullptr);
+        }
         if (!m) break;
-        const int t = g->message_type(m);
-        if (t == GST_MESSAGE_EOS) {
+        if (isEos) {
             if (!eosSent_) { eosSent_ = true; emit endOfMedia(); }
-        } else if (t == GST_MESSAGE_ERROR) {
+        } else if (g->message_parse_error) {
             void* e = nullptr; char* dbg = nullptr;
             g->message_parse_error(m, &e, &dbg);
             qWarning() << "[gstvideo] 管线错误 ⇒ 回退";

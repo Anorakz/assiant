@@ -177,5 +177,9 @@ foreach(gui_target gui_services gui_widgets agent_gui)
         target_compile_options(${gui_target} PRIVATE /W4)
     else()
         target_compile_options(${gui_target} PRIVATE -Wall -Wextra)
+        #: ★★ 第 82 轮（**临时诊断** ✓）：加上**帧指针** —— 板端 Release 构建默认省掉它 ✗，
+        #:   于是 `backtrace()` 只能走出"处理器 + 信号跳板"两帧 ✗，定位不了崩溃点 ✓。
+        #:   代价：少一个通用寄存器（对这里 <1% ✓）；定位完可以删 ✓。
+        target_compile_options(${gui_target} PRIVATE -fno-omit-frame-pointer)
     endif()
 endforeach()

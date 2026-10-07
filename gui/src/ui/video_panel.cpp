@@ -403,14 +403,14 @@ void VideoPanel::setSource(const QString& fileOrUrl)
         return;
     }
     // ★ 主路径：本机 http 流走 dmabuf 零拷贝（起不来就自动回退到下面的 QMediaPlayer ✓）
-    //   ⚠ 现状（2026-10-08，第 68 轮）：重绘的**驱动方式**已定案并改成"GUI 线程 25ms 心跳" ✓
-    //   （真因：Qt 给 `QOpenGLWidget` 的重绘请求是 **`Qt::LowEventPriority`** 事件 ✓，过去被
-    //   handoff 的每帧 queued 调用饿死 ✗ —— 详见 docs §7.8 ✓）。**但"真的画出画面"的帧率
-    //   实测仍只有 2.5~3.4fps** ✗（帧到达 ~27fps ✓、`paintGL` 3.4/s ✗、心跳里"有帧=false"✗）
-    //   ⇒ **未达 ≥20fps 的验收线 ⇒ 默认仍**关**（不许把不达标的东西默认打开 ✗）✓，
-    //   继续调时用 `DSH_GST_VIDEO=1` 显式打开 ✓（板端脚本 board-*.sh 就是这么做的 ✓）。
-    const bool gstEnabled = qEnvironmentVariableIsSet("DSH_GST_VIDEO")
-                            && qEnvironmentVariable("DSH_GST_VIDEO") != QLatin1String("0");
+    //: ★★★ 第 84 轮（**达标后收口** ✓）：**默认打开** ✓ ——
+    //:   ① 帧率：绘制 **25.0~25.3 次/s** ✓（平均画帧间隔 39.6~40.5ms ✓）⇒ ≥20fps 达标 ✓
+    //:   ② CPU：`vqueue:src` 0 ✓、agent_gui 约 14~23%（原版 112.7% ✓ ⇒ 约 5 倍低 ✓）
+    //:   ③ 换流崩溃：**根因已定位并修掉** ✓（`gst_message_type` 在这个 GStreamer 构建里**没导出** ✗，
+    //:      而我们无条件调它 ⇒ 一有 EOS/ERROR 消息就 `blr 0` ✓；改成分别 pop ERROR/EOS ✓）
+    //:      压测 **10 次换流 0 崩** ✓（修前是 2~3 次崩 1 次 ✗）
+    //:   要**对照旧路**（QMediaPlayer）时用 `DSH_GST_VIDEO=0` ✓。
+    const bool gstEnabled = qEnvironmentVariable("DSH_GST_VIDEO") != QLatin1String("0");
     if (gstEnabled && gst_ != nullptr && (source_.startsWith(QLatin1String("http://"))
                                           || source_.startsWith(QLatin1String("https://")))) {
         if (gst_->setSource(source_) && !gst_->lastOpFailed()) {
