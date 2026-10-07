@@ -1285,6 +1285,51 @@ cp /data/assistant/keys/id_ed25519* /root/.ssh/ && chmod 600 /root/.ssh/id_ed255
 （实测最大画帧间隔 3.8~7.6 秒 ✗；洪流停掉后立刻回到 **25fps / 40ms** ✓✓）。
 完整步骤与验证命令见 `docs/music.md` **§3.2.1** ✓。
 
+### 5.13.6 Moonlight（板子）↔ Sunshine（PC）连上：**只要拷预配对凭据**（Sunshine 侧不用动）
+
+**2026-10-07 实测跑通** ✓。要点是「**配对早就做过了**」✓（见 `todo.md:105-121` 的 B2 条目）：
+
+- Sunshine 授权名单（`D:\tool\sunshine\config\sunshine_state.json`）里 **`agent-native` 在列且 enabled** ✓，
+  证书长度 **1208** = `E:\rk3568\local\creds\client.pem` ✓ —— 配对当时用的是 **PIN 5678** ✓
+  （`docs/sunshine-pairing-findings.md:107`、`scripts/pair-run.sh` 的默认值 ✓）。
+- 所以**不需要再配对、也不需要动 Sunshine** ✓；新镜像里缺的只是那对凭据文件 ✗
+  （旧 Ubuntu 把它们放在 `/home/kickpi/myproject/assitant/creds/` ✗，而 `/data` 侧只有 `assistant-init` 建的空目录 ✓）。
+
+```bash
+# ① 拷凭据（PC → 板子；配置里 sunshine.cert/key 本来就是这两个路径 ✓）
+scp E:/rk3568/local/creds/client.pem E:/rk3568/local/creds/client.key rk3568:/data/assistant/creds/
+ssh rk3568 "chmod 600 /data/assistant/creds/client.key; chmod 644 /data/assistant/creds/client.pem"
+
+# ② **重启 agent**（native 只在启动时握手一次 ✓，原因见下的 bug）
+ssh rk3568 "systemctl restart agent"
+
+# ③ 判据（agent 日志）
+#    sunshine: 192.168.137.1 appversion=7.1.431.-1 PairStatus=**1**
+#    sunshine: app=Desktop -> appid=881448767 (走 /resume) sessionUrl=rtspenc://192.168.137.1:48010
+#    PC 侧 D:\tool\sunshine\config\sunshine.log：CLIENT CONNECTED + Creating encoder [hevc_nvenc] ✓
+```
+
+**⚠ 这条路上有个真 bug（待办，本轮未修）** ✗：`native` **只在 agent 启动时**握手一次 ✓，
+而开机时 agent 起得比网络早 ✗ ⇒ 每次开机日志里都是
+
+```
+SunshineError: 连接 192.168.137.1:47984 失败: [Errno 101] Network is unreachable ✗
+```
+
+⇒ **失败后不重试** ✗ ⇒ 重启板子后 moonlight 一直是断的 ✓，得手动 `systemctl restart agent` 才连上 ✓。
+修法（二选一，都还没做）：① `native` 失败后按退避重试（像 music/LLM 那几条一样 ✓）；
+② `agent.service` 依赖 `network-online.target`，并把握手推迟到网络真就绪（板端 WiFi 要 ~11 s ✓，
+而 agent 开机 ~2 s 就握手 ✗）。
+
+**排查时别被这个骗了** ✗：`netstat` 里 `192.168.137.1:48010 ← 板子` 全是 **TIME_WAIT** 是**正常的** ✓ ——
+48010 是 RTSP **握手**（短连接 ✓），真正的视频/音频走 **UDP 47998~48000** ✓。
+判"是否真在串流"要看板端线程（`VideoRecv` / `VideoDec` / `mpp_dec_parser` / `mpp_dec_hal` / `ReqIdrFrame` ✓）
+与 PC 侧 Sunshine 日志的 `CLIENT CONNECTED` ✓。
+
+> 附带发现：`study` 那一路现在报 `game_watch: SigLIP 加载失败: 缺少 tokenizers 库` ✗
+> （镜像里 `tokenizers` 仍是 optional ✓，与 `openai` 那次同源 ✓）—— 想让「认游戏/学习监督」吃上真 moonlight 帧，
+> 得照 `prepare-openai.sh` 的套路把 `tokenizers==0.20.3` 也注入 ✓（还没做 ✗）。
+
 **⚠ 还没做的：刷板**（`T15-2-11` 的正文 ✗）。这套 `update.img` 会**重排 eMMC 分区**
 （板上现有数据全丢 ✗，第一次还要 `mkfs.ext4` userdata ＋ 投放 4.9 GB 模型 ✓），
 所以不在"标准化"里顺手做 ✗ —— 步骤见 `image/FLASH-RUNBOOK.md`，
