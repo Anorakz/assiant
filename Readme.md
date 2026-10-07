@@ -1,683 +1,250 @@
-# Agent
+# RK3568 桌面助手
 
-开发机（Windows PC）上的源码工作区，也是**唯一提交方**。负责 C++/pybind11 底层、
-Python Agent Core、Qt5 C++ GUI 的开发、交叉编译与部署；GUI 的**编译在板端**进行
-（板端装了 Qt5，PC 上没有），见 [`docs/architecture.md`](docs/architecture.md)。
+面向 RK3568 / KICKPI K1 Mini 的板端助手：Python Agent 负责状态、对话与工具编排，
+C++ / pybind11 负责 Sunshine 串流接收、视频解码和键鼠发送，Qt5 C++ GUI 在板端显示与交互。
+源码、构建与部署由开发机维护，Agent 和 GUI 通过同机 Unix domain socket 通信。
 
-目标板：RK3568 / Ubuntu 20.04 / aarch64 / glibc 2.31
+## 功能演示与实测数据
 
----
+以下都是**在真板子上跑出来的**（KICKPI K1 Mini / Buildroot 镜像 / 1280×800 DSI 屏）✓，
+不是设计目标 ✓。
 
-## 目录结构
+### 零拷贝视频（B 站）
 
 ```
-agent/
-├── cmake/
-│   └── toolchain.cmake          # aarch64 交叉编译工具链 (sysroot / -isystem 多架构路径)
-├── native/                      # C++ / pybind11
-│   ├── ring_buffer.h            # SPSC 无锁环形缓冲 (模板)
-│   ├── image_rb.cpp/.h          # 256×256 RGB888 视频帧环形缓冲 (容量 300)
-│   ├── preprocess.cpp/.h        # YUV420P → 256×256 RGB888
-│   ├── decoder.cpp/.h           # H.265 硬解 (板端 V4L2/FFmpeg)
-│   ├── input_sender.cpp/.h      # send_key / send_mouse / send_hotkey
-│   ├── moonlight_adapter.cpp/.h # 连接状态机 + 视频接收线程 (握手在 Python 侧, 见 agent/net/)
-│   ├── binding_utils.h          # binding 与测试共用的转换工具 (Frame→numpy 等)
-│   ├── binding.cpp              # pybind11 模块 agent_native
-│   └── third_party/             # 子模块: moonlight-common-c, pybind11, googletest
-├── agent/                       # Python Agent Core
-│   ├── __init__.py
-│   ├── main.py                  # 进程入口: 装配全部组件 + asyncio 主循环
-│   ├── config.py                # YAML 配置加载/保存/点号路径读取
-│   ├── cli.py                   # 板端控制 CLI (assistant): status/chat/mode/watch/schedule/doctor/cleanup/set/study
-│   ├── core/                    # 状态层、工具路由、调度层、壁纸游标
-│   │   ├── state_machine.py     # SLEEP ⇄ IDLE ⇄ STUDY/GAME 状态机
-│   │   ├── tool_router.py       # 工具注册 / 权限控制 / 执行调度
-│   │   ├── label_spec.py        # 标签/条件的**统一小语法**（壁纸 match= 与音乐 tag= 共用，T8-5b）
-│   │   ├── read_intents.py      # **只读问句直连**（在放什么/库里有什么/壁纸标签/哪张用得最少，0 次模型推理，T8-5c/T8-6）
-│   │   ├── chat_memory.py       # **纯对话记忆**（有界、不落盘；记"谁说的/说了什么/当时哪个模式"，T9-1）
-│   │   ├── user_profile.py      # **用户画像内核**（IP/歌手**权重** + 心情调模型 + 负反馈清零 + 挑图/补歌配方，T9-2/T10）
-│   │   ├── scheduler.py         # 日程检查 + 定时触发 + 终端命令监听
-│   │   ├── schedule_config.py   # 日程的**文本级**增删（只动目标那几行 + `.bak`，R3/T12-5）
-│   │   ├── wallpaper.py         # 壁纸目录 + 游标 + **三格窗口 prev/current/next**（可在候选里翻，T7-3/T10-3）
-│   │   ├── study_anchors.py     # **学习内容锚点库**（五类子标签→study/not_study；每类上限丢最旧，T13-2）
-│   │   ├── study_stats.py       # 学习监督的**有界**运行统计：阈值/计数/分数分布/明细（T13-2）
-│   │   ├── study_watch.py       # **学习内容监督**：判定(锚点+进程) / 提醒→3 次→返回桌面 / 阈值自我修正（T13-3）
-│   │   └── music.py             # 播放内核: 环形队列 / 轮询真实进度 / 30 秒计一次 / **补歌到目标长度** (T8-4/T10-4)
-│   ├── media/                   # 本地媒体库 (T8-3)
-│   │   └── music_library.py     # config/music_library.jsonl: 读写/合并/打标/挑选（纯 Python）
-│   ├── tools/                   # 具体工具 (Phase 7; T12-6 起五个):
-│   │                            #   back_to_desktop / next_wallpaper / next_music /
-│   │                            #   bilibili(只在 GAME) / schedule(日程, IDLE/STUDY)
-│   ├── llm/                     # LLM 三模式 + 规则兜底
-│   │   ├── provider.py          # edge / cloud / disabled 分发 (edge 连本机 llama-server)
-│   │   └── rule_engine.py       # 无 LLM 时的正则规则兜底
-│   ├── ipc/                     # Agent ⇄ GUI 通信
-│   │   ├── protocol.py          # IPC 协议: topic/command 常量 + 编解码
-│   │   ├── local_server.py      # 唯一的生产 server (Unix socket, 收命令信封)
-│   │   └── local_client.py      # 客户端 (板端脚本 / 活体验证用)
-│   ├── vision/                  # 视觉层
-│   │   ├── roi.py               # ROI 字符串解析 ("x,y,w,h")
-│   │   ├── siglip/              # 真 RKNN 双塔: 实时帧/离线打标签/图像检索 (T7-1；T13-1 删空接口)
-│   │   ├── frame_pipeline.py    # "整屏截图 → 板子看到的那一帧"（native 点采样原样复现，T13-4）
-│   │   ├── tag_vocab.py         # 三轴标签词表 (T7-2)
-│   │   ├── wall_data.py         # config/wall_data.jsonl 的唯一写者 (T7-2)
-│   │   ├── tagger.py            # 打标签 (板端 NPU, T7-2)
-│   │   └── tag_index.py         # 标签索引 + IP 锚点挑图 (纯 Python, T7-3)
-│   └── io/                      # native 的 asyncio 包装 + 输入汇聚
-│       ├── chat_bus.py          # ChatInputBus: 终端/GUI 统一事件流
-│       ├── image_reader.py      # ImageReader: image_rb → numpy 帧
-│       ├── input_sender.py      # InputSender: send_key / send_hotkey / send_mouse
-│       └── _native.py           # native 解析 + 专属单线程执行器 (SPSC)
-│   └── net/                     # 对外服务客户端
-│       ├── sunshine_client.py   # Sunshine 串流主机 API
-│       ├── netease_cli.py       # 板端 ssh 调 PC 上第三方 neteasecli（PC 出声，T8-2）
-│       ├── bilibili_api.py      # B 站唯一网络层: 匿名会话/cookie/搜索/直链/错误话术（T11-1）
-│       └── pc_probe.py          # 问 PC 上跑着什么进程（认游戏的"真值"那一路，T11-4）
-├── gui/                         # Qt5 C++ GUI (在板端编译: src/ tests/ tools/)
-│                                 #   GAME 主区: 视频区 + 预览栏 + 只读地址栏 (T9/T11-7)
-│                                 #   下区域 GAME=封面 / 其它=音乐条
-│                                 #   设置页三张卡片: 学习监督 / 游戏检测(含 B 站凭据) / 画像压缩 (T13-9)
-│                                 #   core/config_store.cpp 与 Agent 侧 settings_config.py 同口径:
-│                                 #   只动目标那一行 + 缺段按模板新建; core/cookie_store.cpp 写凭据 JSON
-├── config/                      # 配置模板 (真实配置不入 git)
-│   ├── config.example.yaml      # 唯一真源模板: llm.* / bilibili.* / study.* / wallpaper.* / gui.* / sunshine.* / ipc.*
-│   ├── user_profile.example.yaml# 用户画像
-├── scripts/                     # 构建 / 部署 / 测试 / 配对工具
-│   ├── build.ps1                # aarch64 交叉编译
-│   ├── test-host.ps1            # 宿主机 C++ 单测 (ctest)
-│   ├── test-python.ps1          # 宿主机 Python 单测 (unittest)
-│   ├── deploy.ps1               # 打包并推到板端
-│   ├── setup-sysroot-deps.ps1   # 给 sysroot 补 python3.8-dev / ffmpeg-dev
-│   ├── make-wallpaper-samples.py# 造几张不同比例的纯色壁纸样张 (T3 验收用)
-│   └── pair_sunshine.py 等      # Sunshine SRSAES 配对 (见 docs/)
-├── tests/                       # 宿主机单测
-│   ├── CMakeLists.txt
-│   ├── test_*.cpp               # C++ 单测 (gtest, 由 ctest 驱动)
-│   ├── test_config.py           # 配置模块单测 (unittest)
-│   ├── test_state_machine.py    # 状态机单测
-│   ├── test_tool_router.py      # 工具注册/权限/参数校验/超时/异常单测
-│   ├── test_llm.py              # LLM 三模式切换 / edge 真后端 / 工具循环 / 规则匹配
-│   ├── test_vision.py           # ROI 解析 / SigLIP mock (有无 numpy 两条路径)
-│   ├── test_siglip.py           # SigLIP 双塔: 配置契约 / 分词 / 余弦排序 (T7-1)
-│   ├── test_wall_data.py        # 壁纸词表 / 标签数据文件 / 增量计划 (T7-2)
-│   ├── test_main.py             # 进程装配: 启停顺序 / 异常隔离 / 主循环
-│   ├── test_ipc_protocol.py     # IPC 线格式契约 (字节级)
-│   ├── test_scheduler.py        # 日程触发 / 去重 / 终端命令识别 / 文本级增删用的匹配器
-│   ├── test_chat_bus.py         # ChatInputBus 单测
-│   ├── test_io.py               # image_reader / input_sender
-│   ├── test_docs.py             # 文档守卫: 链接有效 + 过时说法黑名单
-│   ├── test_config_source_guard.py  # 配置真源守卫: agent/ 只认 config/config.yaml
-│   ├── test_schedule_config.py  # 日程配置的文本级增删（R3 的删 + T12-5 的加）
-│   ├── test_cli.py              # CLI 十条命令（T11-10c/f 加了 music / video 传输控制）/ 窗口与尾巴 / cleanup / tag
-│   ├── test_tools.py            # 工具层: 注册 / 状态权限 / 参数校验 / 缺依赖跳过 (T1)
-│   ├── test_tool_permissions.py # 状态权限表: 4 状态 × 每个工具, 禁止的组合真的被拒 (T4)
-│   ├── test_wallpaper.py        # 壁纸目录游标 / 三格窗口(prev/current/next) / next_wallpaper 工具与命令 (T3/T10-3)
-│   ├── test_netease_cli.py      # ssh 调 PC 的第三方 neteasecli: 命令行 / 信封 / 四类错误 (T8-2)
-│   ├── test_bilibili_api.py     # B 站唯一网络层: 搜索/详情/直链(单文件 vs DASH)/cookie/错误话术 (T11-1)
-│   ├── test_bilibili_queue.py   # B 站队列: 3×预览栏格数的滑动窗口 / 往哪边走往哪边补页 / 边界 (T11-2)
-│   ├── test_bilibili_buffer.py  # B 站缓冲代理: ffmpeg 合流->MPEG-TS->本机 HTTP / 15 s 门槛 / 暂停延到 60 s (T11-3)
-│   ├── test_bilibili_tool.py    # B 站工具: 只有一个 keyword / 只在 GAME 可见 / 参数归一化 (T11-5)
-│   ├── test_schedule_tool.py    # 日程工具: 归一化 / schema / 权限 / Runtime 落盘与热重载 (T12-6)
-│   ├── test_bilibili_config.py  # B 站配置守卫: 模板能被真构造器吃下 / 键不多不少 / 默认值对齐 (T11-8)
-│   ├── test_game_watch.py       # 游戏观察器: 画面锚点 vs PC 进程双路 / 自学习纠错 / 常驻策略 (T11-4)
-│   ├── test_study_anchors.py    # 学习锚点库(五类/大类映射/每类上限丢最旧) + 运行统计(有界/坏文件容错) (T13-2)
-│   ├── test_study_watch.py      # 学习监督: 提醒不算数/unknown 中性/冲突不猜/阈值 0.01 护栏/误判停学 (T13-3)
-│   ├── test_settings_config.py  # 设置项的文本级写入(只动一行/.bak/缺段按模板新建) + B 站凭据文件 (T13-8)
-│   ├── test_music_library.py    # 本地音乐库: 读写 / 合并 / 打标 / 挑选 (T8-3)
-│   ├── test_music_player.py     # 播放内核: 环形队列 / 30 秒计一次 / 曲终自动下一首 / 补歌两段式 (T8-4/T10-4)
-│   ├── test_label_spec.py       # 统一标签语法: 拆键 / 拆值 / 多轴 / 壁纸那边只用这一份 (T8-5b)
-│   ├── test_merged_tools.py     # 五个工具: action 分派 / 缺依赖跳过 / 清单**预算守卫** (T8-5b/5c/T12-6)
-│   ├── test_tool_normalize.py   # 参数归一化: 真实错法 → 规范形 / 校验前跑 / 边界 (T8-5c)
-│   ├── test_read_intents.py     # 只读问句直连: 该直连的/不该截胡的/拿不到数据 (T8-5c)
-│   ├── test_chat_memory.py      # 纯对话记忆: 只收对话源 / 有界 / **不碰盘** / 场景与时间 (T9-1)
-│   ├── test_user_profile.py     # 用户画像: 权重配方 / 负反馈清零(两层) / 心情解析 / 落盘 / 消费方 (T9-2/T10)
-│   ├── test_frame_pipeline.py   # "截图 → 板子看到的那一帧": native 点采样公式与 C++ 一致 (T13-4)
-│   ├── mocks/                   # mock_agent_native: native 替身
-│   ├── host/                    # 需要 numpy 的绑定层测试 (按需手动跑)
-│   └── board/                   # 板端真机验收脚本（t13_study_calib.py = 学习判定标定, T13-4）
-├── docs/                        # 文档 (入口: docs/architecture.md)
-│   ├── architecture.md           # 架构与拓扑、板端布局
-│   ├── deploy.md                # 部署与双机同步规则
-│   ├── config-sources.md        # 配置来源: 谁写 / 谁读 / 谁派生
-│   ├── cli.md                   # 板端控制 CLI (assistant) 使用手册
-│   ├── tagging.md               # 壁纸标签化: 词表 / wall_data.jsonl / IP 检索 / 三格窗口与画像挑图 (T7/T10-3)
-│   ├── music.md                 # 音乐: 板端 ssh 调 PC neteasecli / 本地库 / 工具四件套 / 自动补歌 / 歌词 (T8/T10-4/T15-16)
-│   ├── profile.md               # 用户画像: 纯对话记忆 / IP·歌手权重 / 负反馈两层清零 / 心情 / **谁在消费它** (T9/T10)
-│   ├── bilibili.md              # B 站视频: 队列滑动窗口 / 缓冲走本机 HTTP 的来龙去脉 / 清晰度与 cookie 真相 / 双路认游戏 / 实测数字 (T11)
-│   ├── study.md                 # 学习内容监督: 相对分口径 / 升级链 / 阈值自适应护栏 / 管线与几何 / 已知边界 (T13)
-│   ├── llm.md                   # LLM 三模式 / edge 接 llama-server / 工具循环 / 降级
-│   ├── ipc-protocol.md          # Agent ⇄ GUI 协议 (线上格式唯一真源)
-│   ├── gui.md                   # GUI 构建与使用
-│   ├── gui-agent-integration.md # GUI 那一端实际收/发什么
-│   ├── cross-build-rk3568.md    # 交叉编译与 sysroot
-│   ├── decoder-mpp.md           # MPP 硬解
-│   ├── adr/                     # 架构决策记录: 为什么是现在这样、被否决的方案与代价 (T14-1)
-│   └── sunshine-pairing-findings.md
-├── build-host/                  # 宿主机构建产物 (不入 git)
-├── build-rk3568/                # 交叉编译产物 (不入 git)
-├── CMakeLists.txt
-├── Readme.md
-└── todo.md
+[video] 走零拷贝主路径（dmabuf ⇒ Qt EGL）
+[gstvideo] caps 尺寸 = 640 x 360
+[gstvideo] 绘制帧率 fps= "25.0"（每 120 次绘制 4801 ms）零拷贝帧= 240  平均画帧间隔(ms)= "40.0"  最大= 52
+vqueue 进程数 = 0     page flip 错误 = 0     agent-gui NRestarts = 0
+CPU 占用：整机 14.7~16.8%（未走零拷贝时 112.7%）
 ```
 
----
+链路：`B 站直链 → ffmpeg 合流为 MPEG-TS → 板端回环 HTTP 内存缓冲 → GStreamer(tsdemux → mppvideodec) →
+dmabuf → Qt EGL` ✓，视频内容不落盘 ✓。刷流时 GUI 的绘制节拍稳定在 40 ms（25 fps）✓。
 
-## 快速开始
+### 对话 / 工具调用 / 入队（真 terminal 输出）
+
+```console
+$ assistant chat --timeout 240 "搜索 罗刹海市"
+助手: 罗刹海市已成功搜索到，当前第0条，内容为【Hi-Res无损音质】刀郎《罗刹海市》无损音质经典歌曲完整版。
+
+# agent 侧（同一时刻的日志）
+agent: [terminal] 搜索 罗刹海市
+agent: bilibili: 搜「罗刹海市」-> 成功（18 条, 目标 18）
+agent: 回复: 罗刹海市已搜索并排至预览队列。当前为第 0 条…
+
+$ assistant video next
+现在是：【Hi-Res无损音质】刀郎《罗刹海市》无损音质经典歌曲完整版
+下一集：罗刹海市 - 刀郎【Hi-Res无损音质】（正在缓冲 —— 攒够 15 秒才让播放器开）
+```
+
+### 游戏串流（Moonlight ↔ Sunshine）
+
+```
+22:57:46 WARNING native: 第 1 次连接失败（… [Errno 101] Network is unreachable），5 s 后重试（总窗口 600 s）
+22:57:51 INFO    sunshine: Anorak_Host appversion=7.1.431.-1 PairStatus=1
+22:57:51 INFO    sunshine: app=Desktop -> appid=881448767 (走 /resume) sessionUrl=rtspenc://192.168.137.1:48010
+22:57:51 INFO    native: 第 2 次尝试连上了 ✓
+（板端线程：VideoRecv / VideoDec / mpp_dec_parser / mpp_dec_hal / ReqIdrFrame）
+（PC 侧 Sunshine 日志：CLIENT CONNECTED + Creating encoder [hevc_nvenc] + Opus initialized）
+```
+
+冷启动时 agent 比网络早 ⇒ 现在会**退避重试**，WiFi 一上来（~11 s）自己就连上 ✓。
+
+### 截图
+
+Qt 虚拟键盘（板端实拍，`docs/images/`）：
+
+| 覆盖层形态 | 白底输入态 | 透明输入态 | 最小化 |
+| --- | --- | --- | --- |
+| ![键盘覆盖层](docs/images/vk-overlay-bottom-strip.png) | ![白底](docs/images/vk-fixed-keyboard-white-bg.png) | ![透明](docs/images/vk-fixed-transparent.png) | ![最小](docs/images/vk-min.png) |
+
+> ⚠ **主界面整屏照片还没补** ✗ —— GUI 走 DRM/EGLFS（没有 fbdev 仿真），
+> 从板子 `/dev/fb0` 抓到的整帧是**全黑**（实测：4,096,000 字节 = 800×1280×4 一帧，
+> 但平均亮度 0.0、只有 1 种颜色 ✓），所以这里不拿黑图充数 ✓。
+> 要补的话两条路：① 用手机拍屏 ✓；② 走 DRM writeback 连接器
+> （`/sys/class/drm/card0-Writeback-1/modes` 支持 1920×1080 ✓）。
+
+## 当前运行形态
+
+| 形态 | 系统与构建 | 代码与状态位置 |
+| --- | --- | --- |
+| 系统镜像 | 厂商 Linux 6.1 SDK + Buildroot；GUI 使用 SDK 的 Qt 5.15.11 交叉编译，EGLFS 无 X 运行 | 代码 `/usr/lib/assistant`；配置、日志、运行状态 `/data/assistant`；模型 `/data/model` |
+| 开发 checkout | 原 Ubuntu 20.04 / aarch64 / Python 3.8 / glibc 2.31 环境；native 可由 Windows 交叉编译，GUI 可在有 Qt 开发依赖的板端编译 | checkout 约定 `/home/kickpi/myproject/assitant`；可用环境变量覆盖配置与运行状态路径 |
+
+两种形态的工具链、Python ABI 和 Qt 库不同，产物必须按目标系统重新编译。
+镜像的构建、刷写和 A/B 升级见 [系统镜像说明](docs/image.md) 与 [刷板手册](image/FLASH-RUNBOOK.md)。
+
+## 已实现功能
+
+| 功能 | 当前实现与边界 |
+| --- | --- |
+| 对话 | `edge` 访问本机 llama-server，`cloud` 访问 OpenAI 兼容 API，`disabled` 使用规则兜底；模型错误会降级并记录原因 |
+| 模式与日程 | `SLEEP` / `IDLE` / `STUDY` / `GAME`，模式切换经过 IDLE；日程支持周期和一次性事件，执行状态切换 |
+| 壁纸 | 本地壁纸目录、SigLIP 三轴标签、IP 检索、画像选图与 prev/current/next 三格窗口；通过对话工具换图 |
+| 音乐 | 板端经 SSH 调 PC 的 neteasecli，声音在 PC 播放；本地库、队列补歌、播放控制、歌词与画像偏好 |
+| B 站视频 | 搜索队列与预览；GUI 操作起播；ffmpeg 合流为 MPEG-TS，经板端回环 HTTP 内存缓冲交给 GStreamer；视频内容不落盘 |
+| 游戏检测 | SigLIP 画面锚点与 PC 进程双路判断，不一致时由进程裁决并自学习纠错 |
+| 学习监督 | 内容锚点、相对分判定、提醒升级与返回桌面、阈值自适应及有界统计；不确定结果保留为 unknown |
+| GUI 与管理 | 聊天、模式、日程、音乐、视频、模型、设置、系统状态；Qt 虚拟键盘；CLI、Wi-Fi 管理、崩溃日志与 OTA 状态/确认 |
+
+GGUF 模型由独立的 llama-server 进程加载，**不在 Python Agent 内推理**。
+SigLIP 双塔模型通过 RKNNLite 在 NPU 推理；CPU 上仍有预处理、分词和结果处理。
+模型、厂商 SDK、板端凭据及用户媒体不随源码仓库分发。
+
+CPU 调度与 NPU/CPU 协同、内存优化、低功耗的后续工作见 [todo3.md](todo3.md)。
+现有 `SLEEP` 状态和资源释放逻辑不等同于完整的系统低功耗实现。
+
+## 架构与数据通路
+
+```text
+Windows PC：Sunshine / neteasecli / 进程探测
+    │ 视频下行、命令上行           ▲ SSH 调用
+    ▼                            │
+RK3568 native：moonlight-common-c → MPP 解码 → ROI / RGB 预处理
+    │ 256×256 RGB888，300 帧 SPSC 环形缓冲
+    ▼
+Python Agent：asyncio → 视觉 / 状态机 / 日程 / LLM / 工具 / 画像
+    │ 同机 Unix domain socket（默认 /tmp/agent.sock）
+    ▼
+Qt5 GUI：页面 / 控制 / Qt 虚拟键盘 / GStreamer 视频显示
+```
+
+- native 解码器支持 H.264 / H.265。`auto` 先尝试 Rockchip MPP，再尝试编入的 FFmpeg 软解后端；指定后端时不自动回退。
+- `ImageReader` 与 `InputSender` 把 native 调用放在各自专属的单线程执行器中；环形缓冲读取必须保持单消费者线程。
+- GUI 的视频播放与 native 的视觉取帧是两条通路。GUI 的 DMA-BUF 导入与 EGL 渲染见 [零拷贝记录](docs/dmabuf-zero-copy-findings.md)。
+- GUI 向 Agent 提交设置与凭据命令；Agent 负责生产写入。`config/config.yaml` 是配置真源，`llm/config/llm.env` 由其派生。
+- 纯对话记忆有界且不落盘；画像、音乐库、壁纸标签、学习/游戏锚点是板端本地数据。
+
+详细拓扑和接口见 [架构文档](docs/architecture.md)、[IPC 协议](docs/ipc-protocol.md) 与 [架构决策](docs/adr/README.md)。
+
+## 源码目录
+
+```text
+native/       C++ 解码、预处理、环形缓冲、Moonlight 适配、pybind11 绑定
+agent/        Python 入口与 CLI；core / io / ipc / llm / media / net / tools / vision
+gui/          Qt5 C++ 界面、服务层、资源、QTest 与联调工具
+config/       config.example.yaml、user_profile.example.yaml 公共模板
+llm/scripts/  llama-server 启停与状态检查
+image/        SDK 注入、Buildroot 配方、镜像构建、验收、payload、OTA 执行器
+systemd/      checkout 与镜像各自的服务单元
+cmake/        原 Ubuntu 开发环境的交叉工具链
+scripts/      构建、部署、测试、监控、配对与代码审计
+tests/        Python / C++ 宿主测试、测试夹具与 board 真机验收脚本
+docs/         功能、部署、协议、架构、镜像与性能文档
+todo3.md      三项后续优化任务
+```
+
+`todo.md`、`todo2.md` 为本地历史工作记录，已取消 Git 跟踪；公开文档不依赖它们。
+
+## 配置与首次运行
+
+先初始化子模块：
 
 ```bash
-# 初始化子模块 (必须 --recursive: moonlight-common-c 还有 enet / nanors 子模块)
 git submodule update --init --recursive
-
-# 交叉编译 (aarch64)
-scripts/build.ps1
-
-# 宿主机单测 (C++)
-scripts/test-host.ps1
-
-# 宿主机单测 (Python)
-scripts/test-python.ps1
-
-# 部署到板端
-scripts/deploy.ps1
 ```
 
----
+Python 基础依赖是 PyYAML；视觉取帧/预处理需要 NumPy 和具备所需图像 API 的 OpenCV。
+`edge` / `cloud` 客户端还需要 openai，SigLIP 需要 tokenizers、匹配板端驱动的 RKNNLite、RKNN 模型和分词器。
+宿主测试可注入替身，不能代替板端硬件验证。镜像依赖由 `image/` 配方准备。
 
-## I/O 层
-`agent/io/` 把 native (`agent_native`) 的阻塞接口包成 asyncio 友好的 awaitable，
-并把输入源汇成一条事件流：
-
-```
-终端 ─────┐
-GUI ──────┴─→ ChatInputBus ─→ 下游 (scheduler / agent core)
-
-ImageReader   → numpy (256,256,3) 帧
-InputSender   → send_key / send_hotkey / send_mouse
-```
-
-```python
-from agent.io import ChatInputBus, ImageReader, InputSender
-
-bus = ChatInputBus()
-
-event = await bus.get()          # {"source", "text", "timestamp"}
-frame = await ImageReader().read_latest()
-
-sender = InputSender()
-await sender.send_key("ctrl", "C", "down")
-await sender.send_hotkey(["ctrl", "alt", "S"])
-```
-
-约定：
-
-- **所有 native 调用都跑在专属的单线程执行器上**，不阻塞事件循环。这不只是性能：
-  `image_rb` 是 SPSC 无锁结构，消费者必须**始终是同一个线程**，
-  所以不能用 asyncio 默认的共享线程池。
-- `agent/io` **不在 import 时加载 native 扩展**（宿主机没有 `.so`）。缺 `.so` 只在真正
-  调用时报错；测试用 `agent.io.set_native(mock)` 注入替身。
-
----
-
-## 工具路由
-
-负责**注册**、**权限控制**、**执行调度**三件事。具体工具在 `agent/tools/`，
-本模块只认接口，不做编排（谁调谁由 LLM 决定）。
-
-```python
-from agent.core import State, StateMachine, Tool, ToolRouter
-
-sm = StateMachine()
-router = ToolRouter(state_provider=sm)
-
-router.register(Tool(
-    name="screenshot",
-    description="截取主机当前画面",
-    schema={"type": "object", "properties": {}, "additionalProperties": False},
-    handler=do_screenshot,
-    allowed_states={State.GAME, State.STUDY},
-))
-
-router.list_tools()                       # 注册了什么（与状态无关）
-router.allowed_tools()                    # 当前**状态**下能用的那些（给 LLM 的候选）
-await router.execute("screenshot", {})    # {"ok": True, "result": ...}
-                                          # 或 {"ok": False, "error": "..."}
-```
-
-一次 `execute` 的顺序：**工具存在 → 状态允许 → 参数符合 schema → 执行（带超时）→ 异常兜底**。
-`execute` **永不抛异常**，调用方（LLM 循环）只看 `ok`。默认超时 5s。
-
-约定：
-
-- 状态不允许时工具**绝不执行**；拿不到当前状态时 **fail closed**（拒绝而不是放行）。
-  **Phase 7 起丢给模型的候选也按状态过滤**（`allowed_tools()`）—— 不可用的工具不该出现在
-  候选里。当前这张权限表（`tests/test_tool_permissions.py::EXPECTED` 是唯一真源）：
-
-  | 状态 | `back_to_desktop` | `next_wallpaper` | `next_music` | `bilibili_search` | `set_schedule` |
-  | --- | --- | --- | --- | --- | --- |
-  | `SLEEP` | ✗ | ✗ | ✗ | ✗ | ✗ |
-  | `IDLE` | ✗ | ✓ | ✓ | ✗ | ✓ |
-  | `STUDY` | ✓ | ✓ | ✓ | ✗ | ✓ |
-  | `GAME` | ✗ | ✗ | ✗ | ✓ | ✗ |
-
-  **T8-5b 把七个工具合并成三个**（每个工具用 `action` 分派具体动作）：
-  `next_wallpaper` = 翻页/按内容挑/**按用量挑**（`action=least`/`most`，T8-6）/
-  **只预备下一个**（`action=stage`，T10-3）/看标签；
-  `next_music` = 排队列/清空/清单/搜/状态/标签/音量
-  （transport 交给 GUI 四个按钮）；`back_to_desktop` = 回桌面（无参数，只 STUDY）。
-  动机是 **prompt 预算**：T8-5 实测 7 个工具的工具清单占第一轮 prompt 的 90%
-  （1699 / 1898 token），第二轮 2131 直接撞穿 ctx。链路见
-  [`docs/music.md`](docs/music.md) 与 [`docs/tagging.md`](docs/tagging.md)。
-
-  **T11-5 加了第四个工具 `bilibili_search`**（**只在 GAME**）：只有一个必填 `keyword`、
-  没有 `action` 枚举，职责**只有"把对话里的关键词交给 B 站队列"**（搜+排+填预览栏，**不播**）。
-  放在 GAME 而不是 STUDY 有**预算**上的道理：放进 STUDY 会把清单从 3562 顶到 4139（超预算），
-  放 GAME 则一个字符都不占别人的额度（GAME 那份清单 544 字符）。链路见
-  [`docs/bilibili.md`](docs/bilibili.md)。
-
-  **T12-6 加了第五个工具 `set_schedule`**（**IDLE / STUDY**，你点名要的"日程设置"）：
-  三个 action —— `add` / `list` / `remove`。日程的内容只有**时间 + 状态**
-  （`sleep`/`idle`/`study`/`game`），到点严格按状态机切过去（跨模式自动经 `IDLE`
-  释放/接管资源），并推一行展示文本给界面（**不进 LLM**）。它写的是 `config.yaml`
-  的 `scheduler` 段 —— 走的是 R3 那套**文本级**手术（只动目标那几行 + `.bak`），
-  写完**立刻热重载**调度器（不用重启 Agent），见
-  [`docs/config-sources.md`](docs/config-sources.md) §3.1。
-  ⚠ 工具清单因此从 3562 涨到 **4528 字符（= 1867 token, ctx 4096 的 45.6%）**，预算相应抬到 4700 ——
-  理由与量法记在 `tests/test_merged_tools.py::TestPromptBudget` 的注释里，
-  量法本身固定成了 `tests/board/measure_tool_tokens.py`（起真 llama-server, POST `/tokenize`）。
-  ⚠ 系统提示里**没有当前时间**：一次性日程（`date`）要先 `action=list` 拿今天的日期，
-  这条要求写进了工具的 description（0.6B 会自己猜日期）。
-
-  **T7-3 撤掉了 T6① 的一半**：以前 GUI 的 `next_wallpaper` 命令与 LLM 的工具共用这张表
-  （命令路径问 `ToolRouter.allowed_in_current_state()`）。按需求**手动换壁纸已删除**
-  （GUI 按钮 + 同名 IPC 命令），那个方法随之删除 —— 这张表现在只管工具，
-  而工具只有**对话**一条路能调到，所以答案仍然只有一个。
-- 同步 handler 会被丢到线程池，不阻塞事件循环；超时后线程仍在跑（Python 无法强杀线程），
-  调用方需自行考虑幂等。异步 handler 会被真正 cancel。
-- 参数校验用的是**自己实现的 JSON Schema 子集**（`SUPPORTED_KEYWORDS`）——实测宿主/WSL/板端
-  都没有 `jsonschema`，不为一个字段校验往板端塞依赖。子集外的关键字默认静默忽略，
-  用 `ToolRouter(permissive_schema=False)` 可以把"写了但没生效"变成报错。
-
----
-
-## IPC 协议（Agent ⇄ GUI）
-
-完整规范见 [`docs/ipc-protocol.md`](docs/ipc-protocol.md)（**唯一真源**）。常量与编解码在
-`agent/ipc/protocol.py`，Agent 侧接入点是 `agent/ipc/__init__.py` 的 `build_ipc()`，
-GUI 侧实现在 `gui/src/services/local_client.cpp`。
-
-| 项 | 值 |
-| --- | --- |
-| 传输 | Unix domain socket `/tmp/agent.sock`（Agent 监听，GUI 作客户端连接） |
-| 分隔 | 换行 `\n`（NDJSON，每条消息一行） |
-| 编码 | UTF-8 |
-| Agent → GUI（推送） | `{"topic": str, "data": object, "timestamp": float}` |
-| GUI → Agent（命令） | `{"action": str, "payload": object}` —— **没有 `timestamp`** |
-| 时间戳 | Unix epoch **秒**（浮点，C++ 侧必须用 `double`，`float` 在 epoch 尺度只有约 128 秒分辨率） |
-
-```python
-from agent.ipc import encode, decode_command, TOPIC_STATUS, MODE_STUDY
-
-sock.sendall(encode(TOPIC_STATUS, {"mode": MODE_STUDY, "connected": True}))  # 推状态
-action, payload = decode_command(line)    # 收命令 -> ("chat_input", {"text": "..."})
-```
-
-**两个方向的信封不一样，这不是笔误**（Phase 6 决策 1：命令格式以 GUI 的实际实现为准）。
-推送用 `topic`/`data`/`timestamp`，命令用 `action`/`payload`；**混用会被丢弃并记 warning**，
-不做"两种都认"的兼容。两端各自只收一个方向：Agent 只解命令、只发推送，GUI 反过来。
-
-约定：
-
-- **`data` / `payload` 必须是 object**，数组/标量判为非法；没有参数也要写 `{}`。
-- **未知字段忽略、未知 topic / action 忽略** —— 这是没有版本号时唯一的向前兼容手段。
-- **一条坏消息只影响它自己**：非法 JSON / 结构不对 → 丢弃 + 记日志，**不断开连接**。
-- `status.mode` 用**大写**（`SLEEP`/`IDLE`/`STUDY`/`GAME`），而 `StateMachine` 内部是
-  小写；转换只在 ipc server 那层做，不要混着传。
-- `switch_mode` 的参数键是 **`value`**（不是 `mode` —— 那是 `status` 推送里的字段）。
-
-
----
-
-## 运行
+checkout 环境在仓库根初始化配置：
 
 ```bash
-python3 agent/main.py                 # 板端主进程
-python3 agent/main.py --check-config  # 只校验配置
-python3 agent/main.py --dry-run       # 不连串流/不读 stdin, 只验证装配
-AGENT_RUN_SECONDS=5 python3 agent/main.py   # 跑 5 秒自动退出 (冒烟)
-```
-
-启动顺序（按依赖，停止时**严格反向**）—— 就是 `Runtime._STEPS` 那一串：
-
-```
-日志 → config → native → ChatInputBus → io 层
-     → music（工具要在建的时候就位）→ bilibili（同上）
-     → StateMachine + ToolRouter → llama-server 服务 → LLMProvider
-     → profile（判心情要问模型）→ Scheduler → IPC → 终端输入
-```
-
-> ⚠ **音乐与 B 站都排在"建工具"之前**：`agent/tools/` 里的那几个工具要**建的时候**就知道
-> 对应子系统"开没开"（没开就整个不装）—— 顺序错了会变成"工具装了但一调就报错"。
-> ⚠ 日程那个工具（`set_schedule`）反过来**不挑子系统**：它只要"配置文件路径"与
-> "调度器"两样，后者是**后面**才起的 —— 所以它绑的是方法（调用时才读 `runtime.scheduler`），
-> 那样"调度器还没起来"只会让工具如实说"配置写好了，下次启动生效"，而不是整个消失。
-
-约定：
-
-- **单组件失败不影响其他组件**：每个组件包两层保护（组件自身失败、步骤里组件之外的代码
-  失败），失败记进 `failures` 并在收尾汇总。可操作性优先于完整性 —— 摄像头没插不该让
-  命令监听也失效。
-- **日志**：同时写 `logs/agent.log`（含 DEBUG）和 stdout（INFO 起）。
-  正常跑只有 INFO + 少量自解释的 WARNING；**完整 traceback 只进 DEBUG**，
-  免得正常日志看起来像崩了。排查时把级别调到 DEBUG 即可。
-- 关闭：`SIGINT` / `SIGTERM` 都会触发干净退出（systemd 停服务发的是 SIGTERM）。
-- 尚未实现、启动时跳过并记一条 WARNING 的组件：`agent/tools/` 里某个工具**缺依赖**时只跳过
-  那一个（Phase 7 起 `agent/tools/` 本身有真工具了：`back_to_desktop` / `next_wallpaper` /
-  `set_schedule` 等，见上面的权限表）、
-  `agent/ipc/` 缺失或没有 `build_ipc()`（GUI 连不上）。它们**不算失败**，放到位即自动接入，
-  不用改 `main.py`。
-
-systemd 管理（不做 daemon 化）：
-
-```ini
-[Unit]
-Description=Agent (RK3568)
-After=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/home/kickpi/myproject/assitant
-Environment=LD_LIBRARY_PATH=/home/kickpi/myproject/assitant
-ExecStart=/usr/bin/python3 /home/kickpi/myproject/assitant/agent/main.py
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-
----
-
-## 板端控制 CLI（`assistant`）
-
-ssh 进来不用敲一长串 `python3 -m agent.cli`，板端装了启动器 `/usr/local/bin/assistant`：
-
-```bash
-assistant status            # 当前模式 + 串流连接（等不到就如实说没推，不编一个）
-assistant chat 现在几点      # 发一条给 Agent 并等回复（与 GUI 输入框同一条路）
-assistant mode study        # 切模式（大小写不限；非法转换会被状态机拒掉）
-assistant music pause       # 音乐传输控制（play/pause/toggle/next/prev；幂等意图）
-assistant video pause       # 视频传输控制（play/pause/toggle/next/prev；--wait-player 等播放器落地）
-assistant watch             # 盯推送（排障主力；--topics a,b / --count N）
-assistant schedule          # **接下来 24 小时**（--hours 可调）的日程，标出真的触发过的
-assistant cleanup           # 清理**已经过去**的一次性日程（默认只看，--apply 才删）
-assistant doctor            # 体检: 配置 / socket / 派生 llm.env / 日程 / 关键路径
-```
-
-- 走的是**现有 IPC 协议**：不 import Agent、不读它的内存。所以 Agent 没跑时它会明确说"连不上"
-  并给出下一步，而不是给一份假状态。
-- 日程有两件事分得很清：**列出来**（CLI 自己用 `agent.core.scheduler` 语义算，不需要 Agent 在跑）
-  与 **"到底触发过哪条"**（只能问运行中的 Agent —— 协议 `query_schedule`）。问不到时只标
-  「已过（按时间比较）」并写明原因，**不会**含糊成"没触发"；触发记录只在 Agent 内存里，重启即清零。
-- **只显示"接下来 N 小时"**（默认 24，`--hours` 可调；窗口里另带最近 30 分钟刚过去的那些）——
-  所以下午看时"今天早上那条"是不出现的。GUI 日程区同一套口径。
-- 完整说明（窗口与尾巴、三种标记、退出码、公共选项、边界、排障）：[`docs/cli.md`](docs/cli.md)。
-
----
-
-## 调度器
-
-日程检查 + 定时触发 + 终端命令监听。日程本身只有**时间 + 状态**：到点按状态机切到那个状态
-（严格走 `当前→IDLE→目标`，逐跳释放/接管资源），并往 `llm` 推一行显示文本 —— **不叫 LLM**。
-终端命令那条路仍然能把一句话发给 Agent（`bus.push("scheduler", ...)`，和终端/GUI 同一个入口）。
-
-```python
-from agent.core import Scheduler
-
-scheduler = Scheduler(state=sm, bus=bus, config=cfg)
-await scheduler.start()          # 起日程循环 + 命令订阅
-await scheduler.stop()
-
-await scheduler.check_schedule() # 也可手动跑一轮，返回本次真正触发的事件
-```
-
-配置（`interval_min` / `window_min` / `late_grace_min` / `commands` 在 `scheduler` 段，
-`recurring` / `oneoff` 两处都认，方便直接喂 `schedule.yaml`）：
-
-```yaml
-scheduler:
-  interval_min: 1          # 每 1 分钟检查一次
-  window_min: 1            # 触发窗口宽度
-  late_grace_min: 5        # 迟到的容忍度(休眠/重启后晚几分钟仍认)
-  commands:                # 终端命令 -> 动作; 整行相等才命中
-    - command: "study"
-      action: {state: study, prompt: "开始学习"}
-recurring:
-  # T12-4 起日程的内容**只有「时间 + 状态」**: 到点就把设备切到那个状态
-  # (严格走状态机, 跨模式要经 IDLE 释放/接管资源), 同时给界面推一行显示文本。
-  # `title` / `end` / `remind_before_min` / `prompt` 不再被读; 没有 state 的条目跳过 + 警告。
-  - {state: study, days: [mon, tue, wed, thu, fri], start: "09:30"}
-oneoff:
-  - {state: sleep, date: "2026-09-20", start: "22:30"}
-```
-
-约定：
-
-- **去重**：`check_schedule()` 每 `interval_min` 跑一次，但同一时间窗内只触发一次
-  （key 是「哪一天 + 事件 + 触发分钟」）。重启后同一窗口内会再触发一次——不做持久化。
-- **到点只做两件事**：① 按状态机切到那条日程的 `state`（跨模式自动 `当前→IDLE→目标`，
-  逐跳触发释放/进入）② 往 `llm` 推**一行**显示文本（`日程到点：切到 STUDY（13:00）`）。
-  那一行**不进对话总线**，所以**不叫 LLM 做任何事**（T12-4 你定的）。
-- **命令是订阅式的**：`bus.subscribe()` 只看不取。**不能**用 `get()` 读——那会把
-  终端/GUI 的用户消息一起吃进调度器，下游再也看不到。只认 `source == "terminal"`。
-- **命令匹配是"整行相等"**（去首尾空白、大小写不敏感，不做分词/前缀/缩写）——
-  少一层规则就少一处两边理解不一致的地方。
-- **⚠ 命中不会把事件拿走**：终端里敲 `study` 会有两个效果——状态切到 STUDY，
-  **并且那行文本照常被主循环送给 LLM**。要"只生效一次"就得让命令走一条不经过 LLM
-  的通道，那是另一个改动（见 `listen_commands` 的 @note）。
-- **`sync_time()` 不修改系统时间**，只校验时钟是否明显不对（板端无 NTP 服务/客户端库；
-  真要联网校时应配 systemd-timesyncd 或 chrony）。
-- **不做** cron 表达式解析、**不做**日程持久化。
-
----
-
-## 视觉层
-
-```python
-from agent.vision import parse_roi, SiglipModel
-
-roi = parse_roi("100,100,200,200")   # {"x","y","w","h","x2","y2","area","space","clamped",...}
-frame[y2:y1, x2:x1] = ...            # x2/y2 是开区间边界，可直接切片
-
-model = SiglipModel.from_config(cfg["vision"])   # None = 全用默认值；构造不加载
-model.load()                                     # 真 RKNN 双塔，板端 NPU
-emb = model.encode_image(frame)                  # frame 必须是 (1,256,256,3) uint8 0-255
-```
-
-约定：
-
-- **坐标平面是 256×256**（native preprocess 的输出），与鼠标坐标同一平面，
-  所以 ROI 坐标可以直接交给 `InputSender.send_mouse`，不用换算。
-- **超界不报错，而是夹到平面内并置 `clamped=True`**，同时保留 `raw` / `requested`。
-  超界是语义问题不是格式问题（`"100,100,200,200"` 在 256 平面上确实超界，
-  但那是很自然的写法）；报错会卡死链路，静默截断又会让"以为 200×200、实际 156×156"
-  查不出来。格式错误（字段数/非整数/空字段/w,h≤0/负坐标）仍然抛 `RoiError`。
-- 视觉层**只有一条 SigLIP 路径**：`agent/vision/siglip/`（真 RKNN 双塔）。
-  早期那个返回确定性伪随机向量的空接口 `SigLIPEncoder` **已在 T13-1 删除**——
-  它没有语义、`ready` 恒为 `False`，留着只会让人误以为"实时帧那条路已经能用了"。
-- 视觉层**不做**预处理（native 已做）也**不做** embedding 缓存（失效策略依赖调用场景）。
-
-### 截图 → 板子看到的那一帧（`frame_pipeline.py`）
-
-标定与人工打标签手里只有**整屏截图**，而板子看到的是 `Sunshine 按流分辨率编码 → 板端解码
-→ native/preprocess.cpp → 256×256`。`agent/vision/frame_pipeline.py` 把最后两步**原样复现**
-（`native` 是**点采样**、不是面积平均 —— `rx = (dx * roi.w) / 256`），所以"量出来的准确率"
-与"真机上的表现"是同一条管线。板端实测：PC 桌面 1024×768、流 1280×720 → **Sunshine 在缩放**。
-
----
-
-## 学习内容监督（Phase 13）
-
-**在 STUDY 里判断"屏幕上是不是学习内容"** —— 判据是**画面锚点**（与认游戏同源），
-**不进 LLM**；不像学习就提醒一次，提醒后仍不像学习、连续 3 次（**不含那次提醒**）→
-**返回桌面**并冷却 30 分钟；**判不出来完全中性**。阈值**不定死**：没把握带（`relative_band`）
-在运行期按带标签样本自己挪（一次 0.01、有界、每次记理由）。
-
-判定口径是「两个**大类原型**的余弦之差」，不是绝对余弦 —— 板端 39 张真截图实测：
-绝对余弦的两个大类**重叠**（按分位中点定阈值会判出 **69% 的"判不出来"**），
-相对分口径 **2 类 95–97%**、带 0.05 时 **误打扰 0 / 监督失效 1 / 判不出 8%**。
-
-```python
-from agent.core.study_anchors import StudyAnchors
-from agent.core.study_watch import StudyWatcher
-
-anchors = StudyAnchors(); anchors.load()
-watcher = StudyWatcher(anchors, stats=stats, probe=study_probe,
-                       encoder=lambda: game_watcher.encoder())   # 共用一份 SigLIP
-decision = watcher.tick(frame, state="study")
-# {"verdict": "study"|"not_study"|"unknown", "action": ""|"remind"|"back_to_desktop", ...}
-```
-
-- **"不像学习"与"判不出来"是两件事**：后者完全中性（不提醒、不计数、不动升级链）。
-- **冲突也判 unknown**（画面与进程名对不上时不硬猜）: 认错游戏的代价是搜错视频,
-  这里的代价是**打扰人**或**监督静默失效**。
-- 两条数据文件（`config/study_anchors.jsonl` / `config/study_stats.json`）都是**派生数据**、
-  已进 `.gitignore`，与**游戏锚点库分开**（一个认作品、一个认大类）。
-- **能改的设置**：`assistant set study|game-watch|profile|cookie`（文本级: 只动那一行 + `.bak`，
-  默认只看、`--apply` 才写）。
-  ⚠ **T15-4 起分两级权限**：与 GUI 设置页对等的那些键命令行直接改；**其余键（含排障用的调试项）
-  要在 `assistant shell` 里 `mode root` 之后改**（`assistant set --list-tiers` 看两级清单）——
-  口径 [`docs/config-sources.md`](docs/config-sources.md) §3.5。
-  日常操作 `assistant study status|check|label|freeze|reset`（**不用起 Agent**）。细节 [`docs/cli.md`](docs/cli.md)。
-- **GUI 也能改**（板端设置页三张卡片: 学习监督 / 游戏检测含 B 站凭据 / 画像压缩，T13-9）：
-  写的是同一批键、走**同一套**文本级约定（只动那一行、缺段按 `config.example.yaml` 新建、
-  值的类型跟着模板走），并有一条**按键盘点**的白名单契约测试钉住"GUI 只许动这些键"；
-  动作开关（`remind` / `back_to_desktop`）、`learn` / `adapt` 等仍然只在 CLI/真源里改 ——
-  键清单见 [`docs/study.md`](docs/study.md) §8.1。
-- 细节（升级链的每条规矩、自适应护栏、实测数字、**已知边界**）：[`docs/study.md`](docs/study.md)。
-
----
-
-## LLM 三模式
-
-```
-edge      板端本地模型: llama.cpp GGUF, 经本机 llama-server（OpenAI 兼容接口）
-cloud     OpenAI 兼容 API          (openai SDK，按需 import)
-disabled  不调模型，走 RuleEngine 规则兜底
-```
-
-```python
-from agent.llm import LLMProvider
-
-provider = LLMProvider(mode=None, tools=router)   # None = 去 config 读 llm.mode
-await provider.chat("现在几点", {"state": "idle"})        # -> str，失败抛异常
-await provider.chat_with_tools("截个图", {"state": "game"})  # -> dict，失败不抛
-
-provider.set_mode("cloud")     # 运行时切换；set_mode(None) 重新读配置
-```
-
-约定：
-
-- **两条入口的错误语义不同**：`chat()` 返回 str、失败**抛出**（终端/GUI 要知道模型挂了）；
-  `chat_with_tools()` 是自动循环入口，**永不抛**，错误收进
-  `{"ok", "text", "tool_calls", "error", "mode", "degraded"}`。
-- 模式从 `llm.mode` 读；非法模式名**降级到 disabled**（记在 `mode_errors`），
-  配置写错时系统应该降级可用而不是起不来。默认模式是 `disabled`——
-  默认值不该在用户没配置的时候就去调模型/发网络请求。
-- `edge` 是**真后端**：Agent 不加载 GGUF，它只连本机 llama-server
-  （`llm.port` / `llm.model_name` / `llm.local_api_key`）。edge 与 cloud **共用同一个
-  工具循环**，所以板端小模型也能 function call。
-- edge 挂了不会装作答过：`chat()` 照抛，`chat_with_tools()` **退回规则兜底**，
-  正文前面带一句"（板端模型没有响应，这条是规则兜底）"，结果里另有 `degraded` 写原因。
-- `openai` SDK **只在真正要发请求时**才 import；缺包会给带安装提示的
-  `OpenAIClientError`。只有 `disabled` 完全不依赖它。
-- 细节（板端实测数据、`/no_think`、怎么验）：[`docs/llm.md`](docs/llm.md)。
-
----
-
-## 状态机
-
-四个运行状态，**任何切换都必须经过 IDLE**（IDLE 是唯一的公共锚点）：
-
-```
-SLEEP ⇄ IDLE ⇄ STUDY
-         ↕
-        GAME
-```
-
-```python
-from agent.core import State, StateMachine
-
-sm = StateMachine()
-sm.on_change(lambda old, new: ...)        # 通知 GUI
-
-sm.transition(State.STUDY, "用户说开始学习")   # True
-sm.transition(State.GAME, "顺便打会儿游戏")    # False: STUDY 不能直接进 GAME
-sm.current()                              # State.STUDY
-sm.is_connected()                         # moonlight 连接状态 (与状态无关)
-```
-
-约定：
-
-- 非法转换**返回 False**，不抛异常（触发源可能是 IPC 消息或 LLM 输出）。
-- 目标状态也接受字符串（`"study"`），方便直接接 IPC 传来的值。
-- `is_connected()` 与当前状态**无关**，直接问 native；缺 `.so` 时返回 False。
-- 只做"记状态 + 判合法性 + 通知"，**不做**持久化、超时自动转换、变更日志。
-
----
-
-## 配置
-
-配置放在 `config/`，**真实 `*.yaml` 不入 git**，仓库里只提交 `*.example.yaml` 模板。
-
-```bash
-cp config/config.example.yaml       config/config.yaml
+cp config/config.example.yaml config/config.yaml
 cp config/user_profile.example.yaml config/user_profile.yaml
+
+python3 agent/main.py --check-config
+python3 agent/main.py --dry-run
+python3 agent/main.py
 ```
 
-日程写在 `config.yaml` 的 `scheduler:` 段（`recurring` / `oneoff` 的写法与真正会被读的键
-—— `state` / `days` / `start` / `date` —— 见 `config/config.example.yaml` 里那一大段注释；
-模板里不放真日程，免得刚 clone 下来就凭空多出状态切换）。
+模板默认 `llm.mode=disabled`，音乐默认关闭。按需要填写 Sunshine 主机、配对证书路径、
+PC 的 SSH 用户和模型路径，再打开对应功能；模板中的示例地址与用户名必须替换。
+模板中的本地 LLM key 是占位符，启用 edge 前在真实配置中设置独立随机值，并确认派生的 llm.env 与客户端一致。
+llm.env 的初始化和服务管理要求见 [LLM 文档](docs/llm.md) 与 [运行时说明](llm/README.md)。
 
-没有建真实配置时会自动退回读模板，所以刚 clone 下来也能直接跑。
+镜像首次启动的配置初始化见 [payload 配方](image/payload.manifest)。运行服务与 CLI：
 
-```python
-from agent import config
-
-cfg = config.load_config("config")     # -> dict (命中缓存时不读盘)
-config.get("sunshine.host")            # -> "192.168.137.1" (点号路径)
-config.get("llm.mode", "board")        # 缺失时给默认值
-
-config.save_config("config", {...})    # 写 config.yaml 并同步刷新缓存
+```bash
+systemctl status agent.service agent-gui.service
+assistant status
+assistant chat "现在是什么状态"
+assistant mode study
+assistant schedule --hours 12
+assistant doctor
 ```
 
-约定：
+`assistant` 是 CLI 命令名；从源码直接使用时入口是 `python3 -m agent.cli`。
+在镜像交互式 shell 中，`image/payload/assistant.sh` 设置代码、配置、日志和 LLM 状态路径；
+checkout 环境可通过 `AGENT_CONFIG_DIR`、`AGENT_LOG`、`LLM_ENV_FILE`、`LLM_STATE_DIR` 覆盖相应位置。
+命令细节见 [CLI 手册](docs/cli.md)。
 
-- 配置名走**白名单**（`config.ALLOWED_CONFIGS`），新增配置要同时加名字和模板。
-- 不做 schema 校验（各模块校验自己的字段）、不做热重载、不做环境变量替换。
-- `AGENT_CONFIG_DIR` 可覆盖配置目录（板端把配置放别处时用）。
+## 工具与状态权限
 
----
+工具清单和执行都按当前状态过滤，依次检查工具存在、状态权限、参数 schema、执行超时与异常。
+同步 handler 放入线程池；超时不会强制终止已经开始的 Python 线程。
 
-## 关键约定
+| 状态 | `back_to_desktop` | `next_wallpaper` | `next_music` | `bilibili_search` | `set_schedule` |
+| --- | --- | --- | --- | --- | --- |
+| SLEEP | ✗ | ✗ | ✗ | ✗ | ✗ |
+| IDLE | ✗ | ✓ | ✓ | ✗ | ✓ |
+| STUDY | ✓ | ✓ | ✓ | ✗ | ✓ |
+| GAME | ✗ | ✗ | ✗ | ✓ | ✗ |
 
-- 板端不手改代码，`agent/`、`.so`、`VERSION` 由 `deploy.ps1` 覆盖。
-- **壁纸是"三格窗口"**（`prev`/`current`/`next`，进程内、不落盘）：换图 = `next` 变当前并**立刻**按画像补一个新的 `next`；`action=stage` 只预挑不切屏（T10-3）。
-- **用户画像只被 Agent 自己读**（挑下一个壁纸 / 补歌 / 判负反馈 / 心情变了重置队列），模型既看不到也调不到它（T9 定、T10 消费，见 [`docs/profile.md`](docs/profile.md) §8）。
-- **音乐队列维持 30 首**：缺了先吃本地库、不够**只按画像里的歌手**去 PC 搜（`music.autofill`，T10-4）；负反馈把类似的歌整批移出队列。
-- **B 站视频只在板端放、内容不落盘**：队列只存地址（3× 预览栏格数的滑动窗口），**只有 GUI 操作才开始播**（点预览图/上一集/下一集），流走 **ffmpeg `-c copy` → MPEG-TS → 内存窗口 → 只绑 127.0.0.1 的本机 HTTP**（板端 `souphttpsrc` 是坏的，GUI 里把它的 rank 压到 0 让 GStreamer 走 `curlhttpsrc`；播放器读不了 FIFO），解码用板端 MPP 硬解；清晰度只走聊天气泡、界面不显示 —— 见 [`docs/bilibili.md`](docs/bilibili.md)。
-- **认游戏是"画面筛一遍 + PC 进程裁决"**：两路不一致时**以进程为准**并把那一帧写回锚点库（自纠错）；**有对话关键词就一帧都不抓**（T11）。
-- `send_key` / `send_mouse` / `send_hotkey` 必须释放 GIL，不阻塞 asyncio。
-- Agent ⇄ GUI 走**同机 Unix domain socket**（`/tmp/agent.sock`），两个方向的信封不同 —— 见 [`docs/ipc-protocol.md`](docs/ipc-protocol.md)。
-- 固件升级后重拉 sysroot 并重新交叉编译，否则 glibc 不匹配。
-- GameStream 的 `/applist`、`/launch`、`/resume` **只在 HTTPS 47984** 上，且需要已配对的客户端证书。
+权限的代码验证在 `tests/test_tool_permissions.py`。
+GUI 音乐/视频播放控制是 IPC 命令，不属于 LLM 工具权限表；B 站搜索工具只填队列，不自动播放。
 
----
+## 构建、测试与部署
 
-## 环境
+Windows 开发环境的 native 构建与测试：
 
-| 项 | 值 |
+```powershell
+scripts/build.ps1
+scripts/test-host.ps1
+scripts/test-python.ps1
+```
+
+`build.ps1` / `cmake/toolchain.cmake` 使用本地 `E:/rk3568/arm` 和 `E:/rk3568/sysroot`，
+对应原 Ubuntu/Python 3.8 环境。换路径需调整脚本与工具链；它不是 Buildroot 镜像的编译入口。
+checkout 部署使用 `scripts/deploy.ps1`，GUI 同步使用 `scripts/sync-gui.ps1`，参数见 [部署说明](docs/deploy.md)。
+
+有完整 Qt5 开发依赖的 Linux 宿主或板端可独立构建 GUI：
+
+```bash
+cmake -S gui -B build-gui-host -DGUI_BUILD_TESTS=ON
+cmake --build build-gui-host --parallel 4
+QT_QPA_PLATFORM=offscreen ctest --test-dir build-gui-host --output-on-failure
+```
+
+GUI 需要 Qt5 Core / Network / Widgets / Multimedia / MultimediaWidgets / QuickWidgets、
+yaml-cpp，运行软键盘需要匹配的 Qt Virtual Keyboard/QML 模块。离屏测试不验证 EGLFS、触摸或 MPP 视频显示。
+
+Buildroot 镜像在 Linux / WSL 中使用厂商 SDK：
+
+```bash
+bash image/install-into-sdk.sh <SDK>
+bash image/build-image.sh <SDK>
+bash image/preflash-check.sh <SDK>
+```
+
+GUI、native、llama-server 的镜像构建入口分别为 `image/build-gui.sh`、`image/build-native.sh`、
+`image/build-llama.sh`，由 payload 构建串联；刷板前验收中需要 chroot 的步骤以 root 执行。
+SDK 布局、镜像 flavor、模型与 userdata 的处理见 [镜像配方入口](image/README.md)。
+
+宿主 CI 验证 native 宿主分支、Python 测试及代码审计；目标交叉编译、GUI 与真机验证的边界见 [CI 说明](docs/ci.md)。
+性能数字见 [基准说明](docs/bench.md) 和 [CPU / 内存历史测量](docs/perf-cpu-mem.md)，它们是特定环境的记录。
+
+## 文档索引
+
+| 内容 | 文档 |
 | --- | --- |
-| 工具链 | GCC 9.2-2019.12，`E:/rk3568/arm/` |
-| sysroot | `E:/rk3568/sysroot`（从板端 tar 同步；dev 头文件由 `setup-sysroot-deps.ps1` 补） |
-| 板端 | `root@192.168.137.30`，`/home/kickpi/myproject/assitant/` |
-| 板端 Python | 3.8.10 |
-| 板端 GLIBC | 2.31，编译产物最高要求 2.17 |
+| 配置来源与分级 | [配置来源](docs/config-sources.md) |
+| LLM 与工具循环 | [LLM](docs/llm.md) |
+| 壁纸、音乐、画像 | [标签与检索](docs/tagging.md)、[音乐](docs/music.md)、[画像](docs/profile.md) |
+| 视频与学习监督 | [B 站](docs/bilibili.md)、[学习监督](docs/study.md) |
+| GUI 与 IPC 联调 | [GUI](docs/gui.md)、[GUI 风格](docs/gui-style.md)、[Agent 联调](docs/gui-agent-integration.md) |
+| 解码与网络 | [MPP](docs/decoder-mpp.md)、[网络](docs/net.md) |
+| OTA 与崩溃排查 | [OTA](docs/ota.md)、[崩溃日志](docs/crash.md) |
+| 优化任务与公开检查 | [todo3](todo3.md)、[公开前审计](docs/publication-audit.md) |
