@@ -53,17 +53,26 @@ $ assistant video next
 
 ### 截图
 
-Qt 虚拟键盘（板端实拍，`docs/images/`）：
+**板端主界面**（800×1280 实机整屏 ✓）：左上时间、顶部「睡眠 / 学习 / 游戏」模式切换、
+聊天输入（`说…` + 键盘/发送）、右上日程面板、中间壁纸、左下 **「空闲」+ 绿点「已连接」**、
+底部音乐条与导航栏（主页 / 音乐 / 图片 / 设置）✓
+
+![板端主界面](docs/images/screenshot-home.png)
+
+抓图方法（可复现 ✓）：板端 GStreamer 的 `kmssrc`（`gst-rockchip` 提供 ✓）——
+`gst-launch-1.0 -q kmssrc num-buffers=2 ! videoconvert ! filesink location=shot.raw`
+⇒ 800×1280×4 裸帧，回 PC 用 PIL 转 PNG ✓。
+⚠ 试过但**走不通**的两条：① `/dev/fb0`（GUI 走 DRM/EGLFS，抓到整帧**全黑** ✗）；
+② `pngenc` / `jpegenc`（这套精简镜像里**没有**这两个编码器 ✗）⇒ 所以走裸帧 + PC 编码 ✓。
+
+Qt 虚拟键盘（`docs/images/`）：
 
 | 覆盖层形态 | 白底输入态 | 透明输入态 | 最小化 |
 | --- | --- | --- | --- |
 | ![键盘覆盖层](docs/images/vk-overlay-bottom-strip.png) | ![白底](docs/images/vk-fixed-keyboard-white-bg.png) | ![透明](docs/images/vk-fixed-transparent.png) | ![最小](docs/images/vk-min.png) |
 
-> ⚠ **主界面整屏照片还没补** ✗ —— GUI 走 DRM/EGLFS（没有 fbdev 仿真），
-> 从板子 `/dev/fb0` 抓到的整帧是**全黑**（实测：4,096,000 字节 = 800×1280×4 一帧，
-> 但平均亮度 0.0、只有 1 种颜色 ✓），所以这里不拿黑图充数 ✓。
-> 要补的话两条路：① 用手机拍屏 ✓；② 走 DRM writeback 连接器
-> （`/sys/class/drm/card0-Writeback-1/modes` 支持 1920×1080 ✓）。
+> ⚠ 上面那张主界面截图里的壁纸来自本机壁纸库（内容由使用者自行放置 ✓，不含在仓库里 ✓）；
+> 若要公开仓库，可换成中性壁纸再抓一张 ✓（抓图命令同上 ✓）。
 
 ## 当前运行形态
 
