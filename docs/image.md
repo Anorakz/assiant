@@ -1142,7 +1142,77 @@ package-file：misc	misc.img
 3.8 GB 被 OOM 杀掉（`dmesg: Killed process (sh) anon-rss:3840984kB`）。
 补完后板上闭环通过：`gcc 编译并运行成功：hello from board gcc`。
 
-## 6. 板级对齐（T15-2-3，已编译验证）
+### 5.13 ★★ 标准镜像（2026-10-07）：带上 dmabuf 零拷贝视频修复 + 刷板前验收全过
+
+**为什么重建**：GUI 的视频播放这一轮被修好并**由用户目视确认**（详见
+[dmabuf-zero-copy-findings.md](dmabuf-zero-copy-findings.md) §7.9/§7.10）：零拷贝路
+**25 帧/s**、`vqueue:src` 归零、CPU 从 112.7% 降到 14.7~16.8%，并且修掉了"切视频偶发重启"
+（真因是 `gst_message_type` 在这个 GStreamer 构建里**没有导出**，而 `pumpBus()` 无条件调它 ✓）。
+镜像里的 GUI 是**从本仓库 `gui/` 交叉编译**出来的（§5.10 的 payload），所以要让这套修复
+进镜像，只需**重新注入源码 + 重建**。
+
+**怎么重建（两条命令，全程约 12 分钟增量）**：
+
+```bash
+# ① 把仓库源码重新注入 SDK（rsync payload-src；源是唯一来源 ✓）
+wsl -u root bash image/install-into-sdk.sh <SDK>
+# ② 整机构建（post-build 会重新交叉编译 GUI 并装进 rootfs，再打包 update.img）
+wsl -u root bash image/build-image.sh <SDK>          # 用 root（见 §5.8 的三条约束）
+# 完事把属主改回来，否则非 root 的 chroot 活会碰壁 ✓
+chown -R anorak:anorak <SDK>/output <SDK>/buildroot/output
+```
+
+**这次的标准件（指纹，可逐条核对 ✓）**：
+
+| 项 | 值 |
+| --- | --- |
+| 构建会话 | `<SDK>/output/sessions/2026-10-07_12-16-04/`（12:16 → 12:28） |
+| **`update.img`** | `output/update-ab/Image/update.img`，**816,595,530 B**，sha256 `5c597ae8554d7de35be625af3a84d329c03d1dae943f97144a72926092a8d81f`（12:28:29） |
+| 同内容软链 | `output/firmware/update-rk3568-kickpi-k1Mini-assistant-buildroot-2026100712.img` → 上面那份 ✓ |
+| `rootfs.img` | 736,100,352 B（上一版 692,060,160 B ⇒ **+44 MB**，与 GUI 变大一致 ✓） |
+| `boot.img` | 54,307,328 B ｜ target 树 569 MB |
+| **GUI（target 里那份）** | `usr/lib/assistant/gui/agent_gui`，**944,264 B**，md5 **`a986143fa6f1ea10a0ce4cbbf3d3e0da`**（上一版 `6c620a10…` 821,368 B） |
+| 注入的 GUI 源码 | `payload-src/gui/src/ui/gst_video_widget.cpp` = `2b1d7c31…`、`video_panel.cpp` = `2868f255…`（**与仓库逐字节相同** ✓） |
+
+**"镜像里那份 GUI 就是验好的那份"怎么证的**（不靠嘴说 ✓）：
+1. 用**镜像自己的脚本** `image/build-gui.sh`（同 sysroot / 同 flags / 同 strip ✓）编一遍 ⇒ 得到
+   `a986143fa6f1ea10a0ce4cbbf3d3e0da` ✓（即"标准镜像里应有的 md5"）；
+2. 把这份**部署到板上真跑**：日志 `[video] 走零拷贝主路径` ✓、绘制 **25.1 帧/s** ✓、
+   `vqueue 进程数 = 0` ✓、`agent_gui` CPU 16.3% ✓、**换流 5 次 0 崩** ✓；
+3. 整机构建完成后核对 target 里那份 md5 = **`a986143f…`** ✓✓ ⇒ **同一份二进制** ✓。
+
+> ⚠ 顺带记一条**构建可复现性**的坑：同一份源码，用 `image/build-gui.sh`（release 树 + `CMAKE_SYSROOT`）
+> 与 §5.10 之前那份临时脚本（**dev 树** sysroot）编出来**大小相同、字节不同** ✗（`.text` 就不同）。
+> 功能同源、板上都能跑，但**"验过的二进制"与"进镜像的二进制"必须用同一条构建路径** ✓ ——
+> 所以这次专门用镜像脚本重编 + 重新上板验证 ✓。
+
+**刷板前验收（`image/preflash-check.sh`）：== 通过 ✓**
+
+| 段 | 结果 |
+| --- | --- |
+| 逐项在位 | 缺 **0**（含 `rknnlite`、字体、gst 插件、QML、llama 运行时） |
+| DT_NEEDED 闭包 | **2680 个 ELF，缺失 0** |
+| chroot 冒烟 | **9/9**：`Python 3.11.8`、`numpy 1.25.0 + cv2 4.9.0`、`rknnlite ok`、`bash`、`curl 8.6.0`、`nmcli 1.44.2`、`mppvideodec`、思源黑体、`llama-server` |
+| payload | **0/12 未做**（agent 包 / GUI / native 扩展 + moonlight 库 / 两份默认配置 / 三个文档 / CLI 入口 / profile） |
+| 开机目标闭包 | 我们的 **6 个**（`agent-gui` `agent` `assistant-init` `assistant-ota-confirm` `assistant.target` `sshd`）+ 白名单基础设施 5 个；`usb-gadget` 已 mask |
+
+**这一轮顺手修掉的两个"检查器自己坏了"**（都不是视频改动引入的 ✗，但会让验收永远红 ✗）：
+
+| # | 现象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | `preflash-check.sh` 第 1 步就 `NameError: name 'site_packages' is not defined` ✗ | T15-3（3-6a，提交 `59bab14`）把 `site_packages` **收敛进 `imagelib`**，但 `check-runtime-deps.py:171` 还是裸调 ✗ | 改成 `imagelib.site_packages(target)` ✓ |
+| 2 | `sshd.service` 报 4 条：三个可执行文件未允许 ＋ `WantedBy=multi-user.target` ✗ | `sshd` 是 T15-2-11 之后**故意**登记进 `OUR_UNITS` 的（板端唯一交互/关机通道 ✓），但检查器的可执行文件表与 `WantedBy` 判据没跟上 ✗ | 白名单补 `/usr/sbin/sshd`、`/usr/bin/ssh-keygen`、`/bin/kill` ✓；新增**逐单元例外表** `WANTEDBY_ALLOWED_EXTRA`（上游 openssh 单元就写 `multi-user.target`，我们是靠 post-build 软链挂到 `assistant.target` ✓），两条都写了理由 ✓ |
+
+改完后 `python3 -m pytest tests/test_image_target.py tests/test_image_runtime.py tests/test_image_payload.py -q`
+⇒ **48 passed** ✓（这两个检查器在 CI 里有守卫 ✓）。
+
+**⚠ 还没做的：刷板**（`T15-2-11` 的正文 ✗）。这套 `update.img` 会**重排 eMMC 分区**
+（板上现有数据全丢 ✗，第一次还要 `mkfs.ext4` userdata ＋ 投放 4.9 GB 模型 ✓），
+所以不在"标准化"里顺手做 ✗ —— 步骤见 `image/FLASH-RUNBOOK.md`，
+烧写用的路径是 **`output/update-ab/Image/update.img`**（或那条带版本号的软链 ✓），
+**不要**用 `output/firmware/update.img`（AB 形态下它是**悬空软链** ✗）。
+
+
 
 **方法**：以**板端实际运行**的设备树为准（`dtc -I fs /sys/firmware/devicetree/base` 导出 6065 行，
 来自 5.10 厂商镜像 —— 触摸/显示/WiFi 都是好的），逐项对 SDK 的 K1Mini dts 链

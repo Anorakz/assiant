@@ -116,6 +116,20 @@ FORBIDDEN_PATTERNS = [
 ALLOWED_BINARIES = {
     "/usr/bin/python3", "/usr/lib/assistant/gui/agent_gui", "/bin/sh",
     "/bin/mkdir", "/usr/bin/mkdir",
+    #: ★ 2026-10-07 补：`sshd.service`（在 OUR_UNITS 里，理由是"板端唯一的交互/关机通道"）
+    #:   的 ExecStart 是 buildroot 的 openssh 原样那几条 ✓ —— 不补白名单就会一直报
+    #:   "用了未允许的可执行文件" ✗（实测 3 条），把整个刷板前验收卡在退出码 1 ✗。
+    "/usr/sbin/sshd", "/usr/bin/ssh-keygen", "/bin/kill",
+}
+
+#: `WantedBy=` 的**逐单元例外**（默认必须 `assistant.target`）。
+#:   为什么需要：有几个单元是**厂商/上游**写的，`[Install]` 段里就是别的 target ✗，
+#:   而我们是靠 post-build 的软链把它们挂到 `assistant.target.wants/` ✓ ——
+#:   改上游 unit 只为迎合检查器不值得 ✓，所以在这里逐条登记 + 写理由 ✓。
+WANTEDBY_ALLOWED_EXTRA = {
+    # buildroot 的 openssh 单元写的是 `WantedBy=multi-user.target` ✗（但我们不进 multi-user）；
+    # 镜像里它是 `assistant.target.wants/sshd.service` 这条软链拉起来的 ✓（见 post-build）。
+    "sshd.service": {"multi-user.target"},
 }
 
 WANT_RE = re.compile(r"^(Wants|Requires|BindsTo|PartOf|Upholds)\s*=\s*(.+)$")
@@ -215,7 +229,8 @@ def check_unit_file(name: str, unit: dict, problems: list) -> None:
                             if bad in dep.lower():
                                 problems.append("%s: %s 依赖了不该有的 %s" % (name, key, dep))
                 if key == "WantedBy":
-                    if v != "assistant.target" and name != "assistant.target":
+                    allowed = {"assistant.target"} | WANTEDBY_ALLOWED_EXTRA.get(name, set())
+                    if v not in allowed and name != "assistant.target":
                         problems.append("%s: WantedBy=%s（镜像里应当挂 assistant.target）" % (name, v))
     if name.endswith(".service"):
         install = unit.get("Install", {})

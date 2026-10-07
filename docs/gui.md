@@ -870,3 +870,36 @@ qt.virtualkeyboard: PlatformInputContext::showInputPanel()
 
 **板上核验** ✓（服务模式 ✓，`terminal` 配置 ✓）：`输入源=terminal（来自配置 ✓）` ✓ ＋
 `键盘承载尝试` **0 次** ✓ ⇒ 命令行模式下承载层**不建** ✓。
+
+---
+
+## 13. 视频播放：dmabuf 零拷贝（**默认开**）✓
+
+> 完整取证、走过的死路、逐条真因见 [dmabuf-zero-copy-findings.md](dmabuf-zero-copy-findings.md)
+> （§7.6 是旧结论、**§7.9 / §7.10 是最终实测与根因**）。这里只写"用的人要知道的"。
+
+### 13.1 默认走哪条路
+
+| 路 | 何时用 | 代价（同一台板子实测） |
+| --- | --- | --- |
+| **dmabuf 零拷贝**（默认 ✓） | 本机 `http://127.0.0.1:8765/stream/...` 流 | **25.0~25.3 帧/s** ✓、`agent_gui` CPU **14.7~16.8%** ✓、老的 `vqueue:src` 解码线程 **0** ✓ |
+| QMediaPlayer（老路） | 只在零拷贝**起不来**时**自动回退** ✓；或显式 `DSH_GST_VIDEO=0` | `vqueue:src` 约 **0.9 核** ✗、`agent_gui` 约 **112%** ✗ |
+
+```bash
+# 想对照老路（排查用）：给 GUI 服务加一个 drop-in 就行
+mkdir -p /etc/systemd/system/agent-gui.service.d
+printf '[Service]\nEnvironment=DSH_GST_VIDEO=0\n' > /etc/systemd/system/agent-gui.service.d/zz-gstvideo.conf
+systemctl daemon-reload && systemctl restart agent-gui     # 看完删掉这个文件就回到默认 ✓
+```
+
+### 13.2 用的人要知道的三件事
+
+1. **必须在 GAME 模式、且视频面板真的可见** ✓ —— 零拷贝的画面是直接导进面板的 GL 纹理，
+   面板不可见时不会出图（不是 bug，是"没在画"）。见 §1.0 的门禁表与 §2.1 的全屏 kiosk 约束。
+2. **画面不拉伸** ✓：按视频宽高比取最大内接矩形居中（上下或左右留黑）；
+   几何**逐条流解析**（caps 取宽高 ＋ 从内存大小反推 16 对齐高度）⇒ 不同分辨率的源都跟着走 ✓。
+3. **两个坑已经踩过并修掉** ✓：`gst_message_type` 在本镜像的 GStreamer 里**没有导出** ✗
+   （换流时一出现 EOS/ERROR 就会"跳到 0 执行" ⇒ 崩 ✓，已改成分别 pop ERROR/EOS ✓）；
+   EGL/GL 的函数指针要等 **`initializeGL` 之后**才解析得到 ✓（加载期判"必需"会误判成起不来 ✗）。
+   两条都在 findings 的"踩坑总表"里，别再走一遍。
+

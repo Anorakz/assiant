@@ -168,7 +168,10 @@ def check_payload(target: Path) -> list:
 #  1) 逐项在位
 # ---------------------------------------------------------------------------
 def check_present(target: Path) -> list:
-    site = site_packages(target)
+    #: ⚠ 2026-10-07 修（T15-3 / 3-6a 的漏改）：`site_packages` 那次被"收敛到 imagelib"，
+    #:   这里却还按**本地函数**调 ✗ ⇒ `NameError` ⇒ 整个刷板前验收在第 1 步就崩 ✓
+    #:   （实测：`preflash-check.sh` 直接 `NameError: name 'site_packages' is not defined` ✓）。
+    site = imagelib.site_packages(target)
     rows = []
     for kind, rel, why in MANIFEST:
         p = target / rel
