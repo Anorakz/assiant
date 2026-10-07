@@ -1,4 +1,4 @@
-# 公开前仓库审计
+﻿# 公开前仓库审计
 
 检查日期：2026-10-07。结论：**当前工作树已移除模板中的真实本地 LLM 密钥，历史仍需处理；不能据此直接认定公开准备完成。**
 
@@ -69,7 +69,7 @@ Slack token、密码哈希或已提交的真实 B 站/网易云 Cookie。代码�
 | Sunshine 客户端**私钥**值（`E:\rk3568\local\creds\client.key` 正文） | **全部历史无命中 ✓**（旧 `todo.md` 里记的"只差一个 `git add -A`"没有真的发生 ✓） |
 | Sunshine 客户端**证书**值（`client.pem` 正文） | **全部历史无命中 ✓** |
 | OpenSSH / PEM 私钥文件头（`BEGIN … PRIVATE KEY`） | **任何提交里都没有 ✓**（pickaxe 命中 0） |
-| 本地 llama key（`***REMOVED-LLM-KEY***`） | ⚠ **历史里有**：`llm/config/llm.env`（提交 `882cbd1`）与 `gui/config/gui.yaml.bak`（提交 `26545b5`）✓ —— 与上面 §已确认的发现同一把 ✓（指纹 `4e31aa935c3d` ✓） |
+| 本地 llama key（``<新值——原文不入库；sha256 前 12 位 8b77029b…>``） | ⚠ **历史里有**：`llm/config/llm.env`（提交 `882cbd1`）与 `gui/config/gui.yaml.bak`（提交 `26545b5`）✓ —— 与上面 §已确认的发现同一把 ✓（指纹 `4e31aa935c3d` ✓） |
 | 历史里曾**新增过**的敏感文件名 | `llm/config/llm.env`、`sig/config/sig.env`、`config/config.example.yaml.bak-1790930445`、`gui/config/gui.yaml.bak`、`image/local/authorized_keys.example`（示例 ✓ 无真实公钥） |
 | `sig/config/sig.env` 内容 | 只有**路径与说明**（`SIG_TOKENIZER_PATH=/home/<用户名>/…` ⇒ 个人用户名 ✓），**没有密钥** ✓ |
 
