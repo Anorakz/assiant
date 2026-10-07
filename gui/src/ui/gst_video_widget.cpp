@@ -36,14 +36,9 @@ int g_nextWidgetId = 0;  ///< 给每个实例编号（比裸 `this` 好认 ✓�
 //: （"帧到达事件"那条路已在第 75 轮被实测判掉 ✗：事件投得出去、但每次 `repaint()` 只有 ~1/10
 //:   变成 `paintGL` ✓ —— 主驱动因此回到 QTimer ✓，这里不再需要自定义事件类型 ✓）
 
-//: ★★ 第 76 轮（用户实测"闪回旧帧" ＋ "GUI 短暂重启"⇒ 查到 3 次 SIGSEGV ✓）：
-//:   fd 键的 EGLImage 缓存**必须跨流清掉** ✗ —— 换流后旧的 dmabuf 已经被关 ✓，
-//:   而缓存里那条 EGLImage 还指着它 ⇒ 再 `glEGLImageTargetTexture2DOES` 绑上去就是
-//:   **拿已释放的 dmabuf 当纹理** ⇒ 轻则闪出旧帧 ✓、重则驱动层直接 SIGSEGV ✓。
-//:   ⇒ 缓存改成**文件作用域** ✓，`teardown()` 里统一 destroy + 清空 ✓。
-struct FdImage { int fd; void* img; };
-FdImage g_fdCache[8];
-int g_fdCacheN = 0;
+//: ★★ 第 81 轮：**不再留 fd 键的 EGLImage 缓存** ✗（见 paintGL 里的说明 ✓）——
+//:   fd 回收很快，缓存里的 image 会指着"换主的 dmabuf" ⇒ 闪旧帧 / SIGSEGV ✓。
+//:   现在改成每帧 `eglCreateImageKHR` ⇒ 贴纹理 ⇒ 画 ⇒ `eglDestroyImageKHR` ✓（双缓冲式 ✓）。
 GLuint g_tex = 0;              ///< 外部纹理 ✓（**随 GL 上下文** ⇒ 上下文重建必须清零 ✗）
 GLuint g_prog = 0, g_vbo = 0;  ///< 着色器/顶点缓冲 ✓（同上 ✗）
 int g_capsW = 0, g_capsH = 0;  ///< 从 caps 解析出的**真实**视频尺寸 ✓（换流要重解析 ✓）
@@ -51,13 +46,11 @@ int g_capsW = 0, g_capsH = 0;  ///< 从 caps 解析出的**真实**视频尺寸 
 /// ★★ 第 77 轮（崩溃真因之一）：这些 GL 名字/vbo/纹理都是**每个 GL 上下文一份** ✓，
 //:   而 `QOpenGLWidget` 的上下文会被 Qt **重建**（板端日志实测 `initializeGL` 出现过 4 次 ✓）——
 //:   重建之后旧的 `GLuint` 全**失效** ✗，再绑上去就是驱动层 **SIGSEGV** ✓（实测偶发重启 ✓）。
-//:   ⇒ 所以在 `initializeGL()` 里统一清零 + 允许下次重建 ✓；同时清掉 EGLImage 缓存 ✓
-//:   （缓存里的 image 也属于旧上下文/旧 dmabuf ✓）。
+//:   ⇒ 所以在 `initializeGL()` 里统一清零 + 允许下次重建 ✓。
 void resetGlStateForNewContext() {
     g_tex = 0;
     g_prog = 0;
     g_vbo = 0;
-    g_fdCacheN = 0;   // 旧的 EGLImage 随上下文作废 ✓（不 destroy：display 可能已失效 ✗，交给驱动回收 ✓）
 }
 
 /// 单调毫秒（诊断用 ✓；可被 handoff 线程调用 ⇒ C++11 的静态初始化是线程安全的 ✓）
@@ -259,24 +252,13 @@ void GstVideoWidget::teardown() {
         if (g->object_unref) g->object_unref(pipeline_);
     }
     pipeline_ = sink_ = nullptr;
+    src_ = nullptr;
     bus_ = nullptr;    // 引用已在上面还掉 ✓
     playing_ = false;
     drewOnce_ = false;
-    //: ★★ 第 76 轮：**换流必须清 EGLImage 缓存** ✓（旧的 dmabuf 已关 ⇒ 缓存里的 EGLImage 是死引用 ✗
-    //:   ⇒ 再绑上去就会"闪旧帧"甚至 SIGSEGV ✓ —— 板端实测崩过 3 次 ✓，用户也看到 GUI 短暂重启 ✓）
-    {
-        Gst* gg = gst();
-        //: ⚠ 第 77 轮教训：这里**不要去调 `eglDestroyImageKHR`** ✗ ——
-        //:   板端实测：退出/停服务那一刻销毁 EGLImage 会 **SIGSEGV** ✓（10:39:47 那次 SEGV
-        //:   正好发生在 `systemctl stop` 的瞬间 ✓）——那时 EGL/GL 上下文可能已经在拆 ✗。
-        //:   ⇒ 只**丢掉缓存引用**就够 ✓（image 由驱动在 display 销毁时回收 ✓，
-        //:     每换一次源最多漏 8 个 ✓，可接受 ✓）；关键是**新流不会复用旧 image** ✓。
-        Q_UNUSED(gg);
-        if (g_fdCacheN > 0)
-            qInfo() << "[gstvideo] 换流：丢弃 EGLImage 缓存" << g_fdCacheN << "个 ✓（不复用旧的 ✗）";
-        g_fdCacheN = 0;
-        g_capsW = g_capsH = 0;    // 尺寸要按新流重解析 ✓
-    }
+    //: ★ 第 81 轮：EGLImage **不再缓存** ✓ ⇒ 这里只需把"按流解析的尺寸"清掉 ✓
+    //:   （以前这里还要 dis片缓存 ✓；现在每帧现建现毁 ✓ ⇒ 没有跨流死引用这一类问题 ✓）
+    g_capsW = g_capsH = 0;    // 尺寸要按新流重解析 ✓
 }
 
 // ---------------------------------------------------------------- 管线
@@ -359,8 +341,12 @@ bool GstVideoWidget::buildPipeline(const QString& url) {
     //:   ⇒ 对策：让 sink **按实时时钟出帧**（`sync=true` ✓）⇒ 到达变成稳定的 ~24fps ✓
     //:   ⇒ 每 25ms 至多 1 帧 ⇒ **不再丢帧** ✓、`paintGL` 40 拍里该有 ~24 拍拿到帧 ✓（目标 ≥20 ✓）。
     //:   ⚠ 保留 `signal-handoffs=true` ✓（板上没有 `app` 插件 ⇒ 只能靠 handoff 拿 buffer ✓）。
+    //: ★★★ 第 81 轮（**从结构上根治换流崩溃** ✓）：给 source **起名字** ✓ ——
+    //:   这样换流时可以"**复用同一条管线、只换 `location`**" ✓，**不再拆装管线** ✗
+    //:   ⇒ 从根上避开"`set_state(NULL)` 异步拆 + 立刻 unref ⇒ 流线程稍后踩已释放内存"那个坑 ✓
+    //:   （GStreamer 对 `souphttpsrc` 换 `location` 是支持的：它会自己关旧连接、开新连接 ✓）。
     const QByteArray desc =
-        "souphttpsrc location=" + url.toUtf8() +
+        "souphttpsrc name=src location=" + url.toUtf8() +
         " ! tsdemux ! h264parse ! mppvideodec ! video/x-raw(memory:DMABuf)"
         " ! fakesink name=sink signal-handoffs=true sync=true";
     void* err = nullptr;
@@ -368,6 +354,7 @@ bool GstVideoWidget::buildPipeline(const QString& url) {
     if (!pipeline_) { qWarning() << "[gstvideo] 管线构造失败"; failed_ = true; return false; }
     sink_ = g->bin_get_by_name(pipeline_, "sink");
     if (!sink_) { qWarning() << "[gstvideo] 找不到 fakesink(name=sink)"; failed_ = true; return false; }
+    src_ = g->bin_get_by_name(pipeline_, "src");    // ★ 第 81 轮：换流时只改它的 location ✓
     g->object_set(sink_, "signal-handoffs", 1, "sync", 1, nullptr);
     g->signal_connect(sink_, "handoff", (void*)&GstVideoWidget::onHandoff, this, nullptr, 0);
     //: ★ 第 78 轮：bus **只取一次** ✓（`gst_element_get_bus` 会多一个引用 ⇒ 必须还 ✓，
@@ -383,6 +370,32 @@ bool GstVideoWidget::setSource(const QString& url) {
     source_ = url;
     qInfo() << "[gstvideo] setSource this=" << this << "url=" << (url.isEmpty() ? QStringLiteral("(清空)") : url);
     if (url.isEmpty()) { teardown(); update(); return true; }
+    //: ★★★ 第 81 轮（**换流不拆管线** ✓，用户看到"切视频就重启"的那个问题的根治方向 ✓）：
+    //:   已经有管线时 ⇒ **只把 `souphttpsrc` 的 `location` 换掉** ✓（管线一直在 PLAYING ✓）
+    //:   ⇒ 没有"拆装管线"这一步 ⇒ 也就没有"异步拆 + 立刻 unref"那个崩溃窗口 ✓✓
+    //:   细节：① 换流瞬间**先关收帧闸门** ✓、把缓冲排空 ✓（旧流的帧不要混进来 ✓）
+    //:         ② 清掉 caps 尺寸与 EGLImage 缓存 ✓（尺寸/缓冲池都会变 ✓）
+    //:         ③ 200ms 后自动开闸 ✓（新流通常立刻就有帧 ✓；真没起来也有总线 ERROR 兜底 ✓）
+    Gst* g = gst();
+    if (g && pipeline_ != nullptr && src_ != nullptr) {
+        acceptFrames_.store(false);
+        {
+            QMutexLocker lock(&frameMutex_);
+            while (!frameQ_.isEmpty()) {
+                void* held = frameQ_.dequeue();
+                if (held && g->buffer_unref) g->buffer_unref(held);
+            }
+        }
+        g_capsW = g_capsH = 0;    // 新流尺寸要重解析 ✓（EGLImage 每帧现建 ✓ 无缓存要清 ✓）
+        g->object_set(src_, "location", url.toUtf8().constData(), nullptr);
+        failed_ = false; eosSent_ = false; zeroCopyFrames_ = 0; framesShown_ = 0;
+        qInfo() << "[gstvideo] 换流（复用管线 ✓）：只改 source location";
+        QTimer::singleShot(200, this, [this]() {
+            acceptFrames_.store(true);
+            if (tick_ != nullptr && !tick_->isActive()) tick_->start();
+        });
+        return true;
+    }
     failed_ = false; eosSent_ = false; zeroCopyFrames_ = 0; framesShown_ = 0;
     if (!buildPipeline(url)) { emit failedOver(); return false; }
     return true;  // 真正的 PLAYING 在 initializeGL 之后（需要 GL 上下文）
@@ -600,6 +613,13 @@ void GstVideoWidget::paintGL() {
     }
     if (alignedH & 1) ++alignedH;                 // NV12 的 UV 平面按偶数 ✓
     const int uvOff = stride * alignedH;
+    //: ★★★ 第 81 轮（**最后一个便宜假设** ✓）：**不再按 fd 缓存 EGLImage** ✗ ——
+    //:   板端实测 fd 回收得很快（69/79/94/98/87 来回换 ✓），缓存里那条 image 可能指着
+    //:   **已经换主的 dmabuf** ✗（换流/换池时就是"死引用" ✓）⇒ 闪旧帧、甚至驱动层 SIGSEGV ✓。
+    //:   ⇒ 改成**每帧现建现毁** ✓（create ⇒ 贴纹理 ⇒ 画 ⇒ destroy ✓，双缓冲式 ✓）：
+    //:     拿到的 image 永远对应**当帧那个 fd** ✓ ⇒ 这一类竞态**从根上消失** ✓。
+    //:   ⚠ 代价只是每帧一次 `eglCreateImageKHR` ✓（第 68 轮曾怀疑它慢 ✗，后来实测排除 ✓；
+    //:     这里用"绘制帧率是否仍 ≥20"当场验证 ✓）。
     void* dpy = g->eglGetCurrentDisplay();
     const int attrs[] = {
         EGL_WIDTH_, W, EGL_HEIGHT_, alignedH,
@@ -608,30 +628,17 @@ void GstVideoWidget::paintGL() {
         EGL_DMA_BUF_PLANE1_FD_EXT_, fd, EGL_DMA_BUF_PLANE1_OFFSET_EXT_, uvOff, EGL_DMA_BUF_PLANE1_PITCH_EXT_, stride,
         EGL_NONE_
     };
-    //: ★ 按 fd 缓存 `EGLImage` ✓（同一条流内 ✓）：板端实测 fd 只在少数值间轮换（51/54/63/67… ✓）
-    //:   ⇒ 同一个 fd 再来就直接复用 ✓，不再每帧 create/destroy ✗
-    //:   ⚠ 缓存**跨流必须清** ✗（见 `teardown()` ✓ —— 否则就是"闪旧帧/SIGSEGV" ✓）
-    void* s_img = nullptr;
-    for (int i = 0; i < g_fdCacheN; ++i) {
-        if (g_fdCache[i].fd == fd) { s_img = g_fdCache[i].img; break; }
-    }
+    void* s_img = g->eglCreateImageKHR(dpy, nullptr, EGL_LINUX_DMA_BUF_EXT_, nullptr, attrs);
     if (s_img == nullptr) {
-        s_img = g->eglCreateImageKHR(dpy, nullptr, EGL_LINUX_DMA_BUF_EXT_, nullptr, attrs);
-        if (s_img == nullptr) {
-            static bool warned = false;
-            if (!warned) {
-                warned = true;
-                //: 失败时把**真实入参**打出来 ✓（否则只剩"失败"两个字，没法定位 ✗）
-                qWarning() << "[gstvideo] eglCreateImageKHR 失败：W=" << W << "H=" << alignedH
-                           << "stride=" << stride << "uvOff=" << uvOff << "fd=" << fd;
-            }
-            g->buffer_unref(buf);
-            if (!drewOnce_) { gl->glClearColor(0.1f, 0, 0, 1); gl->glClear(GL_COLOR_BUFFER_BIT); }
-            return;
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            qWarning() << "[gstvideo] eglCreateImageKHR 失败：W=" << W << "H=" << alignedH
+                       << "stride=" << stride << "uvOff=" << uvOff << "fd=" << fd;
         }
-        if (g_fdCacheN < 8) { g_fdCache[g_fdCacheN].fd = fd; g_fdCache[g_fdCacheN].img = s_img; ++g_fdCacheN; }
-        static int made = 0;
-        if (++made <= 5) qInfo() << "[gstvideo] 新建 EGLImage（fd=" << fd << "，缓存 " << g_fdCacheN << " 个）";
+        g->buffer_unref(buf);
+        if (!drewOnce_) { gl->glClearColor(0.1f, 0, 0, 1); gl->glClear(GL_COLOR_BUFFER_BIT); }
+        return;
     }
     if (g_tex == 0) {
         gl->glGenTextures(1, &g_tex);
@@ -695,6 +702,9 @@ void GstVideoWidget::paintGL() {
     gl->glVertexAttribPointer(ap, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
     gl->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     gl->glDisableVertexAttribArray(ap);
+    //: ★ 第 81 轮：画完就**把这个 EGLImage 还掉** ✓（下帧再建新的 ✓）—— 不留缓存 ⇒ 不含死引用 ✓
+    if (s_img != nullptr && g->eglDestroyImageKHR && dpy != nullptr)
+        g->eglDestroyImageKHR(dpy, s_img);
 
     //: ★★ 画帧间隔打点（**用户要求"检查画帧间隔是否正确"** ✓）：
     //:   每 120 次**真正绘制**打印平均/最大间隔 ✓ —— 稳定的话平均应 ≈ 1000/帧率 ✓。

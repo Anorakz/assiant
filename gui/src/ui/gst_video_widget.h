@@ -102,7 +102,9 @@ private:
     QByteArray sourceBytes_;
     QString source_;
     void* pipeline_ = nullptr;      ///< GstElement*
-    void* sink_ = nullptr;          ///< GstElement*
+    void* sink_ = nullptr;          ///< GstElement*（fakesink ✓）
+    void* src_ = nullptr;           ///< GstElement*（souphttpsrc ✓ —— 换流时**只改它的 location** ✓，
+                                    ///< 不拆管线 ⇒ 避开"异步拆装"那个崩溃窗口 ✓，见 §7.9.7 ✓）
     void* bus_ = nullptr;           ///< GstBus（**建管线时取一次 ✓、teardown 还回去 ✓** ——
                                     ///< 以前每拍 `element_get_bus` 且从不 unref ⇒ 每拍泄漏 ⇒ 几分钟崩一次 ✗）
     //: ★★ 帧缓冲（第 77 轮，**用户要求** ✓）：单槽"丢最旧"在到达一阵一阵时会让同一波里只剩一帧 ✗
