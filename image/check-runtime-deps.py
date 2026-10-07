@@ -167,6 +167,25 @@ def check_payload(target: Path) -> list:
 # ---------------------------------------------------------------------------
 #  1) 逐项在位
 # ---------------------------------------------------------------------------
+#: ★★ 2026-10-07（**一次真事故换来的门禁** ✓）：镜像里**不许有桌面/Wayland 合成器**。
+#:   我们的形态是"无 X、无桌面、GUI 直接跑在 EGLFS 上"（docs/image.md 决策 D1 / §5.7）。
+#:   事故：buildroot **不会删掉**上一次开着时装进 target 的文件 ✗ ⇒ 陈旧的 weston
+#:   （30 个文件 + sysinit.target.wants/weston.service ✗）被我这次重建打进 rootfs ✗，
+#:   它 WantedBy=sysinit.target **开机极早就抢走 DRM** ⇒ 我们的 GUI 画不上去
+#:   （板端实测 `Could not queue DRM page flip on screen DSI1 (Device or resource busy)` ✗），
+#:   用户看到的是"界面没起来、偶尔闪一张图" ✗。`.config` 里 WESTON=not set 拦不住它 ✗
+#:   （文件是陈旧的，不是这次编出来的）⇒ 只能在这儿用**产物本身**兜住 ✓。
+FORBIDDEN_IN_ROOTFS = [
+    "usr/bin/weston",
+    "usr/bin/weston-launch",
+    "usr/libexec/weston-desktop-shell",
+    "usr/libexec/weston-keyboard",
+    "usr/lib/systemd/system/weston.service",
+    "etc/systemd/system/sysinit.target.wants/weston.service",
+    "etc/xdg/weston",
+]
+
+
 def check_present(target: Path) -> list:
     #: ⚠ 2026-10-07 修（T15-3 / 3-6a 的漏改）：`site_packages` 那次被"收敛到 imagelib"，
     #:   这里却还按**本地函数**调 ✗ ⇒ `NameError` ⇒ 整个刷板前验收在第 1 步就崩 ✓
@@ -177,6 +196,12 @@ def check_present(target: Path) -> list:
         p = target / rel
         rows.append({"kind": kind, "name": rel, "why": why, "ok": p.exists(),
                      "detail": "" if p.exists() else "不存在"})
+    #: ★ 门禁：**不该有的东西一个都不许有** ✓（见上面 FORBIDDEN_IN_ROOTFS 的事故说明 ✓）
+    for rel in FORBIDDEN_IN_ROOTFS:
+        if (target / rel).exists():
+            rows.append({"kind": "禁止", "name": rel,
+                         "why": "镜像里不许有桌面/Wayland 合成器（会抢 DRM ✗）",
+                         "ok": False, "detail": "存在 ⇒ 先清掉 target 里的陈旧文件再重建 ✗"})
     for mod, (cls, where, why) in sorted(PY_MODULES.items()):
         if cls != "required":
             continue

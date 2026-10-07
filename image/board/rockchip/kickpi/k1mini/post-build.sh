@@ -242,6 +242,32 @@ for u in $MASK_UNITS; do
 done
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+#  ★ 2026-10-07：清掉**厂商 overlay 塞进来的 weston**（一次真事故换来的门禁）
+#  ---------------------------------------------------------------------------
+#  事故：厂商的 buildroot 每次构建都会
+#      >>> Copying board/rockchip/common/overlays/10-weston
+#  把 `etc/xdg/weston/{weston.ini,weston.ini.d/*}` 拷进 target ✓ —— `.config` 里
+#  `BR2_PACKAGE_WESTON is not set` **拦不住它** ✗（那是 overlay 拷的，不是包装的）。
+#  更早一次构建还（weston 真开着时）把整包 weston 装进了 target ✓，之后关掉开关，
+#  **buildroot 不会删掉已装进 target 的文件** ✗ ⇒ 30 个 weston 文件被随后的重建
+#  一起打进 rootfs ✗ ⇒ `weston.service`（`WantedBy=sysinit.target`）开机极早抢走 DRM
+#  ⇒ 我们的 GUI 画不上去（板端实测 `Could not queue DRM page flip on screen DSI1
+#  (Device or resource busy)` ✗），用户看到"界面没起来、偶尔闪一张图" ✗。
+#  做法：① 这里把残留一起删干净（厂商 overlay 在 post-build **之前**跑 ✓，所以删得掉 ✓）；
+#        ② `image/check-runtime-deps.py` 的 FORBIDDEN_IN_ROOTFS 用**产物本身**兜底 ✓
+#           （下次谁再带进来，preflash-check 直接判不通过 ✓）。
+for p in "$TARGET_DIR/usr/bin/weston" "$TARGET_DIR/usr/bin/weston-launch" \
+         "$TARGET_DIR/usr/libexec/weston-desktop-shell" "$TARGET_DIR/usr/libexec/weston-keyboard" \
+         "$TARGET_DIR/usr/lib/systemd/system/weston.service" \
+         "$TARGET_DIR/etc/systemd/system/sysinit.target.wants/weston.service" \
+         "$TARGET_DIR/etc/xdg/weston"; do
+    if [ -e "$p" ]; then
+        rm -rf "$p"
+        echo "   - 已清掉 weston 残留 ${p#$TARGET_DIR}（厂商 overlay / 历史构建留下的）"
+    fi
+done
+
 #  T15-2-11：把本机 WiFi 凭据装进镜像（有就装、没有就跳过）
 #  ---------------------------------------------------------------------------
 #  板子只有 wlan0 能通；镜像里没有网络配置的话，首刷后"起来了但没网也没 shell"。
