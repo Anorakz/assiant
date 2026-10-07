@@ -1206,6 +1206,65 @@ chown -R anorak:anorak <SDK>/output <SDK>/buildroot/output
 改完后 `python3 -m pytest tests/test_image_target.py tests/test_image_runtime.py tests/test_image_payload.py -q`
 ⇒ **48 passed** ✓（这两个检查器在 CI 里有守卫 ✓）。
 
+### 5.13.1 ⚠ 上面那版是**废的**（2026-10-07 当晚发现并重做）—— 事故与三个缺口
+
+§5.13 记的那份 `816,595,530 B` 镜像**带进了 weston** ✗（用户实测：界面起不来、偶尔闪一张图 ✗）。
+一晚查下来是**三类问题**，都已修好并重新出镜像：
+
+| # | 问题 | 症状（板端实测） | 根因 | 修法 |
+| --- | --- | --- | --- | --- |
+| 1 | **陈旧 / 厂商 overlay 的 weston** ✗ | `Could not queue DRM page flip on screen DSI1 (Device or resource busy)` ✗；`weston.service`（`WantedBy=sysinit.target`）开机极早抢走 DRM ⇒ 我们的 GUI 画不上去 | ① buildroot **不会删**上一次 weston 还开着时装进 `target/` 的 30 个文件 ✗（`.config` 里 `WESTON is not set` 也拦不住 ✗）；② 厂商 overlay 每次构建都拷 `etc/xdg/weston/*` ✗（日志 `>>> Copying board/rockchip/common/overlays/10-weston`）| `post-build.sh` 里一律删干净 ✓ ＋ `check-runtime-deps.py` 新增 **`FORBIDDEN_IN_ROOTFS`** 用产物兜底 ✓ |
+| 2 | **镜像里没有 `openai` SDK** ✗ | `LLM 降级为规则兜底: OpenAIClientError: 需要 openai SDK` ✗ ⇒ 对话 ⇒ 工具调用 ⇒ `bilibili_search` ⇒ 队列 ⇒ 视频**整条链断** ✗（界面上像"变笨了"） | §5.6 那张表把 openai 标成"optional／镜像里没有（懒加载）"✗ —— 但它挡的是**主功能** ✓；板端 Ubuntu 期那份是装在 `/data` 的 `openai 3.24.0`（docs/perf-cpu-mem.md ✓）| 新增 `image/prepare-openai.sh`（钉 `openai==3.24.0` ＋ `image/openai-wheels.lock` 逐轮子 sha256 校验 ✓，按 `prepare-rknnlite.sh` 的套路解进 site-packages ✓）；检查器把 openai/httpx2/pydantic/jiter **改判 required** ✓ ＋ chroot 里真 `import openai` ✓ |
+| 3 | **python 缺 `zlib`** ✗ ＋ **gst 缺 `tsdemux`** ✗ | ① `httpx2/_decoders.py: import zlib → ModuleNotFoundError` ✗（⇒ openai 也起不来 ✓）；② 播放器 `No decoder available for type 'video/mpegts…'` ✗ ⇒ 面板"视频源未接入" ✗ | ① 厂商基座把 python3 扩展模块全关着 ✗（同 §5.10 的 `_ssl`/`readline` ✓）；② 片段里 `BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_MPEGTSDEMUX=y` ✓ **但包没重编** ✗ ⇒ 插件没进镜像 ✗（**同一个"改子选项 ≠ 重编包"的坑** ✓）| ① defconfig 加 `BR2_PACKAGE_PYTHON3_ZLIB=y` ✓（在所有 `#include` 之后 ✓；CI 守卫 `TestPythonModulesTheAgentNeeds` 同步 ✓）；② `rm -rf build/gst1-plugins-*` 强制重编 ✓（⚠ **`gst1-plugins-rockchip` 也要一起** —— 它就是 `mppvideodec` 的家 ✓，漏了就"插件齐了但硬解没了" ✗）|
+
+**另有两条只踩一次就够了的教训** ✓：
+- **强制重编 python3 会清掉 site-packages 里别人的文件** ✗（`numpy`/`rknnlite`/`cv2` 都被清空 ✗，而"已装"的戳还在 ⇒ 不会自动补 ✗）⇒ 必须把它们**一起**强制重装 ✓。**检查器的 chroot 冒烟正是判据** ✓（"在位"只看路径存在 ✗ ⇒ 空目录能蒙过去 ✗）。
+- **掉 fastboot 的现场救援**（这次真用了 ✓）：`misc` 两个槽被判死后，从 u-boot 清零 misc ⇒ SPL 自己重写默认元数据 ✓（runbook §5.2 option 2 ✓）。串口是唯一通道（fastboot 在串口上**完全静默** ✗，但 Windows 设备里会出现 `USB download gadget VID_18D1&PID_4D00` ✓）。
+
+### 5.13.2 ✅ 新的标准镜像（2026-10-07 晚，这一版是**真的**）
+
+| 项 | 值 |
+| --- | --- |
+| 构建会话 | `<SDK>/output/sessions/2026-10-07_21-10-40/` |
+| `rootfs.ext2` | **761,266,176 B**，sha256 `4c9a91dc9756e3c3b68e9b21d9f90ef156e2130163938e89aa2e14b36509b1ea` |
+| `boot.img` | 54,307,328 B，sha256 `fa229ab9427bd4ab6c8ccae6abf714be41f52a5e29c57eb057f11006302f8e54` |
+| target 里的 GUI | md5 **`a986143fa6f1ea10a0ce4cbbf3d3e0da`**（与 §7.10 在板上验过的那份**逐字节一致** ✓）|
+| gst 插件 | **54 个** ✓，含 `libgstmpegtsdemux.so`（`tsdemux` ✓）与 `libgstrockchipmpp.so`（`mppvideodec` ✓）|
+| python | 3.11.8 ＋ numpy 1.25.0 / cv2 4.9.0 / yaml / psutil / ruamel / rknnlite ＋ **openai 3.24.0（+ httpx2 / pydantic / jiter）** ✓ ＋ `zlib` 扩展 ✓ |
+| weston | 文件 **0** ✓／进程 0 ✓／`weston.service` 不存在 ✓ |
+| `preflash-check.sh` | **结论：通过**（在位缺 0、依赖缺 0、冒烟失败 0、payload 未做 0/12）✓；开机目标 全过 ✓ |
+
+### 5.13.3 上板方式（A/B，不动 `/data` 的那条路 ✓）
+
+板子跑在一个槽上时，把新镜像写**另一个**槽 ✓（`dd` 到 `system_a|b` ＋ `boot_a|b` ＋ 整块写 `misc` ✓），
+写完**读回校验 sha256** ✓ 再重启 ✓ —— 全程不需要 USB/按键，也不碰 `/data` ✓。
+
+```bash
+# 槽与标签（别靠 p6/p7 猜 ✓）：boot_a→p3  boot_b→p4  system_a→p6  system_b→p7  misc→p2  userdata→p9
+dd if=rootfs.ext2 of=/dev/mmcblk0p6 bs=1M  count=<MiB>   conv=fsync   # system_a
+dd if=boot.img    of=/dev/mmcblk0p3 bs=512 count=106069  conv=fsync   # boot_a
+dd if=misc-X.img  of=/dev/mmcblk0p2 bs=512 count=96      conv=fsync   # 48 KB 整块（主+备都在内 ✓）
+# misc 用 agent/core/ota.py 的 build_bcb/apply_bcb_to_misc 生成 ✓（唯一实现，别手抄 CRC ✗）：
+#   目标槽 prio15/tries7/succ0（**未确认** ⇒ 起不来会按 tries 扣完自动回退 ✓）
+#   另一槽 prio14/tries7/succ1（保持"已确认"，当回退 ✓）
+```
+
+### 5.13.4 换槽后的最终实测（2026-10-07 21:2x，板上 ✓）
+
+```
+槽 = _b（root=…54aa = system_b）✓   GUI md5 = a986143f… ✓   weston 文件/进程 = 0/0 ✓
+服务全 active ✓（assistant.target/agent/agent-gui/assistant-init/sshd）
+misc: B **prio15/tries7/succ1** ✓ ⇒ assistant-ota-confirm 已把新槽标成功 ✓
+/data: 22.7G 用 12.4G、模型 4.9G ✓、config.yaml ✓、bilibili_cookie.json ✓
+对话: 「罗刹海市已成功搜索到…」✓（模型答的 ✓）｜agent: 搜「罗刹海市」-> 成功（18 条）✓
+      ⇒ 队列填上 ⇒ `可以播了` ✓（等 10 秒）
+★ 零拷贝视频: caps 640x360 ✓｜绘制 **25.0 帧/s** ✓｜画帧间隔 40.0ms（最大 47~57ms）✓
+             ｜零拷贝帧 == 已画帧 ✓｜**vqueue = 0** ✓｜**page flip = 0** ✓｜**NRestarts = 0** ✓
+```
+
+⇒ **标准镜像 = 这一版** ✓（含 §7.10 的零拷贝修复 ＋ 无桌面 ＋ 对话/工具调用可用 ✓）。
+**仍未做**：整包 USB 重刷 ✗（`update.img` 那条会重排分区、清 `/data` ✗）—— 需要时按 `FLASH-RUNBOOK.md` 走 ✓。
+
 **⚠ 还没做的：刷板**（`T15-2-11` 的正文 ✗）。这套 `update.img` 会**重排 eMMC 分区**
 （板上现有数据全丢 ✗，第一次还要 `mkfs.ext4` userdata ＋ 投放 4.9 GB 模型 ✓），
 所以不在"标准化"里顺手做 ✗ —— 步骤见 `image/FLASH-RUNBOOK.md`，

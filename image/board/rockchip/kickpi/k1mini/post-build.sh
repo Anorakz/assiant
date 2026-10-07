@@ -342,6 +342,19 @@ else
     exit 1
 fi
 
+# --- 3b) openai SDK（T15-2-10c，2026-10-07）---------------------------------
+#  镜像里没有 openai ⇒ `llm.mode=edge` 的对话/搜索**全部降级到规则兜底** ✗
+#  （板端实测 `OpenAIClientError: 需要 openai SDK`）⇒ 工具调用链（bilibili_search⇒队列⇒视频）断。
+#  见 image/prepare-openai.sh 头部；轮子钉 openai==3.24.0 并用 image/openai-wheels.lock 校验 ✓
+if [ -x "$TOOLS/prepare-openai.sh" ]; then
+    echo "== [assistant post-build] openai SDK"
+    bash "$TOOLS/prepare-openai.sh" "$SDK" --target "$TARGET_DIR" \
+        || { echo "!! openai SDK 注入失败" >&2; exit 1; }
+else
+    echo "!! 找不到 $TOOLS/prepare-openai.sh" >&2
+    exit 1
+fi
+
 # --- 4) payload：我们的 agent / GUI / native / 默认配置（T15-2-10b-5）---------
 #  这是"unit 文件早就指向、但一直没装"的那批东西（docs/image.md §5.9 的 F5）：
 #  缺了它 assistant.target 起得来、agent/gui 会一直重启（No module named agent）。

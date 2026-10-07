@@ -61,7 +61,12 @@ PY_MODULES = {
     "psutil":    ("required", "python-psutil", "rknnlite 的声明依赖"),
     "ruamel.yaml": ("required", "python-ruamel-yaml", "rknnlite 的声明依赖"),
     "rknnlite":  ("required", "prepare-rknnlite.sh（SDK 里的 cp311 wheel）", "SigLIP 走 NPU"),
-    "openai":    ("optional", "镜像里没有（provider.py 里懒加载）", "cloud 模式的可选 SDK"),
+    "openai":    ("required", "prepare-openai.sh（PyPI 轮子，钉 3.24.0）",
+                  "★ 2026-10-07 改判：不是 optional ✗ —— 它挡住的是**主功能**（工具调用 ⇒ "
+                  "bilibili_search ⇒ 队列 ⇒ 视频）。镜像里缺它时对话/搜索会静默降级到规则兜底 ✗"),
+    "httpx2":    ("required", "prepare-openai.sh（openai 3.x 的 HTTP 客户端）", "openai 的运行时依赖"),
+    "pydantic":  ("required", "prepare-openai.sh", "openai 的运行时依赖"),
+    "jiter":     ("required", "prepare-openai.sh（aarch64 二进制轮子）", "openai 的运行时依赖"),
     "tokenizers": ("optional", "镜像里没有（tokenizer.py 里懒加载）", "SigLIP 分词的可选后端"),
     "cryptography": ("host", "只在 scripts/pair_analyze.py 用", "开发机分析工具"),
     "pytest":    ("host", "镜像里没有", "测试框架"),
@@ -110,6 +115,10 @@ PY_IN_IMAGE = {
     "psutil": "psutil",
     "ruamel.yaml": "ruamel",
     "rknnlite": "rknnlite",
+    "openai": "openai",
+    "httpx2": "httpx2",
+    "pydantic": "pydantic",
+    "jiter": "jiter",
 }
 
 
@@ -325,6 +334,12 @@ def chroot_smoke(target: Path, use_chroot: bool, verbose: bool = False) -> list:
             "/usr/bin/python3", "-c",
             "import numpy, cv2, yaml, psutil, ruamel.yaml;"
             "print('numpy', numpy.__version__, 'cv2', cv2.__version__)"]),
+        #: ★ 2026-10-07：openai 是**主功能**依赖（工具调用/搜索/入队）⇒ 必须在镜像里真 import 成功 ✓
+        #:   （构建机上不猜：这条 chroot 冒烟就是判据 ✓）
+        ("import openai（对话/工具调用）", [
+            "/usr/bin/python3", "-c",
+            "import openai, httpx2, pydantic, jiter;"
+            "print('openai', openai.__version__, 'pydantic', pydantic.VERSION)"]),
         ("import rknnlite（NPU API）", [
             "/usr/bin/python3", "-c",
             "from rknnlite.api import RKNNLite; print('rknnlite ok', RKNNLite.__name__)"]),

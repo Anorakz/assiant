@@ -73,6 +73,12 @@
 # ---------------------------------------------------------------------------
 BR2_PACKAGE_PYTHON3_SSL=y
 BR2_PACKAGE_PYTHON3_READLINE=y
+#: ★ 2026-10-07（T15-2-10c）：**zlib** —— 同一条船上的第三个模块。
+#:   镜像里没有它 ⇒ `import zlib` 失败 ⇒ httpx2 的 `_decoders` 直接炸 ⇒ `import openai` 失败
+#:   ⇒ agent 的 `llm.mode=edge` 全部降级到规则兜底（工具调用/搜索/入队全断 ✗）。
+#:   板端实测那行：httpx2/_decoders.py: import zlib → ModuleNotFoundError: No module named 'zlib'
+#:   C 库 `libz.so.1` 本来就在（很多包依赖 zlib ✓），缺的只是 python 侧的扩展模块 ⇒ 加这一行。
+BR2_PACKAGE_PYTHON3_ZLIB=y
 
 # ---------------------------------------------------------------------------
 #  T15-2-11：wpa_supplicant 的 **D-Bus 控制接口**（不开就没有 WiFi）

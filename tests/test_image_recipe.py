@@ -489,7 +489,10 @@ class TestPythonModulesTheAgentNeeds(unittest.TestCase):
     """
 
     #: agent 运行期真要用的（`: `_ssl` 由 SSL 一起带出 `_hashlib`）
-    NEEDED = ("BR2_PACKAGE_PYTHON3_SSL", "BR2_PACKAGE_PYTHON3_READLINE")
+    #: ★ 2026-10-07 加 ZLIB：httpx2 的 _decoders 要 `zlib`，缺了 `import openai` 直接失败 ✗
+    #:   ⇒ 工具调用（bilibili_search ⇒ 队列 ⇒ 视频）整条链断 ✓（板端实测过 ✓）
+    NEEDED = ("BR2_PACKAGE_PYTHON3_SSL", "BR2_PACKAGE_PYTHON3_READLINE",
+              "BR2_PACKAGE_PYTHON3_ZLIB")
 
     @classmethod
     def setUpClass(cls):

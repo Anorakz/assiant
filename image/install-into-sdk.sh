@@ -193,6 +193,8 @@ install_file image/board/rockchip/kickpi/k1mini/post-build.sh \
              buildroot/board/rockchip/kickpi/k1mini/post-build.sh
 install_file image/build-llama.sh tools/assistant/build-llama.sh
 install_file image/prepare-rknnlite.sh tools/assistant/prepare-rknnlite.sh
+install_file image/prepare-openai.sh tools/assistant/prepare-openai.sh
+install_file image/openai-wheels.lock tools/assistant/openai-wheels.lock
 install_file image/check-runtime-deps.py tools/assistant/check-runtime-deps.py
 install_file image/check-assistant-target.py tools/assistant/check-assistant-target.py
 # T15-2-10：两个检查器共用的"看哪棵 target 树"模块（imagelib.py），
