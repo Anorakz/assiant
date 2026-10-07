@@ -106,9 +106,13 @@ struct GstVideoWidget::Gst {
     /// ★ 第 76 轮：换流时要**销毁**旧的 EGLImage ✓（否则旧的 dmabuf 已关 ⇒ 死引用 ⇒ 闪旧帧/SIGSEGV ✗）
     unsigned (*eglDestroyImageKHR)(void*, void*) = nullptr;
     void (*glEGLImageTargetTexture2DOES)(unsigned, void*) = nullptr;
-    /// ★ 第 76 轮：真实几何 —— 从 sink pad 的 caps 取宽高 ✓、从内存大小反推对齐高度 ✓
+    /// ★ 第 80 轮：真实几何 —— 从 sink pad 的 caps 取宽高 ✓、从内存大小反推对齐高度 ✓
     void* (*element_get_static_pad)(void*, const char*) = nullptr;
     unsigned long (*memory_get_sizes)(void*, unsigned long*, unsigned long*) = nullptr;
+    /// ★★★ 第 80 轮（换流偶发崩溃的**真凶** ✓）：`gst_element_set_state()` **是异步的** ✗，
+    //:   必须用 `gst_element_get_state(..., timeout)` **等它真的停** ✓ 才能 unref ✗
+    //:   （否则"已经在拆的流线程"稍后踩到已释放的管线 ⇒ 崩在几秒~几十秒后 ✓✓ 与实测吻合 ✓）
+    int (*element_get_state)(void*, int*, int*, unsigned long long) = nullptr;
 };
 
 GstVideoWidget::Gst* GstVideoWidget::gst() {
@@ -164,6 +168,7 @@ GstVideoWidget::Gst* GstVideoWidget::gst() {
     t.eglCreateImageKHR = (decltype(t.eglCreateImageKHR))t.eglGetProcAddress("eglCreateImageKHR");
     t.eglDestroyImageKHR = (decltype(t.eglDestroyImageKHR))t.eglGetProcAddress("eglDestroyImageKHR");
     t.element_get_static_pad = (decltype(t.element_get_static_pad))dlsym(t.hGst, "gst_element_get_static_pad");
+    t.element_get_state = (decltype(t.element_get_state))dlsym(t.hGst, "gst_element_get_state");
     t.memory_get_sizes = (decltype(t.memory_get_sizes))dlsym(t.hGst, "gst_memory_get_sizes");
     t.glEGLImageTargetTexture2DOES =
         (decltype(t.glEGLImageTargetTexture2DOES))t.eglGetProcAddress("glEGLImageTargetTexture2DOES");
@@ -212,6 +217,8 @@ GstVideoWidget::~GstVideoWidget() {
 }
 
 void GstVideoWidget::teardown() {
+    //: ★★★ 第 80 轮：**先关收帧闸门** ✓（见 `acceptFrames_` 的说明 —— 这是"换流偶发 SIGSEGV"的头号嫌疑 ✓）
+    acceptFrames_.store(false);
     if (tick_ != nullptr) tick_->stop();
     Gst* g = gst();
     //: ★ 第 77 轮：帧缓冲也要**排空并 unref** ✓（否则每换一次源就漏一串 buffer ✗）
@@ -233,6 +240,18 @@ void GstVideoWidget::teardown() {
         //:   （`set_state(NULL)` 会等流线程收工 ✓，但先把信号关了更稳妥 ✓）。
         if (sink_ && g->object_set) g->object_set(sink_, "signal-handoffs", 0, nullptr);
         g->element_set_state(pipeline_, GST_STATE_NULL);
+        //: ★★★ 第 80 轮（**换流偶发崩溃的真凶** ✓）：`gst_element_set_state()` **是异步的** ✗
+        //:   —— 它立刻返回（`GST_STATE_CHANGE_ASYNC` ✓），流线程还在拆 ✓；
+        //:   我们却**马上 unref 管线** ✗ ⇒ 那些线程（多半阻塞在网络读里 ✓）稍后回来时
+        //:   踩到**已释放的内存** ✓✓ ⇒ 崩在"几秒~几十秒之后" ✓✓✓（与实测"换流后 20~40 秒崩"吻合 ✓）。
+        //:   ⇒ 必须 `gst_element_get_state(..., timeout)` **等它真的到 NULL** ✓ 再 unref ✓。
+        if (g->element_get_state) {
+            int st = 0, pend = 0;
+            const int rc = g->element_get_state(pipeline_, &st, &pend, 500ull * 1000ull * 1000ull);  // 500ms ✓
+            if (rc == 0 /* GST_STATE_CHANGE_FAILURE */ || pend != 1 /* 没到 NULL */)
+                qWarning() << "[gstvideo] teardown：等 NULL 没等到（rc=" << rc << "state=" << st
+                           << "pending=" << pend << "）⇒ 仍然继续 ✓";
+        }
         //: ★ 修掉一个引用泄漏（第 72 轮顺手）：`sink_` 来自 `gst_bin_get_by_name` ⇒ **多一个引用** ✓，
         //:   以前只把指针置空、从不 unref ✗ ⇒ 每换一次源就漏一个 sink ✓（管线仍能正常销毁 ✓）。
         if (sink_ && g->object_unref) g->object_unref(sink_);
@@ -265,6 +284,13 @@ void GstVideoWidget::onHandoff(void*, void* buffer, void*, void* user) {
     auto* self = static_cast<GstVideoWidget*>(user);
     Gst* g = gst();
     if (!self || !g || !buffer) return;
+    //: ★★★ 第 80 轮（换流偶发 SIGSEGV 的**头号嫌疑**）：换流时 `teardown()` 正在拆旧管线，
+    //:   而 handoff 线程可能**还攥着旧管线的一帧** ✓ ⇒ 若把它放进缓冲 ✓，GUI 线程随后就会
+    //:   拿它的 fd 去 `eglCreateImageKHR` ✗ —— 那条 dmabuf 已经随旧管线关掉了 ✗
+    //:   ⇒ 驱动层拿一个**已关闭的 dmabuf** 当纹理 = SIGSEGV ✓✓（"换流前后崩一次"正好吻合 ✓）。
+    //:   ⇒ 用 `acceptFrames_` 当**闸门** ✓：`teardown()` 一开始就关闸 ✓，`buildPipeline()` 建好再开 ✓。
+    //:     `std::atomic<bool>` ⇒ 跨线程无锁且语义明确 ✓（上一次"无锁共享容器"的教训 ✗）。
+    if (!self->acceptFrames_.load()) return;
     //: ★ 到达速率打点（每 120 帧一行 ✓，用来对照"到达 vs 绘制"）
     //:   ⚠ 计数**改成每实例**（原来是 `static` ✗ ⇒ 多实例时会把流量混起来 ✓），并打 `id=`/`self=` ✓
     ++self->handoffN_;    //: 回调被调用的次数 ✓
@@ -286,6 +312,9 @@ void GstVideoWidget::onHandoff(void*, void* buffer, void*, void* user) {
     //:   ⚠ 上一次崩溃的根因就是"跨线程无锁共享容器" ✗ ⇒ 这里**全程加锁** ✓。
     {
         QMutexLocker lock(&self->frameMutex_);
+        //: ★★ 第 80 轮：**锁内二次确认** ✓ —— 闸门可能在"进函数时那次检查"之后被 `teardown()` 关上 ✓
+        //:   （关闸与清缓冲都在同一把锁里 ✓）⇒ 这里再查一次，就不会把**旧管线的帧**放进新缓冲 ✗。
+        if (!self->acceptFrames_.load()) return;   // 还没 ref 过 ⇒ 直接放手 ✓（由 GStreamer 回收 ✓）
         while (self->frameQ_.size() >= kFrameQMax) {
             void* dropped = self->frameQ_.dequeue();
             if (dropped && g->buffer_unref) g->buffer_unref(dropped);
@@ -344,6 +373,8 @@ bool GstVideoWidget::buildPipeline(const QString& url) {
     //: ★ 第 78 轮：bus **只取一次** ✓（`gst_element_get_bus` 会多一个引用 ⇒ 必须还 ✓，
     //:   否则就是"每拍泄漏一个引用 ⇒ 几分钟崩一次"那个真因 ✗）
     if (g->element_get_bus) bus_ = g->element_get_bus(pipeline_);
+    //: ★ 第 80 轮：管线建好、handoff 已接上 ⇒ **开闸** ✓（与 `teardown()` 里的关闸成对 ✓）
+    acceptFrames_.store(true);
     if (tick_ != nullptr) tick_->start();
     return true;
 }
@@ -492,7 +523,7 @@ void GstVideoWidget::paintGL() {
     //:     ③ 上游按块猛灌时，丢的是"我们没来得及显示的"，而不是把内容加速播完 ✓
     void* buf = nullptr;
     int qDepth = 0;
-    {
+    if (acceptFrames_.load()) {          // ★ 第 80 轮：闸门关着时**不画**（不碰已作废的 dmabuf ✓）
         QMutexLocker lock(&frameMutex_);
         while (frameQ_.size() > 1) {
             void* dropped = frameQ_.dequeue();

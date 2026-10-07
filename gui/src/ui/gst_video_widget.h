@@ -42,6 +42,8 @@
 #include <QQueue>
 #include <QString>
 
+#include <atomic>
+
 class QTimer;
 
 class GstVideoWidget : public QOpenGLWidget {
@@ -111,6 +113,10 @@ private:
     ///   `frameMutex_` 是跨线程访问它的唯一保护 ✓（上次崩溃就是"无锁共享容器"✗，别再犯 ✓）
     QMutex frameMutex_;
     QQueue<void*> frameQ_;
+    /// ★★ 第 80 轮：**收帧闸门** ✓ —— `teardown()` 一进门就关 ✓，管线建好才开 ✓。
+    ///   没有它，handoff 线程会把"旧管线的最后一帧"塞进缓冲 ✗，而那条 dmabuf 已经
+    ///   随旧管线关掉 ⇒ GUI 线程拿它去建 EGLImage = **驱动层 SIGSEGV** ✓（换流崩溃的头号嫌疑 ✓）。
+    std::atomic<bool> acceptFrames_{false};
     static const int kFrameQMax = 8;   ///< 缓冲深度（8 帧 ≈ 0.27 秒 @30fps ✓，够抹平波峰 ✓）
     //: ★ 画帧间隔打点（用户要求"检查画帧间隔是否正确" ✓）
     qint64 lastDrawMs_ = 0;

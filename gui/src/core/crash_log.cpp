@@ -26,6 +26,9 @@
 #include <cstring>
 #include <exception>
 #include <csignal>
+#if defined(__linux__)
+#include <execinfo.h>   // ★ 第 80 轮：崩溃时要**调用栈**（板端原来只有"dumped core" ✗，只能猜 ✓）
+#endif
 
 #include <fcntl.h>        // open
 #include <sys/types.h>    // ssize_t
@@ -248,6 +251,20 @@ void fatalSignalHandler(int sig)
     writeRawFd("（下面是崩溃前的最近消息）\n");
     writeRawFd("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
     copyToRawFd(g_tail, g_tailLen);        // 裸字节尾巴，不分配内存
+    //: ★★ 第 80 轮：**把调用栈也写下来** ✓ —— 板端原来只有"dumped core" ✗，
+    //:   `logs/crash/*.log` 里没有栈 ⇒ 只能猜（这次"换流偶发崩溃"就卡在这 ✓）。
+    //:   `backtrace_symbols_fd` 不分配内存 ✓（比 `backtrace_symbols` 安全 ✓）；
+    //:   没开 `-rdynamic` 时只有 `模块(+0x偏移)` ✓ —— 拿同一份二进制用
+    //:   `aarch64-…-addr2line -f -C -e agent_gui 0x偏移` 就能反查函数名 ✓。
+#if defined(__linux__)
+    writeRawFd("\n---- 调用栈（backtrace ✓）----\n");
+    {
+        void* frames[64];
+        const int n = backtrace(frames, sizeof(frames) / sizeof(frames[0]));
+        backtrace_symbols_fd(frames, n, g_fd >= 0 ? g_fd : 2);
+    }
+    writeRawFd("---- 调用栈结束（用 addr2line 反查偏移 ✓）----\n");
+#endif
     writeRawFd("\n（信号处理器只能写这么多：完整现场请配合 core dump / gdb）\n");
     std::signal(sig, SIG_DFL);
     std::raise(sig);
