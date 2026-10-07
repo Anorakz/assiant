@@ -276,6 +276,23 @@ def _status_data(state: Any) -> Dict[str, Any]:
     return {"mode": mode, "connected": connected}
 
 
+def _wire_status_push(runtime: Any, dispatch: Any, state: Any) -> None:
+    """★ T15-2-10e: 给 Runtime 接上"主动推一条 status"的钩子（拆出来是为了别把
+    `_wire_outbound` 顶过代码审计的 120 行棘轮 ✗）。
+
+    Runtime 只交出 ``{mode, connected}`` 这个语义快照 ✓；**线格式仍由本层决定** ✓
+    （与 on_wallpaper / on_music 同一条规矩 ✓）。
+    """
+    if state is None:
+        return
+
+    def _on_status_push(_snapshot: Any = None) -> None:
+        dispatch(TOPIC_STATUS, _status_data(state))
+
+    runtime.on_status = _on_status_push
+    _log.debug("ipc: 已接上 status 主动补推钩子 (runtime.on_status -> status)")
+
+
 def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
     """把 Agent 的状态与回复推给 GUI (Phase 6 D4)。
 
@@ -299,18 +316,8 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
         on_change(_status_on_change)
         _log.debug("ipc: 已接上状态推送 (state.on_change -> status)")
 
-    # ★ T15-2-10e（2026-10-07 板端实测）：给 Runtime 一个"**主动推一次 status**"的钩子。
-    #   为什么需要：`status.connected`（= moonlight 串流主机是否连上）在 Runtime 那边是
-    #   **懒查询**（`state_machine.is_connected()` 去问 native），连接/断开**没有事件** ✗ ⇒
-    #   只靠上面那条 `state.on_change` 会漏掉它：实测 moonlight 21:52 连上了，GUI 一直显示
-    #   "重连中（主机未就绪）"，直到用户切一次模式才补上 ✗。
-    if state is not None:
-        def _on_status_push(_snapshot: Any = None) -> None:
-            """Runtime 调它 = 把**当前**状态推一条给 GUI（线格式仍由本层决定 ✓）。"""
-            dispatch(TOPIC_STATUS, _status_data(state))
-
-        runtime.on_status = _on_status_push
-        _log.debug("ipc: 已接上 status 主动补推钩子 (runtime.on_status -> status)")
+    # ★ T15-2-10e: status 主动补推钩子（说明见 `_wire_status_push`）
+    _wire_status_push(runtime, dispatch, state)
 
     if hasattr(runtime, "on_reply"):
         def _on_reply(text: str) -> None:

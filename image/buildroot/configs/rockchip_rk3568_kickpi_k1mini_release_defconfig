@@ -79,16 +79,15 @@ BR2_PACKAGE_PYTHON3_READLINE=y
 #:   板端实测那行：httpx2/_decoders.py: import zlib → ModuleNotFoundError: No module named 'zlib'
 #:   C 库 `libz.so.1` 本来就在（很多包依赖 zlib ✓），缺的只是 python 侧的扩展模块 ⇒ 加这一行。
 BR2_PACKAGE_PYTHON3_ZLIB=y
-#: ★ 2026-10-07（T15-2-10d）：PYC_ONLY 的**教训**（这一行是**无效的** ✗，留着当记录 ✓）。
-#:   厂商默认 `BR2_PACKAGE_PYTHON3_PYC_ONLY=y`：只留编译后的 `.pyc`、删掉 `.py` 源码，
-#:   而 CPython 只能从"与源码同目录的**就地** `.pyc`"做无源码导入 ⇒ 这套机制很脆 ✗：
-#:   实测（2026-10-07 22:0x）`.pyc` 一丢，`site-packages/numpy`、`cv2` 立刻退化成**空命名空间包**
-#:   ⇒ `import numpy` 报 `module 'numpy' has no attribute '__version__'` ✗（chroot 冒烟当场红 ✓）。
-#:   ⚠ 试过在这里写 `# BR2_PACKAGE_PYTHON3_PYC_ONLY is not set`，**没生效** ✗ ——
-#:   整机 `.config` 里仍是 `=y`（说明后面还有片段/默认值把它压回来了 ⇒ 教训同 §5.2：
-#:   "最后一个赋值说了算"，别在 defconfig 里跟 kconfig 的缺省硬碰 ✓）。
-#:   ⇒ 结论改成纪律：**任何往 site-packages 里装东西的脚本，都不许删 `__pycache__` / `*.pyc`**
-#:     （`prepare-openai.sh` / `prepare-tokenizers.sh` 里原先那两行 `find -delete` 已删 ✓）。
+#: ★ 2026-10-07（T15-2-10d）：PYC_ONLY 的**教训**（下面这行是**无效的** ✗，留着当记录 ✓）。
+#:   厂商默认开着"只留编译产物、删掉 .py 源码"，而 CPython 只能从"与源码同目录的**就地** .pyc"
+#:   做无源码导入 ⇒ 这套机制很脆 ✗：实测（2026-10-07 22:0x）只要 .pyc 一丢，
+#:   site-packages 里的 numpy、cv2 立刻退化成**空命名空间包** ⇒
+#:   `import numpy` 报 `module 'numpy' has no attribute '__version__'` ✗（chroot 冒烟当场红 ✓）。
+#:   ⚠ 试过在下面写一行"关掉它"，**没生效** ✗ —— 整机 .config 里仍是开的（被后面的片段/缺省压回来 ✓，
+#:   同 §5.2 的"最后一个赋值说了算" ✓）。⇒ 结论改成纪律：
+#:   **任何往 site-packages 里装东西的脚本，都不许删 `__pycache__` / `*.pyc`** ✗
+#:   （两个 prepare-*.sh 里原先那两行 `find -delete` 已删 ✓）。⚠ 本注释里**不写符号全名**（规矩同上 ✓）。
 # BR2_PACKAGE_PYTHON3_PYC_ONLY is not set
 
 # ---------------------------------------------------------------------------

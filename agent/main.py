@@ -374,21 +374,6 @@ class Runtime:
         #: T3: topic 名只由 agent/ipc/ 知道, 这里不认识任何线格式字段。
         self.on_wallpaper: Optional[Callable[[str, int], Any]] = None
 
-        #: ★ T15-2-10e: "主动推一条 status" 的钩子（IPC 层接上 → topic `status`）。
-        #: 与 on_wallpaper / on_music 同款"有就接"；`_watch_stream_connected` 用它补推
-        #: moonlight 的连接翻转（那条状态是懒查询、没有事件 ✗）。
-        self.on_status: Optional[Callable[[Dict[str, Any]], Any]] = None
-
-        #: ★ T15-2-10e: moonlight 连接状态的轮询任务（见 `_watch_stream_connected`）
-        self._stream_watch_task: Optional[asyncio.Task] = None
-
-        #: ★ T15-2-10e: native 退避重试的三个参数（模块常量是默认值）。
-        #: 做成实例属性是为了**测试能把它压到 0** —— 否则"握手失败"那些用例
-        #: 会在 600 s 的重试窗口里挂住 ✗（这个坑当场踩到过一次 ✓）。
-        self.native_retry_total_s: float = NATIVE_RETRY_TOTAL_S
-        self.native_retry_first_s: float = NATIVE_RETRY_FIRST_S
-        self.native_retry_max_s: float = NATIVE_RETRY_MAX_S
-
         #: 壁纸目录 + 游标 (T3 起)。在 _start_state_and_tools() 里按配置建。
         self.wallpaper: Optional[WallpaperDeck] = None
 
@@ -474,6 +459,17 @@ class Runtime:
                 return default
             node = node[key]
         return node
+
+    # ★ T15-2-10e（moonlight）：这三条做成**类属性**（不占 `__init__` 的行数 —— 它有
+    #   代码规范审计的 120 行棘轮盯着 ✗）。含义：
+    #     · `on_status`      "主动推一条 status" 的钩子（IPC 层接上 → topic `status`）
+    #     · `_stream_watch_task`  连接状态轮询任务（见 `_watch_stream_connected`）
+    #     · `native_retry_*`  native 退避重试参数（测试要能压到 0，否则会挂在 600 s 窗口 ✗）
+    on_status: Optional[Callable[[Dict[str, Any]], Any]] = None
+    _stream_watch_task: Optional[asyncio.Task] = None
+    native_retry_total_s: float = NATIVE_RETRY_TOTAL_S
+    native_retry_first_s: float = NATIVE_RETRY_FIRST_S
+    native_retry_max_s: float = NATIVE_RETRY_MAX_S
 
     # ------------------------------------------------------------ 启动 ---
     #: 启动步骤 (顺序即依赖顺序; stop 时反向遍历 _components)
