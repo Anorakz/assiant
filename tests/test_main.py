@@ -92,6 +92,9 @@ EXPECTED_ORDER = [
     # T15-14-a: OTA/槽状态的低频轮询（独立组件 —— 音乐循环只在 music.enabled=true 时跑，
     # 挂在它上面会出现"音乐一关、OTA 状态就不推了"）。同样放 ipc 之前 ✓。
     "ota_status",
+    # ★ T15-2-10e: moonlight 连接状态的轮询（懒查询没有事件 ⇒ 翻转时补推 status ✓）。
+    # 与 ota_status 同理放 ipc **之前** —— 界面一连上就该拿到真实状态 ✓。
+    "stream_watch",
     "ipc",
     "terminal_input",
 ]
@@ -845,7 +848,7 @@ class TestNativeSunshineHandshake(unittest.IsolatedAsyncioTestCase):
         )
         return client
 
-    async def _run_with(self, fake_client, fake_native, **sunshine):
+    async def _run_with(self, fake_client, fake_native, retry_total_s=0.0, **sunshine):
         cfg = {"host": "192.168.137.1", "app": "Desktop"}
         cfg.update(sunshine)
         ctor = mock.patch("agent.net.SunshineClient", return_value=fake_client)
@@ -853,6 +856,11 @@ class TestNativeSunshineHandshake(unittest.IsolatedAsyncioTestCase):
             rt = make_runtime(
                 config=quiet_config(sunshine=cfg), start_native=True
             )
+            # ★ T15-2-10e: 默认把退避重试窗口压成 0 —— 这些用例测的是"失败被记录"，
+            #   不是"退避重试"；不压的话握手失败要等满 600 s ✗（真把测试挂住过 ✓）。
+            rt.native_retry_total_s = float(retry_total_s)
+            rt.native_retry_first_s = 0.01
+            rt.native_retry_max_s = 0.05
             await rt.start()
             try:
                 return rt, patched
@@ -930,6 +938,64 @@ class TestNativeSunshineHandshake(unittest.IsolatedAsyncioTestCase):
         )
         args = fake_native.moonlight.start_with_session.call_args[0]
         self.assertEqual(args[-1], "rtsp://127.0.0.1:48010")
+
+    async def test_native_start_retries_when_the_network_is_not_up_yet(self):
+        """★ T15-2-10e：开机时网络还没起来，native 必须**退避重试**，不能就此放弃 ✗。
+
+        板端实测（2026-10-07）：agent 开机 ~2 s 就握手，而板端 WiFi 要 ~11 s ✓ ⇒
+        原来只试一次的结果是「每次重启板子 moonlight 都是断的，必须手动 restart agent」✗。
+        """
+        fake_native = self._fake_native()
+        fake_client = self._fake_client()
+        ok_info = fake_client.server_info.return_value
+        fake_client.server_info.side_effect = [
+            SunshineError(
+                "连接 192.168.137.1:47984 失败: [Errno 101] Network is unreachable"
+            ),
+            ok_info,
+        ]
+
+        rt, _ = await self._run_with(fake_client, fake_native, retry_total_s=3.0)
+
+        self.assertEqual(rt.failures, [], "重试成功后不该再记成失败 ✗")
+        fake_native.moonlight.start_with_session.assert_called_once()
+        # 握手被试了两次（第一次网络没起来 ✓），第二次才成
+        self.assertEqual(fake_client.server_info.call_count, 2)
+
+    async def test_stream_connected_flip_pushes_status(self):
+        """★ T15-2-10e：moonlight 连接状态是**懒查询**（没有事件）⇒ 翻转时必须补推 status。
+
+        不补推的后果（板端实测）：moonlight 明明连上了，GUI 一直显示"重连中（主机未就绪）"✗，
+        直到用户切一次模式才补上 ✓。
+        """
+        rt = make_runtime(config=quiet_config(), start_native=False)
+
+        class _FakeState:
+            value = True
+
+            def is_connected(self):
+                return self.value
+
+        rt.state = _FakeState()
+        pushed = []
+        rt.on_status = lambda snapshot=None: pushed.append(snapshot)
+
+        with mock.patch("agent.main.STREAM_WATCH_INTERVAL_S", 0.01):
+            task = asyncio.ensure_future(rt._watch_stream_connected())
+            try:
+                await asyncio.sleep(0.05)      # 第一次采样：只记基线，不推 ✓
+                self.assertEqual(pushed, [], "首次采样不该推（那只是基线）✓")
+                rt.state.value = False         # 翻转
+                await asyncio.sleep(0.05)
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        self.assertEqual(len(pushed), 1, "翻转一次应正好推一条 status ✓")
+        self.assertEqual(pushed[0], {"connected": False})
 
 
 class TestStateRelease(unittest.IsolatedAsyncioTestCase):

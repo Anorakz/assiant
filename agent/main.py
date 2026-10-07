@@ -110,6 +110,21 @@ _ENV_MAX_EVENTS = "AGENT_MAX_EVENTS"
 #: 最多跑多少秒后退出; 0/未设 = 不限
 _ENV_RUN_SECONDS = "AGENT_RUN_SECONDS"
 
+# ---------------------------------------------------------------------------
+#  native（moonlight）连接的退避重试 —— T15-2-10e（2026-10-07 板端实测）
+# ---------------------------------------------------------------------------
+#  实测：agent 在开机 ~2 s 就做 Sunshine 握手，而板端 WiFi 要 ~11 s 才连上 ✗ ⇒
+#      SunshineError: 连接 192.168.137.1:47984 失败: [Errno 101] Network is unreachable ✗
+#  而 `_start_native` 原来**只试一次** ✗ ⇒ 每次重启板子 moonlight 都是断的，
+#  必须手动 `systemctl restart agent` 才连上 ✓（真被这坑了一晚上 ✓）。
+#  ⇒ 现在按退避重试，总窗口 NATIVE_RETRY_TOTAL_S；超了仍失败就照旧只记一条 warning ✓。
+NATIVE_RETRY_TOTAL_S = 600.0     #: 退避重试的总时长上限（秒）
+NATIVE_RETRY_FIRST_S = 5.0       #: 第一次重试等多久
+NATIVE_RETRY_MAX_S = 60.0        #: 退避间隔上限
+
+#: moonlight 连接状态的轮询间隔（秒）—— 见 `_watch_stream_connected` 的说明
+STREAM_WATCH_INTERVAL_S = 2.0
+
 
 # ---------------------------------------------------------------------------
 #  日志
@@ -359,6 +374,21 @@ class Runtime:
         #: T3: topic 名只由 agent/ipc/ 知道, 这里不认识任何线格式字段。
         self.on_wallpaper: Optional[Callable[[str, int], Any]] = None
 
+        #: ★ T15-2-10e: "主动推一条 status" 的钩子（IPC 层接上 → topic `status`）。
+        #: 与 on_wallpaper / on_music 同款"有就接"；`_watch_stream_connected` 用它补推
+        #: moonlight 的连接翻转（那条状态是懒查询、没有事件 ✗）。
+        self.on_status: Optional[Callable[[Dict[str, Any]], Any]] = None
+
+        #: ★ T15-2-10e: moonlight 连接状态的轮询任务（见 `_watch_stream_connected`）
+        self._stream_watch_task: Optional[asyncio.Task] = None
+
+        #: ★ T15-2-10e: native 退避重试的三个参数（模块常量是默认值）。
+        #: 做成实例属性是为了**测试能把它压到 0** —— 否则"握手失败"那些用例
+        #: 会在 600 s 的重试窗口里挂住 ✗（这个坑当场踩到过一次 ✓）。
+        self.native_retry_total_s: float = NATIVE_RETRY_TOTAL_S
+        self.native_retry_first_s: float = NATIVE_RETRY_FIRST_S
+        self.native_retry_max_s: float = NATIVE_RETRY_MAX_S
+
         #: 壁纸目录 + 游标 (T3 起)。在 _start_state_and_tools() 里按配置建。
         self.wallpaper: Optional[WallpaperDeck] = None
 
@@ -471,6 +501,9 @@ class Runtime:
         # ⚠ 单独一个组件、**不并进音乐循环** ✗：那个循环只在 music.enabled=true 时跑，
         #   音乐一关 OTA 状态就没人推了 ✗。
         "_start_ota_status",
+        # ★ T15-2-10e: moonlight 连接状态的轮询（懒查询没有事件 ⇒ 翻转时补推 status ✓）。
+        #   也放 IPC 之前 —— 与 OTA 状态同理：界面一连上就能拿到真实状态 ✓。
+        "_start_stream_watch",
         "_start_ipc",
         "_start_terminal_input",
     )
@@ -648,11 +681,91 @@ class Runtime:
 
             await run_native("input_sender", get_native().moonlight.stop)
 
+        async def _start_with_retry() -> None:
+            """★ T15-2-10e：**退避重试**再交给 native。
+
+            开机时 agent 比网络早（板端 WiFi 要 ~11 s ✓），而原来这里只试一次 ✗
+            ⇒ 每次重启板子 moonlight 都是断的，必须手动 restart agent ✓（实测踩过 ✓）。
+            总窗口 `NATIVE_RETRY_TOTAL_S`；超了仍失败就抛出去，由 `_guarded` 记一条 warning ✓
+            （与原先"失败不致命"的行为一致 ✓）。
+            """
+            deadline = time.monotonic() + self.native_retry_total_s
+            delay = self.native_retry_first_s
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    await _start()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - 网络没起来是首启的**正常**情形
+                    if time.monotonic() >= deadline:
+                        raise
+                    self.log.warning(
+                        "native: 第 %d 次连接失败（%r），%.0f s 后重试（总窗口 %.0f s）",
+                        attempt, exc, delay, self.native_retry_total_s,
+                    )
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2.0, self.native_retry_max_s)
+                    continue
+                if attempt > 1:
+                    self.log.info("native: 第 %d 次尝试连上了 ✓", attempt)
+                return
+
         # native 是"可选增强": 连不上照样跑本地规则与终端命令
         await self._guarded(
-            _Component("native", _start, _stop),
+            _Component("native", _start_with_retry, _stop),
             fatal=False,
         )
+
+    async def _start_stream_watch(self) -> None:
+        """起 moonlight 连接状态的轮询组件（T15-2-10e，见 `_watch_stream_connected`）。"""
+        async def _start() -> None:
+            self._stream_watch_task = asyncio.create_task(
+                self._watch_stream_connected(), name="stream-connected-watch"
+            )
+
+        async def _stop() -> None:
+            task, self._stream_watch_task = self._stream_watch_task, None
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        await self._guarded(_Component("stream_watch", _start, _stop), fatal=False)
+
+    async def _watch_stream_connected(self) -> None:
+        """moonlight 连接状态**翻转**时补推一次 status（T15-2-10e）。
+
+        为什么要轮询而不是等事件：`state_machine.is_connected()` 是**懒查询**
+        （每次现问 native），native 侧连上/断开**没有事件** ✗ ⇒ 只靠"模式变化才推"的机制，
+        后连上的串流永远不会告诉 GUI ✗（板端实测：连接成功后 GUI 一直"重连中"✓）。
+        轮询 2 s 一次、只在翻转时推一条，代价可以忽略 ✓。
+        """
+        last: Optional[bool] = None
+        while True:
+            await asyncio.sleep(STREAM_WATCH_INTERVAL_S)
+            try:
+                connected = bool(self.state.is_connected()) if self.state else False
+            except Exception as exc:  # noqa: BLE001 - 探测失败按"没连上"算，不该让任务死掉
+                self.log.debug("native: 连接状态探测失败: %r", exc)
+                connected = False
+            if connected == last:
+                continue
+            if last is not None:
+                self.log.info(
+                    "native: moonlight %s ⇒ 补推一次 status",
+                    "已连接" if connected else "已断开",
+                )
+                push_status = getattr(self, "on_status", None)
+                if callable(push_status):
+                    try:
+                        push_status({"connected": connected})
+                    except Exception as exc:  # noqa: BLE001 - 推送失败不该停掉监视
+                        self.log.warning("native: status 补推失败 (已忽略): %r", exc)
+            last = connected
 
     # ---- 2) bus + io ----
     async def _start_bus_and_io(self) -> None:

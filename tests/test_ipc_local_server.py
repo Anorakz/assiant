@@ -1147,6 +1147,55 @@ class TestBuildIpc(unittest.IsolatedAsyncioTestCase):
                     await writer.wait_closed()
             await server.stop()
 
+    async def test_client_connect_pushes_status_too(self):
+        """★ T15-2-10e: 新 GUI 连上 -> **必须补推一条 status** ✗。
+
+        为什么单列一条：`status.connected`（= moonlight 串流主机有没有连上）在 Runtime 那边是
+        **懒查询**、没有变化事件 ⇒ 只靠"mode 变化才推 status"的机制时，界面会一直显示
+        "重连中（主机未就绪）"，直到用户切一次模式 ✗（板端实测过 ✓）。
+        这里走**真装配**（build_ipc）：`on_status` 钩子与连上回调都是生产路径 ✓。
+        """
+        if not UNIX_SOCKET_SUPPORTED:
+            self.skipTest("需要 AF_UNIX")
+
+        class _State:
+            def current(self):
+                return State.IDLE
+
+            def is_connected(self):
+                return True
+
+            def on_change(self, cb):
+                pass
+
+        class _Rt:
+            state = _State()
+
+            def push_current_wallpaper(self):
+                return True
+
+        rt = _Rt()
+        server = build_ipc(None, {"ipc": {"socket_path": _tmp_socket_path()}}, runtime=rt)
+        self.assertTrue(callable(getattr(rt, "on_status", None)),
+                        "build_ipc 必须给 Runtime 接上 on_status 钩子 ✗")
+
+        recorded = []
+        wired = rt.on_status
+
+        def _record(snapshot=None):
+            recorded.append(snapshot)
+            return wired(snapshot)
+
+        rt.on_status = _record
+        await server.start()
+        try:
+            hook = getattr(server, "on_client_connect", None)
+            self.assertTrue(callable(hook), "server 上没有连上回调 ✗")
+            hook()
+        finally:
+            await server.stop()
+        self.assertEqual(len(recorded), 1, "连上时应当正好补推一条 status ✓")
+
     async def test_a_broken_connect_hook_keeps_the_connection(self):
         """补推炸了不该把刚建立的连接弄断（也不该影响后续命令）。
 

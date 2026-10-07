@@ -1382,6 +1382,41 @@ GUI：重连中 → 已连接（agent=已连接, 主机=已连接）✓
       preflash-check：结论「通过」（在位缺 0、依赖缺 0、冒烟失败 0、payload 0/12）✓
 ```
 
+### 5.13.9 ✅ 那两个 moonlight 缺口已修（T15-2-10e）—— 冷启动自己就连上、GUI 自己就变绿
+
+三处改动（都在 `agent/` 里，配套单测 ✓）：
+
+| # | 改哪儿 | 原来 ✗ | 现在 ✓ |
+| --- | --- | --- | --- |
+| ① | `agent/main.py` `_start_native` | 只试一次 ⇒ 开机时网络没起来就永远断着 ✓ | `_start_with_retry()` **退避重试**（5 s 起、翻倍、上限 60 s，总窗口 `NATIVE_RETRY_TOTAL_S=600 s`）；超时才抛给 `_guarded` 记 warning ✓ |
+| ② | `agent/main.py` `_watch_stream_connected`（新组件 `stream_watch`） | 连接状态是**懒查询**、没有事件 ⇒ 后连上的串流永远不告诉 GUI ✗ | 每 2 s 采样、**翻转时**推一条 status ✓ |
+| ③ | `agent/ipc/__init__.py` | "新客户端连上补推"里**没有 status** ✗（只有壁纸/音乐/B站/OTA） | 新增 `runtime.on_status` 钩子 ＋ 连上时补推一条 status ✓ |
+
+重试参数做成**实例属性**（`native_retry_total_s/first_s/max_s` ✓）—— 否则"握手失败"那些单测会在
+600 s 窗口里挂住 ✗（当场踩到过一次 ✓，`tests/test_main.py:TestNativeStreaming._run_with` 默认压成 0 ✓）。
+新增单测：重试成功（`test_native_start_retries_when_the_network_is_not_up_yet` ✓）、
+翻转补推（`test_stream_connected_flip_pushes_status` ✓）、连上补推（`test_client_connect_pushes_status_too` ✓）；
+组件顺序守卫 `EXPECTED_ORDER` 同步加 `stream_watch` ✓。
+
+**板上实测（2026-10-07 22:57，冷启动，全程不碰服务 ✓）**：
+
+```
+22:57:46 WARNING native: 第 1 次连接失败（… [Errno 101] Network is unreachable），5 s 后重试（总窗口 600 s）
+22:57:51 INFO    sunshine: 192.168.137.1 … PairStatus=1
+22:57:51 INFO    sunshine: app=Desktop -> appid=881448767 (走 /resume) sessionUrl=rtspenc://192.168.137.1:48010
+22:57:51 INFO    native: 第 2 次尝试连上了 ✓
+（线程：VideoRecv / VideoDec / mpp_dec_parser / mpp_dec_hal / ReqIdrFrame ✓）
+22:57:59 GUI: [recv] status {"connected":true,"mode":"IDLE"}   ← 连上补推真的到了 ✓
+        GUI: [ui] 连接: 已连接 ✓（没人切过模式 ✓）
+镜像：rootfs 772,800,512 B / sha256 d627fc92e4fbd2acaceb267e2e5707b25cb6dd46257f986bd7fffd460d37eb70 ✓
+      boot 54,307,328 B / sha256 6f567736859d82b47155222467184594fb10e23b6296c8f36c606e5eb1cdbfda ✓
+      GUI md5 a986143f…（未变 ✓）｜ weston 0 ✓ ｜ preflash "通过" ✓
+      misc：槽 B prio15/tries7/**succ1** ✓（assistant-ota-confirm 已确认 ✓）
+```
+
+> 小瑕疵（不影响判据 ✓）：GUI 那句 `[ui] 连接: … 主机=未知` 是**在它处理那条 status 之前**打的，
+> 线上数据是对的（`connected:true` ✓），所以界面是绿的"已连接" ✓。
+
 **⚠ 还没做的：刷板**（`T15-2-11` 的正文 ✗）。这套 `update.img` 会**重排 eMMC 分区**
 （板上现有数据全丢 ✗，第一次还要 `mkfs.ext4` userdata ＋ 投放 4.9 GB 模型 ✓），
 所以不在"标准化"里顺手做 ✗ —— 步骤见 `image/FLASH-RUNBOOK.md`，

@@ -299,6 +299,19 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
         on_change(_status_on_change)
         _log.debug("ipc: 已接上状态推送 (state.on_change -> status)")
 
+    # ★ T15-2-10e（2026-10-07 板端实测）：给 Runtime 一个"**主动推一次 status**"的钩子。
+    #   为什么需要：`status.connected`（= moonlight 串流主机是否连上）在 Runtime 那边是
+    #   **懒查询**（`state_machine.is_connected()` 去问 native），连接/断开**没有事件** ✗ ⇒
+    #   只靠上面那条 `state.on_change` 会漏掉它：实测 moonlight 21:52 连上了，GUI 一直显示
+    #   "重连中（主机未就绪）"，直到用户切一次模式才补上 ✗。
+    if state is not None:
+        def _on_status_push(_snapshot: Any = None) -> None:
+            """Runtime 调它 = 把**当前**状态推一条给 GUI（线格式仍由本层决定 ✓）。"""
+            dispatch(TOPIC_STATUS, _status_data(state))
+
+        runtime.on_status = _on_status_push
+        _log.debug("ipc: 已接上 status 主动补推钩子 (runtime.on_status -> status)")
+
     if hasattr(runtime, "on_reply"):
         def _on_reply(text: str) -> None:
             dispatch(TOPIC_LLM, {"text": text})
@@ -336,6 +349,13 @@ def _wire_outbound(server: Any, runtime: Any, dispatch: Any = None) -> None:
             ota_push = getattr(runtime, "push_current_ota", None)
             if callable(ota_push):
                 _log.debug("ipc: 新客户端连上 -> 补推 OTA 状态: %s", ota_push())
+            # ★ T15-2-10e: status 也必须补推 ✗ —— 否则刚连上的界面显示的是**旧**状态
+            #   （板端实测：GUI 一直"重连中（主机未就绪）"，而 moonlight 其实早连上了 ✓）。
+            #   注意 status 是"变化才推"、且 connected 是懒查询 ⇒ 这里必须无条件推一条 ✓。
+            status_push = getattr(runtime, "on_status", None)
+            if callable(status_push):
+                status_push()
+                _log.debug("ipc: 新客户端连上 -> 补推 status ✓")
 
         server.on_client_connect = _on_client_connect
         _log.debug("ipc: 已接上'连上补推壁纸/音乐' (server.on_client_connect)")
