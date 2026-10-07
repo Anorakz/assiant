@@ -68,6 +68,41 @@ ssh -o BatchMode=yes Anorak@192.168.137.1 neteasecli --json player status
 # 应当返回 {"success":true,"data":{...}}
 ```
 
+#### 3.2.1 ⚠ **每次刷机/换槽之后都要重新配对一次**（2026-10-07 实测踩到）
+
+我们这套镜像**不把密钥放进 rootfs** —— 新 rootfs 首次启动会**重新生成**两把密钥 ✓，
+所以**每次 OTA/刷机之后**这两处都会失效 ✗：
+
+| 变了什么 | 症状 | 怎么修 |
+| --- | --- | --- |
+| **板端的客户端密钥**（`/root/.ssh/id_ed25519`）没了 ✗ | agent 日志**每 3 秒**一条 `music: 问状态失败: 板端连 PC 的 ssh 被拒（认证失败）` ✗ —— 一晚能刷到 **三万多条** ✓，负载被抬到 1.2 ✓，**视频会偶发几秒级卡顿** ✗（实测最大画帧间隔 3.8~7.6 秒 ✗，洪流停掉后立刻回到 25fps / 40ms ✓） | 板端重新生成 ＋ 把新公钥放到 PC（下面两条命令 ✓） |
+| **板端 sshd 的主机密钥**（`/etc/ssh/ssh_host_*`）重生成 ✗ | PC 上 `ssh rk3568` 报 `REMOTE HOST IDENTIFICATION HAS CHANGED!` ✗（`Offending ... key in known_hosts:N` ✓） | PC 上 `ssh-keygen -R 192.168.137.30` ✓ 再连一次 ✓ |
+
+```bash
+# ① 板端：生成客户端密钥（已存在则不动它 ✓）并把公私钥备份到 /data（跨槽共享 ✓）
+ssh-keygen -t ed25519 -N '' -C "rk3568-board-$(date +%Y%m%d)" -f /root/.ssh/id_ed25519
+mkdir -p /data/assistant/keys && cp /root/.ssh/id_ed25519 /root/.ssh/id_ed25519.pub /data/assistant/keys/
+cat /root/.ssh/id_ed25519.pub        # ← 把这一行交给 PC 侧的下一步
+
+# ② PC（**管理员** PowerShell）：把上面那行公钥追加进 administrators_authorized_keys ✓
+Add-Content -Path C:\ProgramData\ssh\administrators_authorized_keys -Value '<上面那行公钥>'
+icacls C:\ProgramData\ssh\administrators_authorized_keys /inheritance:r `
+  /grant "Administrators:F" /grant "SYSTEM:F"
+
+# ③ 验证（板端）：应输出 pc-ok ✓
+ssh -o BatchMode=yes -p 22 Anorak@192.168.137.1 "echo pc-ok"
+```
+
+> **恢复更快的一条路**：密钥已经在 `/data/assistant/keys/` 里备份着 ✓（`/data` 跨槽共享 ✓）——
+> 刷机之后只要 `cp /data/assistant/keys/id_ed25519* /root/.ssh/ && chmod 600 /root/.ssh/id_ed25519` ✓
+> 就**不用再动 PC 那一侧** ✓（PC 上装的还是同一把公钥 ✓）。
+> `image/local/authorized_keys`（`install-into-sdk.sh` 注入的那份）只管**反向**：PC → 板端 ✓。
+
+> ⚠ **写 PowerShell 脚本时全部用 ASCII** ✗ —— PowerShell 5.1 按 **ANSI** 读 `.ps1`，
+> 中文注释会让解析直接崩（实测报 `表达式或语句中包含意外的标记`)`` ✓，还会把中文显示成 `鈥?` ✓）。
+> 这段流程的现成脚本在 `E:\rk3568\tmp\fix-pc-authorized-key.ps1`（纯 ASCII ＋ 幂等 ＋ 自己收紧 ACL ✓）。
+
+
 ## 4. 本地音乐库 `config/music_library.jsonl`（**不再依赖云歌单**）
 
 一行一首歌：

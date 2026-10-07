@@ -10,6 +10,15 @@ Agent 有**两条前端**：板端那块屏上的 GUI，和这里的 CLI。CLI �
 | 走的通道 | **现有 IPC 协议**（[`ipc-protocol.md`](ipc-protocol.md) 是线上格式唯一真源） |
 | 单测 | `tests/test_cli.py`（PC 与板端都跑；涉及真 socket 的用例在 Windows 上 skip） |
 
+> ⚠ **命令名是 `assistant`**（a-s-s-i-s-t-a-n-t ✓），**不是** `assitant` ✗ ——
+> 后者是**仓库目录名**（`E:\rk3568\project\myproject\assitant` ✓）。
+> 板端实测（2026-10-07）：敲 `assitant -h` 得到 `-bash: assitant: command not found` ✓，
+> `assistant -h` 正常 ✓（`/usr/bin/assistant` ✓；`/etc/profile.d/assistant.sh` 已把环境备好 ✓，
+> 登录 shell 与非登录 shell 都能找到 ✓）。
+> 另：`assistant chat` 的 `--timeout` **默认只有 3 秒** ✓，而板端 0.6B 模型答一条要几十秒 ✗
+> ⇒ 用 `assistant chat --timeout 240 "…"` ✓（否则只看到"发出去 3.0 秒了还没收到 llm 回复" ✗，
+> 很容易误判成 CLI 坏了 ✓）。
+
 ---
 
 ## 1. 怎么跑

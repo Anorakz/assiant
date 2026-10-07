@@ -1265,6 +1265,26 @@ misc: B **prio15/tries7/succ1** ✓ ⇒ assistant-ota-confirm 已把新槽标成
 ⇒ **标准镜像 = 这一版** ✓（含 §7.10 的零拷贝修复 ＋ 无桌面 ＋ 对话/工具调用可用 ✓）。
 **仍未做**：整包 USB 重刷 ✗（`update.img` 那条会重排分区、清 `/data` ✗）—— 需要时按 `FLASH-RUNBOOK.md` 走 ✓。
 
+### 5.13.5 ⚠ 刷完机/换槽之后**必做的两件小事**（2026-10-07 实测踩到）
+
+这套镜像**故意不把密钥放进 rootfs**（用户 2026-10-07 决定：不做持久化，走"刷完手动恢复"✓）⇒
+**每次换槽/刷机后**下面两处都会失效 ✗：
+
+```bash
+# ① PC 侧：sshd 主机密钥换了 ⇒ 清掉旧指纹（否则 ssh rk3568 报 REMOTE HOST IDENTIFICATION HAS CHANGED）
+ssh-keygen -R 192.168.137.30          # PC 上跑；之后第一次连接会重新登记 ✓
+
+# ② 板端密钥恢复（PC 侧不用再动 —— 装的还是同一把公钥 ✓）
+cp /data/assistant/keys/id_ed25519* /root/.ssh/ && chmod 600 /root/.ssh/id_ed25519
+#    没有备份时：板端 ssh-keygen 生成，再按 docs/music.md §3.2.1 把公钥放到 PC 的
+#    C:\ProgramData\ssh\administrators_authorized_keys（管理员 PowerShell ✓ 纯 ASCII 脚本 ✓）
+```
+
+**别小看 ② 的后果** ✗：缺了板端客户端密钥，agent 会**每 3 秒**重试一次连 PC 并刷 WARNING ✗
+（实测一晚刷到 **30755 条** ✓、负载抬到 1.2 ✗），**视频会偶发几秒级卡顿** ✗
+（实测最大画帧间隔 3.8~7.6 秒 ✗；洪流停掉后立刻回到 **25fps / 40ms** ✓✓）。
+完整步骤与验证命令见 `docs/music.md` **§3.2.1** ✓。
+
 **⚠ 还没做的：刷板**（`T15-2-11` 的正文 ✗）。这套 `update.img` 会**重排 eMMC 分区**
 （板上现有数据全丢 ✗，第一次还要 `mkfs.ext4` userdata ＋ 投放 4.9 GB 模型 ✓），
 所以不在"标准化"里顺手做 ✗ —— 步骤见 `image/FLASH-RUNBOOK.md`，
