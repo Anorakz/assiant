@@ -161,6 +161,25 @@ def _locally_ignored(paths):
     return {Path(line.strip()).resolve() for line in proc.stdout.splitlines() if line.strip()}
 
 
+def _tracked_paths():
+    """git 跟踪的文件 (仓库相对 posix 路径)。
+
+    git 不在 / 不是仓库时返回 None（判据退化：只看"文件在不在", 与过去一致）。
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files"],
+            cwd=str(_PROJECT_ROOT),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            universal_newlines=True,
+        )
+    except (OSError, ValueError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
+
 def _doc_paths():
     """收集要扫描的 md 文件 (存在才收, 排序稳定)。本机忽略的不算。"""
     out = []
@@ -218,6 +237,50 @@ class TestDocLinksExist(unittest.TestCase):
         if broken:
             self.fail("有 %d 个相对链接指向不存在的文件:\n  %s"
                       % (len(broken), "\n  ".join(broken)))
+
+    def test_relative_links_point_at_tracked_files(self):
+        """相对链接不许指向**没被 git 跟踪**的文件（本地有、CI 没有 = 只有 CI 会红）。
+
+        为什么单开一条: 上面那条在**本机**是绿的 —— `todo.md` / `todo3.md` 这类
+        "已取消跟踪 / 从没跟踪过"的本地工作记录在开发机上真实存在, 链接解析得到,
+        CI 上却是 404, 于是失败只出现在 CI（T15 之后 Readme 指向 todo3.md 就是这么红的 4 条）。
+        判据: 链接目标在仓库内、且是**文件**时, 必须被 `git ls-files` 列出;
+        指向目录时要求该目录里**至少有一个**被跟踪的文件。
+        git 不在 / 不是仓库时整条跳过（不能把环境问题报成文档问题）。
+        """
+        tracked = _tracked_paths()
+        if tracked is None:
+            self.skipTest("不是 git 仓库 / 没有 git —— 跳过跟踪判据")
+
+        offenders = []
+        for path in _doc_paths():
+            rel_doc = path.relative_to(_PROJECT_ROOT).as_posix()
+            text = path.read_text(encoding="utf-8")
+            for lineno, line in enumerate(text.splitlines(), 1):
+                for target in _LINK_RE.findall(line):
+                    target = target.strip().strip("<>")
+                    if _SKIP_PREFIX_RE.match(target):
+                        continue
+                    rel = target.split("#", 1)[0].split(None, 1)[0].strip()
+                    if not rel:
+                        continue
+                    resolved = (path.parent / rel).resolve()
+                    try:
+                        rel_repo = resolved.relative_to(_PROJECT_ROOT).as_posix()
+                    except ValueError:
+                        continue              # 指到仓库外: 上面那条已按"存在"管了
+                    if not resolved.exists():
+                        continue              # 不存在的那种由上面那条报
+                    if resolved.is_file() and rel_repo not in tracked:
+                        offenders.append("%s:%d  ->  %s（没被 git 跟踪）" % (rel_doc, lineno, target))
+                    elif resolved.is_dir() and not any(
+                            t.startswith(rel_repo + "/") for t in tracked):
+                        offenders.append("%s:%d  ->  %s（目录里没有被跟踪的文件）" % (rel_doc, lineno, target))
+
+        if offenders:
+            self.fail("有 %d 个相对链接指向未被 git 跟踪的路径（本机绿、CI 红），"
+                      "改成行内文本或先把它提交进去:\n  %s"
+                      % (len(offenders), "\n  ".join(offenders)))
 
 
 class TestNoStaleClaims(unittest.TestCase):

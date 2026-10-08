@@ -43,7 +43,7 @@ ENV_SAMPLE = (
     "# ==================== 服务配置 ====================\n"
     "LLM_HOST=0.0.0.0\n"
     "LLM_PORT=9000\n"
-    "LLM_API_KEY=***REMOVED-LLM-KEY***\n"
+    "LLM_API_KEY=REMOVED-LLM-KEY\n"
     "\n"
     "# ==================== 上下文与性能 ====================\n"
     "LLM_CTX_SIZE=4096\n"
@@ -68,7 +68,7 @@ llm:
   batch_size: 256
   threads: 4
   threads_batch: 4
-  local_api_key: ***REMOVED-LLM-KEY***
+  local_api_key: REMOVED-LLM-KEY
 
 ipc:
   socket_path: /tmp/agent.sock

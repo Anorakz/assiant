@@ -271,7 +271,7 @@ bilibili:
 `test_bilibili_preview` / `test_cover_loader` / `test_video_panel`（含**播放控制**
 `control{action,seq}`：没源忽略、同 seq 不重复动手）/ `test_bottom_bar`。
 
-**板端真跑**（`tests/board/t11_accept.py`，见 [`../todo.md`](../todo.md) 的 T11 块）：
+**板端真跑**（`tests/board/t11_accept.py`，见本地工作记录 `todo.md` 的 T11 块）：
 真搜索 → 真队列 3N → 真封面下到 → 点预览图起播（15 s 门槛日志 + `position_s` 递增 + 出声）→
 上一集/下一集换条 → 暂停缓冲涨到 60 s → 断网诚实报错 → cookie 三态三句话 → 识别双路 + 锚点自纠错。
 

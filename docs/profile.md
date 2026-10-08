@@ -206,7 +206,7 @@ python3 tests/board/t10_accept.py --llm    # 起本机 llama-server, 真的问�
    `append_record()` **先**、`_apply_profile_effects()` **后**（`_build_profile_task()`）。
    验收脚本里要是反过来调, 就会看到"刚去掉又被补回来" —— 那是**脚本的错序**, 不是补歌的 bug。
 
-跑法与原文记录另见 [`todo.md`](../todo.md) 的 T10-6 一节。
+跑法与原文记录另见本地工作记录 `todo.md` 的 T10-6 一节。
 
 ## 9. 怎么验
 

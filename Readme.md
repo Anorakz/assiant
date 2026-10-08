@@ -115,7 +115,7 @@ GGUF 模型由独立的 llama-server 进程加载，**不在 Python Agent 内推
 SigLIP 双塔模型通过 RKNNLite 在 NPU 推理；CPU 上仍有预处理、分词和结果处理。
 模型、厂商 SDK、板端凭据及用户媒体不随源码仓库分发。
 
-CPU 调度与 NPU/CPU 协同、内存优化、低功耗的后续工作见 [todo3.md](todo3.md)。
+CPU 调度与 NPU/CPU 协同、内存优化、低功耗的后续工作在本地工作记录 `todo3.md` 里（与 `todo.md` 一样不进仓库）。
 现有 `SLEEP` 状态和资源释放逻辑不等同于完整的系统低功耗实现。
 
 ## 架构与数据通路
@@ -158,7 +158,7 @@ docs/         功能、部署、协议、架构、镜像与性能文档
 todo3.md      三项后续优化任务
 ```
 
-`todo.md`、`todo2.md` 为本地历史工作记录，已取消 Git 跟踪；公开文档不依赖它们。
+`todo.md`、`todo2.md`、`todo3.md` 为本地历史工作记录，已取消 Git 跟踪；公开文档不依赖它们。
 
 ## 配置与首次运行
 
@@ -270,4 +270,4 @@ SDK 布局、镜像 flavor、模型与 userdata 的处理见 [镜像配方入口
 | GUI 与 IPC 联调 | [GUI](docs/gui.md)、[GUI 风格](docs/gui-style.md)、[Agent 联调](docs/gui-agent-integration.md) |
 | 解码与网络 | [MPP](docs/decoder-mpp.md)、[网络](docs/net.md) |
 | OTA 与崩溃排查 | [OTA](docs/ota.md)、[崩溃日志](docs/crash.md) |
-| 优化任务与公开检查 | [todo3](todo3.md)、[公开前审计](docs/publication-audit.md) |
+| 优化任务与公开检查 | `todo3.md`（本地记录，不进仓库）、[公开前审计](docs/publication-audit.md) |
