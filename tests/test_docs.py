@@ -56,6 +56,26 @@ DOC_GLOBS = ["docs/*.md", "docs/**/*.md"]
 # ---------------------------------------------------------------------------
 #: 每条都对应一次真实的漂移。加新条目时写清"为什么它过时了"。
 #: 可选的第三项 = 免检正则: 该行命中它就不算过时声明（用于"它已经删了"这种现状陈述）。
+#:
+#: EXEMPT_AUDIT_HISTORY = `gui/config/` 那条黑名单的免检正则 —— 放行**只有一个地方**：
+#: `docs/publication-audit.md`（公开前凭据审计）。
+#:
+#: 为什么那 4 行不是漂移: 它们说的**不是**"现在还有 gui/config/"，而是"这个小文件在**历史**里"
+#: —— 审计报告的工作就是把历史对象（blob / 提交 / 备份 / 曾新增过的文件名）逐条列出来，
+#: 路径必然出现。判据因此要求**路径**与**历史语境**同行出现、且**离得不远**：
+#: 语境在路径**前面**（`历史里曾新增过…gui/config/gui.yaml.bak`、`历史配置备份`），
+#: 或者紧跟在路径**后面**（`…（历史文件已删除）`、blob/提交号）。
+#: 单独一句"gui/config/gui.yaml 是界面真源"照样会被抓（见 test_audit_exemption_does_not_waive_current_claims）——
+#: 它前后 200 字里没有历史/删除/blob/提交/增过，所以不算例外。
+#: （上界取 200 而不是"紧挨着"：L73 是"历史里曾**新增过**的敏感文件名 | 一长串文件名…gui/config/gui.yaml.bak"，
+#:  语境在表格单元开头、路径在末尾，中间隔着别的文件名 —— 实测 107 字。）
+#:
+#: 命中范围恰好 4 行（L22 历史配置备份 / L23 历史代码与模板 / L72 值级 pickaxe 命中 / L73 历史新增文件名），
+#: 由 test_audit_exemption_covers_the_four_publication_audit_lines 逐行钉住 ——
+#: 以后不小心写宽了（例如去掉"历史"那一支），它会红。
+EXEMPT_AUDIT_HISTORY = (r"(?:历史|删除|blob|提交|增过)[^\n]{0,200}gui(?:\.yaml|/config/)"
+                        r"|gui(?:\.yaml|/config/)[^\n]{0,200}(?:历史|删除|blob|提交|增过)")
+
 STALE_CLAIMS = [
     (r"ZeroMQ",
      "IPC 早就改成同机 Unix domain socket (/tmp/agent.sock) 了, 没有消息队列"),
@@ -73,7 +93,13 @@ STALE_CLAIMS = [
      "IPC 的 server/client 都已经实现并在跑"),
     (r"gui\.yaml|gui/config/",
      "GUI 已经没有自己的配置文件了: 界面参数并进 config/config.yaml 的 gui: 段, "
-     "gui/config/ 目录连同模板一起删除 (归一化 D 系列)"),
+     "gui/config/ 目录连同模板一起删除 (归一化 D 系列)。"
+     "例外只有 4 条, 全在 docs/publication-audit.md —— 那份**公开前凭据审计报告**列的"
+     "是历史对象（blob / 提交 / 备份 / 曾新增过的文件名）, 不是在说现状: "
+     "L22 历史配置备份 gui/config/gui.yaml.bak、L23 历史代码与模板 gui/config/gui.yaml.example、"
+     "L72 值级 pickaxe 命中（提交 26545b5）、L73 历史新增的敏感文件名清单。"
+     "判据见 EXEMPT_AUDIT_HISTORY: 路径要与\"历史/删除/blob/提交\"同行才算。",
+     EXEMPT_AUDIT_HISTORY),
     (r"同步到[^\n]{0,40}llm\.env",
      "llm/config/llm.env 是**派生**文件, 不是被同步的真源 —— "
      "方向只有 config.yaml → llm.env 一个"),
@@ -250,6 +276,55 @@ class TestNoStaleClaims(unittest.TestCase):
         entry = next(e for e in STALE_CLAIMS if e[0] == r"SigLIPEncoder")
         self.assertTrue(_entry_hits(entry, "实时帧那条路是 SigLIPEncoder (⚠ 仍是 mock)"))
         self.assertFalse(_entry_hits(entry, "SigLIPEncoder 已在 T13-1 删除"))
+
+    def test_audit_exemption_does_not_waive_current_claims(self):
+        """审计那条免检不能变成后门: 说"现状还有 gui.yaml"的行, 任何地方都不许被放过。"""
+        gui = next(e for e in STALE_CLAIMS if e[0] == r"gui\.yaml|gui/config/")
+        current_claims = [
+            "GUI 的界面参数真源还是 gui/config/gui.yaml",
+            "GUI 界面改动要先写 gui.yaml",
+            "gui/config/ 目录是界面配置的真源",
+        ]
+        for line in current_claims:
+            self.assertTrue(_entry_hits(gui, line),
+                            "审计免检把现状声明放过了: %r" % line)
+
+    def test_audit_exemption_covers_the_four_publication_audit_lines(self):
+        """免检的命中面恰好是那 4 行审计记录 —— 其他文档一行都不放。
+
+        ① 4 个 probe 必须被放过（否则例外是空话）;
+        ② 免检词换成"历史/删除/blob/提交"以外的措辞就抓不住（证明判据不是随便放行）;
+        ③ 全仓扫描: 被审计免检放过的行数 == 4, 且每行都来自 docs/publication-audit.md。
+        """
+        gui = next(e for e in STALE_CLAIMS if e[0] == r"gui\.yaml|gui/config/")
+        probes = [
+            r"| 历史配置备份 | `config/config.example.yaml.bak-1790930445`，blob `08240e29…`；"
+            r"`gui/config/gui.yaml.bak`，blob 前缀 `32e868745fae`（历史文件已删除） |",
+            r"| 历史代码、模板与基准日志 | `gui/config/gui.yaml.example`、`llm/bench_multimodal.py`"
+            r"（历史文件已删除） |",
+            r"| 本地 llama key | ⚠ **历史里有**：`llm/config/llm.env`（提交 `882cbd1`）与 "
+            r"`gui/config/gui.yaml.bak`（提交 `26545b5`） |",
+            r"| 历史里曾**新增过**的敏感文件名 | `llm/config/llm.env`、`gui/config/gui.yaml.bak` |",
+        ]
+        for probe in probes:
+            self.assertFalse(_entry_hits(gui, probe),
+                             "审计那 4 行里的这行没被放过: %r" % probe[:60])
+
+        self.assertTrue(_entry_hits(gui, "备份里的 gui/config/gui.yaml.bak 仍在用"))
+
+        exempted = []
+        for path in _doc_paths():
+            rel = path.relative_to(_PROJECT_ROOT).as_posix()
+            if rel.startswith(ADR_PREFIX):
+                continue
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if re.search(gui[0], line, re.IGNORECASE) and not _entry_hits(gui, line):
+                    exempted.append("%s:%d" % (rel, lineno))
+        self.assertEqual(len(exempted), 4,
+                         "被审计免检放过的行不是 4 行, 免检面变了: %r" % exempted)
+        for spot in exempted:
+            self.assertTrue(spot.startswith("docs/publication-audit.md:"),
+                            "免检把别的文档也放了: %s" % spot)
 
     def test_the_scan_actually_covers_something(self):
         """防止正则写错导致"零命中"这种假绿灯。"""

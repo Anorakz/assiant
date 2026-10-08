@@ -70,6 +70,8 @@ PY_MODULES = {
     "tokenizers": ("required", "prepare-tokenizers.sh（PyPI 轮子，钉 0.20.3，--no-deps）",
                    "★ 2026-10-07 改判：不是 optional ✗ —— moonlight 连上之后 study/认游戏那一路"
                    "（SigLIP）直接报「缺少 tokenizers 库」⇒ 真帧喂不进 NPU ✗"),
+    "PIL":       ("host", "只在 scripts/board/convert-shots.py 用（AST 扫到的就是它）",
+                  "PC 侧把板端裸帧转 PNG（板端没有 PIL），镜像里不该有"),
     "cryptography": ("host", "只在 scripts/pair_analyze.py 用", "开发机分析工具"),
     "pytest":    ("host", "镜像里没有", "测试框架"),
     "pytest_asyncio": ("host", "镜像里没有", "测试框架"),

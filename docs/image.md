@@ -490,6 +490,7 @@ A/B OTA 换的是**系统槽**。凡是"运行期会长出来"的东西都不能
 | `rknnlite` | required | `image/prepare-rknnlite.sh`（SDK 的 cp311 wheel） | SigLIP 走 NPU 的入口 |
 | `openai` | optional | **镜像里没有**（`provider.py` 懒加载） | cloud 模式的可选 SDK |
 | `tokenizers` | optional | **镜像里没有**（`tokenizer.py` 懒加载） | SigLIP 分词的可选后端 |
+| `PIL` | host | **镜像里没有**（只在 `scripts/board/convert-shots.py` 用） | 板端没有 PIL，`convert-shots.py` 在 PC 侧把裸帧转 PNG |
 | `cryptography` | host | 只在 `scripts/pair_analyze.py` | 开发机分析工具 |
 | `pytest` / `pytest_asyncio` | host | 只在 `tests/` | 测试框架 |
 | `agent_native` | host | pybind11 扩展，镜像侧还没做 | 本地原生扩展 |
