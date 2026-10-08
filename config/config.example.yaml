@@ -74,7 +74,7 @@ llm:
   threads: 4                 # 只给 llama-server
   threads_batch: 4           # 只给 llama-server
   # llama-server 自己的 API key (派生到 llm.env 的 LLM_API_KEY; Agent 读: 请求带的 key)
-  local_api_key: ***REMOVED-LLM-KEY***
+  local_api_key: "REPLACE-ME"     # 公开仓库只留占位符；真值放 llm/config/llm.env（不进仓库）
   #
   # ---- 让 Agent 管 llama-server 的启停 (T7-4) ----
   # false (默认) = Agent **不碰**这个进程: 服务由你/GUI 的「启动服务」按钮管
