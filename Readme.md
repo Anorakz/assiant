@@ -74,6 +74,53 @@ Qt 虚拟键盘（`docs/images/`）：
 > ⚠ 上面那张主界面截图里的壁纸来自本机壁纸库（内容由使用者自行放置 ✓，不含在仓库里 ✓）；
 > 若要公开仓库，可换成中性壁纸再抓一张 ✓（抓图命令同上 ✓）。
 
+### 逐功能实拍（全部为板端 800×1280 实机整屏，图注写明**该图的判据** ✓）
+
+**① 日程：和 LLM 聊天设置日程 → 到点自动切换模式**（这套功能里最完整的一条闭环 ✓）
+
+| 设置与触发记录 | 切换前（空闲，14:00 前） | **切换后（学习，14:00 过后）** |
+| --- | --- | --- |
+| ![schedule_next](docs/images/schedule_next.png) | ![切换前](docs/images/shot-f1410.png) | ![切换后](docs/images/shot-f1410b.png) |
+
+- 判据：模型调用 `set_schedule({'action':'add','state':'study','start':'14:00'}) -> ok` ✓；日程面板显示
+  **「下一条 23:00 STUDY」**，并留有 **`14:00 STUDY ← 已触发 14:00:13`** 的触发记录 ✓；
+  切换后左下徽标由「空闲」变为**「学习」** ✓。
+  同形态的第二份证据：`docs/images/shot-fin-a.png`（13:40 那次触发，聊天区留着
+  `日程已设置:13:40 切换到学习模式。` → `日程到点,切到 STUDY (13:40)` ✓）。
+
+**② 壁纸：由 LLM 调用 `next_wallpaper` 切换**
+
+| 切换前（index 0/34） | 切换后（index 1/34） |
+| --- | --- |
+| ![壁纸切换前](docs/images/shot-wp-before.png) | ![壁纸切换后](docs/images/shot-wp-after.png) |
+
+- 判据：模型调用 `next_wallpaper({'action':'next'}) -> ok` ✓，日志
+  `wallpaper: index=1/34, step=1, pushed=True` ✓，窗口
+  `prev=9b22df80….png / current=from-board-1.jpg / next=from-board-2.jpg` ✓。
+
+**③ 音乐：本地曲库队列 → 播放（曲名 / 歌手 / 专辑 / 进度 / 歌词齐全 ✓）**
+
+见「② 壁纸切换后」那张的底部音乐条 ✓：`雑踏、僕らの街`｜`歌手 トゲナシトゲアリ`｜`专辑 雑踏、僕らの街`｜
+`1:29 / 3:04`，右侧同时显示歌词（含译文）✓。
+判据：`music: 开始播放 2085140192 黎明を穿つ` ✓、`music: 歌词就绪: 35 行（31 行有译文）` ✓
+⇒「曲库队列 → 播放 → 歌词」整条链在板上跑通 ✓（空闲态对照图：`docs/images/scn-s1-music-idle.png` ✓）。
+
+**④ 游戏模式：串流自动接管（不依赖模型 ✓）**
+
+![游戏模式自动串流](docs/images/scn-s4-game-auto.png)
+
+- 判据：`sunshine: … PairStatus=1` ✓、`sessionUrl=rtspenc://192.168.137.1:48010` ✓，
+  板端解码线程 `VideoRecv / VideoDec / mpp_dec_parser / mpp_dec_hal` ✓。
+- ⚠ 如实说明 ✗：进 GAME 后串的是 **PC 桌面（Desktop）** ✓，不是某个具体游戏的画面 ✗。
+
+**⑤ 学习监督（STUDY）的现状 —— 如实标注为"未完成" ✗**
+
+![学习模式](docs/images/scn-s5-study.png)
+
+- 判据：`game_watch: SigLIP 已加载（study 状态常驻）` ✓，但
+  `study: 判定 -> unknown（**锚点库是空的**）` ✗ ⇒ **「自动回桌面」当前不会触发** ✓。
+  代码里有 `back_to_desktop` ✓（`agent/main.py`），缺的是**锚点标定** ✓（见 [学习监督](docs/study.md)）。
+
 ## 当前运行形态
 
 | 形态 | 系统与构建 | 代码与状态位置 |
